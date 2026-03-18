@@ -50,6 +50,26 @@ pub struct ContainerMetrics {
     pub network_tx_bytes: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ContainerStatsSnapshot {
+    pub cpu_total_usage: u64,
+    pub system_cpu_usage: Option<u64>,
+    pub online_cpus: u64,
+    pub fallback_cpu_percent: Option<f64>,
+    pub memory_usage_bytes: Option<u64>,
+    pub memory_limit_bytes: Option<u64>,
+    pub network_rx_bytes: u64,
+    pub network_tx_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContainerExitState {
+    pub status: Option<String>,
+    pub exit_code: Option<i64>,
+    pub oom_killed: bool,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConfiguredResourceLimits {
     pub nano_cpus: Option<i64>,
@@ -163,6 +183,21 @@ impl DockerRuntime {
         Ok(())
     }
 
+    pub async fn wait_until_deployment_cleared(&self, name: &str, timeout: Duration) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if self.list_containers_for_deployment(name).await?.is_empty() {
+                return Ok(());
+            }
+
+            if tokio::time::Instant::now() > deadline {
+                bail!("timed out waiting for deployment `{name}` containers to disappear");
+            }
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     pub async fn remove_orphans(&self, desired_names: &HashSet<String>) -> Result<()> {
         for container in self.list_managed_containers().await? {
             if !desired_names.contains(&container.deployment) {
@@ -254,7 +289,40 @@ impl DockerRuntime {
         })
     }
 
+    pub async fn inspect_exit_state(&self, container_id: &str) -> Result<ContainerExitState> {
+        let details = self
+            .docker
+            .inspect_container(container_id, None::<InspectContainerOptions>)
+            .await
+            .with_context(|| format!("failed to inspect container {container_id}"))?;
+        let state = details
+            .state
+            .context("inspected container did not include state")?;
+
+        Ok(ContainerExitState {
+            status: state.status.map(|status| status.to_string()),
+            exit_code: state.exit_code,
+            oom_killed: state.oom_killed.unwrap_or(false),
+            error: state.error.filter(|value| !value.trim().is_empty()),
+        })
+    }
+
     pub async fn metrics_for_container(&self, container_id: &str) -> Result<ContainerMetrics> {
+        let snapshot = self.stats_snapshot_for_container(container_id).await?;
+
+        Ok(ContainerMetrics {
+            cpu_percent: snapshot.fallback_cpu_percent,
+            memory_usage_bytes: snapshot.memory_usage_bytes,
+            memory_limit_bytes: snapshot.memory_limit_bytes,
+            network_rx_bytes: Some(snapshot.network_rx_bytes),
+            network_tx_bytes: Some(snapshot.network_tx_bytes),
+        })
+    }
+
+    pub async fn stats_snapshot_for_container(
+        &self,
+        container_id: &str,
+    ) -> Result<ContainerStatsSnapshot> {
         let mut stats_stream = self.docker.stats(
             container_id,
             Some(StatsOptions {
@@ -269,13 +337,7 @@ impl DockerRuntime {
             .ok_or_else(|| anyhow!("docker stats stream ended before returning metrics"))?
             .with_context(|| format!("failed to collect metrics for container {container_id}"))?;
 
-        Ok(ContainerMetrics {
-            cpu_percent: compute_cpu_percent(&stats),
-            memory_usage_bytes: stats.memory_stats.usage,
-            memory_limit_bytes: stats.memory_stats.limit,
-            network_rx_bytes: Some(total_network_rx_bytes(&stats)),
-            network_tx_bytes: Some(total_network_tx_bytes(&stats)),
-        })
+        Ok(snapshot_from_stats(&stats))
     }
 
     async fn ensure_image(&self, image: &str) -> Result<()> {
@@ -438,6 +500,45 @@ fn build_host_config(
     configured.then_some(host_config)
 }
 
+pub fn summarize_exit_state(exit_state: &ContainerExitState) -> Option<String> {
+    if exit_state.oom_killed {
+        return Some(match exit_state.exit_code {
+            Some(code) => format!("oom({code})"),
+            None => "oom".to_string(),
+        });
+    }
+
+    if matches!(exit_state.status.as_deref(), Some("removing")) {
+        return Some("removed".to_string());
+    }
+
+    if let Some(error) = exit_state.error.as_deref() {
+        let compact = error.trim();
+        if !compact.is_empty() {
+            return Some(format!("error: {}", truncate_summary(compact, 28)));
+        }
+    }
+
+    match (exit_state.status.as_deref(), exit_state.exit_code) {
+        (Some(status), Some(code)) if !status.is_empty() => Some(format!("{status}({code})")),
+        (Some(status), None) if !status.is_empty() => Some(status.to_string()),
+        (None, Some(code)) => Some(format!("exit({code})")),
+        _ => None,
+    }
+}
+
+fn truncate_summary(value: &str, max: usize) -> String {
+    if value.chars().count() <= max {
+        return value.to_string();
+    }
+
+    value
+        .chars()
+        .take(max.saturating_sub(1))
+        .collect::<String>()
+        + "…"
+}
+
 fn select_primary_container(containers: Vec<ManagedContainer>) -> Option<ManagedContainer> {
     let mut first = None;
     for container in containers {
@@ -506,7 +607,20 @@ pub fn deployment_container_name(name: &str) -> String {
     format!("litek8s-{sanitized}")
 }
 
-fn compute_cpu_percent(stats: &Stats) -> Option<f64> {
+fn snapshot_from_stats(stats: &Stats) -> ContainerStatsSnapshot {
+    ContainerStatsSnapshot {
+        cpu_total_usage: stats.cpu_stats.cpu_usage.total_usage,
+        system_cpu_usage: stats.cpu_stats.system_cpu_usage,
+        online_cpus: online_cpus_for_stats(stats),
+        fallback_cpu_percent: compute_cpu_percent_from_stats(stats),
+        memory_usage_bytes: stats.memory_stats.usage,
+        memory_limit_bytes: stats.memory_stats.limit,
+        network_rx_bytes: total_network_rx_bytes(stats),
+        network_tx_bytes: total_network_tx_bytes(stats),
+    }
+}
+
+fn compute_cpu_percent_from_stats(stats: &Stats) -> Option<f64> {
     let cpu_delta = stats
         .cpu_stats
         .cpu_usage
@@ -520,7 +634,30 @@ fn compute_cpu_percent(stats: &Stats) -> Option<f64> {
         return Some(0.0);
     }
 
-    let online_cpus = stats
+    let online_cpus = online_cpus_for_stats(stats);
+
+    Some((cpu_delta as f64 / system_cpu_delta as f64) * online_cpus as f64 * 100.0)
+}
+
+pub fn compute_cpu_percent_from_samples(
+    previous: &ContainerStatsSnapshot,
+    current: &ContainerStatsSnapshot,
+) -> Option<f64> {
+    let cpu_delta = current
+        .cpu_total_usage
+        .checked_sub(previous.cpu_total_usage)?;
+    let system_cpu_delta = current
+        .system_cpu_usage?
+        .checked_sub(previous.system_cpu_usage?)?;
+    if cpu_delta == 0 || system_cpu_delta == 0 {
+        return Some(0.0);
+    }
+
+    Some((cpu_delta as f64 / system_cpu_delta as f64) * current.online_cpus as f64 * 100.0)
+}
+
+fn online_cpus_for_stats(stats: &Stats) -> u64 {
+    stats
         .cpu_stats
         .online_cpus
         .or_else(|| {
@@ -531,9 +668,7 @@ fn compute_cpu_percent(stats: &Stats) -> Option<f64> {
                 .as_ref()
                 .map(|usage| usage.len() as u64)
         })
-        .unwrap_or(1);
-
-    Some((cpu_delta as f64 / system_cpu_delta as f64) * online_cpus as f64 * 100.0)
+        .unwrap_or(1)
 }
 
 fn total_network_rx_bytes(stats: &Stats) -> u64 {
@@ -568,8 +703,9 @@ mod tests {
     };
 
     use super::{
-        LABEL_DEPLOYMENT, LABEL_HASH, build_container_config, deployment_container_name,
-        total_network_rx_bytes, total_network_tx_bytes,
+        ContainerExitState, ContainerStatsSnapshot, LABEL_DEPLOYMENT, LABEL_HASH,
+        build_container_config, compute_cpu_percent_from_samples, deployment_container_name,
+        summarize_exit_state, total_network_rx_bytes, total_network_tx_bytes,
     };
 
     #[test]
@@ -772,5 +908,77 @@ spec:
 
         assert_eq!(total_network_rx_bytes(&stats), 25);
         assert_eq!(total_network_tx_bytes(&stats), 45);
+    }
+
+    #[test]
+    fn summarizes_oom_exit_states() {
+        let exit_state = ContainerExitState {
+            status: Some("exited".to_string()),
+            exit_code: Some(137),
+            oom_killed: true,
+            error: None,
+        };
+
+        assert_eq!(
+            summarize_exit_state(&exit_state).as_deref(),
+            Some("oom(137)")
+        );
+    }
+
+    #[test]
+    fn summarizes_regular_exit_states() {
+        let exit_state = ContainerExitState {
+            status: Some("exited".to_string()),
+            exit_code: Some(1),
+            oom_killed: false,
+            error: None,
+        };
+
+        assert_eq!(
+            summarize_exit_state(&exit_state).as_deref(),
+            Some("exited(1)")
+        );
+    }
+
+    #[test]
+    fn summarizes_removing_as_removed() {
+        let exit_state = ContainerExitState {
+            status: Some("removing".to_string()),
+            exit_code: Some(137),
+            oom_killed: false,
+            error: None,
+        };
+
+        assert_eq!(
+            summarize_exit_state(&exit_state).as_deref(),
+            Some("removed")
+        );
+    }
+
+    #[test]
+    fn computes_cpu_percent_from_cached_samples() {
+        let previous = ContainerStatsSnapshot {
+            cpu_total_usage: 2_000_000_000,
+            system_cpu_usage: Some(20_000_000_000),
+            online_cpus: 4,
+            fallback_cpu_percent: None,
+            memory_usage_bytes: Some(0),
+            memory_limit_bytes: Some(0),
+            network_rx_bytes: 0,
+            network_tx_bytes: 0,
+        };
+        let current = ContainerStatsSnapshot {
+            cpu_total_usage: 2_500_000_000,
+            system_cpu_usage: Some(25_000_000_000),
+            online_cpus: 4,
+            fallback_cpu_percent: None,
+            memory_usage_bytes: Some(0),
+            memory_limit_bytes: Some(0),
+            network_rx_bytes: 0,
+            network_tx_bytes: 0,
+        };
+
+        let cpu = compute_cpu_percent_from_samples(&previous, &current).expect("cpu");
+        assert!((cpu - 40.0).abs() < f64::EPSILON);
     }
 }

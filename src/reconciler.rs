@@ -2,8 +2,10 @@ use std::collections::HashSet;
 
 use anyhow::Result;
 
-use crate::runtime::docker::DockerRuntime;
+use crate::runtime::docker::{DockerRuntime, summarize_exit_state};
 use crate::store::{DeploymentStatus, Store, StoredDeployment};
+
+const RECREATE_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 pub async fn reconcile_all(
     store: &Store,
@@ -28,6 +30,8 @@ pub async fn reconcile_all(
                     DeploymentStatus::Failed,
                     None,
                     Some(error.to_string()),
+                    None,
+                    false,
                 )
                 .await?;
         }
@@ -46,6 +50,9 @@ pub async fn reconcile_deployment(
 
     if containers.len() > 1 {
         runtime.remove_deployment(name).await?;
+        runtime
+            .wait_until_deployment_cleared(name, RECREATE_WAIT_TIMEOUT)
+            .await?;
         let new_id = runtime
             .create_and_start(&deployment.manifest, &deployment.spec_hash)
             .await?;
@@ -55,6 +62,8 @@ pub async fn reconcile_deployment(
                 DeploymentStatus::Restarting,
                 Some(new_id),
                 Some("recreated after duplicate managed containers were found".to_string()),
+                Some("duplicate containers".to_string()),
+                true,
             )
             .await?;
         return Ok(());
@@ -69,12 +78,30 @@ pub async fn reconcile_deployment(
                     DeploymentStatus::Running,
                     Some(container.id),
                     Some("container is healthy".to_string()),
+                    None,
+                    false,
                 )
                 .await?;
             return Ok(());
         }
 
+        let last_exit = if !hash_matches {
+            Some("spec changed".to_string())
+        } else if container.running {
+            Some("runtime drift".to_string())
+        } else {
+            runtime
+                .inspect_exit_state(&container.id)
+                .await
+                .ok()
+                .and_then(|state| summarize_exit_state(&state))
+                .or_else(|| Some("container exited".to_string()))
+        };
+
         runtime.remove_container(&container.id).await?;
+        runtime
+            .wait_until_deployment_cleared(name, RECREATE_WAIT_TIMEOUT)
+            .await?;
         let new_id = runtime
             .create_and_start(&deployment.manifest, &deployment.spec_hash)
             .await?;
@@ -91,6 +118,8 @@ pub async fn reconcile_deployment(
                 DeploymentStatus::Restarting,
                 Some(new_id),
                 Some(message.to_string()),
+                last_exit,
+                true,
             )
             .await?;
         return Ok(());
@@ -111,7 +140,17 @@ pub async fn reconcile_deployment(
     };
 
     store
-        .set_status(name, status, Some(new_id), Some(message.to_string()))
+        .set_status(
+            name,
+            status,
+            Some(new_id),
+            Some(message.to_string()),
+            deployment
+                .container_id
+                .as_ref()
+                .map(|_| "container disappeared".to_string()),
+            deployment.container_id.is_some(),
+        )
         .await?;
     Ok(())
 }

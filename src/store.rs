@@ -26,6 +26,10 @@ pub struct StoredDeployment {
     pub status: DeploymentStatus,
     pub container_id: Option<String>,
     pub message: Option<String>,
+    #[serde(default)]
+    pub restart_count: u64,
+    #[serde(default)]
+    pub last_exit: Option<String>,
     pub updated_at: u64,
 }
 
@@ -80,7 +84,8 @@ impl Store {
         let spec_hash = manifest.desired_hash()?;
 
         let mut guard = self.state.write().await;
-        let outcome = if guard.deployments.contains_key(&name) {
+        let existing = guard.deployments.get(&name).cloned();
+        let outcome = if existing.is_some() {
             ApplyOutcome::Configured
         } else {
             ApplyOutcome::Created
@@ -94,6 +99,11 @@ impl Store {
                 status: DeploymentStatus::Pending,
                 container_id: None,
                 message: Some("reconciliation scheduled".to_string()),
+                restart_count: existing
+                    .as_ref()
+                    .map(|entry| entry.restart_count)
+                    .unwrap_or(0),
+                last_exit: existing.and_then(|entry| entry.last_exit),
                 updated_at: now_unix(),
             },
         );
@@ -134,12 +144,20 @@ impl Store {
         status: DeploymentStatus,
         container_id: Option<String>,
         message: Option<String>,
+        last_exit: Option<String>,
+        increment_restart_count: bool,
     ) -> Result<()> {
         let mut guard = self.state.write().await;
         if let Some(entry) = guard.deployments.get_mut(name) {
             entry.status = status;
             entry.container_id = container_id;
             entry.message = message;
+            if let Some(last_exit) = last_exit {
+                entry.last_exit = Some(last_exit);
+            }
+            if increment_restart_count {
+                entry.restart_count = entry.restart_count.saturating_add(1);
+            }
             entry.updated_at = now_unix();
         }
         let snapshot = guard.clone();

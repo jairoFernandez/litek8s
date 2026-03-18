@@ -1,21 +1,84 @@
 use std::fs;
+use std::io::{self, IsTerminal};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
+use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Parser, Subcommand};
 
 use crate::config;
 use crate::daemon::{self, ServerConfig};
 use crate::protocol::{self, Request, Response};
 
+const HELP_TEMPLATE: &str = "\
+{before-help}{name} {version}
+{about-with-newline}
+{usage-heading} {usage}
+
+{all-args}{after-help}";
+
+const MAIN_AFTER_HELP: &str = "\
+Quickstart:
+  litek8s serve
+  litek8s apply -f examples/nginx.yaml
+  litek8s top --watch
+  litek8s describe deployment demo-nginx
+
+Mental model:
+  `serve` runs the control loop.
+  Everything else talks to that daemon over a local Unix socket.";
+
+const SERVE_AFTER_HELP: &str = "\
+Examples:
+  litek8s serve
+  litek8s serve --poll-interval-secs 1
+  litek8s serve --state-file /tmp/litek8s-state.json";
+
+const APPLY_AFTER_HELP: &str = "\
+Examples:
+  litek8s apply -f examples/nginx.yaml
+  litek8s apply -f ./my-app.yaml";
+
+const TOP_AFTER_HELP: &str = "\
+Examples:
+  litek8s top
+  litek8s top --watch
+  litek8s top --watch --interval-secs 1";
+
+const GET_AFTER_HELP: &str = "\
+Examples:
+  litek8s get deployments
+  litek8s get deployment";
+
+const DESCRIBE_AFTER_HELP: &str = "\
+Examples:
+  litek8s describe deployment demo-nginx
+  litek8s describe deployments demo-nginx";
+
+const LOGS_AFTER_HELP: &str = "\
+Examples:
+  litek8s logs demo-nginx
+  litek8s logs demo-nginx --tail 200";
+
+const DELETE_AFTER_HELP: &str = "\
+Examples:
+  litek8s delete deployment demo-nginx
+  litek8s delete -f examples/nginx.yaml";
+
 #[derive(Debug, Parser)]
 #[command(
     name = "litek8s",
-    about = "A tiny k8s-like orchestrator backed by Docker"
+    version,
+    about = "Tiny k8s-like orchestration for one machine, one daemon, and Docker underneath.",
+    long_about = "Tiny k8s-like orchestration for one machine, one daemon, and Docker underneath.\n\nlitek8s keeps the UX familiar on purpose: apply a reduced Deployment manifest, inspect it, watch it, and let a small control loop keep the container alive.",
+    help_template = HELP_TEMPLATE,
+    after_help = MAIN_AFTER_HELP,
+    styles = cli_styles(),
+    next_line_help = true
 )]
 struct Cli {
-    #[arg(long, global = true)]
+    #[arg(long, global = true, help = "Use a custom daemon socket path")]
     socket_path: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
@@ -23,38 +86,90 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    #[command(
+        about = "Start the local litek8s daemon",
+        help_template = HELP_TEMPLATE,
+        after_help = SERVE_AFTER_HELP
+    )]
     Serve {
-        #[arg(long)]
+        #[arg(
+            long,
+            help = "Write daemon state to this file instead of the default path"
+        )]
         state_file: Option<PathBuf>,
-        #[arg(long, default_value_t = 2)]
+        #[arg(
+            long,
+            default_value_t = 2,
+            help = "How often the reconciler polls, in seconds"
+        )]
         poll_interval_secs: u64,
     },
+    #[command(
+        about = "Apply a reduced Deployment manifest",
+        help_template = HELP_TEMPLATE,
+        after_help = APPLY_AFTER_HELP
+    )]
     Apply {
-        #[arg(short = 'f', long)]
+        #[arg(short = 'f', long, help = "Path to a YAML deployment manifest")]
         file: PathBuf,
     },
+    #[command(
+        about = "List the deployments managed by litek8s",
+        help_template = HELP_TEMPLATE,
+        after_help = GET_AFTER_HELP
+    )]
     Get {
+        #[arg(help = "Resource type, currently `deployment` or `deployments`")]
         resource: String,
     },
+    #[command(
+        about = "Show a single deployment in detail",
+        help_template = HELP_TEMPLATE,
+        after_help = DESCRIBE_AFTER_HELP
+    )]
     Describe {
+        #[arg(help = "Resource type, currently `deployment` or `deployments`")]
         resource: String,
+        #[arg(help = "Deployment name")]
         name: String,
     },
+    #[command(
+        about = "Read recent logs from the managed container",
+        help_template = HELP_TEMPLATE,
+        after_help = LOGS_AFTER_HELP
+    )]
     Logs {
+        #[arg(help = "Deployment name")]
         name: String,
-        #[arg(long, default_value_t = 100)]
+        #[arg(long, default_value_t = 100, help = "How many log lines to request")]
         tail: usize,
     },
+    #[command(
+        about = "Watch live resource usage for the daemon and deployments",
+        help_template = HELP_TEMPLATE,
+        after_help = TOP_AFTER_HELP
+    )]
     Top {
-        #[arg(long)]
+        #[arg(long, help = "Refresh the table continuously")]
         watch: bool,
-        #[arg(long, default_value_t = 2)]
+        #[arg(long, default_value_t = 2, help = "Refresh interval in seconds")]
         interval_secs: u64,
     },
+    #[command(
+        about = "Delete a deployment by name or manifest",
+        help_template = HELP_TEMPLATE,
+        after_help = DELETE_AFTER_HELP
+    )]
     Delete {
-        #[arg(short = 'f', long)]
+        #[arg(
+            short = 'f',
+            long,
+            help = "Delete the deployment defined in this manifest"
+        )]
         file: Option<PathBuf>,
+        #[arg(help = "Resource type when deleting by name")]
         resource: Option<String>,
+        #[arg(help = "Deployment name when deleting by name")]
         name: Option<String>,
     },
 }
@@ -143,67 +258,76 @@ fn ensure_resource(resource: &str, supported: &[&str]) -> Result<()> {
 fn print_response(response: Response) -> Result<()> {
     match response {
         Response::Ack { message } => {
-            println!("{message}");
+            println!("{} {}", ok("ok"), message);
             Ok(())
         }
         Response::Deployments { items } => {
-            println!("{:<24} {:<12} {:<24} CONTAINER", "NAME", "STATUS", "IMAGE");
+            let total = items.len();
+            println!(
+                "{} {}",
+                title("Managed Deployments"),
+                muted(&format!("({total} total)"))
+            );
+            println!();
+            println!(
+                "{} {} {} {}",
+                header_left("NAME", 24),
+                header_left("STATUS", 12),
+                header_left("IMAGE", 24),
+                label("CONTAINER")
+            );
             for item in items {
                 println!(
-                    "{:<24} {:<12} {:<24} {}",
-                    item.name,
-                    item.status,
-                    truncate(&item.image, 24),
+                    "{} {} {} {}",
+                    left_cell(&item.name, 24),
+                    status_cell(&item.status, 12),
+                    left_cell(&truncate(&item.image, 24), 24),
                     item.container_id.unwrap_or_else(|| "-".to_string())
                 );
             }
             Ok(())
         }
         Response::Description { item } => {
-            println!("Name: {}", item.name);
-            println!("API Version: {}", item.api_version);
-            println!("Status: {}", item.status);
-            println!("Image: {}", item.image);
-            println!("Container Name: {}", item.container_name);
+            let command = if item.command.is_empty() {
+                "-".to_string()
+            } else {
+                item.command.join(" ")
+            };
+            let args = if item.args.is_empty() {
+                "-".to_string()
+            } else {
+                item.args.join(" ")
+            };
+            let ports = if item.ports.is_empty() {
+                "-".to_string()
+            } else {
+                item.ports.join(", ")
+            };
+
+            println!("{}", title(&format!("Deployment {}", item.name)));
             println!(
-                "Container ID: {}",
-                item.container_id.unwrap_or_else(|| "-".to_string())
+                "{}",
+                muted("single-container workload kept alive by the local daemon")
+            );
+            println!();
+            print_detail("apiVersion", &item.api_version);
+            print_detail("status", &color_status(&item.status));
+            print_detail("image", &item.image);
+            print_detail("container", &item.container_name);
+            print_detail(
+                "container id",
+                &item.container_id.unwrap_or_else(|| "-".to_string()),
             );
             if let Some(message) = item.message {
-                println!("Message: {message}");
+                print_detail("message", &message);
             }
-            println!(
-                "Command: {}",
-                if item.command.is_empty() {
-                    "-".to_string()
-                } else {
-                    item.command.join(" ")
-                }
-            );
-            println!(
-                "Args: {}",
-                if item.args.is_empty() {
-                    "-".to_string()
-                } else {
-                    item.args.join(" ")
-                }
-            );
-            println!(
-                "CPU Limit: {}",
-                item.cpu_limit.unwrap_or_else(|| "-".to_string())
-            );
-            println!(
-                "Memory Limit: {}",
-                item.memory_limit.unwrap_or_else(|| "-".to_string())
-            );
-            println!(
-                "Ports: {}",
-                if item.ports.is_empty() {
-                    "-".to_string()
-                } else {
-                    item.ports.join(", ")
-                }
-            );
+            print_detail("command", &command);
+            print_detail("args", &args);
+            print_detail("cpu limit", item.cpu_limit.as_deref().unwrap_or("-"));
+            print_detail("memory limit", item.memory_limit.as_deref().unwrap_or("-"));
+            print_detail("restarts", &item.restart_count.to_string());
+            print_detail("last exit", item.last_exit.as_deref().unwrap_or("-"));
+            print_detail("ports", &ports);
             Ok(())
         }
         Response::Logs { content } => {
@@ -211,8 +335,10 @@ fn print_response(response: Response) -> Result<()> {
             Ok(())
         }
         Response::Top { daemon, items } => {
+            println!("{} {}", title("Daemon"), muted("local control loop"));
             println!(
-                "daemon litek8s: pid={} cpu={} mem={} uptime={}",
+                "{} pid={} cpu={} mem={} uptime={}",
+                label("litek8s"),
                 daemon.pid,
                 format_cpu_compact(daemon.cpu_percent),
                 human_bytes(daemon.memory_bytes),
@@ -220,18 +346,34 @@ fn print_response(response: Response) -> Result<()> {
             );
             println!();
             println!(
-                "{:<24} {:<12} {:>8} {:>14} {:>18} {:<12} IMAGE",
-                "NAME", "STATUS", "CPU", "MEMORY", "NET I/O", "CONTAINER"
+                "{} {} {} {} {} {} {} {} {}",
+                header_left("NAME", 24),
+                header_left("STATUS", 12),
+                header_right("RESTARTS", 8),
+                header_left("LAST EXIT", 16),
+                header_right("CPU", 8),
+                header_right("MEMORY", 14),
+                header_right("NET I/O", 18),
+                header_left("CONTAINER ID", 12),
+                label("IMAGE")
             );
             for item in items {
                 println!(
-                    "{:<24} {:<12} {:>8} {:>14} {:>18} {:<12} {}",
-                    item.name,
-                    item.status,
-                    format_cpu(item.cpu_percent),
-                    format_memory(item.memory_usage_bytes, item.memory_limit_bytes),
-                    format_net_io(item.network_rx_bytes, item.network_tx_bytes),
-                    short_id(item.container_id.as_deref()),
+                    "{} {} {} {} {} {} {} {} {}",
+                    left_cell(&item.name, 24),
+                    status_cell(&item.status, 12),
+                    right_cell(&item.restart_count.to_string(), 8),
+                    left_cell(&truncate(item.last_exit.as_deref().unwrap_or("-"), 16), 16),
+                    right_cell(&format_cpu(item.cpu_percent), 8),
+                    right_cell(
+                        &format_memory(item.memory_usage_bytes, item.memory_limit_bytes),
+                        14,
+                    ),
+                    right_cell(
+                        &format_net_io(item.network_rx_bytes, item.network_tx_bytes),
+                        18,
+                    ),
+                    left_cell(&short_id(item.container_id.as_deref()), 12),
                     truncate(&item.image, 32)
                 );
             }
@@ -271,6 +413,73 @@ fn truncate(value: &str, max: usize) -> String {
         .take(max.saturating_sub(1))
         .collect::<String>()
         + "…"
+}
+
+fn print_detail(name: &str, value: &str) {
+    println!("{} {}", label(&left_cell(&format!("{name}:"), 14)), value);
+}
+
+fn left_cell(value: &str, width: usize) -> String {
+    format!("{value:<width$}")
+}
+
+fn right_cell(value: &str, width: usize) -> String {
+    format!("{value:>width$}")
+}
+
+fn header_left(value: &str, width: usize) -> String {
+    label(&left_cell(value, width))
+}
+
+fn header_right(value: &str, width: usize) -> String {
+    label(&right_cell(value, width))
+}
+
+fn use_color() -> bool {
+    io::stdout().is_terminal() && std::env::var_os("NO_COLOR").is_none()
+}
+
+fn paint(text: &str, ansi: &str) -> String {
+    if use_color() {
+        format!("\x1b[{ansi}m{text}\x1b[0m")
+    } else {
+        text.to_string()
+    }
+}
+
+fn title(text: &str) -> String {
+    paint(text, "1;96")
+}
+
+fn label(text: &str) -> String {
+    paint(text, "1;94")
+}
+
+fn ok(text: &str) -> String {
+    paint(text, "1;92")
+}
+
+fn muted(text: &str) -> String {
+    paint(text, "2")
+}
+
+fn color_status(status: &str) -> String {
+    match status {
+        "Running" => paint(status, "1;92"),
+        "Pending" | "Restarting" => paint(status, "1;93"),
+        "Failed" | "Deleted" => paint(status, "1;91"),
+        _ => status.to_string(),
+    }
+}
+
+fn status_cell(status: &str, width: usize) -> String {
+    let padded = left_cell(status, width);
+    match status {
+        "Running" => paint(&padded, "1;92"),
+        "Pending" | "Restarting" => paint(&padded, "1;93"),
+        "Failed" | "Deleted" => paint(&padded, "1;91"),
+        _ => padded,
+    }
 }
 
 fn short_id(value: Option<&str>) -> String {
@@ -336,6 +545,17 @@ fn format_uptime(seconds: u64) -> String {
     } else {
         format!("{seconds}s")
     }
+}
+
+fn cli_styles() -> Styles {
+    Styles::styled()
+        .header(AnsiColor::BrightBlue.on_default() | Effects::BOLD)
+        .usage(AnsiColor::BrightGreen.on_default() | Effects::BOLD)
+        .literal(AnsiColor::BrightCyan.on_default())
+        .placeholder(AnsiColor::BrightYellow.on_default())
+        .error(AnsiColor::BrightRed.on_default() | Effects::BOLD)
+        .valid(AnsiColor::BrightGreen.on_default() | Effects::BOLD)
+        .invalid(AnsiColor::BrightRed.on_default() | Effects::BOLD)
 }
 
 #[cfg(test)]

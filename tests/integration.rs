@@ -79,6 +79,8 @@ async fn apply_get_logs_and_delete_roundtrip() -> Result<()> {
                 .expect("deployment should appear in top");
             assert_eq!(row.status, "Running");
             assert!(row.container_id.is_some());
+            assert_eq!(row.restart_count, 0);
+            assert!(row.last_exit.is_none());
         }
         other => panic!("unexpected response: {other:?}"),
     }
@@ -134,6 +136,23 @@ async fn reconciler_recreates_container_after_manual_removal() -> Result<()> {
         .wait_until_container_id_changes(&deployment, &original_id)
         .await?;
     assert_ne!(original_id, new_id);
+
+    let top = request(&harness.socket_path, Request::Top).await?;
+    match top {
+        Response::Top { items, .. } => {
+            let row = items
+                .into_iter()
+                .find(|item| item.name == deployment)
+                .expect("deployment should appear in top");
+            assert!(row.restart_count >= 1);
+            assert!(matches!(
+                row.last_exit.as_deref(),
+                Some("removed") | Some("container disappeared")
+            ));
+            assert_eq!(row.container_id.as_deref(), Some(new_id.as_str()));
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
 
     harness.cleanup_deployment(&deployment).await?;
     Ok(())
@@ -251,6 +270,21 @@ async fn applies_and_updates_container_resource_limits() -> Result<()> {
         .await?;
     assert_eq!(updated_limits.nano_cpus, Some(500_000_000));
     assert_eq!(updated_limits.memory_bytes, Some(134_217_728));
+
+    let describe = request(
+        &harness.socket_path,
+        Request::DescribeDeployment {
+            name: deployment.clone(),
+        },
+    )
+    .await?;
+    match describe {
+        Response::Description { item } => {
+            assert!(item.restart_count >= 1);
+            assert_eq!(item.last_exit.as_deref(), Some("spec changed"));
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
 
     harness.cleanup_deployment(&deployment).await?;
     Ok(())

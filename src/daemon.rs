@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,7 +16,10 @@ use crate::protocol::{
     Response, read_message, send_message,
 };
 use crate::reconciler;
-use crate::runtime::docker::{DockerRuntime, deployment_container_name};
+use crate::runtime::docker::{
+    ContainerMetrics, ContainerStatsSnapshot, DockerRuntime, compute_cpu_percent_from_samples,
+    deployment_container_name,
+};
 use crate::store::{ApplyOutcome, Store};
 
 #[derive(Debug, Clone)]
@@ -44,6 +48,7 @@ struct AppState {
     reconcile_guard: Arc<Mutex<()>>,
     cleanup_orphans: bool,
     daemon_metrics: Arc<Mutex<DaemonMetricsSampler>>,
+    top_metrics: Arc<Mutex<TopMetricsSampler>>,
 }
 
 pub async fn serve(config: ServerConfig) -> Result<()> {
@@ -69,6 +74,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         reconcile_guard: Arc::new(Mutex::new(())),
         cleanup_orphans: config.cleanup_orphans,
         daemon_metrics: Arc::new(Mutex::new(DaemonMetricsSampler::new())),
+        top_metrics: Arc::new(Mutex::new(TopMetricsSampler::new())),
     };
     let app_state = Arc::new(app_state);
     app_state.reconcile_all().await?;
@@ -189,6 +195,8 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                     .container()
                     .memory_limit()
                     .map(str::to_string),
+                restart_count: entry.restart_count,
+                last_exit: entry.last_exit,
             };
 
             Ok(Response::Description { item })
@@ -201,26 +209,49 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             state.reconcile_all().await?;
             let deployments = state.store.list().await;
             let mut items = Vec::with_capacity(deployments.len());
+            let mut active_container_ids = HashSet::new();
+            let mut snapshots = HashMap::new();
 
             for entry in deployments {
-                let metrics = match &entry.container_id {
-                    Some(container_id) => {
-                        state.runtime.metrics_for_container(container_id).await.ok()
+                if let Some(container_id) = entry.container_id.as_ref() {
+                    active_container_ids.insert(container_id.clone());
+                    if let Ok(snapshot) = state
+                        .runtime
+                        .stats_snapshot_for_container(container_id)
+                        .await
+                    {
+                        snapshots.insert(container_id.clone(), snapshot);
                     }
-                    None => None,
-                };
+                }
 
                 items.push(DeploymentTopRow {
                     name: entry.manifest.deployment_name().to_string(),
                     status: entry.status.to_string(),
                     image: entry.manifest.container().image.clone(),
                     container_id: entry.container_id,
-                    cpu_percent: metrics.as_ref().and_then(|value| value.cpu_percent),
-                    memory_usage_bytes: metrics.as_ref().and_then(|value| value.memory_usage_bytes),
-                    memory_limit_bytes: metrics.as_ref().and_then(|value| value.memory_limit_bytes),
-                    network_rx_bytes: metrics.as_ref().and_then(|value| value.network_rx_bytes),
-                    network_tx_bytes: metrics.as_ref().and_then(|value| value.network_tx_bytes),
+                    restart_count: entry.restart_count,
+                    last_exit: entry.last_exit,
+                    cpu_percent: None,
+                    memory_usage_bytes: None,
+                    memory_limit_bytes: None,
+                    network_rx_bytes: None,
+                    network_tx_bytes: None,
                 });
+            }
+
+            let mut top_metrics = state.top_metrics.lock().await;
+            top_metrics.retain_active(&active_container_ids);
+            for item in &mut items {
+                if let Some(container_id) = item.container_id.as_ref() {
+                    if let Some(snapshot) = snapshots.get(container_id) {
+                        let metrics = top_metrics.metrics_for(container_id, snapshot);
+                        item.cpu_percent = metrics.cpu_percent;
+                        item.memory_usage_bytes = metrics.memory_usage_bytes;
+                        item.memory_limit_bytes = metrics.memory_limit_bytes;
+                        item.network_rx_bytes = metrics.network_rx_bytes;
+                        item.network_tx_bytes = metrics.network_tx_bytes;
+                    }
+                }
             }
 
             let daemon = state.daemon_metrics.lock().await.snapshot();
@@ -300,5 +331,87 @@ impl DaemonMetricsSampler {
             memory_bytes: process.map(|process| process.memory()).unwrap_or_default(),
             uptime_secs: self.started_at.elapsed().as_secs(),
         }
+    }
+}
+
+#[derive(Default)]
+struct TopMetricsSampler {
+    previous_by_container: HashMap<String, ContainerStatsSnapshot>,
+}
+
+impl TopMetricsSampler {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn retain_active(&mut self, active_ids: &HashSet<String>) {
+        self.previous_by_container
+            .retain(|container_id, _| active_ids.contains(container_id));
+    }
+
+    fn metrics_for(
+        &mut self,
+        container_id: &str,
+        snapshot: &ContainerStatsSnapshot,
+    ) -> ContainerMetrics {
+        let cpu_percent = self
+            .previous_by_container
+            .get(container_id)
+            .and_then(|previous| compute_cpu_percent_from_samples(previous, snapshot))
+            .or(snapshot.fallback_cpu_percent);
+
+        self.previous_by_container
+            .insert(container_id.to_string(), snapshot.clone());
+
+        ContainerMetrics {
+            cpu_percent,
+            memory_usage_bytes: snapshot.memory_usage_bytes,
+            memory_limit_bytes: snapshot.memory_limit_bytes,
+            network_rx_bytes: Some(snapshot.network_rx_bytes),
+            network_tx_bytes: Some(snapshot.network_tx_bytes),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::TopMetricsSampler;
+    use crate::runtime::docker::ContainerStatsSnapshot;
+
+    fn snapshot(cpu_total_usage: u64, system_cpu_usage: u64) -> ContainerStatsSnapshot {
+        ContainerStatsSnapshot {
+            cpu_total_usage,
+            system_cpu_usage: Some(system_cpu_usage),
+            online_cpus: 4,
+            fallback_cpu_percent: None,
+            memory_usage_bytes: Some(12),
+            memory_limit_bytes: Some(64),
+            network_rx_bytes: 20,
+            network_tx_bytes: 10,
+        }
+    }
+
+    #[test]
+    fn top_metrics_sampler_uses_cached_samples_for_cpu() {
+        let mut sampler = TopMetricsSampler::new();
+
+        let first = sampler.metrics_for("abc", &snapshot(2_000_000_000, 20_000_000_000));
+        assert!(first.cpu_percent.is_none());
+
+        let second = sampler.metrics_for("abc", &snapshot(2_500_000_000, 25_000_000_000));
+        let cpu = second.cpu_percent.expect("cpu should be available");
+        assert!((cpu - 40.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn top_metrics_sampler_drops_inactive_containers() {
+        let mut sampler = TopMetricsSampler::new();
+        let _ = sampler.metrics_for("abc", &snapshot(2_000_000_000, 20_000_000_000));
+        sampler.retain_active(&HashSet::new());
+
+        let next = sampler.metrics_for("abc", &snapshot(2_500_000_000, 25_000_000_000));
+        assert!(next.cpu_percent.is_none());
     }
 }

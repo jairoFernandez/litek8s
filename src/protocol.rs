@@ -61,6 +61,8 @@ pub struct DeploymentDescription {
     pub ports: Vec<String>,
     pub cpu_limit: Option<String>,
     pub memory_limit: Option<String>,
+    pub restart_count: u64,
+    pub last_exit: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +71,8 @@ pub struct DeploymentTopRow {
     pub status: String,
     pub image: String,
     pub container_id: Option<String>,
+    pub restart_count: u64,
+    pub last_exit: Option<String>,
     pub cpu_percent: Option<f64>,
     pub memory_usage_bytes: Option<u64>,
     pub memory_limit_bytes: Option<u64>,
