@@ -12,6 +12,10 @@ spec:
           image: nginx:alpine
           command: ["nginx"]
           args: ["-g", "daemon off;"]
+          resources:
+            limits:
+              cpu: "500m"
+              memory: "128Mi"
           ports:
             - containerPort: 80
-              hostPort: 8080
+              hostPort: 8089

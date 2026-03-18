@@ -54,6 +54,26 @@ pub struct ContainerSpec {
     pub env: Vec<EnvVar>,
     #[serde(default)]
     pub ports: Vec<ContainerPort>,
+    pub resources: Option<ResourceRequirements>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceRequirements {
+    pub limits: Option<ResourceLimits>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ResourceLimits {
+    pub cpu: Option<String>,
+    pub memory: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedResourceLimits {
+    pub nano_cpus: Option<i64>,
+    pub memory_bytes: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -155,6 +175,8 @@ impl DeploymentManifest {
             }
         }
 
+        let _ = container.normalized_resource_limits()?;
+
         Ok(self)
     }
 
@@ -196,6 +218,51 @@ impl ContainerPort {
     }
 }
 
+impl ContainerSpec {
+    pub fn normalized_resource_limits(&self) -> Result<Option<NormalizedResourceLimits>> {
+        match &self.resources {
+            Some(resources) => Ok(Some(resources.normalized_limits()?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn cpu_limit(&self) -> Option<&str> {
+        self.resources.as_ref()?.limits.as_ref()?.cpu.as_deref()
+    }
+
+    pub fn memory_limit(&self) -> Option<&str> {
+        self.resources.as_ref()?.limits.as_ref()?.memory.as_deref()
+    }
+}
+
+impl ResourceRequirements {
+    pub fn normalized_limits(&self) -> Result<NormalizedResourceLimits> {
+        let limits = self
+            .limits
+            .as_ref()
+            .context("resources.limits must be provided when resources is set")?;
+
+        let nano_cpus = match limits.cpu.as_deref() {
+            Some(value) => Some(parse_cpu_quantity(value)?),
+            None => None,
+        };
+        let memory_bytes = match limits.memory.as_deref() {
+            Some(value) => Some(parse_memory_quantity(value)?),
+            None => None,
+        };
+
+        ensure!(
+            nano_cpus.is_some() || memory_bytes.is_some(),
+            "resources.limits must include at least one of cpu or memory"
+        );
+
+        Ok(NormalizedResourceLimits {
+            nano_cpus,
+            memory_bytes,
+        })
+    }
+}
+
 impl PortProtocol {
     pub fn as_docker_suffix(&self) -> &'static str {
         match self {
@@ -210,6 +277,66 @@ impl PortProtocol {
             Self::Udp => "UDP",
         }
     }
+}
+
+fn parse_cpu_quantity(value: &str) -> Result<i64> {
+    let value = value.trim();
+    ensure!(!value.is_empty(), "resources.limits.cpu must not be empty");
+
+    if let Some(millis) = value.strip_suffix('m') {
+        let millis = parse_positive_i64(millis, "resources.limits.cpu")?;
+        return millis
+            .checked_mul(1_000_000)
+            .context("resources.limits.cpu is too large");
+    }
+
+    let cores = value
+        .parse::<f64>()
+        .with_context(|| format!("resources.limits.cpu `{value}` is not a valid CPU quantity"))?;
+    ensure!(
+        cores.is_finite() && cores > 0.0,
+        "resources.limits.cpu must be greater than zero"
+    );
+
+    let nano_cpus = (cores * 1_000_000_000f64).round();
+    ensure!(
+        nano_cpus.is_finite() && nano_cpus > 0.0 && nano_cpus <= i64::MAX as f64,
+        "resources.limits.cpu is too large"
+    );
+    Ok(nano_cpus as i64)
+}
+
+fn parse_memory_quantity(value: &str) -> Result<i64> {
+    let value = value.trim();
+    ensure!(
+        !value.is_empty(),
+        "resources.limits.memory must not be empty"
+    );
+
+    for (suffix, multiplier) in [
+        ("Ki", 1024i64),
+        ("Mi", 1024i64.pow(2)),
+        ("Gi", 1024i64.pow(3)),
+        ("Ti", 1024i64.pow(4)),
+    ] {
+        if let Some(raw) = value.strip_suffix(suffix) {
+            let base = parse_positive_i64(raw, "resources.limits.memory")?;
+            return base
+                .checked_mul(multiplier)
+                .context("resources.limits.memory is too large");
+        }
+    }
+
+    parse_positive_i64(value, "resources.limits.memory")
+}
+
+fn parse_positive_i64(value: &str, field: &str) -> Result<i64> {
+    let parsed = value
+        .trim()
+        .parse::<i64>()
+        .with_context(|| format!("{field} `{value}` is not a valid positive integer"))?;
+    ensure!(parsed > 0, "{field} must be greater than zero");
+    Ok(parsed)
 }
 
 #[cfg(test)]
@@ -239,6 +366,10 @@ spec:
           ports:
             - containerPort: 80
               hostPort: 8080
+          resources:
+            limits:
+              cpu: "500m"
+              memory: "128Mi"
 "#
         )
     }
@@ -248,6 +379,13 @@ spec:
         let manifest = DeploymentManifest::parse(&manifest_yaml()).expect("manifest should parse");
         assert_eq!(manifest.deployment_name(), "demo");
         assert_eq!(manifest.container().image, "nginx:alpine");
+        let limits = manifest
+            .container()
+            .normalized_resource_limits()
+            .expect("limits should parse")
+            .expect("limits should exist");
+        assert_eq!(limits.nano_cpus, Some(500_000_000));
+        assert_eq!(limits.memory_bytes, Some(134_217_728));
     }
 
     #[test]
@@ -301,5 +439,122 @@ spec:
 
         let error = DeploymentManifest::parse(&yaml).expect_err("manifest should be rejected");
         assert!(error.to_string().contains("spec.replicas"));
+    }
+
+    #[test]
+    fn accepts_decimal_cpu_and_gib_memory_limits() {
+        let yaml = format!(
+            r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: demo
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: web
+          image: nginx:alpine
+          resources:
+            limits:
+              cpu: "0.5"
+              memory: "1Gi"
+"#
+        );
+
+        let manifest = DeploymentManifest::parse(&yaml).expect("manifest should parse");
+        let limits = manifest
+            .container()
+            .normalized_resource_limits()
+            .expect("limits should normalize")
+            .expect("limits should exist");
+        assert_eq!(limits.nano_cpus, Some(500_000_000));
+        assert_eq!(limits.memory_bytes, Some(1_073_741_824));
+    }
+
+    #[test]
+    fn rejects_requests_in_resources() {
+        let yaml = format!(
+            r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: demo
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: web
+          image: nginx:alpine
+          resources:
+            requests:
+              cpu: "250m"
+"#
+        );
+
+        let error = DeploymentManifest::parse(&yaml).expect_err("manifest should be rejected");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("requests") || text.contains("unknown field"),
+            "unexpected error: {text}"
+        );
+    }
+
+    #[test]
+    fn rejects_zero_or_invalid_resource_limits() {
+        let invalid_cpu = format!(
+            r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: demo
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: web
+          image: nginx:alpine
+          resources:
+            limits:
+              cpu: "0"
+"#
+        );
+        let invalid_memory = format!(
+            r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: demo
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: web
+          image: nginx:alpine
+          resources:
+            limits:
+              memory: "128M"
+"#
+        );
+
+        let cpu_error =
+            DeploymentManifest::parse(&invalid_cpu).expect_err("cpu limit should be rejected");
+        assert!(cpu_error.to_string().contains("greater than zero"));
+
+        let memory_error = DeploymentManifest::parse(&invalid_memory)
+            .expect_err("memory limit should be rejected");
+        assert!(
+            memory_error
+                .to_string()
+                .contains("not a valid positive integer")
+        );
     }
 }

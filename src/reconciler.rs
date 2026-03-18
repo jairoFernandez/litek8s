@@ -5,14 +5,20 @@ use anyhow::Result;
 use crate::runtime::docker::DockerRuntime;
 use crate::store::{DeploymentStatus, Store, StoredDeployment};
 
-pub async fn reconcile_all(store: &Store, runtime: &DockerRuntime) -> Result<()> {
+pub async fn reconcile_all(
+    store: &Store,
+    runtime: &DockerRuntime,
+    cleanup_orphans: bool,
+) -> Result<()> {
     let deployments = store.list().await;
     let desired_names: HashSet<String> = deployments
         .iter()
         .map(|entry| entry.manifest.deployment_name().to_string())
         .collect();
 
-    runtime.remove_orphans(&desired_names).await?;
+    if cleanup_orphans {
+        runtime.remove_orphans(&desired_names).await?;
+    }
 
     for deployment in deployments {
         if let Err(error) = reconcile_deployment(store, runtime, &deployment).await {

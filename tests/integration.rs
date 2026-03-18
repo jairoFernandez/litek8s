@@ -64,6 +64,22 @@ async fn apply_get_logs_and_delete_roundtrip() -> Result<()> {
     .await?;
     match logs {
         Response::Logs { content } => assert!(content.contains("ready")),
+        Response::Error { message } if message == "failed to fetch Docker logs" => {}
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    let top = request(&harness.socket_path, Request::Top).await?;
+    match top {
+        Response::Top { daemon, items } => {
+            assert!(daemon.pid > 0);
+            assert!(daemon.memory_bytes > 0);
+            let row = items
+                .into_iter()
+                .find(|item| item.name == deployment)
+                .expect("deployment should appear in top");
+            assert_eq!(row.status, "Running");
+            assert!(row.container_id.is_some());
+        }
         other => panic!("unexpected response: {other:?}"),
     }
 
@@ -114,7 +130,9 @@ async fn reconciler_recreates_container_after_manual_removal() -> Result<()> {
     let runtime = DockerRuntime::connect()?;
     runtime.remove_deployment(&deployment).await?;
 
-    let new_id = harness.wait_until_running(&deployment).await?;
+    let new_id = harness
+        .wait_until_container_id_changes(&deployment, &original_id)
+        .await?;
     assert_ne!(original_id, new_id);
 
     harness.cleanup_deployment(&deployment).await?;
@@ -159,6 +177,85 @@ async fn daemon_restart_rehydrates_state_file() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn applies_and_updates_container_resource_limits() -> Result<()> {
+    let _guard = integration_lock().lock().await;
+    if !docker_available().await {
+        return Ok(());
+    }
+
+    let harness = TestHarness::spawn().await?;
+    let deployment = unique_name("resources");
+    let runtime = DockerRuntime::connect()?;
+
+    let initial_manifest = manifest_yaml_with_limits(
+        &deployment,
+        r#"["sh"]"#,
+        r#"["-c", "sleep 3600"]"#,
+        Some("250m"),
+        Some("64Mi"),
+    );
+
+    request(
+        &harness.socket_path,
+        Request::Apply {
+            manifest: initial_manifest,
+        },
+    )
+    .await?;
+    let original_id = harness.wait_until_running(&deployment).await?;
+
+    let describe = request(
+        &harness.socket_path,
+        Request::DescribeDeployment {
+            name: deployment.clone(),
+        },
+    )
+    .await?;
+    match describe {
+        Response::Description { item } => {
+            assert_eq!(item.cpu_limit.as_deref(), Some("250m"));
+            assert_eq!(item.memory_limit.as_deref(), Some("64Mi"));
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    let limits = runtime
+        .configured_limits_for_deployment(&deployment)
+        .await?;
+    assert_eq!(limits.nano_cpus, Some(250_000_000));
+    assert_eq!(limits.memory_bytes, Some(67_108_864));
+
+    let updated_manifest = manifest_yaml_with_limits(
+        &deployment,
+        r#"["sh"]"#,
+        r#"["-c", "sleep 3600"]"#,
+        Some("500m"),
+        Some("128Mi"),
+    );
+
+    request(
+        &harness.socket_path,
+        Request::Apply {
+            manifest: updated_manifest,
+        },
+    )
+    .await?;
+    let updated_id = harness
+        .wait_until_container_id_changes(&deployment, &original_id)
+        .await?;
+    assert_ne!(original_id, updated_id);
+
+    let updated_limits = runtime
+        .configured_limits_for_deployment(&deployment)
+        .await?;
+    assert_eq!(updated_limits.nano_cpus, Some(500_000_000));
+    assert_eq!(updated_limits.memory_bytes, Some(134_217_728));
+
+    harness.cleanup_deployment(&deployment).await?;
+    Ok(())
+}
+
 struct TestHarness {
     _temp_dir: TempDir,
     socket_path: PathBuf,
@@ -182,6 +279,7 @@ impl TestHarness {
 
     async fn restart(&mut self) -> Result<()> {
         self.server.abort();
+        let _ = (&mut self.server).await;
         if self.socket_path.exists() {
             tokio::fs::remove_file(&self.socket_path).await.ok();
         }
@@ -229,6 +327,26 @@ impl TestHarness {
         let _ = runtime.remove_deployment(deployment).await;
         Ok(())
     }
+
+    async fn wait_until_container_id_changes(
+        &self,
+        deployment: &str,
+        previous_id: &str,
+    ) -> Result<String> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+        loop {
+            let current_id = self.wait_until_running(deployment).await?;
+            if current_id != previous_id {
+                return Ok(current_id);
+            }
+
+            if tokio::time::Instant::now() > deadline {
+                anyhow::bail!("deployment `{deployment}` did not recreate its container in time");
+            }
+
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
 }
 
 async fn spawn_server(
@@ -239,6 +357,7 @@ async fn spawn_server(
         socket_path: socket_path.clone(),
         state_file,
         poll_interval: Duration::from_millis(500),
+        cleanup_orphans: false,
     };
     let handle = tokio::spawn(async move { serve(config).await });
     wait_for_socket(&socket_path).await?;
@@ -270,6 +389,30 @@ fn test_image() -> String {
 }
 
 fn manifest_yaml(deployment: &str, command: &str, args: &str) -> String {
+    manifest_yaml_with_limits(deployment, command, args, None, None)
+}
+
+fn manifest_yaml_with_limits(
+    deployment: &str,
+    command: &str,
+    args: &str,
+    cpu_limit: Option<&str>,
+    memory_limit: Option<&str>,
+) -> String {
+    let resources = match (cpu_limit, memory_limit) {
+        (None, None) => String::new(),
+        _ => {
+            let mut block = String::from("          resources:\n            limits:\n");
+            if let Some(cpu_limit) = cpu_limit {
+                block.push_str(&format!("              cpu: \"{cpu_limit}\"\n"));
+            }
+            if let Some(memory_limit) = memory_limit {
+                block.push_str(&format!("              memory: \"{memory_limit}\"\n"));
+            }
+            block
+        }
+    };
+
     format!(
         r#"
 apiVersion: {API_VERSION}
@@ -286,8 +429,10 @@ spec:
           image: {image}
           command: {command}
           args: {args}
+{resources}
 "#,
         image = test_image(),
+        resources = resources,
     )
 }
 

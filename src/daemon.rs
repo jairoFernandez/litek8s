@@ -1,15 +1,18 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify};
 
 use crate::config;
 use crate::manifest::DeploymentManifest;
 use crate::protocol::{
-    DeploymentDescription, DeploymentSummary, Request, Response, read_message, send_message,
+    DaemonTopSummary, DeploymentDescription, DeploymentSummary, DeploymentTopRow, Request,
+    Response, read_message, send_message,
 };
 use crate::reconciler;
 use crate::runtime::docker::{DockerRuntime, deployment_container_name};
@@ -20,6 +23,7 @@ pub struct ServerConfig {
     pub socket_path: PathBuf,
     pub state_file: PathBuf,
     pub poll_interval: Duration,
+    pub cleanup_orphans: bool,
 }
 
 impl ServerConfig {
@@ -28,6 +32,7 @@ impl ServerConfig {
             socket_path: config::default_socket_path(),
             state_file: config::default_state_file()?,
             poll_interval: Duration::from_secs(2),
+            cleanup_orphans: true,
         })
     }
 }
@@ -37,6 +42,8 @@ struct AppState {
     store: Arc<Store>,
     runtime: DockerRuntime,
     reconcile_guard: Arc<Mutex<()>>,
+    cleanup_orphans: bool,
+    daemon_metrics: Arc<Mutex<DaemonMetricsSampler>>,
 }
 
 pub async fn serve(config: ServerConfig) -> Result<()> {
@@ -60,6 +67,8 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         store,
         runtime,
         reconcile_guard: Arc::new(Mutex::new(())),
+        cleanup_orphans: config.cleanup_orphans,
+        daemon_metrics: Arc::new(Mutex::new(DaemonMetricsSampler::new())),
     };
     let app_state = Arc::new(app_state);
     app_state.reconcile_all().await?;
@@ -174,6 +183,12 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                     .iter()
                     .map(|port| port.printable())
                     .collect(),
+                cpu_limit: entry.manifest.container().cpu_limit().map(str::to_string),
+                memory_limit: entry
+                    .manifest
+                    .container()
+                    .memory_limit()
+                    .map(str::to_string),
             };
 
             Ok(Response::Description { item })
@@ -181,6 +196,36 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
         Request::Logs { name, tail } => {
             let content = state.runtime.logs(&name, tail).await?;
             Ok(Response::Logs { content })
+        }
+        Request::Top => {
+            state.reconcile_all().await?;
+            let deployments = state.store.list().await;
+            let mut items = Vec::with_capacity(deployments.len());
+
+            for entry in deployments {
+                let metrics = match &entry.container_id {
+                    Some(container_id) => {
+                        state.runtime.metrics_for_container(container_id).await.ok()
+                    }
+                    None => None,
+                };
+
+                items.push(DeploymentTopRow {
+                    name: entry.manifest.deployment_name().to_string(),
+                    status: entry.status.to_string(),
+                    image: entry.manifest.container().image.clone(),
+                    container_id: entry.container_id,
+                    cpu_percent: metrics.as_ref().and_then(|value| value.cpu_percent),
+                    memory_usage_bytes: metrics.as_ref().and_then(|value| value.memory_usage_bytes),
+                    memory_limit_bytes: metrics.as_ref().and_then(|value| value.memory_limit_bytes),
+                    network_rx_bytes: metrics.as_ref().and_then(|value| value.network_rx_bytes),
+                    network_tx_bytes: metrics.as_ref().and_then(|value| value.network_tx_bytes),
+                });
+            }
+
+            let daemon = state.daemon_metrics.lock().await.snapshot();
+
+            Ok(Response::Top { daemon, items })
         }
     }
 }
@@ -219,6 +264,41 @@ fn spawn_reconcile_loop(
 impl AppState {
     async fn reconcile_all(&self) -> Result<()> {
         let _guard = self.reconcile_guard.lock().await;
-        reconciler::reconcile_all(&self.store, &self.runtime).await
+        reconciler::reconcile_all(&self.store, &self.runtime, self.cleanup_orphans).await
+    }
+}
+
+struct DaemonMetricsSampler {
+    pid: Pid,
+    started_at: Instant,
+    system: System,
+}
+
+impl DaemonMetricsSampler {
+    fn new() -> Self {
+        let pid = Pid::from_u32(std::process::id());
+        let mut system = System::new_with_specifics(
+            RefreshKind::nothing().with_processes(ProcessRefreshKind::nothing()),
+        );
+        system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+
+        Self {
+            pid,
+            started_at: Instant::now(),
+            system,
+        }
+    }
+
+    fn snapshot(&mut self) -> DaemonTopSummary {
+        self.system
+            .refresh_processes(ProcessesToUpdate::Some(&[self.pid]), true);
+
+        let process = self.system.process(self.pid);
+        DaemonTopSummary {
+            pid: self.pid.as_u32(),
+            cpu_percent: process.map(|process| process.cpu_usage() as f64),
+            memory_bytes: process.map(|process| process.memory()).unwrap_or_default(),
+            uptime_secs: self.started_at.elapsed().as_secs(),
+        }
     }
 }

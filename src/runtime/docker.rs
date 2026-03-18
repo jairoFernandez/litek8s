@@ -8,9 +8,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use bollard::API_DEFAULT_VERSION;
 use bollard::Docker;
 use bollard::container::{
-    Config, CreateContainerOptions, ListContainersOptions, LogOutput, LogsOptions,
-    RemoveContainerOptions, StartContainerOptions,
+    Config, CreateContainerOptions, InspectContainerOptions, ListContainersOptions, LogOutput,
+    LogsOptions, RemoveContainerOptions, StartContainerOptions, Stats, StatsOptions,
 };
+use bollard::errors::Error as BollardError;
 use bollard::image::CreateImageOptions;
 use bollard::models::{HostConfig, PortBinding};
 use bollard::system::EventsOptions;
@@ -18,7 +19,7 @@ use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
-use crate::manifest::{ContainerPort, DeploymentManifest};
+use crate::manifest::{ContainerPort, DeploymentManifest, NormalizedResourceLimits};
 
 const LABEL_MANAGED: &str = "litek8s.managed";
 const LABEL_DEPLOYMENT: &str = "litek8s.deployment";
@@ -38,6 +39,21 @@ pub struct ManagedContainer {
     pub status: Option<String>,
     pub running: bool,
     pub spec_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerMetrics {
+    pub cpu_percent: Option<f64>,
+    pub memory_usage_bytes: Option<u64>,
+    pub memory_limit_bytes: Option<u64>,
+    pub network_rx_bytes: Option<u64>,
+    pub network_tx_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfiguredResourceLimits {
+    pub nano_cpus: Option<i64>,
+    pub memory_bytes: Option<i64>,
 }
 
 impl DockerRuntime {
@@ -107,7 +123,7 @@ impl DockerRuntime {
         self.ensure_image(&manifest.container().image).await?;
 
         let container_name = deployment_container_name(manifest.deployment_name());
-        let config = build_container_config(manifest, spec_hash);
+        let config = build_container_config(manifest, spec_hash)?;
 
         let create_result = self
             .docker
@@ -157,7 +173,8 @@ impl DockerRuntime {
     }
 
     pub async fn remove_container(&self, container_id: &str) -> Result<()> {
-        self.docker
+        match self
+            .docker
             .remove_container(
                 container_id,
                 Some(RemoveContainerOptions {
@@ -166,16 +183,23 @@ impl DockerRuntime {
                 }),
             )
             .await
-            .with_context(|| format!("failed to remove container {container_id}"))?;
-        Ok(())
+        {
+            Ok(()) => Ok(()),
+            Err(BollardError::DockerResponseServerError {
+                status_code: 404, ..
+            }) => Ok(()),
+            Err(BollardError::DockerResponseServerError {
+                status_code: 409,
+                message,
+            }) if message.contains("already in progress") => Ok(()),
+            Err(error) => {
+                Err(error).with_context(|| format!("failed to remove container {container_id}"))
+            }
+        }
     }
 
     pub async fn logs(&self, name: &str, tail: usize) -> Result<String> {
-        let container = self
-            .list_containers_for_deployment(name)
-            .await?
-            .into_iter()
-            .next()
+        let container = select_primary_container(self.list_containers_for_deployment(name).await?)
             .with_context(|| format!("deployment `{name}` has no managed container"))?;
 
         let mut stream = self.docker.logs(
@@ -191,17 +215,67 @@ impl DockerRuntime {
 
         let mut content = String::new();
         while let Some(chunk) = stream.next().await {
-            match chunk.context("failed to fetch Docker logs")? {
-                LogOutput::StdOut { message }
-                | LogOutput::StdErr { message }
-                | LogOutput::Console { message }
-                | LogOutput::StdIn { message } => {
+            match chunk {
+                Ok(
+                    LogOutput::StdOut { message }
+                    | LogOutput::StdErr { message }
+                    | LogOutput::Console { message }
+                    | LogOutput::StdIn { message },
+                ) => {
                     content.push_str(&String::from_utf8_lossy(&message));
                 }
+                Err(BollardError::DockerStreamError { .. }) => break,
+                Err(error) if !content.is_empty() => return Ok(content),
+                Err(error) => return Err(error).context("failed to fetch Docker logs"),
             }
         }
 
         Ok(content)
+    }
+
+    pub async fn configured_limits_for_deployment(
+        &self,
+        name: &str,
+    ) -> Result<ConfiguredResourceLimits> {
+        let container = select_primary_container(self.list_containers_for_deployment(name).await?)
+            .with_context(|| format!("deployment `{name}` has no managed container"))?;
+        let details = self
+            .docker
+            .inspect_container(&container.id, None::<InspectContainerOptions>)
+            .await
+            .with_context(|| format!("failed to inspect container {}", container.id))?;
+        let host_config = details
+            .host_config
+            .context("inspected container did not include HostConfig")?;
+
+        Ok(ConfiguredResourceLimits {
+            nano_cpus: host_config.nano_cpus,
+            memory_bytes: host_config.memory,
+        })
+    }
+
+    pub async fn metrics_for_container(&self, container_id: &str) -> Result<ContainerMetrics> {
+        let mut stats_stream = self.docker.stats(
+            container_id,
+            Some(StatsOptions {
+                stream: false,
+                one_shot: true,
+            }),
+        );
+
+        let stats = stats_stream
+            .next()
+            .await
+            .ok_or_else(|| anyhow!("docker stats stream ended before returning metrics"))?
+            .with_context(|| format!("failed to collect metrics for container {container_id}"))?;
+
+        Ok(ContainerMetrics {
+            cpu_percent: compute_cpu_percent(&stats),
+            memory_usage_bytes: stats.memory_stats.usage,
+            memory_limit_bytes: stats.memory_stats.limit,
+            network_rx_bytes: Some(total_network_rx_bytes(&stats)),
+            network_tx_bytes: Some(total_network_tx_bytes(&stats)),
+        })
     }
 
     async fn ensure_image(&self, image: &str) -> Result<()> {
@@ -275,8 +349,9 @@ impl DockerRuntime {
 pub(crate) fn build_container_config(
     manifest: &DeploymentManifest,
     spec_hash: &str,
-) -> Config<String> {
+) -> Result<Config<String>> {
     let container = manifest.container();
+    let resource_limits = container.normalized_resource_limits()?;
 
     let exposed_ports = if container.ports.is_empty() {
         None
@@ -291,10 +366,7 @@ pub(crate) fn build_container_config(
     };
 
     let port_bindings = build_port_bindings(&container.ports);
-    let host_config = (!port_bindings.is_empty()).then(|| HostConfig {
-        port_bindings: Some(port_bindings),
-        ..Default::default()
-    });
+    let host_config = build_host_config(port_bindings, resource_limits);
 
     let labels = HashMap::from([
         (LABEL_MANAGED.to_string(), "true".to_string()),
@@ -305,7 +377,7 @@ pub(crate) fn build_container_config(
         (LABEL_HASH.to_string(), spec_hash.to_string()),
     ]);
 
-    Config {
+    Ok(Config {
         image: Some(container.image.clone()),
         entrypoint: (!container.command.is_empty()).then_some(container.command.clone()),
         cmd: (!container.args.is_empty()).then_some(container.args.clone()),
@@ -320,7 +392,7 @@ pub(crate) fn build_container_config(
         host_config,
         labels: Some(labels),
         ..Default::default()
-    }
+    })
 }
 
 fn build_port_bindings(ports: &[ContainerPort]) -> HashMap<String, Option<Vec<PortBinding>>> {
@@ -338,6 +410,45 @@ fn build_port_bindings(ports: &[ContainerPort]) -> HashMap<String, Option<Vec<Po
             })
         })
         .collect()
+}
+
+fn build_host_config(
+    port_bindings: HashMap<String, Option<Vec<PortBinding>>>,
+    resource_limits: Option<NormalizedResourceLimits>,
+) -> Option<HostConfig> {
+    let mut host_config = HostConfig::default();
+    let mut configured = false;
+
+    if !port_bindings.is_empty() {
+        host_config.port_bindings = Some(port_bindings);
+        configured = true;
+    }
+
+    if let Some(resource_limits) = resource_limits {
+        if let Some(nano_cpus) = resource_limits.nano_cpus {
+            host_config.nano_cpus = Some(nano_cpus);
+            configured = true;
+        }
+        if let Some(memory_bytes) = resource_limits.memory_bytes {
+            host_config.memory = Some(memory_bytes);
+            configured = true;
+        }
+    }
+
+    configured.then_some(host_config)
+}
+
+fn select_primary_container(containers: Vec<ManagedContainer>) -> Option<ManagedContainer> {
+    let mut first = None;
+    for container in containers {
+        if container.running {
+            return Some(container);
+        }
+        if first.is_none() {
+            first = Some(container);
+        }
+    }
+    first
 }
 
 fn connect_docker() -> Result<Docker> {
@@ -395,11 +506,71 @@ pub fn deployment_container_name(name: &str) -> String {
     format!("litek8s-{sanitized}")
 }
 
+fn compute_cpu_percent(stats: &Stats) -> Option<f64> {
+    let cpu_delta = stats
+        .cpu_stats
+        .cpu_usage
+        .total_usage
+        .checked_sub(stats.precpu_stats.cpu_usage.total_usage)?;
+    let system_cpu_delta = stats
+        .cpu_stats
+        .system_cpu_usage?
+        .checked_sub(stats.precpu_stats.system_cpu_usage?)?;
+    if cpu_delta == 0 || system_cpu_delta == 0 {
+        return Some(0.0);
+    }
+
+    let online_cpus = stats
+        .cpu_stats
+        .online_cpus
+        .or_else(|| {
+            stats
+                .cpu_stats
+                .cpu_usage
+                .percpu_usage
+                .as_ref()
+                .map(|usage| usage.len() as u64)
+        })
+        .unwrap_or(1);
+
+    Some((cpu_delta as f64 / system_cpu_delta as f64) * online_cpus as f64 * 100.0)
+}
+
+fn total_network_rx_bytes(stats: &Stats) -> u64 {
+    if let Some(networks) = &stats.networks {
+        return networks.values().map(|network| network.rx_bytes).sum();
+    }
+    stats
+        .network
+        .map(|network| network.rx_bytes)
+        .unwrap_or_default()
+}
+
+fn total_network_tx_bytes(stats: &Stats) -> u64 {
+    if let Some(networks) = &stats.networks {
+        return networks.values().map(|network| network.tx_bytes).sum();
+    }
+    stats
+        .network
+        .map(|network| network.tx_bytes)
+        .unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use crate::manifest::{API_VERSION, DeploymentManifest};
 
-    use super::{LABEL_DEPLOYMENT, LABEL_HASH, build_container_config, deployment_container_name};
+    use bollard::container::{
+        BlkioStats, CPUStats, CPUUsage, MemoryStats, NetworkStats, PidsStats, Stats, StorageStats,
+        ThrottlingData,
+    };
+
+    use super::{
+        LABEL_DEPLOYMENT, LABEL_HASH, build_container_config, deployment_container_name,
+        total_network_rx_bytes, total_network_tx_bytes,
+    };
 
     #[test]
     fn creates_expected_container_config() {
@@ -429,7 +600,7 @@ spec:
         ))
         .expect("manifest should parse");
 
-        let config = build_container_config(&manifest, "hash123");
+        let config = build_container_config(&manifest, "hash123").expect("config should build");
         assert_eq!(config.image.as_deref(), Some("nginx:alpine"));
         assert_eq!(
             config.entrypoint.as_ref().expect("entrypoint missing"),
@@ -456,10 +627,150 @@ spec:
     }
 
     #[test]
+    fn maps_resource_limits_into_host_config() {
+        let manifest = DeploymentManifest::parse(&format!(
+            r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: demo
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: web
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
+              hostPort: 8080
+          resources:
+            limits:
+              cpu: "500m"
+              memory: "128Mi"
+"#
+        ))
+        .expect("manifest should parse");
+
+        let config = build_container_config(&manifest, "hash123").expect("config should build");
+        let host_config = config.host_config.expect("host config missing");
+        assert_eq!(host_config.nano_cpus, Some(500_000_000));
+        assert_eq!(host_config.memory, Some(134_217_728));
+        let bindings = host_config.port_bindings.expect("port bindings missing");
+        assert!(bindings.contains_key("80/tcp"));
+    }
+
+    #[test]
     fn sanitizes_container_name() {
         assert_eq!(
             deployment_container_name("api/v1.demo"),
             "litek8s-api-v1.demo"
         );
+    }
+
+    #[test]
+    fn aggregates_network_usage_from_all_interfaces() {
+        let stats = Stats {
+            read: String::new(),
+            preread: String::new(),
+            num_procs: 0,
+            pids_stats: PidsStats {
+                current: None,
+                limit: None,
+            },
+            network: None,
+            networks: Some(HashMap::from([
+                (
+                    "eth0".to_string(),
+                    NetworkStats {
+                        rx_dropped: 0,
+                        rx_bytes: 15,
+                        rx_errors: 0,
+                        tx_packets: 0,
+                        tx_dropped: 0,
+                        rx_packets: 0,
+                        tx_errors: 0,
+                        tx_bytes: 25,
+                    },
+                ),
+                (
+                    "eth1".to_string(),
+                    NetworkStats {
+                        rx_dropped: 0,
+                        rx_bytes: 10,
+                        rx_errors: 0,
+                        tx_packets: 0,
+                        tx_dropped: 0,
+                        rx_packets: 0,
+                        tx_errors: 0,
+                        tx_bytes: 20,
+                    },
+                ),
+            ])),
+            memory_stats: MemoryStats {
+                stats: None,
+                max_usage: None,
+                usage: None,
+                failcnt: None,
+                limit: None,
+                commit: None,
+                commit_peak: None,
+                commitbytes: None,
+                commitpeakbytes: None,
+                privateworkingset: None,
+            },
+            blkio_stats: BlkioStats {
+                io_service_bytes_recursive: None,
+                io_serviced_recursive: None,
+                io_queue_recursive: None,
+                io_service_time_recursive: None,
+                io_wait_time_recursive: None,
+                io_merged_recursive: None,
+                io_time_recursive: None,
+                sectors_recursive: None,
+            },
+            cpu_stats: CPUStats {
+                cpu_usage: CPUUsage {
+                    percpu_usage: None,
+                    usage_in_usermode: 0,
+                    total_usage: 0,
+                    usage_in_kernelmode: 0,
+                },
+                system_cpu_usage: Some(0),
+                online_cpus: Some(1),
+                throttling_data: ThrottlingData {
+                    periods: 0,
+                    throttled_periods: 0,
+                    throttled_time: 0,
+                },
+            },
+            precpu_stats: CPUStats {
+                cpu_usage: CPUUsage {
+                    percpu_usage: None,
+                    usage_in_usermode: 0,
+                    total_usage: 0,
+                    usage_in_kernelmode: 0,
+                },
+                system_cpu_usage: Some(0),
+                online_cpus: Some(1),
+                throttling_data: ThrottlingData {
+                    periods: 0,
+                    throttled_periods: 0,
+                    throttled_time: 0,
+                },
+            },
+            storage_stats: StorageStats {
+                read_count_normalized: None,
+                read_size_bytes: None,
+                write_count_normalized: None,
+                write_size_bytes: None,
+            },
+            name: String::new(),
+            id: String::new(),
+        };
+
+        assert_eq!(total_network_rx_bytes(&stats), 25);
+        assert_eq!(total_network_tx_bytes(&stats), 45);
     }
 }

@@ -10,8 +10,12 @@ cargo run -- apply -f examples/nginx.yaml
 cargo run -- get deployments
 cargo run -- describe deployment demo-nginx
 cargo run -- logs demo-nginx
+cargo run -- top
+cargo run -- top --watch
 cargo run -- delete deployment demo-nginx
 ```
+
+`top` shows a daemon summary first, then the managed deployments table.
 
 ## Manifest shape
 
@@ -22,7 +26,8 @@ The supported manifest is deliberately narrow:
 - `spec.replicas: 1`
 - exactly one container
 - `restartPolicy: Always`
-- optional `command`, `args`, `env`, and `ports`
+- optional `command`, `args`, `env`, `ports`, and `resources.limits`
+- supported limits are `cpu` and `memory` with k8s-style strings such as `500m` and `128Mi`
 
 ## Notes
 

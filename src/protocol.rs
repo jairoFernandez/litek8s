@@ -13,15 +13,30 @@ pub enum Request {
     GetDeployments,
     DescribeDeployment { name: String },
     Logs { name: String, tail: usize },
+    Top,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
-    Ack { message: String },
-    Deployments { items: Vec<DeploymentSummary> },
-    Description { item: DeploymentDescription },
-    Logs { content: String },
-    Error { message: String },
+    Ack {
+        message: String,
+    },
+    Deployments {
+        items: Vec<DeploymentSummary>,
+    },
+    Description {
+        item: DeploymentDescription,
+    },
+    Logs {
+        content: String,
+    },
+    Top {
+        daemon: DaemonTopSummary,
+        items: Vec<DeploymentTopRow>,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +59,29 @@ pub struct DeploymentDescription {
     pub command: Vec<String>,
     pub args: Vec<String>,
     pub ports: Vec<String>,
+    pub cpu_limit: Option<String>,
+    pub memory_limit: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeploymentTopRow {
+    pub name: String,
+    pub status: String,
+    pub image: String,
+    pub container_id: Option<String>,
+    pub cpu_percent: Option<f64>,
+    pub memory_usage_bytes: Option<u64>,
+    pub memory_limit_bytes: Option<u64>,
+    pub network_rx_bytes: Option<u64>,
+    pub network_tx_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DaemonTopSummary {
+    pub pid: u32,
+    pub cpu_percent: Option<f64>,
+    pub memory_bytes: u64,
+    pub uptime_secs: u64,
 }
 
 pub async fn send_message<T>(stream: &mut UnixStream, message: &T) -> Result<()>
