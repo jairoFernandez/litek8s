@@ -62,7 +62,9 @@ pub struct DeploymentDescription {
     pub cpu_limit: Option<String>,
     pub memory_limit: Option<String>,
     pub restart_count: u64,
+    pub restart_streak: u32,
     pub last_exit: Option<String>,
+    pub next_retry_in_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,7 +74,9 @@ pub struct DeploymentTopRow {
     pub image: String,
     pub container_id: Option<String>,
     pub restart_count: u64,
+    pub restart_streak: u32,
     pub last_exit: Option<String>,
+    pub next_retry_in_secs: Option<u64>,
     pub cpu_percent: Option<f64>,
     pub memory_usage_bytes: Option<u64>,
     pub memory_limit_bytes: Option<u64>,

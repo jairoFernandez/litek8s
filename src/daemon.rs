@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
@@ -196,7 +197,9 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                     .memory_limit()
                     .map(str::to_string),
                 restart_count: entry.restart_count,
+                restart_streak: entry.restart_streak,
                 last_exit: entry.last_exit,
+                next_retry_in_secs: retry_in_secs(entry.next_retry_at),
             };
 
             Ok(Response::Description { item })
@@ -231,7 +234,9 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                     image: entry.manifest.container().image.clone(),
                     container_id: entry.container_id,
                     restart_count: entry.restart_count,
+                    restart_streak: entry.restart_streak,
                     last_exit: entry.last_exit,
+                    next_retry_in_secs: retry_in_secs(entry.next_retry_at),
                     cpu_percent: None,
                     memory_usage_bytes: None,
                     memory_limit_bytes: None,
@@ -298,6 +303,18 @@ impl AppState {
         let _guard = self.reconcile_guard.lock().await;
         reconciler::reconcile_all(&self.store, &self.runtime, self.cleanup_orphans).await
     }
+}
+
+fn retry_in_secs(next_retry_at: Option<u64>) -> Option<u64> {
+    let next_retry_at = next_retry_at?;
+    Some(next_retry_at.saturating_sub(now_unix()))
+}
+
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 struct DaemonMetricsSampler {

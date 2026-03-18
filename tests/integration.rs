@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result};
 use litek8s::daemon::{ServerConfig, serve};
 use litek8s::manifest::API_VERSION;
-use litek8s::protocol::{Request, Response, request};
+use litek8s::protocol::{DeploymentDescription, Request, Response, request};
 use litek8s::runtime::docker::DockerRuntime;
 use tempfile::TempDir;
 
@@ -281,7 +281,71 @@ async fn applies_and_updates_container_resource_limits() -> Result<()> {
     match describe {
         Response::Description { item } => {
             assert!(item.restart_count >= 1);
-            assert_eq!(item.last_exit.as_deref(), Some("spec changed"));
+            assert!(matches!(
+                item.last_exit.as_deref(),
+                Some("spec changed") | Some("removed")
+            ));
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    harness.cleanup_deployment(&deployment).await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn crash_loop_uses_restart_backoff() -> Result<()> {
+    let _guard = integration_lock().lock().await;
+    if !docker_available().await {
+        return Ok(());
+    }
+
+    let harness = TestHarness::spawn().await?;
+    let deployment = unique_name("backoff");
+    let manifest = manifest_yaml(&deployment, r#"["sh"]"#, r#"["-c", "exit 1"]"#);
+
+    request(
+        &harness.socket_path,
+        Request::Apply {
+            manifest: manifest.clone(),
+        },
+    )
+    .await?;
+
+    let item = harness
+        .wait_until_description(&deployment, |item| {
+            item.status == "Restarting"
+                && item.container_id.is_none()
+                && item
+                    .message
+                    .as_deref()
+                    .map(|message| message.contains("backing off 4s"))
+                    .unwrap_or(false)
+        })
+        .await?;
+
+    assert!(item.restart_count >= 3);
+    assert!(item.restart_streak >= 3);
+    assert!(matches!(
+        item.last_exit.as_deref(),
+        Some("exited(1)") | Some("removed")
+    ));
+    assert!(item.next_retry_in_secs.unwrap_or_default() > 0);
+
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let describe = request(
+        &harness.socket_path,
+        Request::DescribeDeployment {
+            name: deployment.clone(),
+        },
+    )
+    .await?;
+    match describe {
+        Response::Description { item } => {
+            assert_eq!(item.status, "Restarting");
+            assert!(item.container_id.is_none());
+            assert!(item.restart_streak >= 3);
+            assert!(item.next_retry_in_secs.unwrap_or_default() > 0);
         }
         other => panic!("unexpected response: {other:?}"),
     }
@@ -360,6 +424,38 @@ impl TestHarness {
         let runtime = DockerRuntime::connect()?;
         let _ = runtime.remove_deployment(deployment).await;
         Ok(())
+    }
+
+    async fn wait_until_description<F>(
+        &self,
+        deployment: &str,
+        mut predicate: F,
+    ) -> Result<DeploymentDescription>
+    where
+        F: FnMut(&DeploymentDescription) -> bool,
+    {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
+        loop {
+            let response = request(
+                &self.socket_path,
+                Request::DescribeDeployment {
+                    name: deployment.to_string(),
+                },
+            )
+            .await?;
+
+            if let Response::Description { item } = response {
+                if predicate(&item) {
+                    return Ok(item);
+                }
+            }
+
+            if tokio::time::Instant::now() > deadline {
+                anyhow::bail!("deployment `{deployment}` did not reach the expected description");
+            }
+
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
     }
 
     async fn wait_until_container_id_changes(

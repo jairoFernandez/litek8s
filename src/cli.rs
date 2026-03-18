@@ -326,7 +326,12 @@ fn print_response(response: Response) -> Result<()> {
             print_detail("cpu limit", item.cpu_limit.as_deref().unwrap_or("-"));
             print_detail("memory limit", item.memory_limit.as_deref().unwrap_or("-"));
             print_detail("restarts", &item.restart_count.to_string());
+            print_detail("streak", &item.restart_streak.to_string());
             print_detail("last exit", item.last_exit.as_deref().unwrap_or("-"));
+            print_detail(
+                "next retry",
+                &format_retry_countdown(item.next_retry_in_secs),
+            );
             print_detail("ports", &ports);
             Ok(())
         }
@@ -346,10 +351,12 @@ fn print_response(response: Response) -> Result<()> {
             );
             println!();
             println!(
-                "{} {} {} {} {} {} {} {} {}",
+                "{} {} {} {} {} {} {} {} {} {} {}",
                 header_left("NAME", 24),
                 header_left("STATUS", 12),
                 header_right("RESTARTS", 8),
+                header_right("STREAK", 6),
+                header_left("NEXT RETRY", 10),
                 header_left("LAST EXIT", 16),
                 header_right("CPU", 8),
                 header_right("MEMORY", 14),
@@ -359,10 +366,12 @@ fn print_response(response: Response) -> Result<()> {
             );
             for item in items {
                 println!(
-                    "{} {} {} {} {} {} {} {} {}",
+                    "{} {} {} {} {} {} {} {} {} {} {}",
                     left_cell(&item.name, 24),
                     status_cell(&item.status, 12),
                     right_cell(&item.restart_count.to_string(), 8),
+                    right_cell(&item.restart_streak.to_string(), 6),
+                    left_cell(&format_retry_countdown(item.next_retry_in_secs), 10),
                     left_cell(&truncate(item.last_exit.as_deref().unwrap_or("-"), 16), 16),
                     right_cell(
                         &format_top_cpu(
@@ -506,6 +515,14 @@ fn format_top_cpu(value: Option<f64>, has_live_metrics: bool) -> String {
     }
 }
 
+fn format_retry_countdown(value: Option<u64>) -> String {
+    match value {
+        Some(0) => "now".to_string(),
+        Some(seconds) => format!("{seconds}s"),
+        None => "-".to_string(),
+    }
+}
+
 fn format_cpu_compact(value: Option<f64>) -> String {
     value
         .map(|value| format!("{value:.2}%"))
@@ -614,7 +631,7 @@ impl Drop for WatchDisplay {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_top_cpu, format_uptime};
+    use super::{format_retry_countdown, format_top_cpu, format_uptime};
 
     #[test]
     fn formats_uptime_compactly() {
@@ -627,5 +644,12 @@ mod tests {
     fn formats_top_cpu_warmup_when_metrics_exist_without_cpu_delta() {
         assert_eq!(format_top_cpu(None, true), "warmup");
         assert_eq!(format_top_cpu(None, false), "n/a");
+    }
+
+    #[test]
+    fn formats_retry_countdown() {
+        assert_eq!(format_retry_countdown(None), "-");
+        assert_eq!(format_retry_countdown(Some(0)), "now");
+        assert_eq!(format_retry_countdown(Some(13)), "13s");
     }
 }

@@ -19,7 +19,9 @@ pub enum DeploymentStatus {
     Deleted,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+const HEALTHY_RESET_AFTER_SECS: u64 = 10;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredDeployment {
     pub manifest: DeploymentManifest,
     pub spec_hash: String,
@@ -30,6 +32,12 @@ pub struct StoredDeployment {
     pub restart_count: u64,
     #[serde(default)]
     pub last_exit: Option<String>,
+    #[serde(default)]
+    pub restart_streak: u32,
+    #[serde(default)]
+    pub next_retry_at: Option<u64>,
+    #[serde(default)]
+    pub healthy_since: Option<u64>,
     pub updated_at: u64,
 }
 
@@ -103,7 +111,10 @@ impl Store {
                     .as_ref()
                     .map(|entry| entry.restart_count)
                     .unwrap_or(0),
-                last_exit: existing.and_then(|entry| entry.last_exit),
+                last_exit: None,
+                restart_streak: 0,
+                next_retry_at: None,
+                healthy_since: None,
                 updated_at: now_unix(),
             },
         );
@@ -146,9 +157,17 @@ impl Store {
         message: Option<String>,
         last_exit: Option<String>,
         increment_restart_count: bool,
+        increment_restart_streak: bool,
+        next_retry_at: Option<u64>,
     ) -> Result<()> {
         let mut guard = self.state.write().await;
+        let mut changed = false;
         if let Some(entry) = guard.deployments.get_mut(name) {
+            let now = now_unix();
+            let before = entry.clone();
+
+            let previous_container_id = entry.container_id.clone();
+
             entry.status = status;
             entry.container_id = container_id;
             entry.message = message;
@@ -158,8 +177,39 @@ impl Store {
             if increment_restart_count {
                 entry.restart_count = entry.restart_count.saturating_add(1);
             }
-            entry.updated_at = now_unix();
+            if increment_restart_streak {
+                entry.restart_streak = entry.restart_streak.saturating_add(1);
+            }
+            entry.next_retry_at = next_retry_at;
+
+            if entry.status == DeploymentStatus::Running {
+                if entry.healthy_since.is_none() || previous_container_id != entry.container_id {
+                    entry.healthy_since = Some(now);
+                }
+
+                if entry
+                    .healthy_since
+                    .map(|healthy_since| {
+                        now.saturating_sub(healthy_since) >= HEALTHY_RESET_AFTER_SECS
+                    })
+                    .unwrap_or(false)
+                {
+                    entry.restart_streak = 0;
+                    entry.next_retry_at = None;
+                }
+            } else {
+                entry.healthy_since = None;
+            }
+
+            changed = *entry != before;
+            if changed {
+                entry.updated_at = now;
+            }
         }
+        if !changed {
+            return Ok(());
+        }
+
         let snapshot = guard.clone();
         drop(guard);
         self.persist(&snapshot).await
