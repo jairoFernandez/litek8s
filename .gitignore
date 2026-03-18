@@ -1,0 +1,11 @@
+# Rust build output
+target/
+
+# macOS
+.DS_Store
+
+# Local daemon/runtime artifacts
+*.sock
+state.json
+*.pid
+*.log
