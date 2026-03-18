@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{self, IsTerminal};
+use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -364,7 +364,15 @@ fn print_response(response: Response) -> Result<()> {
                     status_cell(&item.status, 12),
                     right_cell(&item.restart_count.to_string(), 8),
                     left_cell(&truncate(item.last_exit.as_deref().unwrap_or("-"), 16), 16),
-                    right_cell(&format_cpu(item.cpu_percent), 8),
+                    right_cell(
+                        &format_top_cpu(
+                            item.cpu_percent,
+                            item.memory_usage_bytes.is_some()
+                                || item.network_rx_bytes.is_some()
+                                || item.network_tx_bytes.is_some(),
+                        ),
+                        8,
+                    ),
                     right_cell(
                         &format_memory(item.memory_usage_bytes, item.memory_limit_bytes),
                         14,
@@ -384,22 +392,24 @@ fn print_response(response: Response) -> Result<()> {
 }
 
 async fn run_top(socket_path: &Path, watch: bool, interval: Duration) -> Result<()> {
+    let mut watch_display = watch.then(WatchDisplay::new).transpose()?;
+
     loop {
         let response = protocol::request(socket_path, Request::Top).await?;
-        if watch {
-            print!("\x1B[2J\x1B[H");
-            println!(
-                "litek8s top  interval={}s  ctrl+c to exit\n",
-                interval.as_secs()
-            );
+        if let Some(display) = watch_display.as_mut() {
+            display.begin_frame(interval)?;
         }
         print_response(response)?;
+        io::stdout().flush().context("failed to flush top output")?;
 
         if !watch {
             return Ok(());
         }
 
-        tokio::time::sleep(interval).await;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+            _ = tokio::time::sleep(interval) => {}
+        }
     }
 }
 
@@ -488,10 +498,12 @@ fn short_id(value: Option<&str>) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
-fn format_cpu(value: Option<f64>) -> String {
-    value
-        .map(|value| format!("{value:>6.2}%"))
-        .unwrap_or_else(|| "   n/a".to_string())
+fn format_top_cpu(value: Option<f64>, has_live_metrics: bool) -> String {
+    match value {
+        Some(value) => format!("{value:>6.2}%"),
+        None if has_live_metrics => "warmup".to_string(),
+        None => "n/a".to_string(),
+    }
 }
 
 fn format_cpu_compact(value: Option<f64>) -> String {
@@ -558,14 +570,62 @@ fn cli_styles() -> Styles {
         .invalid(AnsiColor::BrightRed.on_default() | Effects::BOLD)
 }
 
+struct WatchDisplay {
+    interactive: bool,
+}
+
+impl WatchDisplay {
+    fn new() -> Result<Self> {
+        let interactive = io::stdout().is_terminal();
+        if interactive {
+            print!("\x1B[?1049h\x1B[?25l");
+            io::stdout()
+                .flush()
+                .context("failed to enter interactive top view")?;
+        }
+
+        Ok(Self { interactive })
+    }
+
+    fn begin_frame(&mut self, interval: Duration) -> Result<()> {
+        if self.interactive {
+            print!("\x1B[H\x1B[J");
+        } else {
+            println!();
+            println!("---");
+        }
+
+        println!(
+            "litek8s top  live  interval={}s  ctrl+c to exit\n",
+            interval.as_secs()
+        );
+        Ok(())
+    }
+}
+
+impl Drop for WatchDisplay {
+    fn drop(&mut self) {
+        if self.interactive {
+            print!("\x1B[?25h\x1B[?1049l");
+            let _ = io::stdout().flush();
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::format_uptime;
+    use super::{format_top_cpu, format_uptime};
 
     #[test]
     fn formats_uptime_compactly() {
         assert_eq!(format_uptime(9), "9s");
         assert_eq!(format_uptime(75), "1m15s");
         assert_eq!(format_uptime(3723), "1h02m03s");
+    }
+
+    #[test]
+    fn formats_top_cpu_warmup_when_metrics_exist_without_cpu_delta() {
+        assert_eq!(format_top_cpu(None, true), "warmup");
+        assert_eq!(format_top_cpu(None, false), "n/a");
     }
 }

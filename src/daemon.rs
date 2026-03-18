@@ -206,7 +206,8 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             Ok(Response::Logs { content })
         }
         Request::Top => {
-            state.reconcile_all().await?;
+            // Keep `top` observational only: the background reconcile loop and Docker event
+            // listener remain responsible for state convergence.
             let deployments = state.store.list().await;
             let mut items = Vec::with_capacity(deployments.len());
             let mut active_container_ids = HashSet::new();
