@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 use crate::node::NodeTransport;
 use crate::protocol::ProxyTarget;
 use crate::proxy;
-use crate::store::{Store, StoredDeployment, StoredService};
+use crate::store::{DeploymentStatus, Store, StoredDeployment, StoredService};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceStatusSnapshot {
@@ -124,14 +124,9 @@ fn spawn_service_task(
                 Ok((socket, _)) => {
                     let store = store.clone();
                     let service = service.clone();
-                    let status = status.clone();
                     tokio::spawn(async move {
                         match resolve_service_target(&store, &service).await {
                             Ok(target) => {
-                                *status.write().await = ServiceStatusSnapshot {
-                                    status: "Listening".to_string(),
-                                    message: None,
-                                };
                                 if let Err(error) = proxy::forward_connection(socket, target).await
                                 {
                                     eprintln!(
@@ -141,10 +136,10 @@ fn spawn_service_task(
                                 }
                             }
                             Err(error) => {
-                                *status.write().await = ServiceStatusSnapshot {
-                                    status: "Error".to_string(),
-                                    message: Some(error.to_string()),
-                                };
+                                eprintln!(
+                                    "service `{}` has no routable backend for this connection: {error}",
+                                    service.name
+                                );
                             }
                         }
                     });
@@ -163,6 +158,19 @@ fn spawn_service_task(
 
 pub async fn resolve_service_target(store: &Store, service: &StoredService) -> Result<ProxyTarget> {
     let deployment = resolve_backing_deployment(store, service).await?;
+    if deployment.status != DeploymentStatus::Running {
+        bail!(
+            "backend deployment `{}` is {}",
+            deployment.manifest.deployment_name(),
+            deployment.status
+        );
+    }
+    if deployment.container_id.is_none() {
+        bail!(
+            "backend deployment `{}` has no running container",
+            deployment.manifest.deployment_name()
+        );
+    }
     let selected_port = deployment.manifest.proxy_port(service.target_port)?;
     let host_port = selected_port
         .host_port

@@ -28,9 +28,10 @@ use crate::runtime::docker::{
     ContainerMetrics, ContainerStatsSnapshot, DockerRuntime, compute_cpu_percent_from_samples,
     deployment_container_name,
 };
-use crate::service::{ServiceManager, resolve_backing_deployment};
+use crate::service::{ServiceManager, ServiceStatusSnapshot, resolve_backing_deployment};
 use crate::store::{
-    ApplyOutcome, EventLevel, EventQuery, NewEvent, NodeApplyOutcome, ServiceApplyOutcome, Store,
+    ApplyOutcome, DeploymentStatus, EventLevel, EventQuery, NewEvent, NodeApplyOutcome,
+    ServiceApplyOutcome, Store,
 };
 
 #[derive(Debug, Clone)]
@@ -399,62 +400,20 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 .await
                 .with_context(|| format!("service `{name}` was not found"))?;
             let runtime_status = state.service_manager.lock().await.status_for(&name).await;
-            let deployment = resolve_backing_deployment(&state.store, &service)
-                .await
-                .ok();
-            let current_node_name = deployment.as_ref().map(|entry| entry.assigned_node.clone());
-            let current_upstream = deployment
-                .as_ref()
-                .and_then(|entry| entry.manifest.proxy_port(service.target_port).ok())
-                .and_then(|port| {
-                    port.host_port
-                        .map(|host_port| format!("127.0.0.1:{host_port}"))
-                });
-            let deployment_name = deployment
-                .as_ref()
-                .map(|entry| entry.manifest.deployment_name().to_string())
-                .or_else(|| {
-                    if !service.deployment_name.is_empty() {
-                        Some(service.deployment_name.clone())
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or_else(|| "-".to_string());
-            let selector_hint = if service.selector.is_empty() {
-                None
-            } else {
-                Some(
-                    service
-                        .selector
-                        .iter()
-                        .map(|(key, value)| format!("{key}={value}"))
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                )
-            };
-            let runtime_message = runtime_status
-                .as_ref()
-                .and_then(|status| status.message.clone());
-            let message = match (selector_hint, runtime_message) {
-                (Some(selector), Some(message)) => Some(format!("{message}; selector {selector}")),
-                (Some(selector), None) => Some(format!("selector {selector}")),
-                (None, message) => message,
-            };
+            let view = state
+                .inspect_service_state(&service, runtime_status, None)
+                .await;
 
             Ok(Response::ServiceDescription {
                 item: ServiceDescription {
                     name: service.name,
-                    deployment_name,
+                    deployment_name: view.deployment_name,
                     listen_addr: service.listen_addr,
                     target_port: service.target_port,
-                    status: runtime_status
-                        .as_ref()
-                        .map(|status| status.status.clone())
-                        .unwrap_or_else(|| "Stopped".to_string()),
-                    message,
-                    current_node_name,
-                    current_upstream,
+                    status: view.status,
+                    message: view.message,
+                    current_node_name: view.current_node_name,
+                    current_upstream: view.current_upstream,
                 },
             })
         }
@@ -804,6 +763,116 @@ impl AppState {
             .await
     }
 
+    async fn inspect_service_state(
+        &self,
+        service: &crate::store::StoredService,
+        runtime_status: Option<ServiceStatusSnapshot>,
+        node_statuses: Option<&HashMap<String, String>>,
+    ) -> EffectiveServiceState {
+        let backend = self.inspect_service_backend(service, node_statuses).await;
+        effective_service_state(service, runtime_status.as_ref(), backend)
+    }
+
+    async fn inspect_service_backend(
+        &self,
+        service: &crate::store::StoredService,
+        node_statuses: Option<&HashMap<String, String>>,
+    ) -> ServiceBackendState {
+        let deployment = match resolve_backing_deployment(&self.store, service).await {
+            Ok(deployment) => deployment,
+            Err(error) => {
+                return ServiceBackendState {
+                    deployment_name: service_deployment_hint(service),
+                    current_node_name: None,
+                    current_upstream: None,
+                    health: ServiceBackendHealth::NoEndpoints,
+                    message: Some(error.to_string()),
+                };
+            }
+        };
+
+        let deployment_name = deployment.manifest.deployment_name().to_string();
+        let current_node_name = Some(deployment.assigned_node.clone());
+
+        if deployment.status != DeploymentStatus::Running {
+            return ServiceBackendState {
+                deployment_name,
+                current_node_name,
+                current_upstream: None,
+                health: ServiceBackendHealth::NoEndpoints,
+                message: Some(format_deployment_backend_message(&deployment)),
+            };
+        }
+
+        if deployment.container_id.is_none() {
+            return ServiceBackendState {
+                deployment_name,
+                current_node_name,
+                current_upstream: None,
+                health: ServiceBackendHealth::NoEndpoints,
+                message: Some(format!(
+                    "deployment `{}` has no running container yet",
+                    deployment.manifest.deployment_name()
+                )),
+            };
+        }
+
+        let selected_port = match deployment.manifest.proxy_port(service.target_port) {
+            Ok(selected_port) => selected_port,
+            Err(error) => {
+                return ServiceBackendState {
+                    deployment_name,
+                    current_node_name,
+                    current_upstream: None,
+                    health: ServiceBackendHealth::Degraded,
+                    message: Some(error.to_string()),
+                };
+            }
+        };
+
+        let current_upstream = match selected_port.host_port {
+            Some(host_port) => format!("127.0.0.1:{host_port}"),
+            None => {
+                return ServiceBackendState {
+                    deployment_name,
+                    current_node_name,
+                    current_upstream: None,
+                    health: ServiceBackendHealth::Degraded,
+                    message: Some("selected service target is missing hostPort".to_string()),
+                };
+            }
+        };
+
+        let node_status = match node_statuses.and_then(|items| items.get(&deployment.assigned_node))
+        {
+            Some(status) => status.clone(),
+            None => match self.store.get_node(&deployment.assigned_node).await {
+                Some(node) => self.node_health(&node).await.0,
+                None => "Offline".to_string(),
+            },
+        };
+        if node_status != "Ready" {
+            return ServiceBackendState {
+                deployment_name,
+                current_node_name,
+                current_upstream: Some(current_upstream),
+                health: ServiceBackendHealth::Degraded,
+                message: Some(format!(
+                    "node `{}` is {}",
+                    deployment.assigned_node, node_status
+                )),
+            };
+        }
+
+        ServiceBackendState {
+            deployment_name,
+            current_node_name,
+            current_upstream: Some(current_upstream),
+            health: ServiceBackendHealth::Ready,
+            message: None,
+        }
+    }
+
     async fn latest_cluster_snapshot(&self) -> Result<ClusterSnapshot> {
         let cache = self.cluster_snapshot.lock().await;
         cache
@@ -909,31 +978,23 @@ impl AppState {
             });
         }
 
+        let node_statuses = node_items
+            .iter()
+            .map(|node| (node.name.clone(), node.status.clone()))
+            .collect::<HashMap<_, _>>();
+
         let mut service_items = Vec::with_capacity(services.len());
         for service in services {
-            let resolved_name = match resolve_backing_deployment(&self.store, &service).await {
-                Ok(deployment) => deployment.manifest.deployment_name().to_string(),
-                Err(_) if !service.deployment_name.is_empty() => service.deployment_name.clone(),
-                Err(_) if !service.selector.is_empty() => format!(
-                    "selector:{}",
-                    service
-                        .selector
-                        .iter()
-                        .map(|(key, value)| format!("{key}={value}"))
-                        .collect::<Vec<_>>()
-                        .join(",")
-                ),
-                Err(_) => "-".to_string(),
-            };
+            let runtime_status = service_statuses.get(&service.name).cloned();
+            let view = self
+                .inspect_service_state(&service, runtime_status, Some(&node_statuses))
+                .await;
             service_items.push(ServiceSummary {
                 name: service.name.clone(),
-                deployment_name: resolved_name,
+                deployment_name: view.deployment_name,
                 listen_addr: service.listen_addr.clone(),
                 target_port: service.target_port,
-                status: service_statuses
-                    .get(&service.name)
-                    .map(|status| status.status.clone())
-                    .unwrap_or_else(|| "Stopped".to_string()),
+                status: view.status,
             });
         }
 
@@ -945,6 +1006,118 @@ impl AppState {
             nodes: node_items,
             services: service_items,
         })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EffectiveServiceState {
+    deployment_name: String,
+    status: String,
+    message: Option<String>,
+    current_node_name: Option<String>,
+    current_upstream: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServiceBackendState {
+    deployment_name: String,
+    current_node_name: Option<String>,
+    current_upstream: Option<String>,
+    health: ServiceBackendHealth,
+    message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServiceBackendHealth {
+    Ready,
+    NoEndpoints,
+    Degraded,
+}
+
+fn effective_service_state(
+    service: &crate::store::StoredService,
+    runtime_status: Option<&ServiceStatusSnapshot>,
+    backend: ServiceBackendState,
+) -> EffectiveServiceState {
+    let (status, message) = match runtime_status {
+        Some(runtime) if runtime.status == "Error" => {
+            ("Error".to_string(), runtime.message.clone())
+        }
+        Some(runtime) if runtime.status == "Starting" => {
+            ("Starting".to_string(), runtime.message.clone())
+        }
+        Some(_) => match backend.health {
+            ServiceBackendHealth::Ready => ("Listening".to_string(), None),
+            ServiceBackendHealth::NoEndpoints => {
+                ("NoEndpoints".to_string(), backend.message.clone())
+            }
+            ServiceBackendHealth::Degraded => ("Degraded".to_string(), backend.message.clone()),
+        },
+        None => ("Stopped".to_string(), None),
+    };
+
+    EffectiveServiceState {
+        deployment_name: backend.deployment_name,
+        status,
+        message: merge_service_message(message, selector_hint(service)),
+        current_node_name: backend.current_node_name,
+        current_upstream: backend.current_upstream,
+    }
+}
+
+fn service_deployment_hint(service: &crate::store::StoredService) -> String {
+    if !service.deployment_name.is_empty() {
+        service.deployment_name.clone()
+    } else if !service.selector.is_empty() {
+        format!(
+            "selector:{}",
+            service
+                .selector
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    } else {
+        "-".to_string()
+    }
+}
+
+fn selector_hint(service: &crate::store::StoredService) -> Option<String> {
+    if service.selector.is_empty() {
+        None
+    } else {
+        Some(
+            service
+                .selector
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    }
+}
+
+fn merge_service_message(message: Option<String>, selector_hint: Option<String>) -> Option<String> {
+    match (message, selector_hint) {
+        (Some(message), Some(selector)) => Some(format!("{message}; selector {selector}")),
+        (Some(message), None) => Some(message),
+        (None, _) => None,
+    }
+}
+
+fn format_deployment_backend_message(deployment: &crate::store::StoredDeployment) -> String {
+    match deployment.message.as_deref() {
+        Some(message) => format!(
+            "deployment `{}` is {}: {message}",
+            deployment.manifest.deployment_name(),
+            deployment.status
+        ),
+        None => format!(
+            "deployment `{}` is {}",
+            deployment.manifest.deployment_name(),
+            deployment.status
+        ),
     }
 }
 
@@ -1054,10 +1227,14 @@ impl TopMetricsSampler {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{BTreeMap, HashSet};
 
-    use super::TopMetricsSampler;
+    use super::{
+        ServiceBackendHealth, ServiceBackendState, TopMetricsSampler, effective_service_state,
+    };
     use crate::runtime::docker::ContainerStatsSnapshot;
+    use crate::service::ServiceStatusSnapshot;
+    use crate::store::StoredService;
 
     fn snapshot(cpu_total_usage: u64, system_cpu_usage: u64) -> ContainerStatsSnapshot {
         ContainerStatsSnapshot {
@@ -1092,5 +1269,65 @@ mod tests {
 
         let next = sampler.metrics_for("abc", &snapshot(2_500_000_000, 25_000_000_000));
         assert!(next.cpu_percent.is_none());
+    }
+
+    #[test]
+    fn service_state_reports_no_endpoints_when_backend_is_missing() {
+        let service = StoredService {
+            name: "edge-svc".to_string(),
+            deployment_name: "echo-edge".to_string(),
+            selector: BTreeMap::new(),
+            listen_addr: "127.0.0.1:9102".to_string(),
+            target_port: Some(5678),
+            updated_at: 0,
+        };
+        let runtime = ServiceStatusSnapshot {
+            status: "Listening".to_string(),
+            message: None,
+        };
+        let backend = ServiceBackendState {
+            deployment_name: "echo-edge".to_string(),
+            current_node_name: None,
+            current_upstream: None,
+            health: ServiceBackendHealth::NoEndpoints,
+            message: Some("deployment `echo-edge` was not found".to_string()),
+        };
+
+        let state = effective_service_state(&service, Some(&runtime), backend);
+        assert_eq!(state.status, "NoEndpoints");
+        assert_eq!(
+            state.message.as_deref(),
+            Some("deployment `echo-edge` was not found")
+        );
+    }
+
+    #[test]
+    fn service_state_reports_degraded_when_node_is_offline() {
+        let service = StoredService {
+            name: "edge-svc".to_string(),
+            deployment_name: String::new(),
+            selector: BTreeMap::from([(String::from("role"), String::from("edge"))]),
+            listen_addr: "127.0.0.1:9102".to_string(),
+            target_port: Some(5678),
+            updated_at: 0,
+        };
+        let runtime = ServiceStatusSnapshot {
+            status: "Listening".to_string(),
+            message: None,
+        };
+        let backend = ServiceBackendState {
+            deployment_name: "echo-edge".to_string(),
+            current_node_name: Some("server77".to_string()),
+            current_upstream: Some("127.0.0.1:8092".to_string()),
+            health: ServiceBackendHealth::Degraded,
+            message: Some("node `server77` is Offline".to_string()),
+        };
+
+        let state = effective_service_state(&service, Some(&runtime), backend);
+        assert_eq!(state.status, "Degraded");
+        assert_eq!(
+            state.message.as_deref(),
+            Some("node `server77` is Offline; selector role=edge")
+        );
     }
 }

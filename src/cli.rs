@@ -1550,7 +1550,8 @@ fn muted(text: &str) -> String {
 fn color_status(status: &str) -> String {
     match status {
         "Running" | "Ready" | "Normal" | "Listening" | "Schedulable" => paint(status, "1;92"),
-        "Pending" | "Restarting" | "Warning" | "Cordoned" | "Starting" => paint(status, "1;93"),
+        "Pending" | "Restarting" | "Warning" | "Cordoned" | "Starting" | "NoEndpoints"
+        | "Degraded" => paint(status, "1;93"),
         "Failed" | "Deleted" | "Offline" | "Error" => paint(status, "1;91"),
         _ => status.to_string(),
     }
@@ -1560,7 +1561,8 @@ fn status_cell(status: &str, width: usize) -> String {
     let padded = left_cell(status, width);
     match status {
         "Running" | "Ready" | "Normal" | "Listening" | "Schedulable" => paint(&padded, "1;92"),
-        "Pending" | "Restarting" | "Warning" | "Cordoned" | "Starting" => paint(&padded, "1;93"),
+        "Pending" | "Restarting" | "Warning" | "Cordoned" | "Starting" | "NoEndpoints"
+        | "Degraded" => paint(&padded, "1;93"),
         "Failed" | "Deleted" | "Offline" | "Error" => paint(&padded, "1;91"),
         _ => padded,
     }

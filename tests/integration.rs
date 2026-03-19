@@ -222,6 +222,69 @@ async fn service_listener_forwards_to_deployment() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn service_transitions_to_no_endpoints_after_backend_disappears() -> Result<()> {
+    let _guard = integration_lock().lock().await;
+    if !docker_available().await {
+        return Ok(());
+    }
+
+    let harness = TestHarness::spawn().await?;
+    let deployment = unique_name("svc-lost");
+    let service = unique_name("svc-lost");
+    let manifest = http_echo_manifest(&deployment, 18095, "hello through service");
+    let service_manifest = service_manifest_yaml(&service, &deployment, "127.0.0.1:19095", None);
+
+    request(
+        &harness.socket_path,
+        Request::Apply {
+            manifest: manifest.clone(),
+        },
+    )
+    .await?;
+    harness.wait_until_running(&deployment).await?;
+
+    request(
+        &harness.socket_path,
+        Request::Apply {
+            manifest: service_manifest,
+        },
+    )
+    .await?;
+    harness
+        .wait_until_service_status(&service, |item| item.status == "Listening")
+        .await?;
+
+    match request(
+        &harness.socket_path,
+        Request::DeleteDeployment {
+            name: deployment.clone(),
+        },
+    )
+    .await?
+    {
+        Response::Ack { .. } => {}
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    let describe = harness
+        .wait_until_service_status(&service, |item| item.status == "NoEndpoints")
+        .await?;
+    assert_eq!(
+        describe.deployment_name,
+        format!("selector:app={deployment}")
+    );
+    assert!(
+        describe
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("no deployment matches selector")
+    );
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconciler_recreates_container_after_manual_removal() -> Result<()> {
     let _guard = integration_lock().lock().await;
     if !docker_available().await {
@@ -249,21 +312,31 @@ async fn reconciler_recreates_container_after_manual_removal() -> Result<()> {
         .await?;
     assert_ne!(original_id, new_id);
 
-    let top = request(&harness.socket_path, Request::Top).await?;
-    match top {
-        Response::Top { items, .. } => {
-            let row = items
-                .into_iter()
-                .find(|item| item.name == deployment)
-                .expect("deployment should appear in top");
-            assert!(row.restart_count >= 1);
-            assert!(matches!(
-                row.last_exit.as_deref(),
-                Some("removed") | Some("container disappeared")
-            ));
-            assert_eq!(row.container_id.as_deref(), Some(new_id.as_str()));
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let top = request(&harness.socket_path, Request::Top).await?;
+        match top {
+            Response::Top { items, .. } => {
+                let row = items
+                    .into_iter()
+                    .find(|item| item.name == deployment)
+                    .expect("deployment should appear in top");
+                if row.restart_count >= 1 && row.container_id.as_deref() == Some(new_id.as_str()) {
+                    assert!(matches!(
+                        row.last_exit.as_deref(),
+                        Some("removed") | Some("container disappeared")
+                    ));
+                    break;
+                }
+            }
+            other => panic!("unexpected response: {other:?}"),
         }
-        other => panic!("unexpected response: {other:?}"),
+
+        if tokio::time::Instant::now() > deadline {
+            anyhow::bail!("top did not converge to the recreated container in time");
+        }
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
     harness.cleanup_deployment(&deployment).await?;
