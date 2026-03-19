@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -9,7 +10,7 @@ use clap::{Parser, Subcommand};
 
 use crate::config;
 use crate::daemon::{self, ServerConfig};
-use crate::node;
+use crate::node::{self, validate_label_key, validate_label_value};
 use crate::protocol::{self, Request, Response};
 
 const HELP_TEMPLATE: &str = "\
@@ -62,6 +63,12 @@ Examples:
   litek8s logs demo-nginx
   litek8s logs demo-nginx --tail 200";
 
+const EVENTS_AFTER_HELP: &str = "\
+Examples:
+  litek8s events
+  litek8s events --watch
+  litek8s events --limit 100";
+
 const DELETE_AFTER_HELP: &str = "\
 Examples:
   litek8s delete deployment demo-nginx
@@ -71,6 +78,7 @@ const NODE_AFTER_HELP: &str = "\
 Examples:
   litek8s node add server77 --ssh server77
   litek8s node add server77 --ssh server77 --install
+  litek8s node add server77 --ssh server77 --label role=edge --label zone=lab
   litek8s node add edge-1 --ssh ubuntu@10.0.0.7 --remote-binary ~/.local/bin/litek8s";
 
 #[derive(Debug, Parser)]
@@ -152,6 +160,23 @@ enum Command {
         tail: usize,
     },
     #[command(
+        about = "Show recent control-plane events",
+        help_template = HELP_TEMPLATE,
+        after_help = EVENTS_AFTER_HELP
+    )]
+    Events {
+        #[arg(long, help = "Refresh the event view continuously")]
+        watch: bool,
+        #[arg(long, default_value_t = 50, help = "How many events to fetch")]
+        limit: usize,
+        #[arg(
+            long,
+            default_value_t = 2,
+            help = "Refresh interval in seconds while watching"
+        )]
+        interval_secs: u64,
+    },
+    #[command(
         about = "Watch live resource usage for the daemon and deployments",
         help_template = HELP_TEMPLATE,
         after_help = TOP_AFTER_HELP
@@ -205,6 +230,12 @@ enum NodeCommand {
             help = "Build a compatible litek8s binary locally, copy it to the remote host, and verify it before registering the node"
         )]
         install: bool,
+        #[arg(
+            long = "label",
+            value_name = "KEY=VALUE",
+            help = "Attach a label to the node; can be repeated"
+        )]
+        labels: Vec<String>,
         #[arg(
             long,
             help = "Path to the litek8s binary on the remote machine",
@@ -271,6 +302,19 @@ pub async fn run() -> Result<()> {
             let response = protocol::request(&socket_path, Request::Logs { name, tail }).await?;
             print_response(response)
         }
+        Command::Events {
+            watch,
+            limit,
+            interval_secs,
+        } => {
+            run_events(
+                &socket_path,
+                watch,
+                limit,
+                Duration::from_secs(interval_secs),
+            )
+            .await
+        }
         Command::Top {
             watch,
             interval_secs,
@@ -280,8 +324,10 @@ pub async fn run() -> Result<()> {
                 name,
                 ssh,
                 install,
+                labels,
                 remote_binary,
             } => {
+                let labels = parse_labels(&labels)?;
                 if install {
                     let project_root = resolve_project_root()?;
                     println!("{}", title("Remote Bootstrap"));
@@ -304,6 +350,7 @@ pub async fn run() -> Result<()> {
                         name,
                         ssh_target: ssh,
                         remote_binary: Some(remote_binary),
+                        labels,
                     },
                 )
                 .await?;
@@ -349,6 +396,19 @@ fn resolve_project_root() -> Result<PathBuf> {
     }
 
     bail!("failed to locate the litek8s project root; run this command from the repository root")
+}
+
+fn parse_labels(values: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut labels = BTreeMap::new();
+    for value in values {
+        let (key, label_value) = value
+            .split_once('=')
+            .with_context(|| format!("label `{value}` must use KEY=VALUE syntax"))?;
+        validate_label_key(key)?;
+        validate_label_value(label_value)?;
+        labels.insert(key.to_string(), label_value.to_string());
+    }
+    Ok(labels)
 }
 
 fn ensure_resource(resource: &str, supported: &[&str]) -> Result<()> {
@@ -449,6 +509,16 @@ fn print_response(response: Response) -> Result<()> {
             println!();
             print_detail("apiVersion", &item.api_version);
             print_detail("node", &item.node_name);
+            print_detail(
+                "requested node",
+                item.requested_node_name.as_deref().unwrap_or("-"),
+            );
+            let node_selector = if item.node_selector.is_empty() {
+                "-".to_string()
+            } else {
+                item.node_selector.join(", ")
+            };
+            print_detail("node selector", &node_selector);
             print_detail("status", &color_status(&item.status));
             print_detail("image", &item.image);
             print_detail("container", &item.container_name);
@@ -484,9 +554,48 @@ fn print_response(response: Response) -> Result<()> {
             print_detail("status", &color_status(&item.status));
             print_detail("endpoint", &item.endpoint);
             print_detail("remote bin", item.remote_binary.as_deref().unwrap_or("-"));
+            let labels = if item.labels.is_empty() {
+                "-".to_string()
+            } else {
+                item.labels.join(", ")
+            };
+            print_detail("labels", &labels);
             print_detail("deployments", &item.deployment_count.to_string());
             if let Some(message) = item.message {
                 print_detail("message", &message);
+            }
+            Ok(())
+        }
+        Response::Events { items } => {
+            let total = items.len();
+            println!(
+                "{} {}",
+                title("Cluster Events"),
+                muted(&format!("({total} shown)"))
+            );
+            println!();
+            println!(
+                "{} {} {} {} {} {}",
+                header_right("ID", 5),
+                header_left("LEVEL", 8),
+                header_left("REASON", 16),
+                header_left("OBJECT", 28),
+                header_left("NODE", 14),
+                label("MESSAGE")
+            );
+            for item in items {
+                println!(
+                    "{} {} {} {} {} {}",
+                    right_cell(&item.id.to_string(), 5),
+                    status_cell(&item.level, 8),
+                    left_cell(&truncate(&item.reason, 16), 16),
+                    left_cell(
+                        &truncate(&format!("{}/{}", item.object_kind, item.object_name), 28),
+                        28,
+                    ),
+                    left_cell(item.node_name.as_deref().unwrap_or("-"), 14),
+                    item.message
+                );
             }
             Ok(())
         }
@@ -579,6 +688,42 @@ async fn run_top(socket_path: &Path, watch: bool, interval: Duration) -> Result<
     }
 }
 
+async fn run_events(
+    socket_path: &Path,
+    watch: bool,
+    limit: usize,
+    interval: Duration,
+) -> Result<()> {
+    let mut watch_display = watch.then(WatchDisplay::new).transpose()?;
+
+    loop {
+        let response = protocol::request(
+            socket_path,
+            Request::GetEvents {
+                limit,
+                since_id: None,
+            },
+        )
+        .await?;
+        if let Some(display) = watch_display.as_mut() {
+            display.begin_frame(interval)?;
+        }
+        print_response(response)?;
+        io::stdout()
+            .flush()
+            .context("failed to flush events output")?;
+
+        if !watch {
+            return Ok(());
+        }
+
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+            _ = tokio::time::sleep(interval) => {}
+        }
+    }
+}
+
 fn truncate(value: &str, max: usize) -> String {
     if value.chars().count() <= max {
         return value.to_string();
@@ -641,8 +786,8 @@ fn muted(text: &str) -> String {
 
 fn color_status(status: &str) -> String {
     match status {
-        "Running" | "Ready" => paint(status, "1;92"),
-        "Pending" | "Restarting" => paint(status, "1;93"),
+        "Running" | "Ready" | "Normal" => paint(status, "1;92"),
+        "Pending" | "Restarting" | "Warning" => paint(status, "1;93"),
         "Failed" | "Deleted" | "Offline" => paint(status, "1;91"),
         _ => status.to_string(),
     }
@@ -651,8 +796,8 @@ fn color_status(status: &str) -> String {
 fn status_cell(status: &str, width: usize) -> String {
     let padded = left_cell(status, width);
     match status {
-        "Running" | "Ready" => paint(&padded, "1;92"),
-        "Pending" | "Restarting" => paint(&padded, "1;93"),
+        "Running" | "Ready" | "Normal" => paint(&padded, "1;92"),
+        "Pending" | "Restarting" | "Warning" => paint(&padded, "1;93"),
         "Failed" | "Deleted" | "Offline" => paint(&padded, "1;91"),
         _ => padded,
     }

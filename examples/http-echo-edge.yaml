@@ -1,0 +1,26 @@
+apiVersion: litek8s.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: echo-edge
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      nodeSelector:
+        role: edge
+      containers:
+        - name: echo
+          image: hashicorp/http-echo:1.0.0
+          args:
+            - "-listen"
+            - ":5678"
+            - "-text"
+            - "hello from an edge-labelled node"
+          resources:
+            limits:
+              cpu: "100m"
+              memory: "32Mi"
+          ports:
+            - containerPort: 5678
+              hostPort: 8092

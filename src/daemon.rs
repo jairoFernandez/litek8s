@@ -12,17 +12,19 @@ use tokio::sync::{Mutex, Notify};
 
 use crate::config;
 use crate::manifest::DeploymentManifest;
-use crate::node::{ClusterNode, DEFAULT_REMOTE_BINARY, NodeClient, NodeTransport};
+use crate::node::{
+    ClusterNode, DEFAULT_REMOTE_BINARY, NodeClient, NodeTransport, select_node_for_manifest,
+};
 use crate::protocol::{
-    DaemonTopSummary, DeploymentDescription, DeploymentSummary, DeploymentTopRow, NodeDescription,
-    NodeSummary, Request, Response, read_message, send_message,
+    DaemonTopSummary, DeploymentDescription, DeploymentSummary, DeploymentTopRow, EventItem,
+    NodeDescription, NodeSummary, Request, Response, read_message, send_message,
 };
 use crate::reconciler;
 use crate::runtime::docker::{
     ContainerMetrics, ContainerStatsSnapshot, DockerRuntime, compute_cpu_percent_from_samples,
     deployment_container_name,
 };
-use crate::store::{ApplyOutcome, NodeApplyOutcome, Store};
+use crate::store::{ApplyOutcome, EventLevel, NewEvent, NodeApplyOutcome, Store};
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -136,17 +138,34 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
         Request::Apply { manifest } => {
             let manifest = DeploymentManifest::parse(&manifest)?;
             let name = manifest.deployment_name().to_string();
-            state
+            let current_assignment = state
                 .store
-                .get_node(manifest.node_name())
+                .get(&name)
                 .await
-                .with_context(|| {
-                    format!(
-                        "deployment `{name}` targets unknown node `{}`; add it first with `litek8s node add`",
-                        manifest.node_name()
-                    )
-                })?;
+                .map(|entry| entry.assigned_node);
+            let assigned_node = select_node_for_manifest(
+                &manifest,
+                &state.store.list_nodes().await,
+                current_assignment.as_deref(),
+            )?;
             let outcome = state.store.upsert(manifest).await?;
+            let _ = state
+                .store
+                .set_assigned_node(&name, assigned_node.clone())
+                .await?;
+            state
+                .record_event(NewEvent {
+                    level: EventLevel::Normal,
+                    reason: match outcome {
+                        ApplyOutcome::Created => "Applied".to_string(),
+                        ApplyOutcome::Configured => "Configured".to_string(),
+                    },
+                    object_kind: "deployment".to_string(),
+                    object_name: name.clone(),
+                    node_name: Some(assigned_node),
+                    message: "deployment manifest accepted by the control plane".to_string(),
+                })
+                .await?;
             state.reconcile_all().await?;
 
             let message = match outcome {
@@ -159,6 +178,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             name,
             ssh_target,
             remote_binary,
+            labels,
         } => {
             if matches!(name.as_str(), "local") {
                 bail!("`local` is reserved for the built-in node");
@@ -167,6 +187,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 name.clone(),
                 ssh_target,
                 remote_binary.unwrap_or_else(|| DEFAULT_REMOTE_BINARY.to_string()),
+                labels,
             )?;
             let client = NodeClient::for_node(&node, state.runtime.clone());
             client
@@ -175,6 +196,19 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 .with_context(|| format!("node `{name}` did not answer over ssh"))?;
 
             let outcome = state.store.upsert_node(node).await?;
+            state
+                .record_event(NewEvent {
+                    level: EventLevel::Normal,
+                    reason: match outcome {
+                        NodeApplyOutcome::Created => "NodeAdded".to_string(),
+                        NodeApplyOutcome::Configured => "NodeUpdated".to_string(),
+                    },
+                    object_kind: "node".to_string(),
+                    object_name: name.clone(),
+                    node_name: Some(name.clone()),
+                    message: "node registered and answered over ssh".to_string(),
+                })
+                .await?;
             let message = match outcome {
                 NodeApplyOutcome::Created => format!("node/{name} added"),
                 NodeApplyOutcome::Configured => format!("node/{name} updated"),
@@ -193,7 +227,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             for node in nodes {
                 let deployment_count = deployments
                     .iter()
-                    .filter(|entry| entry.manifest.node_name() == node.name)
+                    .filter(|entry| entry.assigned_node == node.name)
                     .count();
                 let (status, _) = state.node_health(&node).await;
                 items.push(NodeSummary {
@@ -206,6 +240,25 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             }
             Ok(Response::Nodes { items })
         }
+        Request::GetEvents { limit, since_id } => {
+            let items = state
+                .store
+                .list_events(limit, since_id)
+                .await
+                .into_iter()
+                .map(|event| EventItem {
+                    id: event.id,
+                    timestamp_secs: event.timestamp_secs,
+                    level: event.level.to_string(),
+                    reason: event.reason,
+                    object_kind: event.object_kind,
+                    object_name: event.object_name,
+                    node_name: event.node_name,
+                    message: event.message,
+                })
+                .collect();
+            Ok(Response::Events { items })
+        }
         Request::GetDeployments => {
             state.reconcile_all().await?;
             let items = state
@@ -215,7 +268,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 .into_iter()
                 .map(|entry| DeploymentSummary {
                     name: entry.manifest.deployment_name().to_string(),
-                    node_name: entry.manifest.node_name().to_string(),
+                    node_name: entry.assigned_node,
                     status: entry.status.to_string(),
                     image: entry.manifest.container().image.clone(),
                     container_id: entry.container_id,
@@ -234,7 +287,14 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             let item = DeploymentDescription {
                 name: entry.manifest.deployment_name().to_string(),
                 api_version: entry.manifest.api_version.clone(),
-                node_name: entry.manifest.node_name().to_string(),
+                node_name: entry.assigned_node,
+                requested_node_name: entry.manifest.explicit_node_name().map(str::to_string),
+                node_selector: entry
+                    .manifest
+                    .node_selector()
+                    .iter()
+                    .map(|(key, value)| format!("{key}={value}"))
+                    .collect(),
                 status: entry.status.to_string(),
                 image: entry.manifest.container().image.clone(),
                 container_name: deployment_container_name(entry.manifest.deployment_name()),
@@ -275,7 +335,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 .list()
                 .await
                 .into_iter()
-                .filter(|entry| entry.manifest.node_name() == node.name)
+                .filter(|entry| entry.assigned_node == node.name)
                 .count();
             let item = NodeDescription {
                 name: node.name.clone(),
@@ -285,6 +345,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                     NodeTransport::Local => None,
                     NodeTransport::Ssh { remote_binary, .. } => Some(remote_binary.clone()),
                 },
+                labels: node.printable_labels(),
                 status,
                 deployment_count,
                 message,
@@ -297,9 +358,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 .get(&name)
                 .await
                 .with_context(|| format!("deployment `{name}` was not found"))?;
-            let runtime = state
-                .client_for_node_name(entry.manifest.node_name())
-                .await?;
+            let runtime = state.client_for_node_name(&entry.assigned_node).await?;
             let content = runtime.logs(&name, tail).await?;
             Ok(Response::Logs { content })
         }
@@ -313,11 +372,9 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
 
             for entry in deployments {
                 if let Some(container_id) = entry.container_id.as_ref() {
-                    let sample_key = top_sample_key(entry.manifest.node_name(), container_id);
+                    let sample_key = top_sample_key(&entry.assigned_node, container_id);
                     active_container_ids.insert(sample_key.clone());
-                    if let Ok(runtime) =
-                        state.client_for_node_name(entry.manifest.node_name()).await
-                    {
+                    if let Ok(runtime) = state.client_for_node_name(&entry.assigned_node).await {
                         if let Ok(snapshot) =
                             runtime.stats_snapshot_for_container(container_id).await
                         {
@@ -328,7 +385,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
 
                 items.push(DeploymentTopRow {
                     name: entry.manifest.deployment_name().to_string(),
-                    node_name: entry.manifest.node_name().to_string(),
+                    node_name: entry.assigned_node,
                     status: entry.status.to_string(),
                     image: entry.manifest.container().image.clone(),
                     container_id: entry.container_id,
@@ -378,9 +435,19 @@ async fn delete_deployment(state: Arc<AppState>, name: &str) -> Result<Response>
         bail!("deployment `{name}` was not found");
     }
     state
-        .client_for_node_name(deployment.manifest.node_name())
+        .client_for_node_name(&deployment.assigned_node)
         .await?
         .remove_deployment(name)
+        .await?;
+    state
+        .record_event(NewEvent {
+            level: EventLevel::Normal,
+            reason: "Deleted".to_string(),
+            object_kind: "deployment".to_string(),
+            object_name: name.to_string(),
+            node_name: Some(deployment.assigned_node),
+            message: "deployment removed from the control plane".to_string(),
+        })
         .await?;
     Ok(Response::Ack {
         message: format!("deployment.apps/{name} deleted"),
@@ -429,6 +496,11 @@ impl AppState {
             Ok(()) => ("Ready".to_string(), None),
             Err(error) => ("Offline".to_string(), Some(error.to_string())),
         }
+    }
+
+    async fn record_event(&self, event: NewEvent) -> Result<()> {
+        self.store.record_event(event).await?;
+        Ok(())
     }
 }
 

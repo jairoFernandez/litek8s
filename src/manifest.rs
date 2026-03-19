@@ -1,8 +1,10 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::node::{LOCAL_NODE_NAME, validate_node_name};
+use crate::node::{validate_label_key, validate_label_value, validate_node_name};
 
 pub const API_VERSION: &str = "litek8s.dev/v1alpha1";
 pub const KIND_DEPLOYMENT: &str = "Deployment";
@@ -40,6 +42,8 @@ pub struct PodTemplateSpec {
 pub struct PodSpec {
     pub restart_policy: Option<RestartPolicy>,
     pub node_name: Option<String>,
+    #[serde(default)]
+    pub node_selector: BTreeMap<String, String>,
     #[serde(default)]
     pub containers: Vec<ContainerSpec>,
 }
@@ -139,6 +143,10 @@ impl DeploymentManifest {
         if let Some(node_name) = pod_spec.node_name.as_deref() {
             validate_node_name(node_name)?;
         }
+        for (key, value) in &pod_spec.node_selector {
+            validate_label_key(key)?;
+            validate_label_value(value)?;
+        }
         let restart_policy = pod_spec
             .restart_policy
             .clone()
@@ -194,13 +202,12 @@ impl DeploymentManifest {
         &self.spec.template.spec.containers[0]
     }
 
-    pub fn node_name(&self) -> &str {
-        self.spec
-            .template
-            .spec
-            .node_name
-            .as_deref()
-            .unwrap_or(LOCAL_NODE_NAME)
+    pub fn explicit_node_name(&self) -> Option<&str> {
+        self.spec.template.spec.node_name.as_deref()
+    }
+
+    pub fn node_selector(&self) -> &BTreeMap<String, String> {
+        &self.spec.template.spec.node_selector
     }
 
     pub fn desired_hash(&self) -> Result<String> {

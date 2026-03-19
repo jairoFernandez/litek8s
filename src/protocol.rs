@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -14,6 +15,7 @@ pub enum Request {
         name: String,
         ssh_target: String,
         remote_binary: Option<String>,
+        labels: BTreeMap<String, String>,
     },
     DeleteManifest {
         manifest: String,
@@ -23,6 +25,10 @@ pub enum Request {
     },
     GetDeployments,
     GetNodes,
+    GetEvents {
+        limit: usize,
+        since_id: Option<u64>,
+    },
     DescribeDeployment {
         name: String,
     },
@@ -46,6 +52,9 @@ pub enum Response {
     },
     Nodes {
         items: Vec<NodeSummary>,
+    },
+    Events {
+        items: Vec<EventItem>,
     },
     Description {
         item: DeploymentDescription,
@@ -79,6 +88,8 @@ pub struct DeploymentDescription {
     pub name: String,
     pub api_version: String,
     pub node_name: String,
+    pub requested_node_name: Option<String>,
+    pub node_selector: Vec<String>,
     pub status: String,
     pub image: String,
     pub container_name: String,
@@ -136,9 +147,22 @@ pub struct NodeDescription {
     pub transport: String,
     pub endpoint: String,
     pub remote_binary: Option<String>,
+    pub labels: Vec<String>,
     pub status: String,
     pub deployment_count: usize,
     pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventItem {
+    pub id: u64,
+    pub timestamp_secs: u64,
+    pub level: String,
+    pub reason: String,
+    pub object_kind: String,
+    pub object_name: String,
+    pub node_name: Option<String>,
+    pub message: String,
 }
 
 pub async fn send_message<T>(stream: &mut UnixStream, message: &T) -> Result<()>

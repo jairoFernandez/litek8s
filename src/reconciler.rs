@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
-use crate::node::{ClusterNode, NodeClient};
+use crate::node::{ClusterNode, NodeClient, select_node_for_manifest};
 use crate::runtime::docker::{DockerRuntime, summarize_exit_state};
-use crate::store::{DeploymentStatus, Store, StoredDeployment};
+use crate::store::{DeploymentStatus, EventLevel, NewEvent, Store, StoredDeployment};
 
 const RECREATE_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const MAX_RESTART_BACKOFF_SECS: u64 = 15;
@@ -25,10 +25,14 @@ pub async fn reconcile_all(
 
     let mut desired_names_by_node: HashMap<String, HashSet<String>> = HashMap::new();
     for deployment in &deployments {
-        desired_names_by_node
-            .entry(deployment.manifest.node_name().to_string())
-            .or_default()
-            .insert(deployment.manifest.deployment_name().to_string());
+        if let Ok(target_node) =
+            select_node_for_manifest(&deployment.manifest, nodes, Some(&deployment.assigned_node))
+        {
+            desired_names_by_node
+                .entry(target_node)
+                .or_default()
+                .insert(deployment.manifest.deployment_name().to_string());
+        }
     }
 
     if cleanup_orphans {
@@ -42,29 +46,98 @@ pub async fn reconcile_all(
         }
     }
 
-    for deployment in deployments {
-        let Some(node) = nodes_by_name.get(deployment.manifest.node_name()) else {
-            store
+    for mut deployment in deployments {
+        let target_node = match select_node_for_manifest(
+            &deployment.manifest,
+            nodes,
+            Some(&deployment.assigned_node),
+        ) {
+            Ok(target_node) => target_node,
+            Err(error) => {
+                let changed = store
+                    .set_status(
+                        deployment.manifest.deployment_name(),
+                        DeploymentStatus::Failed,
+                        None,
+                        Some(error.to_string()),
+                        None,
+                        false,
+                        false,
+                        None,
+                    )
+                    .await?;
+                if changed {
+                    record_deployment_event(
+                        store,
+                        EventLevel::Warning,
+                        "FailedScheduling",
+                        deployment.manifest.deployment_name(),
+                        Some(deployment.assigned_node.clone()),
+                        error.to_string(),
+                    )
+                    .await?;
+                }
+                if let Some(previous_node) = nodes_by_name.get(&deployment.assigned_node) {
+                    let runtime = NodeClient::for_node(previous_node, local_runtime.clone());
+                    let _ = runtime
+                        .remove_deployment(deployment.manifest.deployment_name())
+                        .await;
+                }
+                continue;
+            }
+        };
+
+        if deployment.assigned_node != target_node {
+            if let Some(previous_node) = nodes_by_name.get(&deployment.assigned_node) {
+                let previous_runtime = NodeClient::for_node(previous_node, local_runtime.clone());
+                previous_runtime
+                    .remove_deployment(deployment.manifest.deployment_name())
+                    .await
+                    .with_context(|| {
+                        format!(
+                            "failed to move deployment `{}` off node `{}`",
+                            deployment.manifest.deployment_name(),
+                            deployment.assigned_node
+                        )
+                    })?;
+            }
+            if store
+                .set_assigned_node(deployment.manifest.deployment_name(), target_node.clone())
+                .await?
+            {
+                record_deployment_event(
+                    store,
+                    EventLevel::Normal,
+                    "Scheduled",
+                    deployment.manifest.deployment_name(),
+                    Some(target_node.clone()),
+                    format!("deployment assigned to node `{target_node}`"),
+                )
+                .await?;
+            }
+            let _ = store
                 .set_status(
                     deployment.manifest.deployment_name(),
-                    DeploymentStatus::Failed,
+                    DeploymentStatus::Pending,
                     None,
-                    Some(format!(
-                        "target node `{}` is not registered",
-                        deployment.manifest.node_name()
-                    )),
-                    None,
+                    Some(format!("scheduled on node `{target_node}`")),
+                    Some("rescheduled".to_string()),
                     false,
                     false,
                     None,
                 )
                 .await?;
+            deployment.assigned_node = target_node.clone();
+            deployment.container_id = None;
+        }
+
+        let Some(node) = nodes_by_name.get(&target_node) else {
             continue;
         };
 
         let runtime = NodeClient::for_node(node, local_runtime.clone());
         if let Err(error) = reconcile_deployment(store, &runtime, &deployment).await {
-            store
+            let changed = store
                 .set_status(
                     deployment.manifest.deployment_name(),
                     DeploymentStatus::Failed,
@@ -76,6 +149,17 @@ pub async fn reconcile_all(
                     None,
                 )
                 .await?;
+            if changed {
+                record_deployment_event(
+                    store,
+                    EventLevel::Warning,
+                    "Failed",
+                    deployment.manifest.deployment_name(),
+                    Some(deployment.assigned_node.clone()),
+                    error.to_string(),
+                )
+                .await?;
+            }
         }
     }
 
@@ -98,7 +182,7 @@ pub async fn reconcile_deployment(
         let new_id = runtime
             .create_and_start(&deployment.manifest, &deployment.spec_hash)
             .await?;
-        store
+        let changed = store
             .set_status(
                 name,
                 DeploymentStatus::Restarting,
@@ -110,13 +194,24 @@ pub async fn reconcile_deployment(
                 None,
             )
             .await?;
+        if changed {
+            record_deployment_event(
+                store,
+                EventLevel::Warning,
+                "Recreated",
+                name,
+                Some(deployment.assigned_node.clone()),
+                "duplicate managed containers were removed and recreated".to_string(),
+            )
+            .await?;
+        }
         return Ok(());
     }
 
     if let Some(container) = containers.into_iter().next() {
         let hash_matches = container.spec_hash.as_deref() == Some(deployment.spec_hash.as_str());
         if hash_matches && container.running {
-            store
+            let changed = store
                 .set_status(
                     name,
                     DeploymentStatus::Running,
@@ -128,6 +223,17 @@ pub async fn reconcile_deployment(
                     None,
                 )
                 .await?;
+            if changed {
+                record_deployment_event(
+                    store,
+                    EventLevel::Normal,
+                    "Running",
+                    name,
+                    Some(deployment.assigned_node.clone()),
+                    "container is healthy".to_string(),
+                )
+                .await?;
+            }
             return Ok(());
         }
 
@@ -152,8 +258,10 @@ pub async fn reconcile_deployment(
         let message = if hash_matches {
             let backoff = restart_backoff_for_streak(deployment.restart_streak.saturating_add(1));
             let next_retry_at = now_unix().saturating_add(backoff.as_secs());
-            let reason = last_exit.as_deref().unwrap_or("container exited");
-            store
+            let reason = last_exit
+                .clone()
+                .unwrap_or_else(|| "container exited".to_string());
+            let changed = store
                 .set_status(
                     name,
                     DeploymentStatus::Restarting,
@@ -168,6 +276,17 @@ pub async fn reconcile_deployment(
                     Some(next_retry_at),
                 )
                 .await?;
+            if changed {
+                record_deployment_event(
+                    store,
+                    EventLevel::Warning,
+                    "Backoff",
+                    name,
+                    Some(deployment.assigned_node.clone()),
+                    format!("backing off {}s after {reason}", backoff.as_secs()),
+                )
+                .await?;
+            }
             return Ok(());
         } else {
             "container was recreated after the manifest changed"
@@ -177,7 +296,7 @@ pub async fn reconcile_deployment(
             .create_and_start(&deployment.manifest, &deployment.spec_hash)
             .await?;
 
-        store
+        let changed = store
             .set_status(
                 name,
                 DeploymentStatus::Restarting,
@@ -189,6 +308,17 @@ pub async fn reconcile_deployment(
                 None,
             )
             .await?;
+        if changed {
+            record_deployment_event(
+                store,
+                EventLevel::Normal,
+                "Recreated",
+                name,
+                Some(deployment.assigned_node.clone()),
+                message.to_string(),
+            )
+            .await?;
+        }
         return Ok(());
     }
 
@@ -215,7 +345,7 @@ pub async fn reconcile_deployment(
         "container was created"
     };
 
-    store
+    let changed = store
         .set_status(
             name,
             status,
@@ -234,6 +364,23 @@ pub async fn reconcile_deployment(
             None,
         )
         .await?;
+    if changed {
+        record_deployment_event(
+            store,
+            EventLevel::Normal,
+            if retried_after_backoff {
+                "Restarted"
+            } else if deployment.container_id.is_some() {
+                "Recreated"
+            } else {
+                "Started"
+            },
+            name,
+            Some(deployment.assigned_node.clone()),
+            message.to_string(),
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -250,6 +397,27 @@ fn now_unix() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+async fn record_deployment_event(
+    store: &Store,
+    level: EventLevel,
+    reason: impl Into<String>,
+    deployment_name: &str,
+    node_name: Option<String>,
+    message: impl Into<String>,
+) -> Result<()> {
+    store
+        .record_event(NewEvent {
+            level,
+            reason: reason.into(),
+            object_kind: "deployment".to_string(),
+            object_name: deployment_name.to_string(),
+            node_name,
+            message: message.into(),
+        })
+        .await?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -21,11 +21,14 @@ pub enum DeploymentStatus {
 }
 
 const HEALTHY_RESET_AFTER_SECS: u64 = 10;
+const MAX_EVENT_HISTORY: usize = 250;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredDeployment {
     pub manifest: DeploymentManifest,
     pub spec_hash: String,
+    #[serde(default = "default_assigned_node")]
+    pub assigned_node: String,
     pub status: DeploymentStatus,
     pub container_id: Option<String>,
     pub message: Option<String>,
@@ -47,6 +50,10 @@ pub struct StateFile {
     pub deployments: BTreeMap<String, StoredDeployment>,
     #[serde(default)]
     pub nodes: BTreeMap<String, ClusterNode>,
+    #[serde(default)]
+    pub events: Vec<StoredEvent>,
+    #[serde(default)]
+    pub next_event_id: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +66,34 @@ pub enum ApplyOutcome {
 pub enum NodeApplyOutcome {
     Created,
     Configured,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EventLevel {
+    Normal,
+    Warning,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewEvent {
+    pub level: EventLevel,
+    pub reason: String,
+    pub object_kind: String,
+    pub object_name: String,
+    pub node_name: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredEvent {
+    pub id: u64,
+    pub timestamp_secs: u64,
+    pub level: EventLevel,
+    pub reason: String,
+    pub object_kind: String,
+    pub object_name: String,
+    pub node_name: Option<String>,
+    pub message: String,
 }
 
 pub struct Store {
@@ -81,10 +116,28 @@ impl Store {
             StateFile::default()
         };
         let mut state = state;
+        for entry in state.deployments.values_mut() {
+            if entry.assigned_node.is_empty() {
+                entry.assigned_node = entry
+                    .manifest
+                    .explicit_node_name()
+                    .unwrap_or(LOCAL_NODE_NAME)
+                    .to_string();
+            } else if entry.assigned_node == LOCAL_NODE_NAME {
+                if let Some(explicit_node) = entry.manifest.explicit_node_name() {
+                    entry.assigned_node = explicit_node.to_string();
+                }
+            }
+        }
         state
             .nodes
             .entry(LOCAL_NODE_NAME.to_string())
             .or_insert_with(ClusterNode::local);
+        if let Some(local) = state.nodes.get_mut(LOCAL_NODE_NAME) {
+            if local.labels.is_empty() {
+                *local = ClusterNode::local();
+            }
+        }
 
         Ok(Self {
             path,
@@ -118,6 +171,10 @@ impl Store {
             StoredDeployment {
                 manifest,
                 spec_hash,
+                assigned_node: existing
+                    .as_ref()
+                    .map(|entry| entry.assigned_node.clone())
+                    .unwrap_or_else(|| LOCAL_NODE_NAME.to_string()),
                 status: DeploymentStatus::Pending,
                 container_id: None,
                 message: Some("reconciliation scheduled".to_string()),
@@ -188,6 +245,67 @@ impl Store {
         guard.nodes.values().cloned().collect()
     }
 
+    pub async fn set_assigned_node(&self, name: &str, assigned_node: String) -> Result<bool> {
+        let mut guard = self.state.write().await;
+        let mut changed = false;
+        if let Some(entry) = guard.deployments.get_mut(name) {
+            if entry.assigned_node != assigned_node {
+                entry.assigned_node = assigned_node;
+                entry.updated_at = now_unix();
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(false);
+        }
+
+        let snapshot = guard.clone();
+        drop(guard);
+        self.persist(&snapshot).await?;
+        Ok(true)
+    }
+
+    pub async fn record_event(&self, event: NewEvent) -> Result<StoredEvent> {
+        let mut guard = self.state.write().await;
+        guard.next_event_id = guard.next_event_id.saturating_add(1);
+        let stored = StoredEvent {
+            id: guard.next_event_id,
+            timestamp_secs: now_unix(),
+            level: event.level,
+            reason: event.reason,
+            object_kind: event.object_kind,
+            object_name: event.object_name,
+            node_name: event.node_name,
+            message: event.message,
+        };
+        guard.events.push(stored.clone());
+        if guard.events.len() > MAX_EVENT_HISTORY {
+            let overflow = guard.events.len() - MAX_EVENT_HISTORY;
+            guard.events.drain(0..overflow);
+        }
+
+        let snapshot = guard.clone();
+        drop(guard);
+        self.persist(&snapshot).await?;
+        Ok(stored)
+    }
+
+    pub async fn list_events(&self, limit: usize, since_id: Option<u64>) -> Vec<StoredEvent> {
+        let guard = self.state.read().await;
+        let mut items = guard
+            .events
+            .iter()
+            .filter(|event| since_id.map(|value| event.id > value).unwrap_or(true))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if since_id.is_none() && limit > 0 && items.len() > limit {
+            items = items[items.len() - limit..].to_vec();
+        }
+
+        items
+    }
+
     pub async fn set_status(
         &self,
         name: &str,
@@ -198,7 +316,7 @@ impl Store {
         increment_restart_count: bool,
         increment_restart_streak: bool,
         next_retry_at: Option<u64>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let mut guard = self.state.write().await;
         let mut changed = false;
         if let Some(entry) = guard.deployments.get_mut(name) {
@@ -246,12 +364,13 @@ impl Store {
             }
         }
         if !changed {
-            return Ok(());
+            return Ok(false);
         }
 
         let snapshot = guard.clone();
         drop(guard);
-        self.persist(&snapshot).await
+        self.persist(&snapshot).await?;
+        Ok(true)
     }
 
     async fn persist(&self, snapshot: &StateFile) -> Result<()> {
@@ -281,9 +400,23 @@ impl Display for DeploymentStatus {
     }
 }
 
+impl Display for EventLevel {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        let text = match self {
+            Self::Normal => "Normal",
+            Self::Warning => "Warning",
+        };
+        write!(f, "{text}")
+    }
+}
+
 fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn default_assigned_node() -> String {
+    LOCAL_NODE_NAME.to_string()
 }

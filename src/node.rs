@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -20,6 +20,8 @@ const RUST_BUILD_IMAGE: &str = "rust:1.90";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ClusterNode {
     pub name: String,
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
     pub transport: NodeTransport,
 }
 
@@ -100,11 +102,17 @@ impl ClusterNode {
     pub fn local() -> Self {
         Self {
             name: LOCAL_NODE_NAME.to_string(),
+            labels: default_local_labels(),
             transport: NodeTransport::Local,
         }
     }
 
-    pub fn ssh(name: String, target: String, remote_binary: String) -> Result<Self> {
+    pub fn ssh(
+        name: String,
+        target: String,
+        remote_binary: String,
+        labels: BTreeMap<String, String>,
+    ) -> Result<Self> {
         validate_node_name(&name)?;
         ensure!(
             !target.trim().is_empty(),
@@ -114,9 +122,11 @@ impl ClusterNode {
             !remote_binary.trim().is_empty(),
             "remote binary path must not be empty for node `{name}`"
         );
+        validate_labels(&labels)?;
 
         Ok(Self {
             name,
+            labels,
             transport: NodeTransport::Ssh {
                 target,
                 remote_binary,
@@ -137,6 +147,60 @@ impl ClusterNode {
             NodeTransport::Ssh { target, .. } => target.clone(),
         }
     }
+
+    pub fn matches_selector(&self, selector: &BTreeMap<String, String>) -> bool {
+        selector
+            .iter()
+            .all(|(key, value)| self.labels.get(key) == Some(value))
+    }
+
+    pub fn printable_labels(&self) -> Vec<String> {
+        self.labels
+            .iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect()
+    }
+}
+
+pub fn select_node_for_manifest(
+    manifest: &DeploymentManifest,
+    nodes: &[ClusterNode],
+    current_assigned: Option<&str>,
+) -> Result<String> {
+    if let Some(explicit) = manifest.explicit_node_name() {
+        let node = nodes
+            .iter()
+            .find(|node| node.name == explicit)
+            .with_context(|| format!("target node `{explicit}` is not registered"))?;
+        ensure!(
+            node.matches_selector(manifest.node_selector()),
+            "target node `{explicit}` does not satisfy nodeSelector"
+        );
+        return Ok(explicit.to_string());
+    }
+
+    if manifest.node_selector().is_empty() {
+        return Ok(LOCAL_NODE_NAME.to_string());
+    }
+
+    if let Some(current_assigned) = current_assigned {
+        if let Some(node) = nodes.iter().find(|node| node.name == current_assigned) {
+            if node.matches_selector(manifest.node_selector()) {
+                return Ok(node.name.clone());
+            }
+        }
+    }
+
+    nodes
+        .iter()
+        .find(|node| node.matches_selector(manifest.node_selector()))
+        .map(|node| node.name.clone())
+        .with_context(|| {
+            format!(
+                "no registered node matches nodeSelector `{}`",
+                format_selector(manifest.node_selector())
+            )
+        })
 }
 
 impl NodeClient {
@@ -687,12 +751,66 @@ async fn run_ssh_status(ssh_target: &str, remote_command: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn validate_label_key(key: &str) -> Result<()> {
+    ensure!(!key.trim().is_empty(), "label key must not be empty");
+    ensure!(
+        key.chars()
+            .all(|char| { char.is_ascii_alphanumeric() || matches!(char, '.' | '-' | '_' | '/') }),
+        "label key `{key}` contains unsupported characters"
+    );
+    Ok(())
+}
+
+pub fn validate_label_value(value: &str) -> Result<()> {
+    ensure!(!value.trim().is_empty(), "label value must not be empty");
+    ensure!(
+        value
+            .chars()
+            .all(|char| char.is_ascii_alphanumeric() || matches!(char, '.' | '-' | '_')),
+        "label value `{value}` contains unsupported characters"
+    );
+    Ok(())
+}
+
+pub fn validate_labels(labels: &BTreeMap<String, String>) -> Result<()> {
+    for (key, value) in labels {
+        validate_label_key(key)?;
+        validate_label_value(value)?;
+    }
+    Ok(())
+}
+
+fn default_local_labels() -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "kubernetes.io/os".to_string(),
+            std::env::consts::OS.to_string(),
+        ),
+        (
+            "kubernetes.io/arch".to_string(),
+            std::env::consts::ARCH.to_string(),
+        ),
+        ("litek8s.io/node".to_string(), LOCAL_NODE_NAME.to_string()),
+    ])
+}
+
+fn format_selector(selector: &BTreeMap<String, String>) -> String {
+    selector
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         ClusterNode, DEFAULT_REMOTE_BINARY, LOCAL_NODE_NAME, parse_remote_build_spec,
-        remote_parent_dir, validate_node_name,
+        remote_parent_dir, select_node_for_manifest, validate_label_key, validate_label_value,
+        validate_node_name,
     };
+    use crate::manifest::{API_VERSION, DeploymentManifest};
+    use std::collections::BTreeMap;
 
     #[test]
     fn validates_node_names() {
@@ -708,10 +826,12 @@ mod tests {
             "server77".to_string(),
             "server77".to_string(),
             DEFAULT_REMOTE_BINARY.to_string(),
+            BTreeMap::from([("role".to_string(), "edge".to_string())]),
         )
         .expect("ssh node should build");
         assert_eq!(node.endpoint(), "server77");
         assert_eq!(node.transport_label(), "ssh");
+        assert!(node.matches_selector(&BTreeMap::from([("role".to_string(), "edge".to_string())])));
     }
 
     #[test]
@@ -735,5 +855,57 @@ mod tests {
     fn derives_remote_parent_dir() {
         assert_eq!(remote_parent_dir("~/.local/bin/litek8s"), "~/.local/bin");
         assert_eq!(remote_parent_dir("litek8s"), ".");
+    }
+
+    #[test]
+    fn validates_label_parts() {
+        assert!(validate_label_key("role").is_ok());
+        assert!(validate_label_key("topology.k8s.io/zone").is_ok());
+        assert!(validate_label_key("bad key").is_err());
+        assert!(validate_label_value("edge").is_ok());
+        assert!(validate_label_value("us-east-1a").is_ok());
+        assert!(validate_label_value("bad value").is_err());
+    }
+
+    #[test]
+    fn selects_node_from_selector_and_prefers_current_assignment() {
+        let manifest = DeploymentManifest::parse(&format!(
+            r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: demo
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      nodeSelector:
+        role: edge
+      containers:
+        - name: web
+          image: nginx:alpine
+"#
+        ))
+        .expect("manifest should parse");
+
+        let nodes = vec![
+            ClusterNode::local(),
+            ClusterNode::ssh(
+                "server77".to_string(),
+                "server77".to_string(),
+                DEFAULT_REMOTE_BINARY.to_string(),
+                BTreeMap::from([("role".to_string(), "edge".to_string())]),
+            )
+            .expect("ssh node should build"),
+        ];
+
+        let selected =
+            select_node_for_manifest(&manifest, &nodes, None).expect("selector should match");
+        assert_eq!(selected, "server77");
+
+        let preferred = select_node_for_manifest(&manifest, &nodes, Some("server77"))
+            .expect("current node should be preserved");
+        assert_eq!(preferred, "server77");
     }
 }
