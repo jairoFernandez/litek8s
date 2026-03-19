@@ -62,10 +62,12 @@ struct AppState {
     top_metrics: Arc<Mutex<TopMetricsSampler>>,
     service_manager: Arc<Mutex<ServiceManager>>,
     cluster_snapshot: Arc<Mutex<ClusterSnapshotCache>>,
+    snapshot_refresh: Arc<Notify>,
 }
 
-const CLUSTER_SNAPSHOT_MAX_AGE: Duration = Duration::from_millis(900);
+const CLUSTER_SNAPSHOT_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const CLUSTER_REMOTE_QUERY_TIMEOUT: Duration = Duration::from_millis(1200);
+const CLUSTER_SNAPSHOT_WARMING_UP: &str = "cluster snapshot is warming up";
 
 pub async fn serve(config: ServerConfig) -> Result<()> {
     config::ensure_parent_dir(&config.socket_path)?;
@@ -83,6 +85,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     let store = Arc::new(Store::load(config.state_file.clone()).await?);
     let runtime = DockerRuntime::connect()?;
     runtime.ping().await?;
+    let snapshot_refresh = Arc::new(Notify::new());
 
     let app_state = AppState {
         store,
@@ -93,6 +96,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         top_metrics: Arc::new(Mutex::new(TopMetricsSampler::new())),
         service_manager: Arc::new(Mutex::new(ServiceManager::new())),
         cluster_snapshot: Arc::new(Mutex::new(ClusterSnapshotCache::default())),
+        snapshot_refresh: snapshot_refresh.clone(),
     };
     let app_state = Arc::new(app_state);
     app_state.sync_services().await?;
@@ -107,8 +111,14 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     let notify = Arc::new(Notify::new());
     let reconcile_task =
         spawn_reconcile_loop(app_state.clone(), notify.clone(), config.poll_interval);
+    let snapshot_task = spawn_snapshot_loop(
+        app_state.clone(),
+        snapshot_refresh,
+        CLUSTER_SNAPSHOT_REFRESH_INTERVAL,
+    );
     let event_listener = app_state.runtime.spawn_event_listener(notify.clone());
     notify.notify_one();
+    app_state.request_cluster_snapshot_refresh();
 
     loop {
         tokio::select! {
@@ -129,6 +139,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     }
 
     reconcile_task.abort();
+    snapshot_task.abort();
     event_listener.abort();
     if config.socket_path.exists() {
         std::fs::remove_file(&config.socket_path)
@@ -191,7 +202,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                     message: "node registered and answered over ssh".to_string(),
                 })
                 .await?;
-            state.invalidate_cluster_snapshot().await;
+            state.refresh_cluster_snapshot().await?;
             let message = match outcome {
                 NodeApplyOutcome::Created => format!("node/{name} added"),
                 NodeApplyOutcome::Configured => format!("node/{name} updated"),
@@ -231,6 +242,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                     })
                     .await?;
                 state.reconcile_all().await?;
+                state.refresh_cluster_snapshot().await?;
             }
 
             Ok(Response::Ack {
@@ -276,13 +288,13 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
         }
         Request::DeleteService { name } => delete_service(state, &name).await,
         Request::GetServices => {
-            let snapshot = state.cluster_snapshot().await?;
+            let snapshot = state.latest_cluster_snapshot().await?;
             Ok(Response::Services {
                 items: snapshot.services,
             })
         }
         Request::GetNodes => {
-            let snapshot = state.cluster_snapshot().await?;
+            let snapshot = state.latest_cluster_snapshot().await?;
             Ok(Response::Nodes {
                 items: snapshot.nodes,
             })
@@ -518,7 +530,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             })
         }
         Request::Top => {
-            let snapshot = state.cluster_snapshot().await?;
+            let snapshot = state.latest_cluster_snapshot().await?;
             Ok(Response::Top {
                 daemon: snapshot.daemon,
                 items: snapshot.deployments,
@@ -552,7 +564,7 @@ async fn delete_deployment(state: Arc<AppState>, name: &str) -> Result<Response>
             message: "deployment removed from the control plane".to_string(),
         })
         .await?;
-    state.invalidate_cluster_snapshot().await;
+    state.refresh_cluster_snapshot().await?;
     Ok(Response::Ack {
         message: format!("deployment.apps/{name} deleted"),
     })
@@ -592,6 +604,7 @@ async fn apply_deployment_manifest(
         })
         .await?;
     state.reconcile_all().await?;
+    state.refresh_cluster_snapshot().await?;
 
     Ok(Response::Ack {
         message: match outcome {
@@ -672,7 +685,7 @@ async fn apply_service_manifest(
             message: format!("service listens on {listen_addr} and forwards to {target_text}"),
         })
         .await?;
-    state.invalidate_cluster_snapshot().await;
+    state.refresh_cluster_snapshot().await?;
     Ok(Response::Ack {
         message: match outcome {
             ServiceApplyOutcome::Created => format!("service/{name} created"),
@@ -697,7 +710,7 @@ async fn delete_service(state: Arc<AppState>, name: &str) -> Result<Response> {
             message: "service listener removed from the control plane".to_string(),
         })
         .await?;
-    state.invalidate_cluster_snapshot().await;
+    state.refresh_cluster_snapshot().await?;
     Ok(Response::Ack {
         message: format!("service/{name} deleted"),
     })
@@ -723,12 +736,34 @@ fn spawn_reconcile_loop(
     })
 }
 
+fn spawn_snapshot_loop(
+    state: Arc<AppState>,
+    notify: Arc<Notify>,
+    refresh_interval: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(refresh_interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {}
+                _ = notify.notified() => {}
+            }
+
+            if let Err(error) = state.refresh_cluster_snapshot().await {
+                eprintln!("cluster snapshot refresh failed: {error}");
+            }
+        }
+    })
+}
+
 impl AppState {
     async fn reconcile_all(&self) -> Result<()> {
         let _guard = self.reconcile_guard.lock().await;
         let nodes = self.store.list_nodes().await;
         reconciler::reconcile_all(&self.store, &self.runtime, &nodes, self.cleanup_orphans).await?;
-        self.invalidate_cluster_snapshot().await;
+        self.request_cluster_snapshot_refresh();
         Ok(())
     }
 
@@ -769,26 +804,24 @@ impl AppState {
             .await
     }
 
-    async fn cluster_snapshot(&self) -> Result<ClusterSnapshot> {
-        let mut cache = self.cluster_snapshot.lock().await;
-        let now = Instant::now();
-        if let (Some(generated_at), Some(snapshot)) = (cache.generated_at, cache.snapshot.as_ref())
-        {
-            if now.duration_since(generated_at) <= CLUSTER_SNAPSHOT_MAX_AGE {
-                return Ok(snapshot.clone());
-            }
-        }
-
-        let snapshot = self.collect_cluster_snapshot().await?;
-        cache.generated_at = Some(Instant::now());
-        cache.snapshot = Some(snapshot.clone());
-        Ok(snapshot)
+    async fn latest_cluster_snapshot(&self) -> Result<ClusterSnapshot> {
+        let cache = self.cluster_snapshot.lock().await;
+        cache
+            .snapshot
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!(CLUSTER_SNAPSHOT_WARMING_UP))
     }
 
-    async fn invalidate_cluster_snapshot(&self) {
+    fn request_cluster_snapshot_refresh(&self) {
+        self.snapshot_refresh.notify_one();
+    }
+
+    async fn refresh_cluster_snapshot(&self) -> Result<()> {
+        let snapshot = self.collect_cluster_snapshot().await?;
         let mut cache = self.cluster_snapshot.lock().await;
-        cache.generated_at = None;
-        cache.snapshot = None;
+        cache.generated_at = Some(Instant::now());
+        cache.snapshot = Some(snapshot);
+        Ok(())
     }
 
     async fn collect_cluster_snapshot(&self) -> Result<ClusterSnapshot> {

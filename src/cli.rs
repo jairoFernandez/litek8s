@@ -871,62 +871,7 @@ fn print_response(response: Response) -> Result<()> {
             Ok(())
         }
         Response::Top { daemon, items } => {
-            println!("{} {}", title("Daemon"), muted("local control loop"));
-            println!(
-                "{} pid={} cpu={} mem={} uptime={}",
-                label("litek8s"),
-                daemon.pid,
-                format_cpu_compact(daemon.cpu_percent),
-                human_bytes(daemon.memory_bytes),
-                format_uptime(daemon.uptime_secs),
-            );
-            println!();
-            println!(
-                "{} {} {} {} {} {} {} {} {} {} {} {}",
-                header_left("NAME", 24),
-                header_left("NODE", 14),
-                header_left("STATUS", 12),
-                header_right("RESTARTS", 8),
-                header_right("STREAK", 6),
-                header_left("NEXT RETRY", 10),
-                header_left("LAST EXIT", 16),
-                header_right("CPU", 8),
-                header_right("MEMORY", 14),
-                header_right("NET I/O", 18),
-                header_left("CONTAINER ID", 12),
-                label("IMAGE")
-            );
-            for item in items {
-                println!(
-                    "{} {} {} {} {} {} {} {} {} {} {} {}",
-                    left_cell(&item.name, 24),
-                    left_cell(&truncate(&item.node_name, 14), 14),
-                    status_cell(&item.status, 12),
-                    right_cell(&item.restart_count.to_string(), 8),
-                    right_cell(&item.restart_streak.to_string(), 6),
-                    left_cell(&format_retry_countdown(item.next_retry_in_secs), 10),
-                    left_cell(&truncate(item.last_exit.as_deref().unwrap_or("-"), 16), 16),
-                    right_cell(
-                        &format_top_cpu(
-                            item.cpu_percent,
-                            item.memory_usage_bytes.is_some()
-                                || item.network_rx_bytes.is_some()
-                                || item.network_tx_bytes.is_some(),
-                        ),
-                        8,
-                    ),
-                    right_cell(
-                        &format_memory(item.memory_usage_bytes, item.memory_limit_bytes),
-                        14,
-                    ),
-                    right_cell(
-                        &format_net_io(item.network_rx_bytes, item.network_tx_bytes),
-                        18,
-                    ),
-                    left_cell(&short_id(item.container_id.as_deref()), 12),
-                    truncate(&item.image, 32)
-                );
-            }
+            print!("{}", format_top_body(&daemon, &items));
             Ok(())
         }
         Response::Error { message } => Err(anyhow!(message)),
@@ -939,22 +884,38 @@ async fn run_top(socket_path: &Path, watch: bool, interval: Duration) -> Result<
         .transpose()?;
 
     loop {
-        if let Some(display) = watch_display.as_mut() {
-            display.begin_frame(interval)?;
-            println!("{}", muted("loading snapshot..."));
-            io::stdout().flush().context("failed to flush top output")?;
-        }
-        let Some(response) = request_with_ctrl_c(socket_path, Request::Top).await? else {
+        let Some(response) = request_with_loading(
+            socket_path,
+            Request::Top,
+            watch_display.as_mut(),
+            interval,
+            "loading snapshot...",
+        )
+        .await?
+        else {
             return Ok(());
         };
-        if watch_display.is_some() {
-            watch_display
-                .as_mut()
-                .expect("watch display should exist")
-                .begin_frame(interval)?;
+        if let Some(display) = watch_display.as_mut() {
+            let body = match response {
+                Response::Top { daemon, items } => format_top_body(&daemon, &items),
+                Response::Error { message } if message.contains("warming up") => {
+                    let loading = muted("loading snapshot...");
+                    display.render_frame(&loading)?;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+                Response::Error { message } => format_error_body(&message),
+                other => {
+                    print_response(other)?;
+                    io::stdout().flush().context("failed to flush top output")?;
+                    continue;
+                }
+            };
+            display.render_frame(&body)?;
+        } else {
+            print_response(response)?;
+            io::stdout().flush().context("failed to flush top output")?;
         }
-        print_response(response)?;
-        io::stdout().flush().context("failed to flush top output")?;
 
         if !watch {
             return Ok(());
@@ -987,26 +948,30 @@ async fn run_tree(socket_path: &Path, watch: bool, interval: Duration) -> Result
         .transpose()?;
 
     loop {
+        let snapshot =
+            match fetch_tree_snapshot(socket_path, watch_display.as_mut(), interval).await {
+                Ok(Some(snapshot)) => snapshot,
+                Ok(None) => return Ok(()),
+                Err(error) if error.to_string().contains("warming up") => {
+                    if let Some(display) = watch_display.as_mut() {
+                        let loading = muted("loading snapshot...");
+                        display.render_frame(&loading)?;
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        continue;
+                    }
+                    return Err(error);
+                }
+                Err(error) => return Err(error),
+            };
+        let body = render_tree(&snapshot);
         if let Some(display) = watch_display.as_mut() {
-            display.begin_frame(interval)?;
-            println!("{}", muted("loading snapshot..."));
+            display.render_frame(&body)?;
+        } else {
+            println!("{body}");
             io::stdout()
                 .flush()
                 .context("failed to flush tree output")?;
         }
-        let Some(snapshot) = fetch_tree_snapshot(socket_path).await? else {
-            return Ok(());
-        };
-        if watch_display.is_some() {
-            watch_display
-                .as_mut()
-                .expect("watch display should exist")
-                .begin_frame(interval)?;
-        }
-        println!("{}", render_tree(&snapshot));
-        io::stdout()
-            .flush()
-            .context("failed to flush tree output")?;
 
         if !watch {
             return Ok(());
@@ -1019,11 +984,33 @@ async fn run_tree(socket_path: &Path, watch: bool, interval: Duration) -> Result
     }
 }
 
-async fn fetch_tree_snapshot(socket_path: &Path) -> Result<Option<TreeSnapshot>> {
+async fn fetch_tree_snapshot(
+    socket_path: &Path,
+    watch_display: Option<&mut WatchDisplay>,
+    interval: Duration,
+) -> Result<Option<TreeSnapshot>> {
     let (top_response, nodes_response, services_response) = tokio::try_join!(
-        request_with_ctrl_c(socket_path, Request::Top),
-        request_with_ctrl_c(socket_path, Request::GetNodes),
-        request_with_ctrl_c(socket_path, Request::GetServices),
+        request_with_loading(
+            socket_path,
+            Request::Top,
+            None,
+            interval,
+            "loading snapshot..."
+        ),
+        request_with_loading(
+            socket_path,
+            Request::GetNodes,
+            None,
+            interval,
+            "loading snapshot..."
+        ),
+        request_with_loading(
+            socket_path,
+            Request::GetServices,
+            watch_display,
+            interval,
+            "loading snapshot..."
+        ),
     )?;
 
     let (Some(top_response), Some(nodes_response), Some(services_response)) =
@@ -1088,6 +1075,77 @@ fn render_tree(snapshot: &TreeSnapshot) -> String {
     }
 
     lines.join("\n")
+}
+
+fn format_top_body(
+    daemon: &protocol::DaemonTopSummary,
+    items: &[protocol::DeploymentTopRow],
+) -> String {
+    let mut lines = vec![
+        format!("{} {}", title("Daemon"), muted("local control loop")),
+        format!(
+            "{} pid={} cpu={} mem={} uptime={}",
+            label("litek8s"),
+            daemon.pid,
+            format_cpu_compact(daemon.cpu_percent),
+            human_bytes(daemon.memory_bytes),
+            format_uptime(daemon.uptime_secs),
+        ),
+        String::new(),
+        format!(
+            "{} {} {} {} {} {} {} {} {} {} {} {}",
+            header_left("NAME", 24),
+            header_left("NODE", 14),
+            header_left("STATUS", 12),
+            header_right("RESTARTS", 8),
+            header_right("STREAK", 6),
+            header_left("NEXT RETRY", 10),
+            header_left("LAST EXIT", 16),
+            header_right("CPU", 8),
+            header_right("MEMORY", 14),
+            header_right("NET I/O", 18),
+            header_left("CONTAINER ID", 12),
+            label("IMAGE")
+        ),
+    ];
+
+    for item in items {
+        lines.push(format!(
+            "{} {} {} {} {} {} {} {} {} {} {} {}",
+            left_cell(&item.name, 24),
+            left_cell(&truncate(&item.node_name, 14), 14),
+            status_cell(&item.status, 12),
+            right_cell(&item.restart_count.to_string(), 8),
+            right_cell(&item.restart_streak.to_string(), 6),
+            left_cell(&format_retry_countdown(item.next_retry_in_secs), 10),
+            left_cell(&truncate(item.last_exit.as_deref().unwrap_or("-"), 16), 16),
+            right_cell(
+                &format_top_cpu(
+                    item.cpu_percent,
+                    item.memory_usage_bytes.is_some()
+                        || item.network_rx_bytes.is_some()
+                        || item.network_tx_bytes.is_some(),
+                ),
+                8,
+            ),
+            right_cell(
+                &format_memory(item.memory_usage_bytes, item.memory_limit_bytes),
+                14,
+            ),
+            right_cell(
+                &format_net_io(item.network_rx_bytes, item.network_tx_bytes),
+                18,
+            ),
+            left_cell(&short_id(item.container_id.as_deref()), 12),
+            truncate(&item.image, 32)
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn format_error_body(message: &str) -> String {
+    format!("{}\n\n{}", title("Error"), message)
 }
 
 fn build_tree_entries(snapshot: &TreeSnapshot) -> Vec<TreeEntry> {
@@ -1360,14 +1418,7 @@ async fn run_events(
         .transpose()?;
 
     loop {
-        if let Some(display) = watch_display.as_mut() {
-            display.begin_frame(interval)?;
-            println!("{}", muted("loading events..."));
-            io::stdout()
-                .flush()
-                .context("failed to flush events output")?;
-        }
-        let Some(response) = request_with_ctrl_c(
+        let Some(response) = request_with_loading(
             socket_path,
             Request::GetEvents {
                 limit,
@@ -1375,6 +1426,9 @@ async fn run_events(
                 deployment_name: deployment.clone(),
                 node_name: node.clone(),
             },
+            watch_display.as_mut(),
+            interval,
+            "loading events...",
         )
         .await?
         else {
@@ -1402,10 +1456,34 @@ async fn run_events(
     }
 }
 
-async fn request_with_ctrl_c(socket_path: &Path, request: Request) -> Result<Option<Response>> {
+async fn request_with_loading(
+    socket_path: &Path,
+    request: Request,
+    mut watch_display: Option<&mut WatchDisplay>,
+    _interval: Duration,
+    loading_label: &str,
+) -> Result<Option<Response>> {
+    const LOADING_THRESHOLD: Duration = Duration::from_millis(180);
+
+    let response = protocol::request(socket_path, request);
+    tokio::pin!(response);
+
+    let loading_delay = tokio::time::sleep(LOADING_THRESHOLD);
+    tokio::pin!(loading_delay);
+
     tokio::select! {
-        response = protocol::request(socket_path, request) => response.map(Some),
+        response = &mut response => response.map(Some),
         _ = tokio::signal::ctrl_c() => Ok(None),
+        _ = &mut loading_delay => {
+            if let Some(display) = watch_display.as_mut() {
+                display.render_frame(&muted(loading_label))?;
+            }
+
+            tokio::select! {
+                response = &mut response => response.map(Some),
+                _ = tokio::signal::ctrl_c() => Ok(None),
+            }
+        }
     }
 }
 
@@ -1594,6 +1672,7 @@ fn cli_styles() -> Styles {
 struct WatchDisplay {
     interactive: bool,
     banner: String,
+    previous_lines: Vec<String>,
 }
 
 impl WatchDisplay {
@@ -1609,6 +1688,7 @@ impl WatchDisplay {
         Ok(Self {
             interactive,
             banner,
+            previous_lines: Vec::new(),
         })
     }
 
@@ -1620,9 +1700,67 @@ impl WatchDisplay {
             println!("---");
         }
 
+        self.previous_lines.clear();
         println!("{}\n", self.banner);
         Ok(())
     }
+
+    fn render_frame(&mut self, body: &str) -> Result<()> {
+        if self.interactive {
+            let next_lines = build_watch_frame_lines(&self.banner, body);
+            let patch = render_watch_frame_patch(&self.previous_lines, &next_lines);
+            print!("{patch}");
+            self.previous_lines = next_lines;
+        } else {
+            println!();
+            println!("---");
+            println!("{}\n", self.banner);
+            print!("{body}");
+            if !body.ends_with('\n') {
+                println!();
+            }
+        }
+        io::stdout()
+            .flush()
+            .context("failed to flush watch frame output")
+    }
+}
+
+fn build_watch_frame_lines(banner: &str, body: &str) -> Vec<String> {
+    let mut lines = vec![banner.to_string(), String::new()];
+    lines.extend(body.lines().map(|line| line.to_string()));
+    lines
+}
+
+fn render_watch_frame_patch(previous: &[String], next: &[String]) -> String {
+    if previous.is_empty() {
+        let mut full = String::from("\x1B[H\x1B[J");
+        for (index, line) in next.iter().enumerate() {
+            if index > 0 {
+                full.push('\n');
+            }
+            full.push_str(line);
+        }
+        full.push_str("\x1B[J");
+        return full;
+    }
+
+    let mut patch = String::new();
+    let max_lines = previous.len().max(next.len());
+    for index in 0..max_lines {
+        let old = previous.get(index);
+        let new = next.get(index);
+        if old == new {
+            continue;
+        }
+
+        patch.push_str(&format!("\x1B[{};1H\x1B[2K", index + 1));
+        if let Some(line) = new {
+            patch.push_str(line);
+        }
+    }
+
+    patch
 }
 
 fn build_watch_banner(
@@ -1659,7 +1797,10 @@ impl Drop for WatchDisplay {
 mod tests {
     use crate::protocol::{DaemonTopSummary, DeploymentTopRow, NodeSummary, ServiceSummary};
 
-    use super::{TreeSnapshot, format_retry_countdown, format_top_cpu, format_uptime, render_tree};
+    use super::{
+        TreeSnapshot, build_watch_frame_lines, format_retry_countdown, format_top_cpu,
+        format_uptime, render_tree, render_watch_frame_patch,
+    };
 
     #[test]
     fn formats_uptime_compactly() {
@@ -1679,6 +1820,32 @@ mod tests {
         assert_eq!(format_retry_countdown(None), "-");
         assert_eq!(format_retry_countdown(Some(0)), "now");
         assert_eq!(format_retry_countdown(Some(13)), "13s");
+    }
+
+    #[test]
+    fn first_interactive_watch_frame_clears_once() {
+        let next = build_watch_frame_lines("banner", "line1\nline2");
+        let patch = render_watch_frame_patch(&[], &next);
+        assert!(patch.starts_with("\x1B[H\x1B[J"));
+        assert!(patch.contains("banner\n\nline1\nline2"));
+    }
+
+    #[test]
+    fn interactive_watch_patch_updates_only_changed_lines() {
+        let previous = build_watch_frame_lines("banner", "same\nold");
+        let next = build_watch_frame_lines("banner", "same\nnew");
+        let patch = render_watch_frame_patch(&previous, &next);
+        assert!(!patch.contains("\x1B[H\x1B[J"));
+        assert!(patch.contains("\x1B[4;1H\x1B[2Knew"));
+        assert!(!patch.contains("\x1B[3;1H"));
+    }
+
+    #[test]
+    fn interactive_watch_patch_clears_removed_trailing_lines() {
+        let previous = build_watch_frame_lines("banner", "line1\nline2");
+        let next = build_watch_frame_lines("banner", "line1");
+        let patch = render_watch_frame_patch(&previous, &next);
+        assert!(patch.contains("\x1B[4;1H\x1B[2K"));
     }
 
     #[test]
