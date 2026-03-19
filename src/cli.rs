@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -49,6 +49,12 @@ Examples:
   litek8s top
   litek8s top --watch
   litek8s top --watch --interval-secs 1";
+
+const TREE_AFTER_HELP: &str = "\
+Examples:
+  litek8s tree
+  litek8s tree --watch
+  litek8s tree --watch --interval-secs 1";
 
 const GET_AFTER_HELP: &str = "\
 Examples:
@@ -233,6 +239,17 @@ enum Command {
     )]
     Top {
         #[arg(long, help = "Refresh the table continuously")]
+        watch: bool,
+        #[arg(long, default_value_t = 2, help = "Refresh interval in seconds")]
+        interval_secs: u64,
+    },
+    #[command(
+        about = "Show a relationship tree of the control plane, nodes, deployments, and services",
+        help_template = HELP_TEMPLATE,
+        after_help = TREE_AFTER_HELP
+    )]
+    Tree {
+        #[arg(long, help = "Refresh the tree continuously")]
         watch: bool,
         #[arg(long, default_value_t = 2, help = "Refresh interval in seconds")]
         interval_secs: u64,
@@ -443,6 +460,10 @@ pub async fn run() -> Result<()> {
             watch,
             interval_secs,
         } => run_top(&socket_path, watch, Duration::from_secs(interval_secs)).await,
+        Command::Tree {
+            watch,
+            interval_secs,
+        } => run_tree(&socket_path, watch, Duration::from_secs(interval_secs)).await,
         Command::Node { command } => match command {
             NodeCommand::Add {
                 name,
@@ -936,6 +957,306 @@ async fn run_top(socket_path: &Path, watch: bool, interval: Duration) -> Result<
     }
 }
 
+#[derive(Debug, Clone)]
+struct TreeSnapshot {
+    daemon: protocol::DaemonTopSummary,
+    deployments: Vec<protocol::DeploymentTopRow>,
+    nodes: Vec<protocol::NodeSummary>,
+    services: Vec<protocol::ServiceSummary>,
+}
+
+#[derive(Debug, Clone)]
+struct TreeEntry {
+    text: String,
+    children: Vec<TreeEntry>,
+}
+
+async fn run_tree(socket_path: &Path, watch: bool, interval: Duration) -> Result<()> {
+    let mut watch_display = watch
+        .then(|| WatchDisplay::new(build_watch_banner("tree", interval, None, None)))
+        .transpose()?;
+
+    loop {
+        let snapshot = fetch_tree_snapshot(socket_path).await?;
+        if let Some(display) = watch_display.as_mut() {
+            display.begin_frame(interval)?;
+        }
+        println!("{}", render_tree(&snapshot));
+        io::stdout()
+            .flush()
+            .context("failed to flush tree output")?;
+
+        if !watch {
+            return Ok(());
+        }
+
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => return Ok(()),
+            _ = tokio::time::sleep(interval) => {}
+        }
+    }
+}
+
+async fn fetch_tree_snapshot(socket_path: &Path) -> Result<TreeSnapshot> {
+    let (top_response, nodes_response, services_response) = tokio::try_join!(
+        protocol::request(socket_path, Request::Top),
+        protocol::request(socket_path, Request::GetNodes),
+        protocol::request(socket_path, Request::GetServices),
+    )?;
+
+    let (daemon, deployments) = match top_response {
+        Response::Top { daemon, items } => (daemon, items),
+        Response::Error { message } => return Err(anyhow!(message)),
+        _ => bail!("unexpected response to Request::Top"),
+    };
+
+    let nodes = match nodes_response {
+        Response::Nodes { items } => items,
+        Response::Error { message } => return Err(anyhow!(message)),
+        _ => bail!("unexpected response to Request::GetNodes"),
+    };
+
+    let services = match services_response {
+        Response::Services { items } => items,
+        Response::Error { message } => return Err(anyhow!(message)),
+        _ => bail!("unexpected response to Request::GetServices"),
+    };
+
+    Ok(TreeSnapshot {
+        daemon,
+        deployments,
+        nodes,
+        services,
+    })
+}
+
+fn render_tree(snapshot: &TreeSnapshot) -> String {
+    let mut lines = vec![
+        title("Cluster Map"),
+        muted("real relationships currently managed by the control plane"),
+        String::new(),
+    ];
+
+    let summary = format!(
+        "[nodes={} deployments={} services={} cpu={} mem={} uptime={}]",
+        snapshot.nodes.len(),
+        snapshot.deployments.len(),
+        snapshot.services.len(),
+        format_cpu_compact(snapshot.daemon.cpu_percent),
+        human_bytes(snapshot.daemon.memory_bytes),
+        format_uptime(snapshot.daemon.uptime_secs),
+    );
+    lines.push(format!(
+        "{} {}",
+        label("litek8s/control-plane"),
+        muted(&summary)
+    ));
+
+    let entries = build_tree_entries(snapshot);
+    if entries.is_empty() {
+        lines.push("└─ no managed resources yet".to_string());
+    } else {
+        append_tree_entries(&mut lines, "", &entries);
+    }
+
+    lines.join("\n")
+}
+
+fn build_tree_entries(snapshot: &TreeSnapshot) -> Vec<TreeEntry> {
+    let mut deployments_by_node: BTreeMap<String, Vec<protocol::DeploymentTopRow>> =
+        BTreeMap::new();
+    let mut deployment_names = BTreeSet::new();
+    for deployment in &snapshot.deployments {
+        deployment_names.insert(deployment.name.clone());
+        deployments_by_node
+            .entry(deployment.node_name.clone())
+            .or_default()
+            .push(deployment.clone());
+    }
+    for deployments in deployments_by_node.values_mut() {
+        deployments.sort_by(|left, right| left.name.cmp(&right.name));
+    }
+
+    let mut services_by_deployment: BTreeMap<String, Vec<protocol::ServiceSummary>> =
+        BTreeMap::new();
+    let mut unresolved_services = Vec::new();
+    for service in &snapshot.services {
+        if deployment_names.contains(&service.deployment_name) {
+            services_by_deployment
+                .entry(service.deployment_name.clone())
+                .or_default()
+                .push(service.clone());
+        } else {
+            unresolved_services.push(service.clone());
+        }
+    }
+    for services in services_by_deployment.values_mut() {
+        services.sort_by(|left, right| left.name.cmp(&right.name));
+    }
+    unresolved_services.sort_by(|left, right| left.name.cmp(&right.name));
+
+    let known_nodes: BTreeSet<String> = snapshot
+        .nodes
+        .iter()
+        .map(|node| node.name.clone())
+        .collect();
+    let mut nodes = snapshot.nodes.clone();
+    for node_name in deployments_by_node.keys() {
+        if !known_nodes.contains(node_name) {
+            nodes.push(protocol::NodeSummary {
+                name: node_name.clone(),
+                transport: "unknown".to_string(),
+                endpoint: "missing from node registry".to_string(),
+                status: "Offline".to_string(),
+                scheduling: "-".to_string(),
+                deployment_count: deployments_by_node
+                    .get(node_name)
+                    .map(|items| items.len())
+                    .unwrap_or(0),
+            });
+        }
+    }
+    nodes.sort_by(|left, right| {
+        let left_rank = u8::from(left.name != crate::node::LOCAL_NODE_NAME);
+        let right_rank = u8::from(right.name != crate::node::LOCAL_NODE_NAME);
+        (left_rank, left.name.as_str()).cmp(&(right_rank, right.name.as_str()))
+    });
+
+    let mut entries = Vec::new();
+    for node in nodes {
+        let deployments = deployments_by_node.remove(&node.name).unwrap_or_default();
+        let deployment_count = deployments.len();
+        let children = deployments
+            .into_iter()
+            .map(|deployment| {
+                let services = services_by_deployment
+                    .remove(&deployment.name)
+                    .unwrap_or_default();
+                let text = format_tree_deployment(&deployment, services.len());
+                let children = services
+                    .into_iter()
+                    .map(|service| TreeEntry {
+                        text: format_tree_service(&service, true),
+                        children: Vec::new(),
+                    })
+                    .collect();
+                TreeEntry { text, children }
+            })
+            .collect();
+        entries.push(TreeEntry {
+            text: format_tree_node(&node, deployment_count),
+            children,
+        });
+    }
+
+    if !unresolved_services.is_empty() {
+        let unresolved_count = unresolved_services.len();
+        let children = unresolved_services
+            .into_iter()
+            .map(|service| TreeEntry {
+                text: format_tree_service(&service, false),
+                children: Vec::new(),
+            })
+            .collect();
+        entries.push(TreeEntry {
+            text: format!(
+                "{} {}",
+                label("services/unresolved"),
+                muted(&format!("[count={unresolved_count}]"))
+            ),
+            children,
+        });
+    }
+
+    entries
+}
+
+fn format_tree_node(node: &protocol::NodeSummary, deployment_count: usize) -> String {
+    format!(
+        "{} [{}, {}, {}, deployments={}] endpoint={}",
+        label(&format!("node/{}", node.name)),
+        color_status(&node.status),
+        color_scheduling(&node.scheduling),
+        node.transport,
+        deployment_count,
+        node.endpoint
+    )
+}
+
+fn format_tree_deployment(deployment: &protocol::DeploymentTopRow, service_count: usize) -> String {
+    let mut details = vec![
+        color_status(&deployment.status),
+        format!("image={}", deployment.image),
+    ];
+    if deployment.container_id.is_some() {
+        details.push(format!(
+            "ctr={}",
+            short_id(deployment.container_id.as_deref())
+        ));
+    }
+    if deployment.restart_count > 0 {
+        details.push(format!("restarts={}", deployment.restart_count));
+    }
+    if let Some(last_exit) = deployment.last_exit.as_deref() {
+        details.push(format!("last_exit={last_exit}"));
+    }
+    if deployment.next_retry_in_secs.is_some() {
+        details.push(format!(
+            "next_retry={}",
+            format_retry_countdown(deployment.next_retry_in_secs)
+        ));
+    }
+    if service_count > 0 {
+        details.push(format!("services={service_count}"));
+    }
+
+    format!(
+        "{} [{}]",
+        label(&format!("deployment/{}", deployment.name)),
+        details.join(", ")
+    )
+}
+
+fn format_tree_service(service: &protocol::ServiceSummary, attached: bool) -> String {
+    let mut details = vec![
+        color_status(&service.status),
+        format!("listen={}", service.listen_addr),
+        format!(
+            "target={}",
+            service
+                .target_port
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "auto".to_string())
+        ),
+    ];
+    if !attached {
+        details.push(format!("backend={}", service.deployment_name));
+    }
+
+    format!(
+        "{} [{}]",
+        label(&format!("service/{}", service.name)),
+        details.join(", ")
+    )
+}
+
+fn append_tree_entries(lines: &mut Vec<String>, prefix: &str, entries: &[TreeEntry]) {
+    for (index, entry) in entries.iter().enumerate() {
+        let is_last = index + 1 == entries.len();
+        let connector = if is_last { "└─" } else { "├─" };
+        lines.push(format!("{prefix}{connector} {}", entry.text));
+
+        if !entry.children.is_empty() {
+            let next_prefix = if is_last {
+                format!("{prefix}   ")
+            } else {
+                format!("{prefix}│  ")
+            };
+            append_tree_entries(lines, &next_prefix, &entry.children);
+        }
+    }
+}
+
 async fn run_proxy(socket_path: &Path, name: &str, listen: &str, port: Option<u16>) -> Result<()> {
     let response = protocol::request(
         socket_path,
@@ -1276,7 +1597,9 @@ impl Drop for WatchDisplay {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_retry_countdown, format_top_cpu, format_uptime};
+    use crate::protocol::{DaemonTopSummary, DeploymentTopRow, NodeSummary, ServiceSummary};
+
+    use super::{TreeSnapshot, format_retry_countdown, format_top_cpu, format_uptime, render_tree};
 
     #[test]
     fn formats_uptime_compactly() {
@@ -1296,5 +1619,128 @@ mod tests {
         assert_eq!(format_retry_countdown(None), "-");
         assert_eq!(format_retry_countdown(Some(0)), "now");
         assert_eq!(format_retry_countdown(Some(13)), "13s");
+    }
+
+    #[test]
+    fn renders_tree_with_real_relationships() {
+        let snapshot = TreeSnapshot {
+            daemon: DaemonTopSummary {
+                pid: 42,
+                cpu_percent: Some(0.7),
+                memory_bytes: 18 * 1024 * 1024,
+                uptime_secs: 75,
+            },
+            nodes: vec![
+                NodeSummary {
+                    name: "local".to_string(),
+                    transport: "local".to_string(),
+                    endpoint: "local Docker socket".to_string(),
+                    status: "Ready".to_string(),
+                    scheduling: "Schedulable".to_string(),
+                    deployment_count: 1,
+                },
+                NodeSummary {
+                    name: "server77".to_string(),
+                    transport: "ssh".to_string(),
+                    endpoint: "server77".to_string(),
+                    status: "Ready".to_string(),
+                    scheduling: "Schedulable".to_string(),
+                    deployment_count: 1,
+                },
+            ],
+            deployments: vec![
+                DeploymentTopRow {
+                    name: "echo-demo".to_string(),
+                    node_name: "local".to_string(),
+                    status: "Running".to_string(),
+                    image: "hashicorp/http-echo:1.0".to_string(),
+                    container_id: Some("abcd1234efgh5678".to_string()),
+                    restart_count: 0,
+                    restart_streak: 0,
+                    last_exit: None,
+                    next_retry_in_secs: None,
+                    cpu_percent: Some(0.0),
+                    memory_usage_bytes: None,
+                    memory_limit_bytes: None,
+                    network_rx_bytes: None,
+                    network_tx_bytes: None,
+                },
+                DeploymentTopRow {
+                    name: "echo-edge".to_string(),
+                    node_name: "server77".to_string(),
+                    status: "Running".to_string(),
+                    image: "hashicorp/http-echo:1.0".to_string(),
+                    container_id: Some("1234abcd5678efgh".to_string()),
+                    restart_count: 1,
+                    restart_streak: 0,
+                    last_exit: Some("spec changed".to_string()),
+                    next_retry_in_secs: None,
+                    cpu_percent: Some(0.0),
+                    memory_usage_bytes: None,
+                    memory_limit_bytes: None,
+                    network_rx_bytes: None,
+                    network_tx_bytes: None,
+                },
+            ],
+            services: vec![
+                ServiceSummary {
+                    name: "echo-svc".to_string(),
+                    deployment_name: "echo-demo".to_string(),
+                    listen_addr: "127.0.0.1:9100".to_string(),
+                    target_port: Some(5678),
+                    status: "Listening".to_string(),
+                },
+                ServiceSummary {
+                    name: "edge-svc".to_string(),
+                    deployment_name: "echo-edge".to_string(),
+                    listen_addr: "127.0.0.1:9102".to_string(),
+                    target_port: Some(5678),
+                    status: "Listening".to_string(),
+                },
+            ],
+        };
+
+        let rendered = render_tree(&snapshot);
+        assert!(rendered.contains("litek8s/control-plane"));
+        assert!(rendered.contains("node/local"));
+        assert!(rendered.contains("node/server77"));
+        assert!(rendered.contains("deployment/echo-demo"));
+        assert!(rendered.contains("deployment/echo-edge"));
+        assert!(rendered.contains("service/echo-svc"));
+        assert!(rendered.contains("service/edge-svc"));
+        assert!(rendered.contains("services=1"));
+    }
+
+    #[test]
+    fn renders_unresolved_services_bucket() {
+        let snapshot = TreeSnapshot {
+            daemon: DaemonTopSummary {
+                pid: 42,
+                cpu_percent: None,
+                memory_bytes: 8 * 1024 * 1024,
+                uptime_secs: 5,
+            },
+            nodes: vec![NodeSummary {
+                name: "local".to_string(),
+                transport: "local".to_string(),
+                endpoint: "local Docker socket".to_string(),
+                status: "Ready".to_string(),
+                scheduling: "Schedulable".to_string(),
+                deployment_count: 0,
+            }],
+            deployments: Vec::new(),
+            services: vec![ServiceSummary {
+                name: "ghost-svc".to_string(),
+                deployment_name: "selector:app=ghost".to_string(),
+                listen_addr: "127.0.0.1:9191".to_string(),
+                target_port: None,
+                status: "Error".to_string(),
+            }],
+        };
+
+        let rendered = render_tree(&snapshot);
+        assert!(rendered.contains("services/unresolved"));
+        assert!(rendered.contains("service/ghost-svc"));
+        assert!(rendered.contains("backend=selector:app=ghost"));
     }
 }

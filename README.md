@@ -19,6 +19,8 @@ cargo run -- events --deployment demo-nginx
 cargo run -- events --node server77 --watch
 cargo run -- top
 cargo run -- top --watch
+cargo run -- tree
+cargo run -- tree --watch
 cargo run -- node cordon server77
 cargo run -- node uncordon server77
 cargo run -- delete deployment demo-nginx
@@ -30,6 +32,7 @@ cargo run -- delete deployment demo-nginx
 `proxy` opens a local TCP listener and forwards into the deployment's published `hostPort`, using SSH tunneling automatically when the workload is on a remote node.
 `service add` creates a daemon-managed local listener with a stable address, so you do not need to keep a foreground `proxy` process open.
 The same service can also be declared as YAML with a small selector-based `Service` manifest and applied with `litek8s apply -f ...`.
+`tree` gives you a real relationship view from the control plane down to nodes, deployments, and services, so you do not have to reconstruct topology mentally from separate tables.
 
 ## Firepack
 
@@ -49,6 +52,7 @@ cargo run -- apply -f examples/logstorm.yaml
 cargo run -- apply -f examples/oom-demo.yaml
 
 target/debug/litek8s top --watch --interval-secs 1
+target/debug/litek8s tree --watch --interval-secs 1
 target/debug/litek8s logs logstorm --tail 20
 target/debug/litek8s describe deployment oom-demo
 target/debug/litek8s proxy echo-demo --listen 127.0.0.1:9000
@@ -92,6 +96,7 @@ cargo run -- describe deployment echo-server77
 cargo run -- describe deployment echo-edge
 cargo run -- get services
 cargo run -- describe service edge-svc
+cargo run -- tree --watch
 cargo run -- events --node server77 --watch
 cargo run -- events --deployment echo-edge
 cargo run -- proxy echo-edge --listen 127.0.0.1:9002
@@ -105,6 +110,7 @@ The remote examples cover both scheduling paths:
 
 `get` / `describe` / `top` now show a `NODE` column so you can see where each deployment is running, and `events` lets you watch the scheduler and reconciler decisions in real time.
 `get nodes` and `describe node` also show whether a node is `Schedulable` or `Cordoned`, which makes it easy to demo controlled placement.
+`tree` is the quickest way to show the actual cluster shape: which deployment lives on which node, and which service currently points at which deployment.
 `proxy` is useful when the remote node is only reachable over SSH or when you want one stable local URL during the demo.
 `service` is the next step up: the daemon owns the listener, keeps it alive across CLI exits, and forwards each connection to the deployment's current node and published port.
 The declarative subset is intentionally small: `kind: Service`, `spec.selector`, and one TCP entry in `spec.ports`. The daemon resolves the selector to exactly one deployment in v1; built-in load balancing is not implemented yet. The older `deploymentName` + `listenAddr` + `targetPort` shape still works for compatibility.

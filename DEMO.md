@@ -83,6 +83,7 @@ Open the live view:
 ```bash
 cd "/Users/civojairo/Documents/New project/litek8s-demo"
 target/debug/litek8s top --watch --interval-secs 1
+target/debug/litek8s tree --watch --interval-secs 1
 ```
 
 What to look for:
@@ -91,6 +92,7 @@ What to look for:
 - `NODE` showing whether a deployment is local or remote
 - `oom-demo` moving between `Running` and `Restarting`
 - `RESTARTS`, `STREAK`, and `NEXT RETRY` increasing when `oom-demo` hits OOM
+- `tree` showing the actual relationships: control plane -> node -> deployment -> service
 
 Watch the control-plane history:
 
@@ -102,6 +104,7 @@ cargo run -- events --node server77 --watch
 ```
 
 This is useful to show scheduling, starts, backoff, restart, and node registration.
+Use `tree` when you want topology; use `events` when you want timeline.
 
 ## 5. Inspect a few specific workloads
 
@@ -276,11 +279,12 @@ If you want a short verbal flow while presenting:
 1. Start `serve` and explain that the control plane is one local Rust process.
 2. Show `get nodes` and explain that `server77` is added over SSH, not with a heavy cluster stack.
 3. Apply `echo-edge` and show that scheduling happens through node labels, not just hard-coded node names.
-4. Open `top --watch` and point out daemon overhead, workload CPU pressure, and the `oom-demo` backoff loop.
-5. Open `events --node server77 --watch` or `events --deployment echo-edge` and show that the control plane is emitting readable lifecycle events without `oom-demo` noise.
-6. Run `proxy echo-edge --listen 127.0.0.1:9002` and `curl http://127.0.0.1:9002` to show raw remote access without a Service or ingress stack.
-7. Run `apply -f examples/http-echo-edge-service.yaml` and `curl http://127.0.0.1:9102` to show the next level up: a declarative stable entrypoint owned by the daemon and selected by labels.
-8. Finish with `describe deployment echo-edge`, `describe service edge-svc`, and `describe deployment oom-demo` to connect scheduling, access, and resource limits.
+4. Open `tree --watch` first and show the real topology: which node owns which deployments, and which services attach to them.
+5. Open `top --watch` next and point out daemon overhead, workload CPU pressure, and the `oom-demo` backoff loop.
+6. Open `events --node server77 --watch` or `events --deployment echo-edge` and show that the control plane is emitting readable lifecycle events without `oom-demo` noise.
+7. Run `proxy echo-edge --listen 127.0.0.1:9002` and `curl http://127.0.0.1:9002` to show raw remote access without a Service or ingress stack.
+8. Run `apply -f examples/http-echo-edge-service.yaml` and `curl http://127.0.0.1:9102` to show the next level up: a declarative stable entrypoint owned by the daemon and selected by labels.
+9. Finish with `describe deployment echo-edge`, `describe service edge-svc`, and `describe deployment oom-demo` to connect scheduling, access, and resource limits.
 
 ## 7. Cleanup
 
