@@ -9,6 +9,7 @@ use litek8s::manifest::API_VERSION;
 use litek8s::protocol::{DeploymentDescription, Request, Response, request};
 use litek8s::runtime::docker::DockerRuntime;
 use tempfile::TempDir;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn apply_get_logs_and_delete_roundtrip() -> Result<()> {
@@ -64,7 +65,7 @@ async fn apply_get_logs_and_delete_roundtrip() -> Result<()> {
     .await?;
     match logs {
         Response::Logs { content } => assert!(content.contains("ready")),
-        Response::Error { message } if message == "failed to fetch Docker logs" => {}
+        Response::Error { message } if message.contains("failed to fetch Docker logs") => {}
         other => panic!("unexpected response: {other:?}"),
     }
 
@@ -148,6 +149,73 @@ async fn resolves_proxy_target_for_published_port() -> Result<()> {
             assert_eq!(item.host_port, 18090);
             assert_eq!(item.protocol, "TCP");
         }
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    harness.cleanup_deployment(&deployment).await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn service_listener_forwards_to_deployment() -> Result<()> {
+    let _guard = integration_lock().lock().await;
+    if !docker_available().await {
+        return Ok(());
+    }
+
+    let harness = TestHarness::spawn().await?;
+    let deployment = unique_name("svc-echo");
+    let service = unique_name("svc");
+    let manifest = http_echo_manifest(&deployment, 18094, "hello through service");
+
+    request(
+        &harness.socket_path,
+        Request::Apply {
+            manifest: manifest.clone(),
+        },
+    )
+    .await?;
+    harness.wait_until_running(&deployment).await?;
+
+    let add_service = request(
+        &harness.socket_path,
+        Request::AddService {
+            name: service.clone(),
+            deployment_name: deployment.clone(),
+            listen_addr: "127.0.0.1:19094".to_string(),
+            target_port: None,
+        },
+    )
+    .await?;
+    match add_service {
+        Response::Ack { .. } => {}
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    let describe = harness
+        .wait_until_service_status(&service, |item| item.status == "Listening")
+        .await?;
+    assert_eq!(describe.listen_addr, "127.0.0.1:19094");
+
+    let mut client = tokio::net::TcpStream::connect("127.0.0.1:19094").await?;
+    client
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .await?;
+    client.shutdown().await?;
+    let mut response = Vec::new();
+    client.read_to_end(&mut response).await?;
+    let body = String::from_utf8_lossy(&response);
+    assert!(body.contains("hello through service"));
+
+    match request(
+        &harness.socket_path,
+        Request::DeleteService {
+            name: service.clone(),
+        },
+    )
+    .await?
+    {
+        Response::Ack { .. } => {}
         other => panic!("unexpected response: {other:?}"),
     }
 
@@ -680,6 +748,38 @@ impl TestHarness {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
+
+    async fn wait_until_service_status<F>(
+        &self,
+        service: &str,
+        mut predicate: F,
+    ) -> Result<litek8s::protocol::ServiceDescription>
+    where
+        F: FnMut(&litek8s::protocol::ServiceDescription) -> bool,
+    {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let response = request(
+                &self.socket_path,
+                Request::DescribeService {
+                    name: service.to_string(),
+                },
+            )
+            .await?;
+
+            if let Response::ServiceDescription { item } = response {
+                if predicate(&item) {
+                    return Ok(item);
+                }
+            }
+
+            if tokio::time::Instant::now() > deadline {
+                anyhow::bail!("service `{service}` did not reach the expected status");
+            }
+
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
 }
 
 async fn spawn_server(
@@ -798,6 +898,33 @@ spec:
         image = test_image(),
         command = command,
         args = args,
+    )
+}
+
+fn http_echo_manifest(deployment: &str, host_port: u16, text: &str) -> String {
+    format!(
+        r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: {deployment}
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: echo
+          image: hashicorp/http-echo:1.0.0
+          args:
+            - "-listen"
+            - ":5678"
+            - "-text"
+            - "{text}"
+          ports:
+            - containerPort: 5678
+              hostPort: {host_port}
+"#
     )
 }
 

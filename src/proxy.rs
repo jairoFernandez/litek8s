@@ -33,7 +33,7 @@ pub async fn serve_listener(listener: TcpListener, target: ProxyTarget) -> Resul
     }
 }
 
-async fn handle_connection(mut inbound: TcpStream, target: ProxyTarget) -> Result<()> {
+pub async fn forward_connection(mut inbound: TcpStream, target: ProxyTarget) -> Result<()> {
     match target.transport.as_str() {
         "local" => {
             let mut upstream = TcpStream::connect(("127.0.0.1", target.host_port))
@@ -52,6 +52,10 @@ async fn handle_connection(mut inbound: TcpStream, target: ProxyTarget) -> Resul
         "ssh" => proxy_over_ssh(inbound, &target).await,
         other => bail!("unsupported proxy transport `{other}`"),
     }
+}
+
+async fn handle_connection(inbound: TcpStream, target: ProxyTarget) -> Result<()> {
+    forward_connection(inbound, target).await
 }
 
 async fn proxy_over_ssh(inbound: TcpStream, target: &ProxyTarget) -> Result<()> {

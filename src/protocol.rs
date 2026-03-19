@@ -27,7 +27,17 @@ pub enum Request {
     DeleteDeployment {
         name: String,
     },
+    AddService {
+        name: String,
+        deployment_name: String,
+        listen_addr: String,
+        target_port: Option<u16>,
+    },
+    DeleteService {
+        name: String,
+    },
     GetDeployments,
+    GetServices,
     GetNodes,
     GetEvents {
         limit: usize,
@@ -36,6 +46,9 @@ pub enum Request {
         node_name: Option<String>,
     },
     DescribeDeployment {
+        name: String,
+    },
+    DescribeService {
         name: String,
     },
     DescribeNode {
@@ -60,6 +73,9 @@ pub enum Response {
     Deployments {
         items: Vec<DeploymentSummary>,
     },
+    Services {
+        items: Vec<ServiceSummary>,
+    },
     Nodes {
         items: Vec<NodeSummary>,
     },
@@ -77,6 +93,9 @@ pub enum Response {
     },
     ProxyTarget {
         item: ProxyTarget,
+    },
+    ServiceDescription {
+        item: ServiceDescription,
     },
     Top {
         daemon: DaemonTopSummary,
@@ -166,6 +185,27 @@ pub struct NodeDescription {
     pub scheduling: String,
     pub deployment_count: usize,
     pub message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceSummary {
+    pub name: String,
+    pub deployment_name: String,
+    pub listen_addr: String,
+    pub target_port: Option<u16>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ServiceDescription {
+    pub name: String,
+    pub deployment_name: String,
+    pub listen_addr: String,
+    pub target_port: Option<u16>,
+    pub status: String,
+    pub message: Option<String>,
+    pub current_node_name: Option<String>,
+    pub current_upstream: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

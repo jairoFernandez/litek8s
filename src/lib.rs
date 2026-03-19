@@ -7,4 +7,5 @@ pub mod protocol;
 pub mod proxy;
 pub mod reconciler;
 pub mod runtime;
+pub mod service;
 pub mod store;

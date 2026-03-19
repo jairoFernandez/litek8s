@@ -52,11 +52,13 @@ Examples:
 const GET_AFTER_HELP: &str = "\
 Examples:
   litek8s get deployments
+  litek8s get services
   litek8s get nodes";
 
 const DESCRIBE_AFTER_HELP: &str = "\
 Examples:
   litek8s describe deployment demo-nginx
+  litek8s describe service echo-svc
   litek8s describe deployments demo-nginx";
 
 const LOGS_AFTER_HELP: &str = "\
@@ -80,6 +82,7 @@ Examples:
 const DELETE_AFTER_HELP: &str = "\
 Examples:
   litek8s delete deployment demo-nginx
+  litek8s delete service echo-svc
   litek8s delete -f examples/nginx.yaml";
 
 const NODE_AFTER_HELP: &str = "\
@@ -90,6 +93,13 @@ Examples:
   litek8s node cordon server77
   litek8s node uncordon server77
   litek8s node add edge-1 --ssh ubuntu@10.0.0.7 --remote-binary ~/.local/bin/litek8s";
+
+const SERVICE_AFTER_HELP: &str = "\
+Examples:
+  litek8s service add echo-svc --deployment echo-demo --listen 127.0.0.1:9100
+  litek8s service add edge-svc --deployment echo-edge --listen 127.0.0.1:9102
+  litek8s get services
+  litek8s describe service echo-svc";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -144,7 +154,9 @@ enum Command {
         after_help = GET_AFTER_HELP
     )]
     Get {
-        #[arg(help = "Resource type, currently `deployment`, `deployments`, `node`, or `nodes`")]
+        #[arg(
+            help = "Resource type, currently `deployment`, `deployments`, `service`, `services`, `node`, or `nodes`"
+        )]
         resource: String,
     },
     #[command(
@@ -153,7 +165,9 @@ enum Command {
         after_help = DESCRIBE_AFTER_HELP
     )]
     Describe {
-        #[arg(help = "Resource type, currently `deployment`, `deployments`, `node`, or `nodes`")]
+        #[arg(
+            help = "Resource type, currently `deployment`, `deployments`, `service`, `services`, `node`, or `nodes`"
+        )]
         resource: String,
         #[arg(help = "Deployment name")]
         name: String,
@@ -231,6 +245,15 @@ enum Command {
         command: NodeCommand,
     },
     #[command(
+        about = "Manage stable local service listeners backed by deployments",
+        help_template = HELP_TEMPLATE,
+        after_help = SERVICE_AFTER_HELP
+    )]
+    Service {
+        #[command(subcommand)]
+        command: ServiceCommand,
+    },
+    #[command(
         about = "Delete a deployment by name or manifest",
         help_template = HELP_TEMPLATE,
         after_help = DELETE_AFTER_HELP
@@ -244,7 +267,7 @@ enum Command {
         file: Option<PathBuf>,
         #[arg(help = "Resource type when deleting by name")]
         resource: Option<String>,
-        #[arg(help = "Deployment name when deleting by name")]
+        #[arg(help = "Resource name when deleting by name")]
         name: Option<String>,
     },
     #[command(hide = true)]
@@ -289,6 +312,28 @@ enum NodeCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum ServiceCommand {
+    #[command(about = "Create or update a local service listener")]
+    Add {
+        #[arg(help = "Logical service name")]
+        name: String,
+        #[arg(long, help = "Target deployment name")]
+        deployment: String,
+        #[arg(
+            long,
+            default_value = "127.0.0.1:9100",
+            help = "Local listen address for the service"
+        )]
+        listen: String,
+        #[arg(
+            long,
+            help = "Select a specific published deployment port by containerPort or hostPort"
+        )]
+        port: Option<u16>,
+    },
+}
+
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
     let socket_path = cli.socket_path.unwrap_or_else(config::default_socket_path);
@@ -319,9 +364,22 @@ pub async fn run() -> Result<()> {
                 "deployment" | "deployments" => {
                     protocol::request(&socket_path, Request::GetDeployments).await?
                 }
+                "service" | "services" => {
+                    protocol::request(&socket_path, Request::GetServices).await?
+                }
                 "node" | "nodes" => protocol::request(&socket_path, Request::GetNodes).await?,
                 _ => {
-                    ensure_resource(&resource, &["deployment", "deployments", "node", "nodes"])?;
+                    ensure_resource(
+                        &resource,
+                        &[
+                            "deployment",
+                            "deployments",
+                            "service",
+                            "services",
+                            "node",
+                            "nodes",
+                        ],
+                    )?;
                     unreachable!()
                 }
             };
@@ -332,11 +390,24 @@ pub async fn run() -> Result<()> {
                 "deployment" | "deployments" => {
                     protocol::request(&socket_path, Request::DescribeDeployment { name }).await?
                 }
+                "service" | "services" => {
+                    protocol::request(&socket_path, Request::DescribeService { name }).await?
+                }
                 "node" | "nodes" => {
                     protocol::request(&socket_path, Request::DescribeNode { name }).await?
                 }
                 _ => {
-                    ensure_resource(&resource, &["deployment", "deployments", "node", "nodes"])?;
+                    ensure_resource(
+                        &resource,
+                        &[
+                            "deployment",
+                            "deployments",
+                            "service",
+                            "services",
+                            "node",
+                            "nodes",
+                        ],
+                    )?;
                     unreachable!()
                 }
             };
@@ -430,6 +501,26 @@ pub async fn run() -> Result<()> {
                 print_response(response)
             }
         },
+        Command::Service { command } => match command {
+            ServiceCommand::Add {
+                name,
+                deployment,
+                listen,
+                port,
+            } => {
+                let response = protocol::request(
+                    &socket_path,
+                    Request::AddService {
+                        name,
+                        deployment_name: deployment,
+                        listen_addr: listen,
+                        target_port: port,
+                    },
+                )
+                .await?;
+                print_response(response)
+            }
+        },
         Command::Delete {
             file,
             resource,
@@ -441,9 +532,16 @@ pub async fn run() -> Result<()> {
                 }
             } else {
                 let resource = resource.context("resource is required when -f is not used")?;
-                ensure_resource(&resource, &["deployment", "deployments"])?;
+                ensure_resource(
+                    &resource,
+                    &["deployment", "deployments", "service", "services"],
+                )?;
                 let name = name.context("deployment name is required")?;
-                Request::DeleteDeployment { name }
+                match resource.as_str() {
+                    "deployment" | "deployments" => Request::DeleteDeployment { name },
+                    "service" | "services" => Request::DeleteService { name },
+                    _ => unreachable!(),
+                }
             };
 
             let response = protocol::request(&socket_path, request).await?;
@@ -525,6 +623,40 @@ fn print_response(response: Response) -> Result<()> {
                     status_cell(&item.status, 12),
                     left_cell(&truncate(&item.image, 24), 24),
                     item.container_id.unwrap_or_else(|| "-".to_string())
+                );
+            }
+            Ok(())
+        }
+        Response::Services { items } => {
+            let total = items.len();
+            println!(
+                "{} {}",
+                title("Managed Services"),
+                muted(&format!("({total} total)"))
+            );
+            println!();
+            println!(
+                "{} {} {} {} {}",
+                header_left("NAME", 18),
+                header_left("DEPLOYMENT", 24),
+                header_left("LISTEN", 22),
+                header_left("PORT", 8),
+                label("STATUS")
+            );
+            for item in items {
+                println!(
+                    "{} {} {} {} {}",
+                    left_cell(&item.name, 18),
+                    left_cell(&truncate(&item.deployment_name, 24), 24),
+                    left_cell(&truncate(&item.listen_addr, 22), 22),
+                    left_cell(
+                        &item
+                            .target_port
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| "auto".to_string()),
+                        8,
+                    ),
+                    status_cell(&item.status, 10)
                 );
             }
             Ok(())
@@ -616,6 +748,30 @@ fn print_response(response: Response) -> Result<()> {
                 &format_retry_countdown(item.next_retry_in_secs),
             );
             print_detail("ports", &ports);
+            Ok(())
+        }
+        Response::ServiceDescription { item } => {
+            println!("{}", title(&format!("Service {}", item.name)));
+            println!("{}", muted("stable local listener backed by a deployment"));
+            println!();
+            print_detail("deployment", &item.deployment_name);
+            print_detail("listen", &item.listen_addr);
+            print_detail(
+                "target port",
+                &item
+                    .target_port
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "auto".to_string()),
+            );
+            print_detail("status", &color_status(&item.status));
+            print_detail(
+                "current node",
+                item.current_node_name.as_deref().unwrap_or("-"),
+            );
+            print_detail("upstream", item.current_upstream.as_deref().unwrap_or("-"));
+            if let Some(message) = item.message {
+                print_detail("message", &message);
+            }
             Ok(())
         }
         Response::NodeDescription { item } => {
@@ -932,9 +1088,9 @@ fn muted(text: &str) -> String {
 
 fn color_status(status: &str) -> String {
     match status {
-        "Running" | "Ready" | "Normal" => paint(status, "1;92"),
-        "Pending" | "Restarting" | "Warning" | "Cordoned" => paint(status, "1;93"),
-        "Failed" | "Deleted" | "Offline" => paint(status, "1;91"),
+        "Running" | "Ready" | "Normal" | "Listening" | "Schedulable" => paint(status, "1;92"),
+        "Pending" | "Restarting" | "Warning" | "Cordoned" | "Starting" => paint(status, "1;93"),
+        "Failed" | "Deleted" | "Offline" | "Error" => paint(status, "1;91"),
         _ => status.to_string(),
     }
 }
@@ -942,9 +1098,9 @@ fn color_status(status: &str) -> String {
 fn status_cell(status: &str, width: usize) -> String {
     let padded = left_cell(status, width);
     match status {
-        "Running" | "Ready" | "Normal" => paint(&padded, "1;92"),
-        "Pending" | "Restarting" | "Warning" | "Cordoned" => paint(&padded, "1;93"),
-        "Failed" | "Deleted" | "Offline" => paint(&padded, "1;91"),
+        "Running" | "Ready" | "Normal" | "Listening" | "Schedulable" => paint(&padded, "1;92"),
+        "Pending" | "Restarting" | "Warning" | "Cordoned" | "Starting" => paint(&padded, "1;93"),
+        "Failed" | "Deleted" | "Offline" | "Error" => paint(&padded, "1;91"),
         _ => padded,
     }
 }

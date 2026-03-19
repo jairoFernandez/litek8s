@@ -17,15 +17,18 @@ use crate::node::{
 };
 use crate::protocol::{
     DaemonTopSummary, DeploymentDescription, DeploymentSummary, DeploymentTopRow, EventItem,
-    NodeDescription, NodeSummary, ProxyTarget as ProxyTargetInfo, Request, Response, read_message,
-    send_message,
+    NodeDescription, NodeSummary, ProxyTarget as ProxyTargetInfo, Request, Response,
+    ServiceDescription, ServiceSummary, read_message, send_message,
 };
 use crate::reconciler;
 use crate::runtime::docker::{
     ContainerMetrics, ContainerStatsSnapshot, DockerRuntime, compute_cpu_percent_from_samples,
     deployment_container_name,
 };
-use crate::store::{ApplyOutcome, EventLevel, EventQuery, NewEvent, NodeApplyOutcome, Store};
+use crate::service::ServiceManager;
+use crate::store::{
+    ApplyOutcome, EventLevel, EventQuery, NewEvent, NodeApplyOutcome, ServiceApplyOutcome, Store,
+};
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -54,6 +57,7 @@ struct AppState {
     cleanup_orphans: bool,
     daemon_metrics: Arc<Mutex<DaemonMetricsSampler>>,
     top_metrics: Arc<Mutex<TopMetricsSampler>>,
+    service_manager: Arc<Mutex<ServiceManager>>,
 }
 
 pub async fn serve(config: ServerConfig) -> Result<()> {
@@ -80,9 +84,11 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         cleanup_orphans: config.cleanup_orphans,
         daemon_metrics: Arc::new(Mutex::new(DaemonMetricsSampler::new())),
         top_metrics: Arc::new(Mutex::new(TopMetricsSampler::new())),
+        service_manager: Arc::new(Mutex::new(ServiceManager::new())),
     };
     let app_state = Arc::new(app_state);
     app_state.reconcile_all().await?;
+    app_state.sync_services().await?;
 
     let listener = UnixListener::bind(&config.socket_path).with_context(|| {
         format!(
@@ -264,6 +270,102 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             delete_deployment(state, manifest.deployment_name()).await
         }
         Request::DeleteDeployment { name } => delete_deployment(state, &name).await,
+        Request::AddService {
+            name,
+            deployment_name,
+            listen_addr,
+            target_port,
+        } => {
+            let deployment = state
+                .store
+                .get(&deployment_name)
+                .await
+                .with_context(|| format!("deployment `{deployment_name}` was not found"))?;
+            let _ = deployment.manifest.proxy_port(target_port)?;
+
+            let existing = state.store.get_service(&name).await;
+            let needs_bind_probe = existing
+                .as_ref()
+                .map(|service| service.listen_addr != listen_addr)
+                .unwrap_or(true);
+            if needs_bind_probe {
+                let _probe = tokio::net::TcpListener::bind(&listen_addr)
+                    .await
+                    .with_context(|| {
+                        format!("failed to bind service listen address {listen_addr}")
+                    })?;
+            }
+
+            let outcome = state
+                .store
+                .upsert_service(
+                    name.clone(),
+                    deployment_name.clone(),
+                    listen_addr.clone(),
+                    target_port,
+                )
+                .await?;
+            state.sync_services().await?;
+            state
+                .record_event(NewEvent {
+                    level: EventLevel::Normal,
+                    reason: match outcome {
+                        ServiceApplyOutcome::Created => "ServiceAdded".to_string(),
+                        ServiceApplyOutcome::Configured => "ServiceUpdated".to_string(),
+                    },
+                    object_kind: "service".to_string(),
+                    object_name: name.clone(),
+                    node_name: None,
+                    message: format!(
+                        "service listens on {listen_addr} and forwards to deployment `{deployment_name}`"
+                    ),
+                })
+                .await?;
+            Ok(Response::Ack {
+                message: match outcome {
+                    ServiceApplyOutcome::Created => format!("service/{name} created"),
+                    ServiceApplyOutcome::Configured => format!("service/{name} configured"),
+                },
+            })
+        }
+        Request::DeleteService { name } => {
+            let removed = state.store.remove_service(&name).await?;
+            if removed.is_none() {
+                bail!("service `{name}` was not found");
+            }
+            state.sync_services().await?;
+            state
+                .record_event(NewEvent {
+                    level: EventLevel::Normal,
+                    reason: "ServiceDeleted".to_string(),
+                    object_kind: "service".to_string(),
+                    object_name: name.clone(),
+                    node_name: None,
+                    message: "service listener removed from the control plane".to_string(),
+                })
+                .await?;
+            Ok(Response::Ack {
+                message: format!("service/{name} deleted"),
+            })
+        }
+        Request::GetServices => {
+            let services = state.store.list_services().await;
+            let statuses = state.service_manager.lock().await.statuses().await;
+            let items = services
+                .into_iter()
+                .map(|service| ServiceSummary {
+                    name: service.name.clone(),
+                    deployment_name: service.deployment_name.clone(),
+                    listen_addr: service.listen_addr.clone(),
+                    target_port: service.target_port,
+                    status: statuses
+                        .get(&service.name)
+                        .map(|status| status.status.clone())
+                        .unwrap_or_else(|| "Stopped".to_string()),
+                })
+                .collect();
+            Ok(Response::Services { items })
+        }
         Request::GetNodes => {
             let nodes = state.store.list_nodes().await;
             let deployments = state.store.list().await;
@@ -377,6 +479,39 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             };
 
             Ok(Response::Description { item })
+        }
+        Request::DescribeService { name } => {
+            let service = state
+                .store
+                .get_service(&name)
+                .await
+                .with_context(|| format!("service `{name}` was not found"))?;
+            let runtime_status = state.service_manager.lock().await.status_for(&name).await;
+            let deployment = state.store.get(&service.deployment_name).await;
+            let current_node_name = deployment.as_ref().map(|entry| entry.assigned_node.clone());
+            let current_upstream = deployment
+                .as_ref()
+                .and_then(|entry| entry.manifest.proxy_port(service.target_port).ok())
+                .and_then(|port| {
+                    port.host_port
+                        .map(|host_port| format!("127.0.0.1:{host_port}"))
+                });
+
+            Ok(Response::ServiceDescription {
+                item: ServiceDescription {
+                    name: service.name,
+                    deployment_name: service.deployment_name,
+                    listen_addr: service.listen_addr,
+                    target_port: service.target_port,
+                    status: runtime_status
+                        .as_ref()
+                        .map(|status| status.status.clone())
+                        .unwrap_or_else(|| "Stopped".to_string()),
+                    message: runtime_status.and_then(|status| status.message),
+                    current_node_name,
+                    current_upstream,
+                },
+            })
         }
         Request::DescribeNode { name } => {
             let node = state
@@ -588,6 +723,14 @@ impl AppState {
     async fn record_event(&self, event: NewEvent) -> Result<()> {
         self.store.record_event(event).await?;
         Ok(())
+    }
+
+    async fn sync_services(&self) -> Result<()> {
+        self.service_manager
+            .lock()
+            .await
+            .sync(self.store.clone())
+            .await
     }
 }
 

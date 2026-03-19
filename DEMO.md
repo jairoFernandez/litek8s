@@ -196,6 +196,37 @@ This proxy is intentionally simple:
 - remote SSH nodes are reached through an `ssh -W` tunnel per connection
 - it is TCP-level forwarding, so it also works for simple non-HTTP TCP demos
 
+Daemon-managed service:
+
+```bash
+cd "/Users/civojairo/Documents/New project/litek8s-demo"
+cargo run -- service add echo-svc --deployment echo-demo --listen 127.0.0.1:9100
+cargo run -- get services
+cargo run -- describe service echo-svc
+```
+
+Then:
+
+```bash
+curl http://127.0.0.1:9100
+```
+
+For the remote edge deployment:
+
+```bash
+cd "/Users/civojairo/Documents/New project/litek8s-demo"
+cargo run -- service add edge-svc --deployment echo-edge --listen 127.0.0.1:9102
+cargo run -- describe service edge-svc
+curl http://127.0.0.1:9102
+```
+
+This `service` layer is intentionally small:
+
+- it is configured by CLI, not by a full Service manifest yet
+- the daemon owns the listener, so it survives after the CLI command exits
+- each incoming connection resolves the deployment's current node and published port
+- it gives you a stable local entrypoint without adding kube-proxy or an ingress stack
+
 ## 6. Suggested demo script
 
 If you want a short verbal flow while presenting:
@@ -205,8 +236,9 @@ If you want a short verbal flow while presenting:
 3. Apply `echo-edge` and show that scheduling happens through node labels, not just hard-coded node names.
 4. Open `top --watch` and point out daemon overhead, workload CPU pressure, and the `oom-demo` backoff loop.
 5. Open `events --node server77 --watch` or `events --deployment echo-edge` and show that the control plane is emitting readable lifecycle events without `oom-demo` noise.
-6. Run `proxy echo-edge --listen 127.0.0.1:9002` and `curl http://127.0.0.1:9002` to show that you can reach a remote workload without a Service or ingress stack.
-7. Finish with `describe deployment echo-edge` and `describe deployment oom-demo` to connect scheduling and resource limits.
+6. Run `proxy echo-edge --listen 127.0.0.1:9002` and `curl http://127.0.0.1:9002` to show raw remote access without a Service or ingress stack.
+7. Run `service add edge-svc --deployment echo-edge --listen 127.0.0.1:9102` and `curl http://127.0.0.1:9102` to show the next level up: a stable entrypoint owned by the daemon.
+8. Finish with `describe deployment echo-edge`, `describe service edge-svc`, and `describe deployment oom-demo` to connect scheduling, access, and resource limits.
 
 ## 7. Cleanup
 

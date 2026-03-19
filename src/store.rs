@@ -45,9 +45,20 @@ pub struct StoredDeployment {
     pub updated_at: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StoredService {
+    pub name: String,
+    pub deployment_name: String,
+    pub listen_addr: String,
+    pub target_port: Option<u16>,
+    pub updated_at: u64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StateFile {
     pub deployments: BTreeMap<String, StoredDeployment>,
+    #[serde(default)]
+    pub services: BTreeMap<String, StoredService>,
     #[serde(default)]
     pub nodes: BTreeMap<String, ClusterNode>,
     #[serde(default)]
@@ -64,6 +75,12 @@ pub enum ApplyOutcome {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeApplyOutcome {
+    Created,
+    Configured,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ServiceApplyOutcome {
     Created,
     Configured,
 }
@@ -226,6 +243,54 @@ impl Store {
     pub async fn names(&self) -> Vec<String> {
         let guard = self.state.read().await;
         guard.deployments.keys().cloned().collect()
+    }
+
+    pub async fn upsert_service(
+        &self,
+        name: String,
+        deployment_name: String,
+        listen_addr: String,
+        target_port: Option<u16>,
+    ) -> Result<ServiceApplyOutcome> {
+        let mut guard = self.state.write().await;
+        let outcome = if guard.services.contains_key(&name) {
+            ServiceApplyOutcome::Configured
+        } else {
+            ServiceApplyOutcome::Created
+        };
+        guard.services.insert(
+            name.clone(),
+            StoredService {
+                name,
+                deployment_name,
+                listen_addr,
+                target_port,
+                updated_at: now_unix(),
+            },
+        );
+        let snapshot = guard.clone();
+        drop(guard);
+        self.persist(&snapshot).await?;
+        Ok(outcome)
+    }
+
+    pub async fn remove_service(&self, name: &str) -> Result<Option<StoredService>> {
+        let mut guard = self.state.write().await;
+        let removed = guard.services.remove(name);
+        let snapshot = guard.clone();
+        drop(guard);
+        self.persist(&snapshot).await?;
+        Ok(removed)
+    }
+
+    pub async fn get_service(&self, name: &str) -> Option<StoredService> {
+        let guard = self.state.read().await;
+        guard.services.get(name).cloned()
+    }
+
+    pub async fn list_services(&self) -> Vec<StoredService> {
+        let guard = self.state.read().await;
+        guard.services.values().cloned().collect()
     }
 
     pub async fn upsert_node(&self, node: ClusterNode) -> Result<NodeApplyOutcome> {
