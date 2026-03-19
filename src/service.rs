@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -9,7 +9,7 @@ use tokio::task::JoinHandle;
 use crate::node::NodeTransport;
 use crate::protocol::ProxyTarget;
 use crate::proxy;
-use crate::store::{Store, StoredService};
+use crate::store::{Store, StoredDeployment, StoredService};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceStatusSnapshot {
@@ -161,11 +161,8 @@ fn spawn_service_task(
     })
 }
 
-async fn resolve_service_target(store: &Store, service: &StoredService) -> Result<ProxyTarget> {
-    let deployment = store
-        .get(&service.deployment_name)
-        .await
-        .with_context(|| format!("deployment `{}` was not found", service.deployment_name))?;
+pub async fn resolve_service_target(store: &Store, service: &StoredService) -> Result<ProxyTarget> {
+    let deployment = resolve_backing_deployment(store, service).await?;
     let selected_port = deployment.manifest.proxy_port(service.target_port)?;
     let host_port = selected_port
         .host_port
@@ -190,15 +187,55 @@ async fn resolve_service_target(store: &Store, service: &StoredService) -> Resul
     })
 }
 
+pub async fn resolve_backing_deployment(
+    store: &Store,
+    service: &StoredService,
+) -> Result<StoredDeployment> {
+    if !service.deployment_name.is_empty() {
+        return store
+            .get(&service.deployment_name)
+            .await
+            .with_context(|| format!("deployment `{}` was not found", service.deployment_name));
+    }
+
+    let matches: Vec<StoredDeployment> = store
+        .list()
+        .await
+        .into_iter()
+        .filter(|deployment| deployment.manifest.matches_labels(&service.selector))
+        .collect();
+
+    match matches.as_slice() {
+        [] => Err(anyhow::anyhow!(
+            "no deployment matches selector `{}`",
+            format_selector(&service.selector)
+        )),
+        [deployment] => Ok(deployment.clone()),
+        _ => Err(anyhow::anyhow!(
+            "selector `{}` matches multiple deployments; service load-balancing is not implemented in v1",
+            format_selector(&service.selector)
+        )),
+    }
+}
+
 fn service_spec_key(service: &StoredService) -> String {
     format!(
-        "{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}",
         service.name,
         service.deployment_name,
+        format_selector(&service.selector),
         service.listen_addr,
         service
             .target_port
             .map(|value| value.to_string())
             .unwrap_or_else(|| "-".to_string())
     )
+}
+
+fn format_selector(selector: &BTreeMap<String, String>) -> String {
+    selector
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join(",")
 }

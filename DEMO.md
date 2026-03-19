@@ -222,10 +222,52 @@ curl http://127.0.0.1:9102
 
 This `service` layer is intentionally small:
 
-- it is configured by CLI, not by a full Service manifest yet
+- it can be configured by CLI or by a small declarative `Service` manifest
 - the daemon owns the listener, so it survives after the CLI command exits
 - each incoming connection resolves the deployment's current node and published port
 - it gives you a stable local entrypoint without adding kube-proxy or an ingress stack
+- the selector must resolve to exactly one deployment in v1; there is no built-in service load balancing yet
+
+Declarative service YAML:
+
+```bash
+cd "/Users/civojairo/Documents/New project/litek8s-demo"
+cargo run -- apply -f examples/http-echo-service.yaml
+cargo run -- get services
+cargo run -- describe service echo-svc
+curl http://127.0.0.1:9100
+```
+
+And for the remote edge deployment:
+
+```bash
+cd "/Users/civojairo/Documents/New project/litek8s-demo"
+cargo run -- apply -f examples/http-echo-edge-service.yaml
+cargo run -- describe service edge-svc
+curl http://127.0.0.1:9102
+```
+
+The preferred declarative shape is intentionally tiny and k8s-like:
+
+```yaml
+apiVersion: litek8s.dev/v1alpha1
+kind: Service
+metadata:
+  name: edge-svc
+spec:
+  selector:
+    app: echo-edge
+  ports:
+    - port: 9102
+      targetPort: 5678
+```
+
+What this means:
+
+- `selector` matches a deployment by labels such as `metadata.labels.app: echo-edge`
+- `port` becomes the stable local listener, here `127.0.0.1:9102`
+- `targetPort` is optional; if omitted, `litek8s` uses the deployment's published TCP port
+- the older `deploymentName` + `listenAddr` form still works, but `selector` + `ports` is the preferred demo path now
 
 ## 6. Suggested demo script
 
@@ -237,7 +279,7 @@ If you want a short verbal flow while presenting:
 4. Open `top --watch` and point out daemon overhead, workload CPU pressure, and the `oom-demo` backoff loop.
 5. Open `events --node server77 --watch` or `events --deployment echo-edge` and show that the control plane is emitting readable lifecycle events without `oom-demo` noise.
 6. Run `proxy echo-edge --listen 127.0.0.1:9002` and `curl http://127.0.0.1:9002` to show raw remote access without a Service or ingress stack.
-7. Run `service add edge-svc --deployment echo-edge --listen 127.0.0.1:9102` and `curl http://127.0.0.1:9102` to show the next level up: a stable entrypoint owned by the daemon.
+7. Run `apply -f examples/http-echo-edge-service.yaml` and `curl http://127.0.0.1:9102` to show the next level up: a declarative stable entrypoint owned by the daemon and selected by labels.
 8. Finish with `describe deployment echo-edge`, `describe service edge-svc`, and `describe deployment oom-demo` to connect scheduling, access, and resource limits.
 
 ## 7. Cleanup

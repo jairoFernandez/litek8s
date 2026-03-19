@@ -2,6 +2,8 @@ apiVersion: litek8s.dev/v1alpha1
 kind: Deployment
 metadata:
   name: echo-demo
+  labels:
+    app: echo-demo
 spec:
   replicas: 1
   template:

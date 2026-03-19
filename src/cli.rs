@@ -41,6 +41,7 @@ Examples:
 const APPLY_AFTER_HELP: &str = "\
 Examples:
   litek8s apply -f examples/nginx.yaml
+  litek8s apply -f examples/http-echo-service.yaml
   litek8s apply -f ./my-app.yaml";
 
 const TOP_AFTER_HELP: &str = "\
@@ -83,6 +84,7 @@ const DELETE_AFTER_HELP: &str = "\
 Examples:
   litek8s delete deployment demo-nginx
   litek8s delete service echo-svc
+  litek8s delete -f examples/http-echo-service.yaml
   litek8s delete -f examples/nginx.yaml";
 
 const NODE_AFTER_HELP: &str = "\
@@ -140,7 +142,7 @@ enum Command {
         poll_interval_secs: u64,
     },
     #[command(
-        about = "Apply a reduced Deployment manifest",
+        about = "Apply a reduced Deployment or Service manifest",
         help_template = HELP_TEMPLATE,
         after_help = APPLY_AFTER_HELP
     )]
@@ -169,7 +171,7 @@ enum Command {
             help = "Resource type, currently `deployment`, `deployments`, `service`, `services`, `node`, or `nodes`"
         )]
         resource: String,
-        #[arg(help = "Deployment name")]
+        #[arg(help = "Resource name")]
         name: String,
     },
     #[command(
@@ -254,7 +256,7 @@ enum Command {
         command: ServiceCommand,
     },
     #[command(
-        about = "Delete a deployment by name or manifest",
+        about = "Delete a deployment or service by name or manifest",
         help_template = HELP_TEMPLATE,
         after_help = DELETE_AFTER_HELP
     )]
@@ -262,7 +264,7 @@ enum Command {
         #[arg(
             short = 'f',
             long,
-            help = "Delete the deployment defined in this manifest"
+            help = "Delete the resource defined in this manifest"
         )]
         file: Option<PathBuf>,
         #[arg(help = "Resource type when deleting by name")]

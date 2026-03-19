@@ -48,7 +48,10 @@ pub struct StoredDeployment {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredService {
     pub name: String,
+    #[serde(default)]
     pub deployment_name: String,
+    #[serde(default)]
+    pub selector: BTreeMap<String, String>,
     pub listen_addr: String,
     pub target_port: Option<u16>,
     pub updated_at: u64,
@@ -249,6 +252,7 @@ impl Store {
         &self,
         name: String,
         deployment_name: String,
+        selector: BTreeMap<String, String>,
         listen_addr: String,
         target_port: Option<u16>,
     ) -> Result<ServiceApplyOutcome> {
@@ -263,6 +267,7 @@ impl Store {
             StoredService {
                 name,
                 deployment_name,
+                selector,
                 listen_addr,
                 target_port,
                 updated_at: now_unix(),

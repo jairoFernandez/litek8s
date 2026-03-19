@@ -2,6 +2,8 @@ apiVersion: litek8s.dev/v1alpha1
 kind: Deployment
 metadata:
   name: echo-server77
+  labels:
+    app: echo-server77
 spec:
   replicas: 1
   template:

@@ -1,0 +1,10 @@
+apiVersion: litek8s.dev/v1alpha1
+kind: Service
+metadata:
+  name: echo-svc
+spec:
+  selector:
+    app: echo-demo
+  ports:
+    - port: 9100
+      targetPort: 5678

@@ -1,12 +1,13 @@
 # litek8s
 
-`litek8s` is a single-node, Docker-backed orchestrator demo written in Rust. It keeps the UX close to `kubectl` while staying intentionally small: one binary, a local daemon over a Unix socket, a strict reduced `Deployment` manifest, and a reconciler that recreates containers if they disappear.
+`litek8s` is a Docker-backed orchestrator demo written in Rust. It keeps the UX close to `kubectl` while staying intentionally small: one binary, a local daemon over a Unix socket, a strict reduced `Deployment` manifest, SSH-backed remote nodes, and a reconciler that recreates containers if they disappear.
 
 ## Commands
 
 ```bash
 cargo run -- serve
 cargo run -- apply -f examples/nginx.yaml
+cargo run -- apply -f examples/http-echo-service.yaml
 cargo run -- get deployments
 cargo run -- describe deployment demo-nginx
 cargo run -- logs demo-nginx
@@ -28,6 +29,7 @@ cargo run -- delete deployment demo-nginx
 `events` can also filter by deployment or node so noisy workloads do not drown the rest of the stream.
 `proxy` opens a local TCP listener and forwards into the deployment's published `hostPort`, using SSH tunneling automatically when the workload is on a remote node.
 `service add` creates a daemon-managed local listener with a stable address, so you do not need to keep a foreground `proxy` process open.
+The same service can also be declared as YAML with a small selector-based `Service` manifest and applied with `litek8s apply -f ...`.
 
 ## Firepack
 
@@ -50,7 +52,8 @@ target/debug/litek8s top --watch --interval-secs 1
 target/debug/litek8s logs logstorm --tail 20
 target/debug/litek8s describe deployment oom-demo
 target/debug/litek8s proxy echo-demo --listen 127.0.0.1:9000
-target/debug/litek8s service add echo-svc --deployment echo-demo --listen 127.0.0.1:9100
+target/debug/litek8s apply -f examples/http-echo-service.yaml
+target/debug/litek8s apply -f examples/http-echo-edge-service.yaml
 ```
 
 To clean up:
@@ -65,22 +68,9 @@ cargo run -- delete deployment oom-demo
 
 ## Remote node demo
 
-`litek8s` can also place a deployment on another machine over `ssh`. In this v1, the remote machine must already have the same `litek8s` binary available.
+`litek8s` can also place a deployment on another machine over `ssh`. The simplest path is `node add --install`, which detects the remote platform, builds a compatible binary, copies it over SSH, and registers the node.
 
-1. Build the binary locally:
-
-```bash
-cargo build
-```
-
-2. Copy it to the remote machine and make it executable:
-
-```bash
-scp target/debug/litek8s server77:~/.local/bin/litek8s
-ssh server77 chmod +x ~/.local/bin/litek8s
-```
-
-3. Register the node in the local control plane:
+1. Register the node in the local control plane:
 
 ```bash
 cargo run -- node add server77 --ssh server77 --install --label role=edge --label zone=lab
@@ -91,18 +81,20 @@ cargo run -- node uncordon server77
 
 If you already copied the correct binary manually, `--install` is optional.
 
-4. Apply a manifest that targets that node:
+2. Apply manifests that target that node:
 
 ```bash
 cargo run -- apply -f examples/http-echo-server77.yaml
 cargo run -- apply -f examples/http-echo-edge.yaml
+cargo run -- apply -f examples/http-echo-edge-service.yaml
 cargo run -- get deployments
 cargo run -- describe deployment echo-server77
 cargo run -- describe deployment echo-edge
+cargo run -- get services
+cargo run -- describe service edge-svc
 cargo run -- events --node server77 --watch
 cargo run -- events --deployment echo-edge
 cargo run -- proxy echo-edge --listen 127.0.0.1:9002
-cargo run -- service add edge-svc --deployment echo-edge --listen 127.0.0.1:9102
 cargo run -- top --watch
 ```
 
@@ -115,6 +107,7 @@ The remote examples cover both scheduling paths:
 `get nodes` and `describe node` also show whether a node is `Schedulable` or `Cordoned`, which makes it easy to demo controlled placement.
 `proxy` is useful when the remote node is only reachable over SSH or when you want one stable local URL during the demo.
 `service` is the next step up: the daemon owns the listener, keeps it alive across CLI exits, and forwards each connection to the deployment's current node and published port.
+The declarative subset is intentionally small: `kind: Service`, `spec.selector`, and one TCP entry in `spec.ports`. The daemon resolves the selector to exactly one deployment in v1; built-in load balancing is not implemented yet. The older `deploymentName` + `listenAddr` + `targetPort` shape still works for compatibility.
 
 ## Manifest shape
 
@@ -126,10 +119,21 @@ The supported manifest is deliberately narrow:
 - exactly one container
 - `restartPolicy: Always`
 - optional `nodeName` and `nodeSelector` in `spec.template.spec`
+- optional `metadata.labels` for service selection
 - optional `command`, `args`, `env`, `ports`, and `resources.limits`
 - supported limits are `cpu` and `memory` with k8s-style strings such as `500m` and `128Mi`
+
+The supported `Service` subset is also deliberately narrow:
+
+- `apiVersion: litek8s.dev/v1alpha1`
+- `kind: Service`
+- `spec.selector` must match exactly one deployment
+- `spec.ports` must contain exactly one TCP port
+- `spec.ports[0].port` becomes the local listener port on `127.0.0.1`
+- optional `spec.ports[0].targetPort` overrides the deployment's published container port
 
 ## Notes
 
 - The daemon uses the local Docker socket directly and supports Linux plus macOS setups such as OrbStack and Docker Desktop.
-- No multi-node support, overlay networking, services, volumes, secrets, or rollouts are included in v1.
+- Remote nodes are reached over `ssh` and execute the same `litek8s` agent binary against their local Docker daemon.
+- No overlay networking, kube-proxy, load balancing, volumes, secrets, or rollouts are included in v1.

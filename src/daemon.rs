@@ -11,7 +11,10 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify};
 
 use crate::config;
-use crate::manifest::DeploymentManifest;
+use crate::manifest::{
+    API_VERSION, DeploymentManifest, KIND_SERVICE, Metadata, ParsedManifest, ServiceManifest,
+    ServiceSpec,
+};
 use crate::node::{
     ClusterNode, DEFAULT_REMOTE_BINARY, NodeClient, NodeTransport, select_node_for_manifest,
 };
@@ -25,7 +28,7 @@ use crate::runtime::docker::{
     ContainerMetrics, ContainerStatsSnapshot, DockerRuntime, compute_cpu_percent_from_samples,
     deployment_container_name,
 };
-use crate::service::ServiceManager;
+use crate::service::{ServiceManager, resolve_backing_deployment};
 use crate::store::{
     ApplyOutcome, EventLevel, EventQuery, NewEvent, NodeApplyOutcome, ServiceApplyOutcome, Store,
 };
@@ -142,45 +145,12 @@ async fn handle_connection(state: Arc<AppState>, mut stream: UnixStream) -> Resu
 
 async fn process_request(state: Arc<AppState>, request: Request) -> Result<Response> {
     match request {
-        Request::Apply { manifest } => {
-            let manifest = DeploymentManifest::parse(&manifest)?;
-            let name = manifest.deployment_name().to_string();
-            let current_assignment = state
-                .store
-                .get(&name)
-                .await
-                .map(|entry| entry.assigned_node);
-            let assigned_node = select_node_for_manifest(
-                &manifest,
-                &state.store.list_nodes().await,
-                current_assignment.as_deref(),
-            )?;
-            let outcome = state.store.upsert(manifest).await?;
-            let _ = state
-                .store
-                .set_assigned_node(&name, assigned_node.clone())
-                .await?;
-            state
-                .record_event(NewEvent {
-                    level: EventLevel::Normal,
-                    reason: match outcome {
-                        ApplyOutcome::Created => "Applied".to_string(),
-                        ApplyOutcome::Configured => "Configured".to_string(),
-                    },
-                    object_kind: "deployment".to_string(),
-                    object_name: name.clone(),
-                    node_name: Some(assigned_node),
-                    message: "deployment manifest accepted by the control plane".to_string(),
-                })
-                .await?;
-            state.reconcile_all().await?;
-
-            let message = match outcome {
-                ApplyOutcome::Created => format!("deployment.apps/{name} created"),
-                ApplyOutcome::Configured => format!("deployment.apps/{name} configured"),
-            };
-            Ok(Response::Ack { message })
-        }
+        Request::Apply { manifest } => match ParsedManifest::parse(&manifest)? {
+            ParsedManifest::Deployment(manifest) => {
+                apply_deployment_manifest(state, manifest).await
+            }
+            ParsedManifest::Service(manifest) => apply_service_manifest(state, manifest).await,
+        },
         Request::AddNode {
             name,
             ssh_target,
@@ -265,10 +235,14 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 },
             })
         }
-        Request::DeleteManifest { manifest } => {
-            let manifest = DeploymentManifest::parse(&manifest)?;
-            delete_deployment(state, manifest.deployment_name()).await
-        }
+        Request::DeleteManifest { manifest } => match ParsedManifest::parse(&manifest)? {
+            ParsedManifest::Deployment(manifest) => {
+                delete_deployment(state, manifest.deployment_name()).await
+            }
+            ParsedManifest::Service(manifest) => {
+                delete_service(state, manifest.service_name()).await
+            }
+        },
         Request::DeleteDeployment { name } => delete_deployment(state, &name).await,
         Request::AddService {
             name,
@@ -276,94 +250,57 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             listen_addr,
             target_port,
         } => {
-            let deployment = state
-                .store
-                .get(&deployment_name)
-                .await
-                .with_context(|| format!("deployment `{deployment_name}` was not found"))?;
-            let _ = deployment.manifest.proxy_port(target_port)?;
-
-            let existing = state.store.get_service(&name).await;
-            let needs_bind_probe = existing
-                .as_ref()
-                .map(|service| service.listen_addr != listen_addr)
-                .unwrap_or(true);
-            if needs_bind_probe {
-                let _probe = tokio::net::TcpListener::bind(&listen_addr)
-                    .await
-                    .with_context(|| {
-                        format!("failed to bind service listen address {listen_addr}")
-                    })?;
-            }
-
-            let outcome = state
-                .store
-                .upsert_service(
-                    name.clone(),
-                    deployment_name.clone(),
-                    listen_addr.clone(),
-                    target_port,
-                )
-                .await?;
-            state.sync_services().await?;
-            state
-                .record_event(NewEvent {
-                    level: EventLevel::Normal,
-                    reason: match outcome {
-                        ServiceApplyOutcome::Created => "ServiceAdded".to_string(),
-                        ServiceApplyOutcome::Configured => "ServiceUpdated".to_string(),
-                    },
-                    object_kind: "service".to_string(),
-                    object_name: name.clone(),
-                    node_name: None,
-                    message: format!(
-                        "service listens on {listen_addr} and forwards to deployment `{deployment_name}`"
-                    ),
-                })
-                .await?;
-            Ok(Response::Ack {
-                message: match outcome {
-                    ServiceApplyOutcome::Created => format!("service/{name} created"),
-                    ServiceApplyOutcome::Configured => format!("service/{name} configured"),
+            let manifest = ServiceManifest {
+                api_version: API_VERSION.to_string(),
+                kind: KIND_SERVICE.to_string(),
+                metadata: Metadata {
+                    name,
+                    labels: Default::default(),
                 },
-            })
-        }
-        Request::DeleteService { name } => {
-            let removed = state.store.remove_service(&name).await?;
-            if removed.is_none() {
-                bail!("service `{name}` was not found");
+                spec: ServiceSpec {
+                    deployment_name: Some(deployment_name),
+                    listen_addr: Some(listen_addr),
+                    target_port,
+                    selector: Default::default(),
+                    ports: Vec::new(),
+                },
             }
-            state.sync_services().await?;
-            state
-                .record_event(NewEvent {
-                    level: EventLevel::Normal,
-                    reason: "ServiceDeleted".to_string(),
-                    object_kind: "service".to_string(),
-                    object_name: name.clone(),
-                    node_name: None,
-                    message: "service listener removed from the control plane".to_string(),
-                })
-                .await?;
-            Ok(Response::Ack {
-                message: format!("service/{name} deleted"),
-            })
+            .validate()?;
+            apply_service_manifest(state, manifest).await
         }
+        Request::DeleteService { name } => delete_service(state, &name).await,
         Request::GetServices => {
             let services = state.store.list_services().await;
             let statuses = state.service_manager.lock().await.statuses().await;
-            let items = services
-                .into_iter()
-                .map(|service| ServiceSummary {
+            let mut items = Vec::with_capacity(services.len());
+            for service in services {
+                let resolved_name = match resolve_backing_deployment(&state.store, &service).await {
+                    Ok(deployment) => deployment.manifest.deployment_name().to_string(),
+                    Err(_) if !service.deployment_name.is_empty() => {
+                        service.deployment_name.clone()
+                    }
+                    Err(_) if !service.selector.is_empty() => format!(
+                        "selector:{}",
+                        service
+                            .selector
+                            .iter()
+                            .map(|(key, value)| format!("{key}={value}"))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    ),
+                    Err(_) => "-".to_string(),
+                };
+                items.push(ServiceSummary {
                     name: service.name.clone(),
-                    deployment_name: service.deployment_name.clone(),
+                    deployment_name: resolved_name,
                     listen_addr: service.listen_addr.clone(),
                     target_port: service.target_port,
                     status: statuses
                         .get(&service.name)
                         .map(|status| status.status.clone())
                         .unwrap_or_else(|| "Stopped".to_string()),
-                })
-                .collect();
+                });
+            }
             Ok(Response::Services { items })
         }
         Request::GetNodes => {
@@ -487,7 +424,9 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 .await
                 .with_context(|| format!("service `{name}` was not found"))?;
             let runtime_status = state.service_manager.lock().await.status_for(&name).await;
-            let deployment = state.store.get(&service.deployment_name).await;
+            let deployment = resolve_backing_deployment(&state.store, &service)
+                .await
+                .ok();
             let current_node_name = deployment.as_ref().map(|entry| entry.assigned_node.clone());
             let current_upstream = deployment
                 .as_ref()
@@ -496,18 +435,49 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                     port.host_port
                         .map(|host_port| format!("127.0.0.1:{host_port}"))
                 });
+            let deployment_name = deployment
+                .as_ref()
+                .map(|entry| entry.manifest.deployment_name().to_string())
+                .or_else(|| {
+                    if !service.deployment_name.is_empty() {
+                        Some(service.deployment_name.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| "-".to_string());
+            let selector_hint = if service.selector.is_empty() {
+                None
+            } else {
+                Some(
+                    service
+                        .selector
+                        .iter()
+                        .map(|(key, value)| format!("{key}={value}"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                )
+            };
+            let runtime_message = runtime_status
+                .as_ref()
+                .and_then(|status| status.message.clone());
+            let message = match (selector_hint, runtime_message) {
+                (Some(selector), Some(message)) => Some(format!("{message}; selector {selector}")),
+                (Some(selector), None) => Some(format!("selector {selector}")),
+                (None, message) => message,
+            };
 
             Ok(Response::ServiceDescription {
                 item: ServiceDescription {
                     name: service.name,
-                    deployment_name: service.deployment_name,
+                    deployment_name,
                     listen_addr: service.listen_addr,
                     target_port: service.target_port,
                     status: runtime_status
                         .as_ref()
                         .map(|status| status.status.clone())
                         .unwrap_or_else(|| "Stopped".to_string()),
-                    message: runtime_status.and_then(|status| status.message),
+                    message,
                     current_node_name,
                     current_upstream,
                 },
@@ -673,6 +643,149 @@ async fn delete_deployment(state: Arc<AppState>, name: &str) -> Result<Response>
         .await?;
     Ok(Response::Ack {
         message: format!("deployment.apps/{name} deleted"),
+    })
+}
+
+async fn apply_deployment_manifest(
+    state: Arc<AppState>,
+    manifest: DeploymentManifest,
+) -> Result<Response> {
+    let name = manifest.deployment_name().to_string();
+    let current_assignment = state
+        .store
+        .get(&name)
+        .await
+        .map(|entry| entry.assigned_node);
+    let assigned_node = select_node_for_manifest(
+        &manifest,
+        &state.store.list_nodes().await,
+        current_assignment.as_deref(),
+    )?;
+    let outcome = state.store.upsert(manifest).await?;
+    let _ = state
+        .store
+        .set_assigned_node(&name, assigned_node.clone())
+        .await?;
+    state
+        .record_event(NewEvent {
+            level: EventLevel::Normal,
+            reason: match outcome {
+                ApplyOutcome::Created => "Applied".to_string(),
+                ApplyOutcome::Configured => "Configured".to_string(),
+            },
+            object_kind: "deployment".to_string(),
+            object_name: name.clone(),
+            node_name: Some(assigned_node),
+            message: "deployment manifest accepted by the control plane".to_string(),
+        })
+        .await?;
+    state.reconcile_all().await?;
+
+    Ok(Response::Ack {
+        message: match outcome {
+            ApplyOutcome::Created => format!("deployment.apps/{name} created"),
+            ApplyOutcome::Configured => format!("deployment.apps/{name} configured"),
+        },
+    })
+}
+
+async fn apply_service_manifest(
+    state: Arc<AppState>,
+    manifest: ServiceManifest,
+) -> Result<Response> {
+    let name = manifest.service_name().to_string();
+    let deployment_name = manifest
+        .configured_deployment_name()
+        .unwrap_or_default()
+        .to_string();
+    let selector = manifest.selector().clone();
+    let listen_addr = manifest.listen_addr()?;
+    let target_port = manifest.resolved_target_port();
+
+    let service_for_resolution = crate::store::StoredService {
+        name: name.clone(),
+        deployment_name: deployment_name.clone(),
+        selector: selector.clone(),
+        listen_addr: listen_addr.clone(),
+        target_port,
+        updated_at: 0,
+    };
+    let deployment = resolve_backing_deployment(&state.store, &service_for_resolution).await?;
+    let _ = deployment.manifest.proxy_port(target_port)?;
+
+    let existing = state.store.get_service(&name).await;
+    let needs_bind_probe = existing
+        .as_ref()
+        .map(|service| service.listen_addr != listen_addr)
+        .unwrap_or(true);
+    if needs_bind_probe {
+        let _probe = tokio::net::TcpListener::bind(&listen_addr)
+            .await
+            .with_context(|| format!("failed to bind service listen address {listen_addr}"))?;
+    }
+
+    let outcome = state
+        .store
+        .upsert_service(
+            name.clone(),
+            deployment_name.clone(),
+            selector.clone(),
+            listen_addr.clone(),
+            target_port,
+        )
+        .await?;
+    state.sync_services().await?;
+    let target_text = if deployment_name.is_empty() {
+        format!(
+            "selector `{}`",
+            selector
+                .iter()
+                .map(|(key, value)| format!("{key}={value}"))
+                .collect::<Vec<_>>()
+                .join(",")
+        )
+    } else {
+        format!("deployment `{deployment_name}`")
+    };
+    state
+        .record_event(NewEvent {
+            level: EventLevel::Normal,
+            reason: match outcome {
+                ServiceApplyOutcome::Created => "ServiceAdded".to_string(),
+                ServiceApplyOutcome::Configured => "ServiceUpdated".to_string(),
+            },
+            object_kind: "service".to_string(),
+            object_name: name.clone(),
+            node_name: None,
+            message: format!("service listens on {listen_addr} and forwards to {target_text}"),
+        })
+        .await?;
+    Ok(Response::Ack {
+        message: match outcome {
+            ServiceApplyOutcome::Created => format!("service/{name} created"),
+            ServiceApplyOutcome::Configured => format!("service/{name} configured"),
+        },
+    })
+}
+
+async fn delete_service(state: Arc<AppState>, name: &str) -> Result<Response> {
+    let removed = state.store.remove_service(name).await?;
+    if removed.is_none() {
+        bail!("service `{name}` was not found");
+    }
+    state.sync_services().await?;
+    state
+        .record_event(NewEvent {
+            level: EventLevel::Normal,
+            reason: "ServiceDeleted".to_string(),
+            object_kind: "service".to_string(),
+            object_name: name.to_string(),
+            node_name: None,
+            message: "service listener removed from the control plane".to_string(),
+        })
+        .await?;
+    Ok(Response::Ack {
+        message: format!("service/{name} deleted"),
     })
 }
 

@@ -167,6 +167,7 @@ async fn service_listener_forwards_to_deployment() -> Result<()> {
     let deployment = unique_name("svc-echo");
     let service = unique_name("svc");
     let manifest = http_echo_manifest(&deployment, 18094, "hello through service");
+    let service_manifest = service_manifest_yaml(&service, &deployment, "127.0.0.1:19094", None);
 
     request(
         &harness.socket_path,
@@ -179,11 +180,8 @@ async fn service_listener_forwards_to_deployment() -> Result<()> {
 
     let add_service = request(
         &harness.socket_path,
-        Request::AddService {
-            name: service.clone(),
-            deployment_name: deployment.clone(),
-            listen_addr: "127.0.0.1:19094".to_string(),
-            target_port: None,
+        Request::Apply {
+            manifest: service_manifest.clone(),
         },
     )
     .await?;
@@ -209,8 +207,8 @@ async fn service_listener_forwards_to_deployment() -> Result<()> {
 
     match request(
         &harness.socket_path,
-        Request::DeleteService {
-            name: service.clone(),
+        Request::DeleteManifest {
+            manifest: service_manifest,
         },
     )
     .await?
@@ -908,6 +906,8 @@ apiVersion: {API_VERSION}
 kind: Deployment
 metadata:
   name: {deployment}
+  labels:
+    app: {deployment}
 spec:
   replicas: 1
   template:
@@ -924,6 +924,34 @@ spec:
           ports:
             - containerPort: 5678
               hostPort: {host_port}
+"#
+    )
+}
+
+fn service_manifest_yaml(
+    service: &str,
+    deployment: &str,
+    listen_addr: &str,
+    target_port: Option<u16>,
+) -> String {
+    let port = listen_addr
+        .rsplit_once(':')
+        .and_then(|(_, port)| port.parse::<u16>().ok())
+        .expect("listen_addr must end with a port");
+    let target_port = target_port.unwrap_or(5678);
+
+    format!(
+        r#"
+apiVersion: {API_VERSION}
+kind: Service
+metadata:
+  name: {service}
+spec:
+  selector:
+    app: {deployment}
+  ports:
+    - port: {port}
+      targetPort: {target_port}
 "#
     )
 }
