@@ -92,7 +92,7 @@ What to look for:
 - `NODE` showing whether a deployment is local or remote
 - `oom-demo` moving between `Running` and `Restarting`
 - `RESTARTS`, `STREAK`, and `NEXT RETRY` increasing when `oom-demo` hits OOM
-- `tree` showing the actual relationships: control plane -> node -> deployment -> service
+- `tree` showing the actual relationships: control plane -> node -> deployment -> published port/service
 
 Watch the control-plane history:
 

@@ -145,6 +145,8 @@ pub struct DeploymentTopRow {
     pub status: String,
     pub image: String,
     pub container_id: Option<String>,
+    #[serde(default)]
+    pub ports: Vec<String>,
     pub restart_count: u64,
     pub restart_streak: u32,
     pub last_exit: Option<String>,

@@ -1133,13 +1133,18 @@ fn build_tree_entries(snapshot: &TreeSnapshot) -> Vec<TreeEntry> {
                     .remove(&deployment.name)
                     .unwrap_or_default();
                 let text = format_tree_deployment(&deployment, services.len());
-                let children = services
-                    .into_iter()
-                    .map(|service| TreeEntry {
-                        text: format_tree_service(&service, true),
+                let mut children = deployment
+                    .ports
+                    .iter()
+                    .map(|port| TreeEntry {
+                        text: format_tree_port(port),
                         children: Vec::new(),
                     })
-                    .collect();
+                    .collect::<Vec<_>>();
+                children.extend(services.into_iter().map(|service| TreeEntry {
+                    text: format_tree_service(&service, true),
+                    children: Vec::new(),
+                }));
                 TreeEntry { text, children }
             })
             .collect();
@@ -1206,6 +1211,9 @@ fn format_tree_deployment(deployment: &protocol::DeploymentTopRow, service_count
             format_retry_countdown(deployment.next_retry_in_secs)
         ));
     }
+    if !deployment.ports.is_empty() {
+        details.push(format!("published_ports={}", deployment.ports.len()));
+    }
     if service_count > 0 {
         details.push(format!("services={service_count}"));
     }
@@ -1215,6 +1223,10 @@ fn format_tree_deployment(deployment: &protocol::DeploymentTopRow, service_count
         label(&format!("deployment/{}", deployment.name)),
         details.join(", ")
     )
+}
+
+fn format_tree_port(port: &str) -> String {
+    format!("{} {}", label("published-port"), muted(port))
 }
 
 fn format_tree_service(service: &protocol::ServiceSummary, attached: bool) -> String {
@@ -1655,6 +1667,7 @@ mod tests {
                     status: "Running".to_string(),
                     image: "hashicorp/http-echo:1.0".to_string(),
                     container_id: Some("abcd1234efgh5678".to_string()),
+                    ports: vec!["8090->5678/TCP".to_string()],
                     restart_count: 0,
                     restart_streak: 0,
                     last_exit: None,
@@ -1671,6 +1684,7 @@ mod tests {
                     status: "Running".to_string(),
                     image: "hashicorp/http-echo:1.0".to_string(),
                     container_id: Some("1234abcd5678efgh".to_string()),
+                    ports: vec!["8092->5678/TCP".to_string()],
                     restart_count: 1,
                     restart_streak: 0,
                     last_exit: Some("spec changed".to_string()),
@@ -1709,6 +1723,8 @@ mod tests {
         assert!(rendered.contains("service/echo-svc"));
         assert!(rendered.contains("service/edge-svc"));
         assert!(rendered.contains("services=1"));
+        assert!(rendered.contains("published-port"));
+        assert!(rendered.contains("8090->5678/TCP"));
     }
 
     #[test]

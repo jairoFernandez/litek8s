@@ -32,7 +32,7 @@ cargo run -- delete deployment demo-nginx
 `proxy` opens a local TCP listener and forwards into the deployment's published `hostPort`, using SSH tunneling automatically when the workload is on a remote node.
 `service add` creates a daemon-managed local listener with a stable address, so you do not need to keep a foreground `proxy` process open.
 The same service can also be declared as YAML with a small selector-based `Service` manifest and applied with `litek8s apply -f ...`.
-`tree` gives you a real relationship view from the control plane down to nodes, deployments, and services, so you do not have to reconstruct topology mentally from separate tables.
+`tree` gives you a real relationship view from the control plane down to nodes, deployments, published ports, and services, so you do not have to reconstruct topology mentally from separate tables.
 
 ## Firepack
 

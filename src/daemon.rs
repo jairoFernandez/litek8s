@@ -581,6 +581,13 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                     status: entry.status.to_string(),
                     image: entry.manifest.container().image.clone(),
                     container_id: entry.container_id,
+                    ports: entry
+                        .manifest
+                        .container()
+                        .ports
+                        .iter()
+                        .map(|port| port.printable())
+                        .collect(),
                     restart_count: entry.restart_count,
                     restart_streak: entry.restart_streak,
                     last_exit: entry.last_exit,
