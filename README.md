@@ -69,9 +69,11 @@ ssh server77 chmod +x ~/.local/bin/litek8s
 3. Register the node in the local control plane:
 
 ```bash
-cargo run -- node add server77 --ssh server77
+cargo run -- node add server77 --ssh server77 --install
 cargo run -- get nodes
 ```
+
+If you already copied the correct binary manually, `--install` is optional.
 
 4. Apply a manifest that targets that node:
 

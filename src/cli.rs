@@ -9,6 +9,7 @@ use clap::{Parser, Subcommand};
 
 use crate::config;
 use crate::daemon::{self, ServerConfig};
+use crate::node;
 use crate::protocol::{self, Request, Response};
 
 const HELP_TEMPLATE: &str = "\
@@ -69,6 +70,7 @@ Examples:
 const NODE_AFTER_HELP: &str = "\
 Examples:
   litek8s node add server77 --ssh server77
+  litek8s node add server77 --ssh server77 --install
   litek8s node add edge-1 --ssh ubuntu@10.0.0.7 --remote-binary ~/.local/bin/litek8s";
 
 #[derive(Debug, Parser)]
@@ -200,6 +202,11 @@ enum NodeCommand {
         ssh: String,
         #[arg(
             long,
+            help = "Build a compatible litek8s binary locally, copy it to the remote host, and verify it before registering the node"
+        )]
+        install: bool,
+        #[arg(
+            long,
             help = "Path to the litek8s binary on the remote machine",
             default_value = "~/.local/bin/litek8s"
         )]
@@ -272,8 +279,25 @@ pub async fn run() -> Result<()> {
             NodeCommand::Add {
                 name,
                 ssh,
+                install,
                 remote_binary,
             } => {
+                if install {
+                    let project_root = resolve_project_root()?;
+                    println!("{}", title("Remote Bootstrap"));
+                    println!(
+                        "{} {} {}",
+                        muted("building and installing a compatible litek8s binary for"),
+                        label(&ssh),
+                        muted("before node registration")
+                    );
+                    let summary =
+                        node::install_remote_agent(&ssh, &remote_binary, &project_root).await?;
+                    println!("{} {}", label("platform"), summary.platform_label);
+                    println!("{} {}", label("artifact"), summary.artifact_path.display());
+                    println!("{} {}", label("remote"), remote_binary);
+                    println!();
+                }
                 let response = protocol::request(
                     &socket_path,
                     Request::AddNode {
@@ -311,6 +335,20 @@ pub async fn run() -> Result<()> {
 
 fn read_manifest(path: &Path) -> Result<String> {
     fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))
+}
+
+fn resolve_project_root() -> Result<PathBuf> {
+    let cwd = std::env::current_dir().context("failed to read the current working directory")?;
+    if cwd.join("Cargo.toml").exists() {
+        return Ok(cwd);
+    }
+
+    let fallback = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    if fallback.join("Cargo.toml").exists() {
+        return Ok(fallback);
+    }
+
+    bail!("failed to locate the litek8s project root; run this command from the repository root")
 }
 
 fn ensure_resource(resource: &str, supported: &[&str]) -> Result<()> {
