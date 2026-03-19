@@ -102,6 +102,21 @@ pub struct ContainerSpec {
     #[serde(default)]
     pub ports: Vec<ContainerPort>,
     pub resources: Option<ResourceRequirements>,
+    pub readiness_probe: Option<ReadinessProbe>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReadinessProbe {
+    pub tcp_socket: TcpSocketProbe,
+    pub initial_delay_seconds: Option<u64>,
+    pub timeout_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TcpSocketProbe {
+    pub port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -234,6 +249,18 @@ impl DeploymentManifest {
         }
 
         let _ = container.normalized_resource_limits()?;
+        if let Some(probe) = container.readiness_probe.as_ref() {
+            ensure!(
+                probe.tcp_socket.port > 0,
+                "readinessProbe.tcpSocket.port must be greater than zero"
+            );
+            if let Some(timeout_seconds) = probe.timeout_seconds {
+                ensure!(
+                    timeout_seconds > 0,
+                    "readinessProbe.timeoutSeconds must be greater than zero"
+                );
+            }
+        }
 
         Ok(self)
     }
@@ -493,6 +520,20 @@ impl ContainerSpec {
     pub fn memory_limit(&self) -> Option<&str> {
         self.resources.as_ref()?.limits.as_ref()?.memory.as_deref()
     }
+
+    pub fn readiness_probe(&self) -> Option<&ReadinessProbe> {
+        self.readiness_probe.as_ref()
+    }
+}
+
+impl ReadinessProbe {
+    pub fn initial_delay_seconds(&self) -> u64 {
+        self.initial_delay_seconds.unwrap_or(0)
+    }
+
+    pub fn timeout_seconds(&self) -> u64 {
+        self.timeout_seconds.unwrap_or(1)
+    }
 }
 
 impl ResourceRequirements {
@@ -653,6 +694,67 @@ spec:
             .expect("limits should exist");
         assert_eq!(limits.nano_cpus, Some(500_000_000));
         assert_eq!(limits.memory_bytes, Some(134_217_728));
+    }
+
+    #[test]
+    fn parses_supported_readiness_probe() {
+        let yaml = format!(
+            r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: demo
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: web
+          image: nginx:alpine
+          readinessProbe:
+            tcpSocket:
+              port: 80
+            initialDelaySeconds: 2
+            timeoutSeconds: 3
+"#
+        );
+
+        let manifest = DeploymentManifest::parse(&yaml).expect("manifest should parse");
+        let probe = manifest
+            .container()
+            .readiness_probe()
+            .expect("probe should exist");
+        assert_eq!(probe.tcp_socket.port, 80);
+        assert_eq!(probe.initial_delay_seconds(), 2);
+        assert_eq!(probe.timeout_seconds(), 3);
+    }
+
+    #[test]
+    fn rejects_invalid_readiness_probe() {
+        let yaml = format!(
+            r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: demo
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: web
+          image: nginx:alpine
+          readinessProbe:
+            tcpSocket:
+              port: 80
+            timeoutSeconds: 0
+"#
+        );
+
+        let error = DeploymentManifest::parse(&yaml).expect_err("manifest should be rejected");
+        assert!(error.to_string().contains("readinessProbe.timeoutSeconds"));
     }
 
     #[test]

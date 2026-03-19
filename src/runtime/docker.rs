@@ -17,6 +17,7 @@ use bollard::models::{HostConfig, PortBinding};
 use bollard::system::EventsOptions;
 use futures_util::stream::StreamExt;
 use serde::{Deserialize, Serialize};
+use tokio::net::TcpStream;
 use tokio::sync::Notify;
 
 use crate::manifest::{ContainerPort, DeploymentManifest, NormalizedResourceLimits};
@@ -338,6 +339,37 @@ impl DockerRuntime {
             .with_context(|| format!("failed to collect metrics for container {container_id}"))?;
 
         Ok(snapshot_from_stats(&stats))
+    }
+
+    pub async fn probe_container_tcp(
+        &self,
+        container_id: &str,
+        port: u16,
+        timeout: Duration,
+    ) -> Result<()> {
+        let details = self
+            .docker
+            .inspect_container(container_id, None::<InspectContainerOptions>)
+            .await
+            .with_context(|| format!("failed to inspect container {container_id}"))?;
+        let ip_address = details
+            .network_settings
+            .as_ref()
+            .and_then(|settings| settings.networks.as_ref())
+            .and_then(|networks| {
+                networks
+                    .values()
+                    .find_map(|network| network.ip_address.as_deref())
+            })
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .context("container has no IPv4 address to probe")?;
+
+        tokio::time::timeout(timeout, TcpStream::connect((ip_address.as_str(), port)))
+            .await
+            .context("tcp readiness probe timed out")?
+            .with_context(|| format!("tcp readiness probe failed for {ip_address}:{port}"))?;
+        Ok(())
     }
 
     async fn ensure_image(&self, image: &str) -> Result<()> {

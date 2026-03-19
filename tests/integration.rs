@@ -222,6 +222,96 @@ async fn service_listener_forwards_to_deployment() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deployment_with_readiness_probe_becomes_ready() -> Result<()> {
+    let _guard = integration_lock().lock().await;
+    if !docker_available().await {
+        return Ok(());
+    }
+
+    let harness = TestHarness::spawn().await?;
+    let deployment = unique_name("ready");
+    let manifest = http_echo_manifest_with_readiness(&deployment, 18096, "ready with probe");
+
+    request(
+        &harness.socket_path,
+        Request::Apply {
+            manifest: manifest.clone(),
+        },
+    )
+    .await?;
+
+    let describe = harness
+        .wait_until_description(&deployment, |item| item.status == "Ready" && item.ready)
+        .await?;
+    assert_eq!(
+        describe.readiness_probe.as_deref(),
+        Some("tcpSocket:5678 (initialDelay=0s timeout=1s)")
+    );
+    assert!(describe
+        .conditions
+        .iter()
+        .any(|condition| condition.type_name == "Ready" && condition.status == "True"));
+
+    harness.cleanup_deployment(&deployment).await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn service_waits_for_readiness_before_exposing_endpoints() -> Result<()> {
+    let _guard = integration_lock().lock().await;
+    if !docker_available().await {
+        return Ok(());
+    }
+
+    let harness = TestHarness::spawn().await?;
+    let deployment = unique_name("not-ready");
+    let service = unique_name("not-ready-svc");
+    let manifest = sleeping_manifest_with_host_port_and_readiness(&deployment, 18097, 8080);
+    let service_manifest = service_manifest_yaml(&service, &deployment, "127.0.0.1:19097", Some(8080));
+
+    request(
+        &harness.socket_path,
+        Request::Apply {
+            manifest,
+        },
+    )
+    .await?;
+
+    let describe = harness
+        .wait_until_description(&deployment, |item| {
+            item.status == "Running"
+                && !item.ready
+                && item
+                    .message
+                    .as_deref()
+                    .map(|message| message.contains("readiness probe is still failing"))
+                    .unwrap_or(false)
+        })
+        .await?;
+    assert!(!describe.ready);
+
+    request(
+        &harness.socket_path,
+        Request::Apply {
+            manifest: service_manifest,
+        },
+    )
+    .await?;
+
+    let service_describe = harness
+        .wait_until_service_status(&service, |item| item.status == "NoEndpoints")
+        .await?;
+    assert!(service_describe
+        .message
+        .as_deref()
+        .unwrap_or_default()
+        .contains("deployment"));
+
+    harness.cleanup_deployment(&deployment).await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn service_transitions_to_no_endpoints_after_backend_disappears() -> Result<()> {
     let _guard = integration_lock().lock().await;
     if !docker_available().await {
@@ -998,6 +1088,72 @@ spec:
             - containerPort: 5678
               hostPort: {host_port}
 "#
+    )
+}
+
+fn http_echo_manifest_with_readiness(deployment: &str, host_port: u16, text: &str) -> String {
+    format!(
+        r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: {deployment}
+  labels:
+    app: {deployment}
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: echo
+          image: hashicorp/http-echo:1.0.0
+          args:
+            - "-listen"
+            - ":5678"
+            - "-text"
+            - "{text}"
+          ports:
+            - containerPort: 5678
+              hostPort: {host_port}
+          readinessProbe:
+            tcpSocket:
+              port: 5678
+"#
+    )
+}
+
+fn sleeping_manifest_with_host_port_and_readiness(
+    deployment: &str,
+    host_port: u16,
+    probe_port: u16,
+) -> String {
+    format!(
+        r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: {deployment}
+  labels:
+    app: {deployment}
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: app
+          image: {image}
+          command: ["sh"]
+          args: ["-c", "sleep 3600"]
+          ports:
+            - containerPort: 8080
+              hostPort: {host_port}
+          readinessProbe:
+            tcpSocket:
+              port: {probe_port}
+"#,
+        image = test_image(),
     )
 }
 

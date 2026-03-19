@@ -19,9 +19,9 @@ use crate::node::{
     ClusterNode, DEFAULT_REMOTE_BINARY, NodeClient, NodeTransport, select_node_for_manifest,
 };
 use crate::protocol::{
-    DaemonTopSummary, DeploymentDescription, DeploymentSummary, DeploymentTopRow, EventItem,
-    NodeDescription, NodeSummary, ProxyTarget as ProxyTargetInfo, Request, Response,
-    ServiceDescription, ServiceSummary, read_message, send_message,
+    DaemonTopSummary, DeploymentCondition, DeploymentDescription, DeploymentSummary,
+    DeploymentTopRow, EventItem, NodeDescription, NodeSummary, ProxyTarget as ProxyTargetInfo,
+    Request, Response, ServiceDescription, ServiceSummary, read_message, send_message,
 };
 use crate::reconciler;
 use crate::runtime::docker::{
@@ -338,10 +338,10 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 .into_iter()
                 .map(|entry| DeploymentSummary {
                     name: entry.manifest.deployment_name().to_string(),
-                    node_name: entry.assigned_node,
-                    status: entry.status.to_string(),
+                    node_name: entry.assigned_node.clone(),
+                    status: deployment_display_status(&entry),
                     image: entry.manifest.container().image.clone(),
-                    container_id: entry.container_id,
+                    container_id: entry.container_id.clone(),
                 })
                 .collect();
             Ok(Response::Deployments { items })
@@ -357,7 +357,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             let item = DeploymentDescription {
                 name: entry.manifest.deployment_name().to_string(),
                 api_version: entry.manifest.api_version.clone(),
-                node_name: entry.assigned_node,
+                node_name: entry.assigned_node.clone(),
                 requested_node_name: entry.manifest.explicit_node_name().map(str::to_string),
                 node_selector: entry
                     .manifest
@@ -365,11 +365,12 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                     .iter()
                     .map(|(key, value)| format!("{key}={value}"))
                     .collect(),
-                status: entry.status.to_string(),
+                status: deployment_display_status(&entry),
+                ready: deployment_is_ready(&entry),
                 image: entry.manifest.container().image.clone(),
                 container_name: deployment_container_name(entry.manifest.deployment_name()),
-                container_id: entry.container_id,
-                message: entry.message,
+                container_id: entry.container_id.clone(),
+                message: entry.message.clone(),
                 command: entry.manifest.container().command.clone(),
                 args: entry.manifest.container().args.clone(),
                 ports: entry
@@ -379,6 +380,11 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                     .iter()
                     .map(|port| port.printable())
                     .collect(),
+                readiness_probe: entry
+                    .manifest
+                    .container()
+                    .readiness_probe()
+                    .map(format_readiness_probe),
                 cpu_limit: entry.manifest.container().cpu_limit().map(str::to_string),
                 memory_limit: entry
                     .manifest
@@ -387,8 +393,9 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                     .map(str::to_string),
                 restart_count: entry.restart_count,
                 restart_streak: entry.restart_streak,
-                last_exit: entry.last_exit,
+                last_exit: entry.last_exit.clone(),
                 next_retry_in_secs: retry_in_secs(entry.next_retry_at),
+                conditions: deployment_conditions(&entry),
             };
 
             Ok(Response::Description { item })
@@ -794,7 +801,7 @@ impl AppState {
         let deployment_name = deployment.manifest.deployment_name().to_string();
         let current_node_name = Some(deployment.assigned_node.clone());
 
-        if deployment.status != DeploymentStatus::Running {
+        if !deployment_can_receive_traffic(&deployment) {
             return ServiceBackendState {
                 deployment_name,
                 current_node_name,
@@ -922,7 +929,8 @@ impl AppState {
             deployment_items.push(DeploymentTopRow {
                 name: entry.manifest.deployment_name().to_string(),
                 node_name: entry.assigned_node.clone(),
-                status: entry.status.to_string(),
+                status: deployment_display_status(entry),
+                ready: deployment_is_ready(entry),
                 image: entry.manifest.container().image.clone(),
                 container_id: entry.container_id.clone(),
                 ports: entry
@@ -1007,6 +1015,121 @@ impl AppState {
             services: service_items,
         })
     }
+}
+
+fn deployment_is_ready(entry: &crate::store::StoredDeployment) -> bool {
+    if entry.manifest.container().readiness_probe().is_some() {
+        entry.ready
+    } else {
+        entry.status == DeploymentStatus::Running && entry.container_id.is_some()
+    }
+}
+
+fn deployment_can_receive_traffic(entry: &crate::store::StoredDeployment) -> bool {
+    deployment_is_ready(entry)
+}
+
+fn deployment_display_status(entry: &crate::store::StoredDeployment) -> String {
+    if entry.manifest.container().readiness_probe().is_some() && entry.ready {
+        "Ready".to_string()
+    } else {
+        entry.status.to_string()
+    }
+}
+
+fn format_readiness_probe(probe: &crate::manifest::ReadinessProbe) -> String {
+    let mut text = format!("tcpSocket:{} ", probe.tcp_socket.port);
+    text.push_str(&format!(
+        "(initialDelay={}s timeout={}s)",
+        probe.initial_delay_seconds(),
+        probe.timeout_seconds()
+    ));
+    text
+}
+
+fn deployment_conditions(entry: &crate::store::StoredDeployment) -> Vec<DeploymentCondition> {
+    let mut items = Vec::new();
+    items.push(DeploymentCondition {
+        type_name: "Scheduled".to_string(),
+        status: if !entry.assigned_node.is_empty() {
+            "True".to_string()
+        } else {
+            "False".to_string()
+        },
+        reason: if !entry.assigned_node.is_empty() {
+            "AssignedNode".to_string()
+        } else {
+            "PendingScheduling".to_string()
+        },
+        message: (!entry.assigned_node.is_empty())
+            .then(|| format!("assigned to node `{}`", entry.assigned_node)),
+        last_transition_secs: entry.updated_at,
+    });
+    items.push(DeploymentCondition {
+        type_name: "Started".to_string(),
+        status: if entry.container_id.is_some() {
+            "True".to_string()
+        } else {
+            "False".to_string()
+        },
+        reason: if entry.container_id.is_some() {
+            "ContainerPresent".to_string()
+        } else {
+            "NoContainer".to_string()
+        },
+        message: entry
+            .container_id
+            .as_ref()
+            .map(|id| format!("managed container `{}` is present", short_container_id(id))),
+        last_transition_secs: entry
+            .container_started_at
+            .or(entry.container_id.as_ref().map(|_| entry.updated_at))
+            .unwrap_or(entry.updated_at),
+    });
+    items.push(DeploymentCondition {
+        type_name: "Ready".to_string(),
+        status: if deployment_is_ready(entry) {
+            "True".to_string()
+        } else {
+            "False".to_string()
+        },
+        reason: if deployment_is_ready(entry) {
+            if entry.manifest.container().readiness_probe().is_some() {
+                "ReadinessProbeSucceeded".to_string()
+            } else {
+                "ContainerRunning".to_string()
+            }
+        } else if entry.manifest.container().readiness_probe().is_some() {
+            "ReadinessProbePending".to_string()
+        } else {
+            "ContainerNotRunning".to_string()
+        },
+        message: entry.message.clone(),
+        last_transition_secs: entry
+            .ready_since
+            .or(entry.container_started_at)
+            .unwrap_or(entry.updated_at),
+    });
+    items.push(DeploymentCondition {
+        type_name: "Degraded".to_string(),
+        status: if matches!(entry.status, DeploymentStatus::Failed | DeploymentStatus::Restarting) {
+            "True".to_string()
+        } else {
+            "False".to_string()
+        },
+        reason: match entry.status {
+            DeploymentStatus::Failed => "Failed".to_string(),
+            DeploymentStatus::Restarting => "Restarting".to_string(),
+            _ => "Healthy".to_string(),
+        },
+        message: entry.message.clone(),
+        last_transition_secs: entry.updated_at,
+    });
+    items
+}
+
+fn short_container_id(id: &str) -> String {
+    id.chars().take(12).collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1111,12 +1234,12 @@ fn format_deployment_backend_message(deployment: &crate::store::StoredDeployment
         Some(message) => format!(
             "deployment `{}` is {}: {message}",
             deployment.manifest.deployment_name(),
-            deployment.status
+            deployment_display_status(deployment)
         ),
         None => format!(
             "deployment `{}` is {}",
             deployment.manifest.deployment_name(),
-            deployment.status
+            deployment_display_status(deployment)
         ),
     }
 }

@@ -30,6 +30,8 @@ pub struct StoredDeployment {
     #[serde(default = "default_assigned_node")]
     pub assigned_node: String,
     pub status: DeploymentStatus,
+    #[serde(default)]
+    pub ready: bool,
     pub container_id: Option<String>,
     pub message: Option<String>,
     #[serde(default)]
@@ -42,6 +44,10 @@ pub struct StoredDeployment {
     pub next_retry_at: Option<u64>,
     #[serde(default)]
     pub healthy_since: Option<u64>,
+    #[serde(default)]
+    pub container_started_at: Option<u64>,
+    #[serde(default)]
+    pub ready_since: Option<u64>,
     pub updated_at: u64,
 }
 
@@ -204,6 +210,7 @@ impl Store {
                     .map(|entry| entry.assigned_node.clone())
                     .unwrap_or_else(|| LOCAL_NODE_NAME.to_string()),
                 status: DeploymentStatus::Pending,
+                ready: false,
                 container_id: None,
                 message: Some("reconciliation scheduled".to_string()),
                 restart_count: existing
@@ -214,6 +221,8 @@ impl Store {
                 restart_streak: 0,
                 next_retry_at: None,
                 healthy_since: None,
+                container_started_at: None,
+                ready_since: None,
                 updated_at: now_unix(),
             },
         );
@@ -428,6 +437,7 @@ impl Store {
         &self,
         name: &str,
         status: DeploymentStatus,
+        ready: bool,
         container_id: Option<String>,
         message: Option<String>,
         last_exit: Option<String>,
@@ -442,8 +452,10 @@ impl Store {
             let before = entry.clone();
 
             let previous_container_id = entry.container_id.clone();
+            let previous_ready = entry.ready;
 
             entry.status = status;
+            entry.ready = ready;
             entry.container_id = container_id;
             entry.message = message;
             if let Some(last_exit) = last_exit {
@@ -457,7 +469,31 @@ impl Store {
             }
             entry.next_retry_at = next_retry_at;
 
-            if entry.status == DeploymentStatus::Running {
+            if previous_container_id != entry.container_id {
+                entry.container_started_at = entry.container_id.as_ref().map(|_| now);
+                entry.ready_since = None;
+            } else if entry.container_id.is_none() {
+                entry.container_started_at = None;
+                entry.ready_since = None;
+            }
+
+            if entry.ready {
+                if !previous_ready {
+                    entry.ready_since = Some(now);
+                }
+            } else {
+                entry.ready_since = None;
+            }
+
+            let counts_as_healthy = if entry.ready {
+                true
+            } else {
+                entry.status == DeploymentStatus::Running
+                    && entry.container_id.is_some()
+                    && entry.manifest.container().readiness_probe().is_none()
+            };
+
+            if counts_as_healthy {
                 if entry.healthy_since.is_none() || previous_container_id != entry.container_id {
                     entry.healthy_since = Some(now);
                 }

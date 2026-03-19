@@ -24,3 +24,8 @@ spec:
           ports:
             - containerPort: 5678
               hostPort: 8090
+          readinessProbe:
+            tcpSocket:
+              port: 5678
+            initialDelaySeconds: 0
+            timeoutSeconds: 1

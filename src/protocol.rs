@@ -123,6 +123,7 @@ pub struct DeploymentDescription {
     pub requested_node_name: Option<String>,
     pub node_selector: Vec<String>,
     pub status: String,
+    pub ready: bool,
     pub image: String,
     pub container_name: String,
     pub container_id: Option<String>,
@@ -130,12 +131,15 @@ pub struct DeploymentDescription {
     pub command: Vec<String>,
     pub args: Vec<String>,
     pub ports: Vec<String>,
+    pub readiness_probe: Option<String>,
     pub cpu_limit: Option<String>,
     pub memory_limit: Option<String>,
     pub restart_count: u64,
     pub restart_streak: u32,
     pub last_exit: Option<String>,
     pub next_retry_in_secs: Option<u64>,
+    #[serde(default)]
+    pub conditions: Vec<DeploymentCondition>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +147,7 @@ pub struct DeploymentTopRow {
     pub name: String,
     pub node_name: String,
     pub status: String,
+    pub ready: bool,
     pub image: String,
     pub container_id: Option<String>,
     #[serde(default)]
@@ -156,6 +161,15 @@ pub struct DeploymentTopRow {
     pub memory_limit_bytes: Option<u64>,
     pub network_rx_bytes: Option<u64>,
     pub network_tx_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeploymentCondition {
+    pub type_name: String,
+    pub status: String,
+    pub reason: String,
+    pub message: Option<String>,
+    pub last_transition_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -63,6 +63,7 @@ pub async fn reconcile_all(
                     .set_status(
                         deployment.manifest.deployment_name(),
                         DeploymentStatus::Failed,
+                        false,
                         None,
                         Some(error.to_string()),
                         None,
@@ -124,6 +125,7 @@ pub async fn reconcile_all(
                 .set_status(
                     deployment.manifest.deployment_name(),
                     DeploymentStatus::Pending,
+                    false,
                     None,
                     Some(format!("scheduled on node `{target_node}`")),
                     Some("rescheduled".to_string()),
@@ -146,6 +148,7 @@ pub async fn reconcile_all(
                 .set_status(
                     deployment.manifest.deployment_name(),
                     DeploymentStatus::Failed,
+                    false,
                     None,
                     Some(error.to_string()),
                     None,
@@ -191,6 +194,7 @@ pub async fn reconcile_deployment(
             .set_status(
                 name,
                 DeploymentStatus::Restarting,
+                false,
                 Some(new_id),
                 Some("recreated after duplicate managed containers were found".to_string()),
                 Some("duplicate containers".to_string()),
@@ -216,12 +220,52 @@ pub async fn reconcile_deployment(
     if let Some(container) = containers.into_iter().next() {
         let hash_matches = container.spec_hash.as_deref() == Some(deployment.spec_hash.as_str());
         if hash_matches && container.running {
+            let (ready, message, event_reason) = if let Some(probe) =
+                deployment.manifest.container().readiness_probe()
+            {
+                let probe_target = format!("tcpSocket:{}", probe.tcp_socket.port);
+                let started_at = deployment.container_started_at.unwrap_or_else(now_unix);
+                let initial_delay = probe.initial_delay_seconds();
+                if initial_delay > 0 && now_unix().saturating_sub(started_at) < initial_delay {
+                    (
+                        false,
+                        format!(
+                            "waiting {}s before readiness probe begins on {probe_target}",
+                            initial_delay
+                        ),
+                        Some("NotReady"),
+                    )
+                } else {
+                    match runtime
+                        .probe_container_tcp(
+                            &container.id,
+                            probe.tcp_socket.port,
+                            Duration::from_secs(probe.timeout_seconds()),
+                        )
+                        .await
+                    {
+                        Ok(()) => (
+                            true,
+                            format!("readiness probe succeeded on {probe_target}"),
+                            Some("Ready"),
+                        ),
+                        Err(_) => (
+                            false,
+                            format!("readiness probe is still failing on {probe_target}"),
+                            Some("NotReady"),
+                        ),
+                    }
+                }
+            } else {
+                (true, "container is healthy".to_string(), Some("Running"))
+            };
             let changed = store
                 .set_status(
                     name,
                     DeploymentStatus::Running,
+                    ready,
                     Some(container.id),
-                    Some("container is healthy".to_string()),
+                    Some(message.clone()),
                     None,
                     false,
                     false,
@@ -232,10 +276,10 @@ pub async fn reconcile_deployment(
                 record_deployment_event(
                     store,
                     EventLevel::Normal,
-                    "Running",
+                    event_reason.unwrap_or("Running"),
                     name,
                     Some(deployment.assigned_node.clone()),
-                    "container is healthy".to_string(),
+                    message,
                 )
                 .await?;
             }
@@ -270,6 +314,7 @@ pub async fn reconcile_deployment(
                 .set_status(
                     name,
                     DeploymentStatus::Restarting,
+                    false,
                     None,
                     Some(format!(
                         "backing off {}s before retry after {reason}",
@@ -305,6 +350,7 @@ pub async fn reconcile_deployment(
             .set_status(
                 name,
                 DeploymentStatus::Restarting,
+                false,
                 Some(new_id),
                 Some(message.to_string()),
                 last_exit,
@@ -354,6 +400,7 @@ pub async fn reconcile_deployment(
         .set_status(
             name,
             status,
+            false,
             Some(new_id),
             Some(message.to_string()),
             if deployment.status == DeploymentStatus::Restarting && deployment.last_exit.is_some() {

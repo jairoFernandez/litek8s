@@ -750,6 +750,7 @@ fn print_response(response: Response) -> Result<()> {
             };
             print_detail("node selector", &node_selector);
             print_detail("status", &color_status(&item.status));
+            print_detail("ready", if item.ready { "true" } else { "false" });
             print_detail("image", &item.image);
             print_detail("container", &item.container_name);
             print_detail(
@@ -761,6 +762,10 @@ fn print_response(response: Response) -> Result<()> {
             }
             print_detail("command", &command);
             print_detail("args", &args);
+            print_detail(
+                "readiness",
+                item.readiness_probe.as_deref().unwrap_or("-"),
+            );
             print_detail("cpu limit", item.cpu_limit.as_deref().unwrap_or("-"));
             print_detail("memory limit", item.memory_limit.as_deref().unwrap_or("-"));
             print_detail("restarts", &item.restart_count.to_string());
@@ -771,6 +776,26 @@ fn print_response(response: Response) -> Result<()> {
                 &format_retry_countdown(item.next_retry_in_secs),
             );
             print_detail("ports", &ports);
+            if !item.conditions.is_empty() {
+                println!("{}", label("conditions:"));
+                for condition in item.conditions {
+                    let condition_status = if condition.status == "True" {
+                        ok("True")
+                    } else {
+                        muted("False")
+                    };
+                    println!(
+                        "  {} {} {} @{}",
+                        left_cell(&condition.type_name, 10),
+                        condition_status,
+                        muted(&format!("reason={}", condition.reason)),
+                        condition.last_transition_secs
+                    );
+                    if let Some(message) = condition.message {
+                        println!("  {}", muted(&message));
+                    }
+                }
+            }
             Ok(())
         }
         Response::ServiceDescription { item } => {
@@ -1889,6 +1914,7 @@ mod tests {
                     name: "echo-demo".to_string(),
                     node_name: "local".to_string(),
                     status: "Running".to_string(),
+                    ready: true,
                     image: "hashicorp/http-echo:1.0".to_string(),
                     container_id: Some("abcd1234efgh5678".to_string()),
                     ports: vec!["8090->5678/TCP".to_string()],
@@ -1906,6 +1932,7 @@ mod tests {
                     name: "echo-edge".to_string(),
                     node_name: "server77".to_string(),
                     status: "Running".to_string(),
+                    ready: true,
                     image: "hashicorp/http-echo:1.0".to_string(),
                     container_id: Some("1234abcd5678efgh".to_string()),
                     ports: vec!["8092->5678/TCP".to_string()],

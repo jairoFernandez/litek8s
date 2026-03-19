@@ -61,6 +61,11 @@ pub enum AgentRequest {
     StatsSnapshot {
         container_id: String,
     },
+    ProbeContainerTcp {
+        container_id: String,
+        port: u16,
+        timeout_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -394,6 +399,28 @@ impl NodeClient {
             },
         }
     }
+
+    pub async fn probe_container_tcp(
+        &self,
+        container_id: &str,
+        port: u16,
+        timeout: Duration,
+    ) -> Result<()> {
+        match self {
+            Self::Local(runtime) => runtime.probe_container_tcp(container_id, port, timeout).await,
+            Self::Ssh(client) => match client
+                .request(AgentRequest::ProbeContainerTcp {
+                    container_id: container_id.to_string(),
+                    port,
+                    timeout_ms: timeout.as_millis().min(u128::from(u64::MAX)) as u64,
+                })
+                .await?
+            {
+                AgentResponse::Ack => Ok(()),
+                other => bail!("unexpected agent response while probing container TCP: {other:?}"),
+            },
+        }
+    }
 }
 
 impl SshNodeClient {
@@ -536,6 +563,16 @@ async fn handle_agent_request(
         AgentRequest::StatsSnapshot { container_id } => Ok(AgentResponse::StatsSnapshot {
             snapshot: runtime.stats_snapshot_for_container(&container_id).await?,
         }),
+        AgentRequest::ProbeContainerTcp {
+            container_id,
+            port,
+            timeout_ms,
+        } => {
+            runtime
+                .probe_container_tcp(&container_id, port, Duration::from_millis(timeout_ms))
+                .await?;
+            Ok(AgentResponse::Ack)
+        }
     }
 }
 

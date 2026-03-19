@@ -158,11 +158,20 @@ fn spawn_service_task(
 
 pub async fn resolve_service_target(store: &Store, service: &StoredService) -> Result<ProxyTarget> {
     let deployment = resolve_backing_deployment(store, service).await?;
-    if deployment.status != DeploymentStatus::Running {
+    let backend_ready = if deployment.manifest.container().readiness_probe().is_some() {
+        deployment.ready
+    } else {
+        deployment.status == DeploymentStatus::Running && deployment.container_id.is_some()
+    };
+    if !backend_ready {
         bail!(
             "backend deployment `{}` is {}",
             deployment.manifest.deployment_name(),
-            deployment.status
+            if deployment.manifest.container().readiness_probe().is_some() && deployment.ready {
+                "Ready".to_string()
+            } else {
+                deployment.status.to_string()
+            }
         );
     }
     if deployment.container_id.is_none() {
