@@ -22,6 +22,8 @@ pub struct ClusterNode {
     pub name: String,
     #[serde(default)]
     pub labels: BTreeMap<String, String>,
+    #[serde(default)]
+    pub unschedulable: bool,
     pub transport: NodeTransport,
 }
 
@@ -103,6 +105,7 @@ impl ClusterNode {
         Self {
             name: LOCAL_NODE_NAME.to_string(),
             labels: default_local_labels(),
+            unschedulable: false,
             transport: NodeTransport::Local,
         }
     }
@@ -127,6 +130,7 @@ impl ClusterNode {
         Ok(Self {
             name,
             labels,
+            unschedulable: false,
             transport: NodeTransport::Ssh {
                 target,
                 remote_binary,
@@ -160,6 +164,14 @@ impl ClusterNode {
             .map(|(key, value)| format!("{key}={value}"))
             .collect()
     }
+
+    pub fn scheduling_label(&self) -> &'static str {
+        if self.unschedulable {
+            "Cordoned"
+        } else {
+            "Schedulable"
+        }
+    }
 }
 
 pub fn select_node_for_manifest(
@@ -179,10 +191,6 @@ pub fn select_node_for_manifest(
         return Ok(explicit.to_string());
     }
 
-    if manifest.node_selector().is_empty() {
-        return Ok(LOCAL_NODE_NAME.to_string());
-    }
-
     if let Some(current_assigned) = current_assigned {
         if let Some(node) = nodes.iter().find(|node| node.name == current_assigned) {
             if node.matches_selector(manifest.node_selector()) {
@@ -191,13 +199,27 @@ pub fn select_node_for_manifest(
         }
     }
 
+    if manifest.node_selector().is_empty() {
+        if let Some(local) = nodes.iter().find(|node| node.name == LOCAL_NODE_NAME) {
+            if !local.unschedulable {
+                return Ok(local.name.clone());
+            }
+        }
+
+        return nodes
+            .iter()
+            .find(|node| !node.unschedulable)
+            .map(|node| node.name.clone())
+            .context("no schedulable node is available");
+    }
+
     nodes
         .iter()
-        .find(|node| node.matches_selector(manifest.node_selector()))
+        .find(|node| !node.unschedulable && node.matches_selector(manifest.node_selector()))
         .map(|node| node.name.clone())
         .with_context(|| {
             format!(
-                "no registered node matches nodeSelector `{}`",
+                "no schedulable node matches nodeSelector `{}`",
                 format_selector(manifest.node_selector())
             )
         })
@@ -906,6 +928,45 @@ spec:
 
         let preferred = select_node_for_manifest(&manifest, &nodes, Some("server77"))
             .expect("current node should be preserved");
+        assert_eq!(preferred, "server77");
+    }
+
+    #[test]
+    fn skips_cordoned_nodes_for_new_workloads_but_keeps_current_assignment() {
+        let manifest = DeploymentManifest::parse(&format!(
+            r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: demo
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      nodeSelector:
+        role: edge
+      containers:
+        - name: web
+          image: nginx:alpine
+"#
+        ))
+        .expect("manifest should parse");
+
+        let mut server77 = ClusterNode::ssh(
+            "server77".to_string(),
+            "server77".to_string(),
+            DEFAULT_REMOTE_BINARY.to_string(),
+            BTreeMap::from([("role".to_string(), "edge".to_string())]),
+        )
+        .expect("ssh node should build");
+        server77.unschedulable = true;
+
+        let nodes = vec![ClusterNode::local(), server77];
+        assert!(select_node_for_manifest(&manifest, &nodes, None).is_err());
+
+        let preferred = select_node_for_manifest(&manifest, &nodes, Some("server77"))
+            .expect("current assignment should be preserved on a cordoned node");
         assert_eq!(preferred, "server77");
     }
 }

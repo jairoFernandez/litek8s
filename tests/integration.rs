@@ -358,6 +358,159 @@ async fn crash_loop_uses_restart_backoff() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cordon_blocks_new_default_scheduling_until_uncordoned() -> Result<()> {
+    let _guard = integration_lock().lock().await;
+    if !docker_available().await {
+        return Ok(());
+    }
+
+    let harness = TestHarness::spawn().await?;
+    let deployment = unique_name("cordon");
+    let manifest = manifest_yaml(&deployment, r#"["sh"]"#, r#"["-c", "sleep 3600"]"#);
+
+    let cordon = request(
+        &harness.socket_path,
+        Request::SetNodeScheduling {
+            name: "local".to_string(),
+            unschedulable: true,
+        },
+    )
+    .await?;
+    match cordon {
+        Response::Ack { message } => assert!(message.contains("cordoned")),
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    let apply = request(
+        &harness.socket_path,
+        Request::Apply {
+            manifest: manifest.clone(),
+        },
+    )
+    .await?;
+    match apply {
+        Response::Error { message } => {
+            assert!(message.contains("no schedulable node is available"));
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    let nodes = request(&harness.socket_path, Request::GetNodes).await?;
+    match nodes {
+        Response::Nodes { items } => {
+            let local = items
+                .into_iter()
+                .find(|item| item.name == "local")
+                .expect("local node should exist");
+            assert_eq!(local.scheduling, "Cordoned");
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    let uncordon = request(
+        &harness.socket_path,
+        Request::SetNodeScheduling {
+            name: "local".to_string(),
+            unschedulable: false,
+        },
+    )
+    .await?;
+    match uncordon {
+        Response::Ack { message } => assert!(message.contains("uncordoned")),
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    let apply = request(
+        &harness.socket_path,
+        Request::Apply {
+            manifest: manifest.clone(),
+        },
+    )
+    .await?;
+    match apply {
+        Response::Ack { .. } => {}
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    harness.wait_until_running(&deployment).await?;
+    harness.cleanup_deployment(&deployment).await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn events_can_filter_by_deployment_and_node() -> Result<()> {
+    let _guard = integration_lock().lock().await;
+    if !docker_available().await {
+        return Ok(());
+    }
+
+    let harness = TestHarness::spawn().await?;
+    let deployment = unique_name("events");
+    let manifest = manifest_yaml(
+        &deployment,
+        r#"["sh"]"#,
+        r#"["-c", "echo ready && sleep 3600"]"#,
+    );
+
+    request(
+        &harness.socket_path,
+        Request::Apply {
+            manifest: manifest.clone(),
+        },
+    )
+    .await?;
+    harness.wait_until_running(&deployment).await?;
+
+    let deployment_events = request(
+        &harness.socket_path,
+        Request::GetEvents {
+            limit: 50,
+            since_id: None,
+            deployment_name: Some(deployment.clone()),
+            node_name: None,
+        },
+    )
+    .await?;
+    match deployment_events {
+        Response::Events { items } => {
+            assert!(!items.is_empty());
+            assert!(
+                items
+                    .iter()
+                    .all(|item| item.object_kind == "deployment" && item.object_name == deployment)
+            );
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    let node_events = request(
+        &harness.socket_path,
+        Request::GetEvents {
+            limit: 50,
+            since_id: None,
+            deployment_name: Some(deployment.clone()),
+            node_name: Some("local".to_string()),
+        },
+    )
+    .await?;
+    match node_events {
+        Response::Events { items } => {
+            assert!(!items.is_empty());
+            assert!(items.iter().all(|item| item.object_name == deployment));
+            assert!(
+                items
+                    .iter()
+                    .all(|item| item.node_name.as_deref() == Some("local"))
+            );
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    harness.cleanup_deployment(&deployment).await?;
+    Ok(())
+}
+
 struct TestHarness {
     _temp_dir: TempDir,
     socket_path: PathBuf,

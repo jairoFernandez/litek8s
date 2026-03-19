@@ -17,6 +17,10 @@ pub enum Request {
         remote_binary: Option<String>,
         labels: BTreeMap<String, String>,
     },
+    SetNodeScheduling {
+        name: String,
+        unschedulable: bool,
+    },
     DeleteManifest {
         manifest: String,
     },
@@ -28,6 +32,8 @@ pub enum Request {
     GetEvents {
         limit: usize,
         since_id: Option<u64>,
+        deployment_name: Option<String>,
+        node_name: Option<String>,
     },
     DescribeDeployment {
         name: String,
@@ -138,6 +144,7 @@ pub struct NodeSummary {
     pub transport: String,
     pub endpoint: String,
     pub status: String,
+    pub scheduling: String,
     pub deployment_count: usize,
 }
 
@@ -149,6 +156,7 @@ pub struct NodeDescription {
     pub remote_binary: Option<String>,
     pub labels: Vec<String>,
     pub status: String,
+    pub scheduling: String,
     pub deployment_count: usize,
     pub message: Option<String>,
 }

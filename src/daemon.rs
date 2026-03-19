@@ -24,7 +24,7 @@ use crate::runtime::docker::{
     ContainerMetrics, ContainerStatsSnapshot, DockerRuntime, compute_cpu_percent_from_samples,
     deployment_container_name,
 };
-use crate::store::{ApplyOutcome, EventLevel, NewEvent, NodeApplyOutcome, Store};
+use crate::store::{ApplyOutcome, EventLevel, EventQuery, NewEvent, NodeApplyOutcome, Store};
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -215,6 +215,49 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             };
             Ok(Response::Ack { message })
         }
+        Request::SetNodeScheduling {
+            name,
+            unschedulable,
+        } => {
+            state
+                .store
+                .get_node(&name)
+                .await
+                .with_context(|| format!("node `{name}` was not found"))?;
+            let changed = state
+                .store
+                .set_node_unschedulable(&name, unschedulable)
+                .await?;
+            if changed {
+                state
+                    .record_event(NewEvent {
+                        level: EventLevel::Normal,
+                        reason: if unschedulable {
+                            "NodeCordoned".to_string()
+                        } else {
+                            "NodeUncordoned".to_string()
+                        },
+                        object_kind: "node".to_string(),
+                        object_name: name.clone(),
+                        node_name: Some(name.clone()),
+                        message: if unschedulable {
+                            "node marked unschedulable for new deployments".to_string()
+                        } else {
+                            "node reopened for scheduling".to_string()
+                        },
+                    })
+                    .await?;
+                state.reconcile_all().await?;
+            }
+
+            Ok(Response::Ack {
+                message: if unschedulable {
+                    format!("node/{name} cordoned")
+                } else {
+                    format!("node/{name} uncordoned")
+                },
+            })
+        }
         Request::DeleteManifest { manifest } => {
             let manifest = DeploymentManifest::parse(&manifest)?;
             delete_deployment(state, manifest.deployment_name()).await
@@ -235,15 +278,26 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                     transport: node.transport_label().to_string(),
                     endpoint: node.endpoint(),
                     status,
+                    scheduling: node.scheduling_label().to_string(),
                     deployment_count,
                 });
             }
             Ok(Response::Nodes { items })
         }
-        Request::GetEvents { limit, since_id } => {
+        Request::GetEvents {
+            limit,
+            since_id,
+            deployment_name,
+            node_name,
+        } => {
             let items = state
                 .store
-                .list_events(limit, since_id)
+                .list_events(EventQuery {
+                    limit,
+                    since_id,
+                    deployment_name,
+                    node_name,
+                })
                 .await
                 .into_iter()
                 .map(|event| EventItem {
@@ -347,6 +401,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 },
                 labels: node.printable_labels(),
                 status,
+                scheduling: node.scheduling_label().to_string(),
                 deployment_count,
                 message,
             };

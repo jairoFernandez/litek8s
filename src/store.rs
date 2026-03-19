@@ -96,6 +96,14 @@ pub struct StoredEvent {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct EventQuery {
+    pub limit: usize,
+    pub since_id: Option<u64>,
+    pub deployment_name: Option<String>,
+    pub node_name: Option<String>,
+}
+
 pub struct Store {
     path: PathBuf,
     state: RwLock<StateFile>,
@@ -228,6 +236,10 @@ impl Store {
         } else {
             NodeApplyOutcome::Created
         };
+        let mut node = node;
+        if let Some(existing) = guard.nodes.get(&name) {
+            node.unschedulable = existing.unschedulable;
+        }
         guard.nodes.insert(name, node);
         let snapshot = guard.clone();
         drop(guard);
@@ -243,6 +255,25 @@ impl Store {
     pub async fn list_nodes(&self) -> Vec<ClusterNode> {
         let guard = self.state.read().await;
         guard.nodes.values().cloned().collect()
+    }
+
+    pub async fn set_node_unschedulable(&self, name: &str, unschedulable: bool) -> Result<bool> {
+        let mut guard = self.state.write().await;
+        let mut changed = false;
+        if let Some(node) = guard.nodes.get_mut(name) {
+            if node.unschedulable != unschedulable {
+                node.unschedulable = unschedulable;
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(false);
+        }
+
+        let snapshot = guard.clone();
+        drop(guard);
+        self.persist(&snapshot).await?;
+        Ok(true)
     }
 
     pub async fn set_assigned_node(&self, name: &str, assigned_node: String) -> Result<bool> {
@@ -290,17 +321,34 @@ impl Store {
         Ok(stored)
     }
 
-    pub async fn list_events(&self, limit: usize, since_id: Option<u64>) -> Vec<StoredEvent> {
+    pub async fn list_events(&self, query: EventQuery) -> Vec<StoredEvent> {
         let guard = self.state.read().await;
         let mut items = guard
             .events
             .iter()
-            .filter(|event| since_id.map(|value| event.id > value).unwrap_or(true))
+            .filter(|event| query.since_id.map(|value| event.id > value).unwrap_or(true))
+            .filter(|event| {
+                query
+                    .deployment_name
+                    .as_deref()
+                    .map(|name| event.object_kind == "deployment" && event.object_name == name)
+                    .unwrap_or(true)
+            })
+            .filter(|event| {
+                query
+                    .node_name
+                    .as_deref()
+                    .map(|name| {
+                        event.node_name.as_deref() == Some(name)
+                            || (event.object_kind == "node" && event.object_name == name)
+                    })
+                    .unwrap_or(true)
+            })
             .cloned()
             .collect::<Vec<_>>();
 
-        if since_id.is_none() && limit > 0 && items.len() > limit {
-            items = items[items.len() - limit..].to_vec();
+        if query.since_id.is_none() && query.limit > 0 && items.len() > query.limit {
+            items = items[items.len() - query.limit..].to_vec();
         }
 
         items

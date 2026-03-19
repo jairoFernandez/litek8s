@@ -67,7 +67,8 @@ const EVENTS_AFTER_HELP: &str = "\
 Examples:
   litek8s events
   litek8s events --watch
-  litek8s events --limit 100";
+  litek8s events --deployment echo-edge
+  litek8s events --node server77 --watch";
 
 const DELETE_AFTER_HELP: &str = "\
 Examples:
@@ -79,6 +80,8 @@ Examples:
   litek8s node add server77 --ssh server77
   litek8s node add server77 --ssh server77 --install
   litek8s node add server77 --ssh server77 --label role=edge --label zone=lab
+  litek8s node cordon server77
+  litek8s node uncordon server77
   litek8s node add edge-1 --ssh ubuntu@10.0.0.7 --remote-binary ~/.local/bin/litek8s";
 
 #[derive(Debug, Parser)]
@@ -169,6 +172,10 @@ enum Command {
         watch: bool,
         #[arg(long, default_value_t = 50, help = "How many events to fetch")]
         limit: usize,
+        #[arg(long, help = "Only show events for this deployment")]
+        deployment: Option<String>,
+        #[arg(long, help = "Only show events for this node")]
+        node: Option<String>,
         #[arg(
             long,
             default_value_t = 2,
@@ -243,6 +250,16 @@ enum NodeCommand {
         )]
         remote_binary: String,
     },
+    #[command(about = "Mark a node unschedulable for new selector-based or default placements")]
+    Cordon {
+        #[arg(help = "Logical node name")]
+        name: String,
+    },
+    #[command(about = "Re-open a node for scheduling")]
+    Uncordon {
+        #[arg(help = "Logical node name")]
+        name: String,
+    },
 }
 
 pub async fn run() -> Result<()> {
@@ -305,12 +322,16 @@ pub async fn run() -> Result<()> {
         Command::Events {
             watch,
             limit,
+            deployment,
+            node,
             interval_secs,
         } => {
             run_events(
                 &socket_path,
                 watch,
                 limit,
+                deployment,
+                node,
                 Duration::from_secs(interval_secs),
             )
             .await
@@ -351,6 +372,28 @@ pub async fn run() -> Result<()> {
                         ssh_target: ssh,
                         remote_binary: Some(remote_binary),
                         labels,
+                    },
+                )
+                .await?;
+                print_response(response)
+            }
+            NodeCommand::Cordon { name } => {
+                let response = protocol::request(
+                    &socket_path,
+                    Request::SetNodeScheduling {
+                        name,
+                        unschedulable: true,
+                    },
+                )
+                .await?;
+                print_response(response)
+            }
+            NodeCommand::Uncordon { name } => {
+                let response = protocol::request(
+                    &socket_path,
+                    Request::SetNodeScheduling {
+                        name,
+                        unschedulable: false,
                     },
                 )
                 .await?;
@@ -465,19 +508,21 @@ fn print_response(response: Response) -> Result<()> {
             );
             println!();
             println!(
-                "{} {} {} {} {}",
+                "{} {} {} {} {} {}",
                 header_left("NAME", 18),
                 header_left("TYPE", 8),
                 header_left("STATUS", 10),
+                header_left("SCHED", 12),
                 header_left("ENDPOINT", 24),
                 label("DEPLOYMENTS")
             );
             for item in items {
                 println!(
-                    "{} {} {} {} {}",
+                    "{} {} {} {} {} {}",
                     left_cell(&item.name, 18),
                     left_cell(&item.transport, 8),
                     status_cell(&item.status, 10),
+                    scheduling_cell(&item.scheduling, 12),
                     left_cell(&truncate(&item.endpoint, 24), 24),
                     item.deployment_count
                 );
@@ -552,6 +597,7 @@ fn print_response(response: Response) -> Result<()> {
             println!();
             print_detail("type", &item.transport);
             print_detail("status", &color_status(&item.status));
+            print_detail("scheduling", &color_scheduling(&item.scheduling));
             print_detail("endpoint", &item.endpoint);
             print_detail("remote bin", item.remote_binary.as_deref().unwrap_or("-"));
             let labels = if item.labels.is_empty() {
@@ -667,7 +713,9 @@ fn print_response(response: Response) -> Result<()> {
 }
 
 async fn run_top(socket_path: &Path, watch: bool, interval: Duration) -> Result<()> {
-    let mut watch_display = watch.then(WatchDisplay::new).transpose()?;
+    let mut watch_display = watch
+        .then(|| WatchDisplay::new(build_watch_banner("top", interval, None, None)))
+        .transpose()?;
 
     loop {
         let response = protocol::request(socket_path, Request::Top).await?;
@@ -692,9 +740,20 @@ async fn run_events(
     socket_path: &Path,
     watch: bool,
     limit: usize,
+    deployment: Option<String>,
+    node: Option<String>,
     interval: Duration,
 ) -> Result<()> {
-    let mut watch_display = watch.then(WatchDisplay::new).transpose()?;
+    let mut watch_display = watch
+        .then(|| {
+            WatchDisplay::new(build_watch_banner(
+                "events",
+                interval,
+                deployment.as_deref(),
+                node.as_deref(),
+            ))
+        })
+        .transpose()?;
 
     loop {
         let response = protocol::request(
@@ -702,6 +761,8 @@ async fn run_events(
             Request::GetEvents {
                 limit,
                 since_id: None,
+                deployment_name: deployment.clone(),
+                node_name: node.clone(),
             },
         )
         .await?;
@@ -787,7 +848,7 @@ fn muted(text: &str) -> String {
 fn color_status(status: &str) -> String {
     match status {
         "Running" | "Ready" | "Normal" => paint(status, "1;92"),
-        "Pending" | "Restarting" | "Warning" => paint(status, "1;93"),
+        "Pending" | "Restarting" | "Warning" | "Cordoned" => paint(status, "1;93"),
         "Failed" | "Deleted" | "Offline" => paint(status, "1;91"),
         _ => status.to_string(),
     }
@@ -797,8 +858,25 @@ fn status_cell(status: &str, width: usize) -> String {
     let padded = left_cell(status, width);
     match status {
         "Running" | "Ready" | "Normal" => paint(&padded, "1;92"),
-        "Pending" | "Restarting" | "Warning" => paint(&padded, "1;93"),
+        "Pending" | "Restarting" | "Warning" | "Cordoned" => paint(&padded, "1;93"),
         "Failed" | "Deleted" | "Offline" => paint(&padded, "1;91"),
+        _ => padded,
+    }
+}
+
+fn color_scheduling(value: &str) -> String {
+    match value {
+        "Schedulable" => paint(value, "1;92"),
+        "Cordoned" => paint(value, "1;93"),
+        _ => value.to_string(),
+    }
+}
+
+fn scheduling_cell(value: &str, width: usize) -> String {
+    let padded = left_cell(value, width);
+    match value {
+        "Schedulable" => paint(&padded, "1;92"),
+        "Cordoned" => paint(&padded, "1;93"),
         _ => padded,
     }
 }
@@ -891,22 +969,26 @@ fn cli_styles() -> Styles {
 
 struct WatchDisplay {
     interactive: bool,
+    banner: String,
 }
 
 impl WatchDisplay {
-    fn new() -> Result<Self> {
+    fn new(banner: String) -> Result<Self> {
         let interactive = io::stdout().is_terminal();
         if interactive {
             print!("\x1B[?1049h\x1B[?25l");
             io::stdout()
                 .flush()
-                .context("failed to enter interactive top view")?;
+                .context("failed to enter interactive watch view")?;
         }
 
-        Ok(Self { interactive })
+        Ok(Self {
+            interactive,
+            banner,
+        })
     }
 
-    fn begin_frame(&mut self, interval: Duration) -> Result<()> {
+    fn begin_frame(&mut self, _interval: Duration) -> Result<()> {
         if self.interactive {
             print!("\x1B[H\x1B[J");
         } else {
@@ -914,12 +996,30 @@ impl WatchDisplay {
             println!("---");
         }
 
-        println!(
-            "litek8s top  live  interval={}s  ctrl+c to exit\n",
-            interval.as_secs()
-        );
+        println!("{}\n", self.banner);
         Ok(())
     }
+}
+
+fn build_watch_banner(
+    kind: &str,
+    interval: Duration,
+    deployment: Option<&str>,
+    node: Option<&str>,
+) -> String {
+    let mut parts = vec![
+        format!("litek8s {kind}"),
+        "live".to_string(),
+        format!("interval={}s", interval.as_secs()),
+    ];
+    if let Some(deployment) = deployment {
+        parts.push(format!("deployment={deployment}"));
+    }
+    if let Some(node) = node {
+        parts.push(format!("node={node}"));
+    }
+    parts.push("ctrl+c to exit".to_string());
+    parts.join("  ")
 }
 
 impl Drop for WatchDisplay {

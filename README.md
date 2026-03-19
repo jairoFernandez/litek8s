@@ -11,13 +11,18 @@ cargo run -- get deployments
 cargo run -- describe deployment demo-nginx
 cargo run -- logs demo-nginx
 cargo run -- events
+cargo run -- events --deployment demo-nginx
+cargo run -- events --node server77 --watch
 cargo run -- top
 cargo run -- top --watch
+cargo run -- node cordon server77
+cargo run -- node uncordon server77
 cargo run -- delete deployment demo-nginx
 ```
 
 `top` shows a daemon summary first, then the managed deployments table.
 `events` shows the control-plane history: scheduling, starts, backoff, deletes, and node registration.
+`events` can also filter by deployment or node so noisy workloads do not drown the rest of the stream.
 
 ## Firepack
 
@@ -73,6 +78,8 @@ ssh server77 chmod +x ~/.local/bin/litek8s
 ```bash
 cargo run -- node add server77 --ssh server77 --install --label role=edge --label zone=lab
 cargo run -- get nodes
+cargo run -- node cordon server77
+cargo run -- node uncordon server77
 ```
 
 If you already copied the correct binary manually, `--install` is optional.
@@ -85,7 +92,8 @@ cargo run -- apply -f examples/http-echo-edge.yaml
 cargo run -- get deployments
 cargo run -- describe deployment echo-server77
 cargo run -- describe deployment echo-edge
-cargo run -- events --watch
+cargo run -- events --node server77 --watch
+cargo run -- events --deployment echo-edge
 cargo run -- top --watch
 ```
 
@@ -95,6 +103,7 @@ The remote examples cover both scheduling paths:
 - `examples/http-echo-edge.yaml` uses `spec.template.spec.nodeSelector.role=edge`
 
 `get` / `describe` / `top` now show a `NODE` column so you can see where each deployment is running, and `events` lets you watch the scheduler and reconciler decisions in real time.
+`get nodes` and `describe node` also show whether a node is `Schedulable` or `Cordoned`, which makes it easy to demo controlled placement.
 
 ## Manifest shape
 
