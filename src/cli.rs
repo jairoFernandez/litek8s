@@ -49,7 +49,7 @@ Examples:
 const GET_AFTER_HELP: &str = "\
 Examples:
   litek8s get deployments
-  litek8s get deployment";
+  litek8s get nodes";
 
 const DESCRIBE_AFTER_HELP: &str = "\
 Examples:
@@ -65,6 +65,11 @@ const DELETE_AFTER_HELP: &str = "\
 Examples:
   litek8s delete deployment demo-nginx
   litek8s delete -f examples/nginx.yaml";
+
+const NODE_AFTER_HELP: &str = "\
+Examples:
+  litek8s node add server77 --ssh server77
+  litek8s node add edge-1 --ssh ubuntu@10.0.0.7 --remote-binary ~/.local/bin/litek8s";
 
 #[derive(Debug, Parser)]
 #[command(
@@ -119,7 +124,7 @@ enum Command {
         after_help = GET_AFTER_HELP
     )]
     Get {
-        #[arg(help = "Resource type, currently `deployment` or `deployments`")]
+        #[arg(help = "Resource type, currently `deployment`, `deployments`, `node`, or `nodes`")]
         resource: String,
     },
     #[command(
@@ -128,7 +133,7 @@ enum Command {
         after_help = DESCRIBE_AFTER_HELP
     )]
     Describe {
-        #[arg(help = "Resource type, currently `deployment` or `deployments`")]
+        #[arg(help = "Resource type, currently `deployment`, `deployments`, `node`, or `nodes`")]
         resource: String,
         #[arg(help = "Deployment name")]
         name: String,
@@ -156,6 +161,15 @@ enum Command {
         interval_secs: u64,
     },
     #[command(
+        about = "Register a remote node reachable over ssh",
+        help_template = HELP_TEMPLATE,
+        after_help = NODE_AFTER_HELP
+    )]
+    Node {
+        #[command(subcommand)]
+        command: NodeCommand,
+    },
+    #[command(
         about = "Delete a deployment by name or manifest",
         help_template = HELP_TEMPLATE,
         after_help = DELETE_AFTER_HELP
@@ -171,6 +185,25 @@ enum Command {
         resource: Option<String>,
         #[arg(help = "Deployment name when deleting by name")]
         name: Option<String>,
+    },
+    #[command(hide = true)]
+    Agent,
+}
+
+#[derive(Debug, Subcommand)]
+enum NodeCommand {
+    #[command(about = "Add or update a remote node reachable over ssh")]
+    Add {
+        #[arg(help = "Logical node name used from manifests via spec.template.spec.nodeName")]
+        name: String,
+        #[arg(long, help = "SSH target such as `server77` or `ubuntu@10.0.0.7`")]
+        ssh: String,
+        #[arg(
+            long,
+            help = "Path to the litek8s binary on the remote machine",
+            default_value = "~/.local/bin/litek8s"
+        )]
+        remote_binary: String,
     },
 }
 
@@ -200,14 +233,31 @@ pub async fn run() -> Result<()> {
             print_response(response)
         }
         Command::Get { resource } => {
-            ensure_resource(&resource, &["deployment", "deployments"])?;
-            let response = protocol::request(&socket_path, Request::GetDeployments).await?;
+            let response = match resource.as_str() {
+                "deployment" | "deployments" => {
+                    protocol::request(&socket_path, Request::GetDeployments).await?
+                }
+                "node" | "nodes" => protocol::request(&socket_path, Request::GetNodes).await?,
+                _ => {
+                    ensure_resource(&resource, &["deployment", "deployments", "node", "nodes"])?;
+                    unreachable!()
+                }
+            };
             print_response(response)
         }
         Command::Describe { resource, name } => {
-            ensure_resource(&resource, &["deployment", "deployments"])?;
-            let response =
-                protocol::request(&socket_path, Request::DescribeDeployment { name }).await?;
+            let response = match resource.as_str() {
+                "deployment" | "deployments" => {
+                    protocol::request(&socket_path, Request::DescribeDeployment { name }).await?
+                }
+                "node" | "nodes" => {
+                    protocol::request(&socket_path, Request::DescribeNode { name }).await?
+                }
+                _ => {
+                    ensure_resource(&resource, &["deployment", "deployments", "node", "nodes"])?;
+                    unreachable!()
+                }
+            };
             print_response(response)
         }
         Command::Logs { name, tail } => {
@@ -218,6 +268,24 @@ pub async fn run() -> Result<()> {
             watch,
             interval_secs,
         } => run_top(&socket_path, watch, Duration::from_secs(interval_secs)).await,
+        Command::Node { command } => match command {
+            NodeCommand::Add {
+                name,
+                ssh,
+                remote_binary,
+            } => {
+                let response = protocol::request(
+                    &socket_path,
+                    Request::AddNode {
+                        name,
+                        ssh_target: ssh,
+                        remote_binary: Some(remote_binary),
+                    },
+                )
+                .await?;
+                print_response(response)
+            }
+        },
         Command::Delete {
             file,
             resource,
@@ -237,6 +305,7 @@ pub async fn run() -> Result<()> {
             let response = protocol::request(&socket_path, request).await?;
             print_response(response)
         }
+        Command::Agent => crate::node::run_agent_stdio().await,
     }
 }
 
@@ -270,19 +339,49 @@ fn print_response(response: Response) -> Result<()> {
             );
             println!();
             println!(
-                "{} {} {} {}",
+                "{} {} {} {} {}",
                 header_left("NAME", 24),
+                header_left("NODE", 14),
                 header_left("STATUS", 12),
                 header_left("IMAGE", 24),
                 label("CONTAINER")
             );
             for item in items {
                 println!(
-                    "{} {} {} {}",
+                    "{} {} {} {} {}",
                     left_cell(&item.name, 24),
+                    left_cell(&truncate(&item.node_name, 14), 14),
                     status_cell(&item.status, 12),
                     left_cell(&truncate(&item.image, 24), 24),
                     item.container_id.unwrap_or_else(|| "-".to_string())
+                );
+            }
+            Ok(())
+        }
+        Response::Nodes { items } => {
+            let total = items.len();
+            println!(
+                "{} {}",
+                title("Cluster Nodes"),
+                muted(&format!("({total} total)"))
+            );
+            println!();
+            println!(
+                "{} {} {} {} {}",
+                header_left("NAME", 18),
+                header_left("TYPE", 8),
+                header_left("STATUS", 10),
+                header_left("ENDPOINT", 24),
+                label("DEPLOYMENTS")
+            );
+            for item in items {
+                println!(
+                    "{} {} {} {} {}",
+                    left_cell(&item.name, 18),
+                    left_cell(&item.transport, 8),
+                    status_cell(&item.status, 10),
+                    left_cell(&truncate(&item.endpoint, 24), 24),
+                    item.deployment_count
                 );
             }
             Ok(())
@@ -311,6 +410,7 @@ fn print_response(response: Response) -> Result<()> {
             );
             println!();
             print_detail("apiVersion", &item.api_version);
+            print_detail("node", &item.node_name);
             print_detail("status", &color_status(&item.status));
             print_detail("image", &item.image);
             print_detail("container", &item.container_name);
@@ -335,6 +435,23 @@ fn print_response(response: Response) -> Result<()> {
             print_detail("ports", &ports);
             Ok(())
         }
+        Response::NodeDescription { item } => {
+            println!("{}", title(&format!("Node {}", item.name)));
+            println!(
+                "{}",
+                muted("execution target registered in the local control plane")
+            );
+            println!();
+            print_detail("type", &item.transport);
+            print_detail("status", &color_status(&item.status));
+            print_detail("endpoint", &item.endpoint);
+            print_detail("remote bin", item.remote_binary.as_deref().unwrap_or("-"));
+            print_detail("deployments", &item.deployment_count.to_string());
+            if let Some(message) = item.message {
+                print_detail("message", &message);
+            }
+            Ok(())
+        }
         Response::Logs { content } => {
             print!("{content}");
             Ok(())
@@ -351,8 +468,9 @@ fn print_response(response: Response) -> Result<()> {
             );
             println!();
             println!(
-                "{} {} {} {} {} {} {} {} {} {} {}",
+                "{} {} {} {} {} {} {} {} {} {} {} {}",
                 header_left("NAME", 24),
+                header_left("NODE", 14),
                 header_left("STATUS", 12),
                 header_right("RESTARTS", 8),
                 header_right("STREAK", 6),
@@ -366,8 +484,9 @@ fn print_response(response: Response) -> Result<()> {
             );
             for item in items {
                 println!(
-                    "{} {} {} {} {} {} {} {} {} {} {}",
+                    "{} {} {} {} {} {} {} {} {} {} {} {}",
                     left_cell(&item.name, 24),
+                    left_cell(&truncate(&item.node_name, 14), 14),
                     status_cell(&item.status, 12),
                     right_cell(&item.restart_count.to_string(), 8),
                     right_cell(&item.restart_streak.to_string(), 6),
@@ -484,9 +603,9 @@ fn muted(text: &str) -> String {
 
 fn color_status(status: &str) -> String {
     match status {
-        "Running" => paint(status, "1;92"),
+        "Running" | "Ready" => paint(status, "1;92"),
         "Pending" | "Restarting" => paint(status, "1;93"),
-        "Failed" | "Deleted" => paint(status, "1;91"),
+        "Failed" | "Deleted" | "Offline" => paint(status, "1;91"),
         _ => status.to_string(),
     }
 }
@@ -494,9 +613,9 @@ fn color_status(status: &str) -> String {
 fn status_cell(status: &str, width: usize) -> String {
     let padded = left_cell(status, width);
     match status {
-        "Running" => paint(&padded, "1;92"),
+        "Running" | "Ready" => paint(&padded, "1;92"),
         "Pending" | "Restarting" => paint(&padded, "1;93"),
-        "Failed" | "Deleted" => paint(&padded, "1;91"),
+        "Failed" | "Deleted" | "Offline" => paint(&padded, "1;91"),
         _ => padded,
     }
 }

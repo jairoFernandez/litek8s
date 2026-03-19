@@ -2,6 +2,8 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::node::{LOCAL_NODE_NAME, validate_node_name};
+
 pub const API_VERSION: &str = "litek8s.dev/v1alpha1";
 pub const KIND_DEPLOYMENT: &str = "Deployment";
 
@@ -37,6 +39,7 @@ pub struct PodTemplateSpec {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PodSpec {
     pub restart_policy: Option<RestartPolicy>,
+    pub node_name: Option<String>,
     #[serde(default)]
     pub containers: Vec<ContainerSpec>,
 }
@@ -133,6 +136,9 @@ impl DeploymentManifest {
         self.spec.replicas = Some(1);
 
         let pod_spec = &mut self.spec.template.spec;
+        if let Some(node_name) = pod_spec.node_name.as_deref() {
+            validate_node_name(node_name)?;
+        }
         let restart_policy = pod_spec
             .restart_policy
             .clone()
@@ -186,6 +192,15 @@ impl DeploymentManifest {
 
     pub fn container(&self) -> &ContainerSpec {
         &self.spec.template.spec.containers[0]
+    }
+
+    pub fn node_name(&self) -> &str {
+        self.spec
+            .template
+            .spec
+            .node_name
+            .as_deref()
+            .unwrap_or(LOCAL_NODE_NAME)
     }
 
     pub fn desired_hash(&self) -> Result<String> {

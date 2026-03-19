@@ -1,0 +1,25 @@
+apiVersion: litek8s.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: echo-server77
+spec:
+  replicas: 1
+  template:
+    spec:
+      nodeName: server77
+      restartPolicy: Always
+      containers:
+        - name: echo
+          image: hashicorp/http-echo:1.0.0
+          args:
+            - "-listen"
+            - ":5678"
+            - "-text"
+            - "hello from server77"
+          resources:
+            limits:
+              cpu: "100m"
+              memory: "32Mi"
+          ports:
+            - containerPort: 5678
+              hostPort: 8091

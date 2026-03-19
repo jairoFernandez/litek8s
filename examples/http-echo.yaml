@@ -1,0 +1,24 @@
+apiVersion: litek8s.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: echo-demo
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: echo
+          image: hashicorp/http-echo:1.0.0
+          args:
+            - "-listen"
+            - ":5678"
+            - "-text"
+            - "hello from litek8s"
+          resources:
+            limits:
+              cpu: "100m"
+              memory: "32Mi"
+          ports:
+            - containerPort: 5678
+              hostPort: 8090

@@ -7,12 +7,32 @@ use tokio::net::UnixStream;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
-    Apply { manifest: String },
-    DeleteManifest { manifest: String },
-    DeleteDeployment { name: String },
+    Apply {
+        manifest: String,
+    },
+    AddNode {
+        name: String,
+        ssh_target: String,
+        remote_binary: Option<String>,
+    },
+    DeleteManifest {
+        manifest: String,
+    },
+    DeleteDeployment {
+        name: String,
+    },
     GetDeployments,
-    DescribeDeployment { name: String },
-    Logs { name: String, tail: usize },
+    GetNodes,
+    DescribeDeployment {
+        name: String,
+    },
+    DescribeNode {
+        name: String,
+    },
+    Logs {
+        name: String,
+        tail: usize,
+    },
     Top,
 }
 
@@ -24,8 +44,14 @@ pub enum Response {
     Deployments {
         items: Vec<DeploymentSummary>,
     },
+    Nodes {
+        items: Vec<NodeSummary>,
+    },
     Description {
         item: DeploymentDescription,
+    },
+    NodeDescription {
+        item: NodeDescription,
     },
     Logs {
         content: String,
@@ -42,6 +68,7 @@ pub enum Response {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploymentSummary {
     pub name: String,
+    pub node_name: String,
     pub status: String,
     pub image: String,
     pub container_id: Option<String>,
@@ -51,6 +78,7 @@ pub struct DeploymentSummary {
 pub struct DeploymentDescription {
     pub name: String,
     pub api_version: String,
+    pub node_name: String,
     pub status: String,
     pub image: String,
     pub container_name: String,
@@ -70,6 +98,7 @@ pub struct DeploymentDescription {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeploymentTopRow {
     pub name: String,
+    pub node_name: String,
     pub status: String,
     pub image: String,
     pub container_id: Option<String>,
@@ -90,6 +119,26 @@ pub struct DaemonTopSummary {
     pub cpu_percent: Option<f64>,
     pub memory_bytes: u64,
     pub uptime_secs: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeSummary {
+    pub name: String,
+    pub transport: String,
+    pub endpoint: String,
+    pub status: String,
+    pub deployment_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeDescription {
+    pub name: String,
+    pub transport: String,
+    pub endpoint: String,
+    pub remote_binary: Option<String>,
+    pub status: String,
+    pub deployment_count: usize,
+    pub message: Option<String>,
 }
 
 pub async fn send_message<T>(stream: &mut UnixStream, message: &T) -> Result<()>

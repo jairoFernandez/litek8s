@@ -50,7 +50,7 @@ pub struct ContainerMetrics {
     pub network_tx_bytes: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ContainerStatsSnapshot {
     pub cpu_total_usage: u64,
     pub system_cpu_usage: Option<u64>,
@@ -62,7 +62,7 @@ pub struct ContainerStatsSnapshot {
     pub network_tx_bytes: u64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ContainerExitState {
     pub status: Option<String>,
     pub exit_code: Option<i64>,

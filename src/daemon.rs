@@ -12,16 +12,17 @@ use tokio::sync::{Mutex, Notify};
 
 use crate::config;
 use crate::manifest::DeploymentManifest;
+use crate::node::{ClusterNode, DEFAULT_REMOTE_BINARY, NodeClient, NodeTransport};
 use crate::protocol::{
-    DaemonTopSummary, DeploymentDescription, DeploymentSummary, DeploymentTopRow, Request,
-    Response, read_message, send_message,
+    DaemonTopSummary, DeploymentDescription, DeploymentSummary, DeploymentTopRow, NodeDescription,
+    NodeSummary, Request, Response, read_message, send_message,
 };
 use crate::reconciler;
 use crate::runtime::docker::{
     ContainerMetrics, ContainerStatsSnapshot, DockerRuntime, compute_cpu_percent_from_samples,
     deployment_container_name,
 };
-use crate::store::{ApplyOutcome, Store};
+use crate::store::{ApplyOutcome, NodeApplyOutcome, Store};
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -124,7 +125,7 @@ async fn handle_connection(state: Arc<AppState>, mut stream: UnixStream) -> Resu
     let response = match process_request(state, request).await {
         Ok(response) => response,
         Err(error) => Response::Error {
-            message: error.to_string(),
+            message: format!("{error:#}"),
         },
     };
     send_message(&mut stream, &response).await
@@ -135,6 +136,16 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
         Request::Apply { manifest } => {
             let manifest = DeploymentManifest::parse(&manifest)?;
             let name = manifest.deployment_name().to_string();
+            state
+                .store
+                .get_node(manifest.node_name())
+                .await
+                .with_context(|| {
+                    format!(
+                        "deployment `{name}` targets unknown node `{}`; add it first with `litek8s node add`",
+                        manifest.node_name()
+                    )
+                })?;
             let outcome = state.store.upsert(manifest).await?;
             state.reconcile_all().await?;
 
@@ -144,11 +155,57 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             };
             Ok(Response::Ack { message })
         }
+        Request::AddNode {
+            name,
+            ssh_target,
+            remote_binary,
+        } => {
+            if matches!(name.as_str(), "local") {
+                bail!("`local` is reserved for the built-in node");
+            }
+            let node = ClusterNode::ssh(
+                name.clone(),
+                ssh_target,
+                remote_binary.unwrap_or_else(|| DEFAULT_REMOTE_BINARY.to_string()),
+            )?;
+            let client = NodeClient::for_node(&node, state.runtime.clone());
+            client
+                .ping()
+                .await
+                .with_context(|| format!("node `{name}` did not answer over ssh"))?;
+
+            let outcome = state.store.upsert_node(node).await?;
+            let message = match outcome {
+                NodeApplyOutcome::Created => format!("node/{name} added"),
+                NodeApplyOutcome::Configured => format!("node/{name} updated"),
+            };
+            Ok(Response::Ack { message })
+        }
         Request::DeleteManifest { manifest } => {
             let manifest = DeploymentManifest::parse(&manifest)?;
             delete_deployment(state, manifest.deployment_name()).await
         }
         Request::DeleteDeployment { name } => delete_deployment(state, &name).await,
+        Request::GetNodes => {
+            let nodes = state.store.list_nodes().await;
+            let deployments = state.store.list().await;
+            let mut items = Vec::with_capacity(nodes.len());
+            for node in nodes {
+                let deployment_count = deployments
+                    .iter()
+                    .filter(|entry| entry.manifest.node_name() == node.name)
+                    .count();
+                let (status, _) = state.node_health(&node).await;
+                items.push(NodeSummary {
+                    name: node.name.clone(),
+                    transport: node.transport_label().to_string(),
+                    endpoint: node.endpoint(),
+                    status,
+                    deployment_count,
+                });
+            }
+            Ok(Response::Nodes { items })
+        }
         Request::GetDeployments => {
             state.reconcile_all().await?;
             let items = state
@@ -158,6 +215,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 .into_iter()
                 .map(|entry| DeploymentSummary {
                     name: entry.manifest.deployment_name().to_string(),
+                    node_name: entry.manifest.node_name().to_string(),
                     status: entry.status.to_string(),
                     image: entry.manifest.container().image.clone(),
                     container_id: entry.container_id,
@@ -176,6 +234,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             let item = DeploymentDescription {
                 name: entry.manifest.deployment_name().to_string(),
                 api_version: entry.manifest.api_version.clone(),
+                node_name: entry.manifest.node_name().to_string(),
                 status: entry.status.to_string(),
                 image: entry.manifest.container().image.clone(),
                 container_name: deployment_container_name(entry.manifest.deployment_name()),
@@ -204,8 +263,44 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
 
             Ok(Response::Description { item })
         }
+        Request::DescribeNode { name } => {
+            let node = state
+                .store
+                .get_node(&name)
+                .await
+                .with_context(|| format!("node `{name}` was not found"))?;
+            let (status, message) = state.node_health(&node).await;
+            let deployment_count = state
+                .store
+                .list()
+                .await
+                .into_iter()
+                .filter(|entry| entry.manifest.node_name() == node.name)
+                .count();
+            let item = NodeDescription {
+                name: node.name.clone(),
+                transport: node.transport_label().to_string(),
+                endpoint: node.endpoint(),
+                remote_binary: match &node.transport {
+                    NodeTransport::Local => None,
+                    NodeTransport::Ssh { remote_binary, .. } => Some(remote_binary.clone()),
+                },
+                status,
+                deployment_count,
+                message,
+            };
+            Ok(Response::NodeDescription { item })
+        }
         Request::Logs { name, tail } => {
-            let content = state.runtime.logs(&name, tail).await?;
+            let entry = state
+                .store
+                .get(&name)
+                .await
+                .with_context(|| format!("deployment `{name}` was not found"))?;
+            let runtime = state
+                .client_for_node_name(entry.manifest.node_name())
+                .await?;
+            let content = runtime.logs(&name, tail).await?;
             Ok(Response::Logs { content })
         }
         Request::Top => {
@@ -218,18 +313,22 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
 
             for entry in deployments {
                 if let Some(container_id) = entry.container_id.as_ref() {
-                    active_container_ids.insert(container_id.clone());
-                    if let Ok(snapshot) = state
-                        .runtime
-                        .stats_snapshot_for_container(container_id)
-                        .await
+                    let sample_key = top_sample_key(entry.manifest.node_name(), container_id);
+                    active_container_ids.insert(sample_key.clone());
+                    if let Ok(runtime) =
+                        state.client_for_node_name(entry.manifest.node_name()).await
                     {
-                        snapshots.insert(container_id.clone(), snapshot);
+                        if let Ok(snapshot) =
+                            runtime.stats_snapshot_for_container(container_id).await
+                        {
+                            snapshots.insert(sample_key, snapshot);
+                        }
                     }
                 }
 
                 items.push(DeploymentTopRow {
                     name: entry.manifest.deployment_name().to_string(),
+                    node_name: entry.manifest.node_name().to_string(),
                     status: entry.status.to_string(),
                     image: entry.manifest.container().image.clone(),
                     container_id: entry.container_id,
@@ -249,8 +348,9 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             top_metrics.retain_active(&active_container_ids);
             for item in &mut items {
                 if let Some(container_id) = item.container_id.as_ref() {
-                    if let Some(snapshot) = snapshots.get(container_id) {
-                        let metrics = top_metrics.metrics_for(container_id, snapshot);
+                    let sample_key = top_sample_key(&item.node_name, container_id);
+                    if let Some(snapshot) = snapshots.get(&sample_key) {
+                        let metrics = top_metrics.metrics_for(&sample_key, snapshot);
                         item.cpu_percent = metrics.cpu_percent;
                         item.memory_usage_bytes = metrics.memory_usage_bytes;
                         item.memory_limit_bytes = metrics.memory_limit_bytes;
@@ -268,11 +368,20 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
 }
 
 async fn delete_deployment(state: Arc<AppState>, name: &str) -> Result<Response> {
+    let deployment = state
+        .store
+        .get(name)
+        .await
+        .with_context(|| format!("deployment `{name}` was not found"))?;
     let removed = state.store.remove(name).await?;
     if removed.is_none() {
         bail!("deployment `{name}` was not found");
     }
-    state.runtime.remove_deployment(name).await?;
+    state
+        .client_for_node_name(deployment.manifest.node_name())
+        .await?
+        .remove_deployment(name)
+        .await?;
     Ok(Response::Ack {
         message: format!("deployment.apps/{name} deleted"),
     })
@@ -301,7 +410,25 @@ fn spawn_reconcile_loop(
 impl AppState {
     async fn reconcile_all(&self) -> Result<()> {
         let _guard = self.reconcile_guard.lock().await;
-        reconciler::reconcile_all(&self.store, &self.runtime, self.cleanup_orphans).await
+        let nodes = self.store.list_nodes().await;
+        reconciler::reconcile_all(&self.store, &self.runtime, &nodes, self.cleanup_orphans).await
+    }
+
+    async fn client_for_node_name(&self, name: &str) -> Result<NodeClient> {
+        let node = self
+            .store
+            .get_node(name)
+            .await
+            .with_context(|| format!("node `{name}` was not found"))?;
+        Ok(NodeClient::for_node(&node, self.runtime.clone()))
+    }
+
+    async fn node_health(&self, node: &ClusterNode) -> (String, Option<String>) {
+        let client = NodeClient::for_node(node, self.runtime.clone());
+        match client.ping().await {
+            Ok(()) => ("Ready".to_string(), None),
+            Err(error) => ("Offline".to_string(), Some(error.to_string())),
+        }
     }
 }
 
@@ -315,6 +442,10 @@ fn now_unix() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn top_sample_key(node_name: &str, container_id: &str) -> String {
+    format!("{node_name}:{container_id}")
 }
 
 struct DaemonMetricsSampler {

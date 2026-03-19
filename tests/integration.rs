@@ -179,6 +179,7 @@ async fn daemon_restart_rehydrates_state_file() -> Result<()> {
     harness.wait_until_running(&deployment).await?;
 
     harness.restart().await?;
+    let running_id = harness.wait_until_running(&deployment).await?;
 
     let describe = request(
         &harness.socket_path,
@@ -188,7 +189,10 @@ async fn daemon_restart_rehydrates_state_file() -> Result<()> {
     )
     .await?;
     match describe {
-        Response::Description { item } => assert_eq!(item.status, "Running"),
+        Response::Description { item } => {
+            assert_eq!(item.status, "Running");
+            assert_eq!(item.container_id.as_deref(), Some(running_id.as_str()));
+        }
         other => panic!("unexpected response: {other:?}"),
     }
 

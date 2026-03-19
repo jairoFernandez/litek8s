@@ -9,6 +9,7 @@ use tokio::sync::RwLock;
 
 use crate::config;
 use crate::manifest::DeploymentManifest;
+use crate::node::{ClusterNode, LOCAL_NODE_NAME};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DeploymentStatus {
@@ -44,10 +45,18 @@ pub struct StoredDeployment {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StateFile {
     pub deployments: BTreeMap<String, StoredDeployment>,
+    #[serde(default)]
+    pub nodes: BTreeMap<String, ClusterNode>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ApplyOutcome {
+    Created,
+    Configured,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeApplyOutcome {
     Created,
     Configured,
 }
@@ -71,6 +80,11 @@ impl Store {
         } else {
             StateFile::default()
         };
+        let mut state = state;
+        state
+            .nodes
+            .entry(LOCAL_NODE_NAME.to_string())
+            .or_insert_with(ClusterNode::local);
 
         Ok(Self {
             path,
@@ -147,6 +161,31 @@ impl Store {
     pub async fn names(&self) -> Vec<String> {
         let guard = self.state.read().await;
         guard.deployments.keys().cloned().collect()
+    }
+
+    pub async fn upsert_node(&self, node: ClusterNode) -> Result<NodeApplyOutcome> {
+        let mut guard = self.state.write().await;
+        let name = node.name.clone();
+        let outcome = if guard.nodes.contains_key(&name) {
+            NodeApplyOutcome::Configured
+        } else {
+            NodeApplyOutcome::Created
+        };
+        guard.nodes.insert(name, node);
+        let snapshot = guard.clone();
+        drop(guard);
+        self.persist(&snapshot).await?;
+        Ok(outcome)
+    }
+
+    pub async fn get_node(&self, name: &str) -> Option<ClusterNode> {
+        let guard = self.state.read().await;
+        guard.nodes.get(name).cloned()
+    }
+
+    pub async fn list_nodes(&self) -> Vec<ClusterNode> {
+        let guard = self.state.read().await;
+        guard.nodes.values().cloned().collect()
     }
 
     pub async fn set_status(

@@ -1,8 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use anyhow::Result;
 
+use crate::node::{ClusterNode, NodeClient};
 use crate::runtime::docker::{DockerRuntime, summarize_exit_state};
 use crate::store::{DeploymentStatus, Store, StoredDeployment};
 
@@ -11,21 +12,58 @@ const MAX_RESTART_BACKOFF_SECS: u64 = 15;
 
 pub async fn reconcile_all(
     store: &Store,
-    runtime: &DockerRuntime,
+    local_runtime: &DockerRuntime,
+    nodes: &[ClusterNode],
     cleanup_orphans: bool,
 ) -> Result<()> {
     let deployments = store.list().await;
-    let desired_names: HashSet<String> = deployments
+    let nodes_by_name: HashMap<String, ClusterNode> = nodes
         .iter()
-        .map(|entry| entry.manifest.deployment_name().to_string())
+        .cloned()
+        .map(|node| (node.name.clone(), node))
         .collect();
 
+    let mut desired_names_by_node: HashMap<String, HashSet<String>> = HashMap::new();
+    for deployment in &deployments {
+        desired_names_by_node
+            .entry(deployment.manifest.node_name().to_string())
+            .or_default()
+            .insert(deployment.manifest.deployment_name().to_string());
+    }
+
     if cleanup_orphans {
-        runtime.remove_orphans(&desired_names).await?;
+        for node in nodes {
+            let runtime = NodeClient::for_node(node, local_runtime.clone());
+            let desired_names = desired_names_by_node
+                .get(&node.name)
+                .cloned()
+                .unwrap_or_default();
+            runtime.remove_orphans(&desired_names).await?;
+        }
     }
 
     for deployment in deployments {
-        if let Err(error) = reconcile_deployment(store, runtime, &deployment).await {
+        let Some(node) = nodes_by_name.get(deployment.manifest.node_name()) else {
+            store
+                .set_status(
+                    deployment.manifest.deployment_name(),
+                    DeploymentStatus::Failed,
+                    None,
+                    Some(format!(
+                        "target node `{}` is not registered",
+                        deployment.manifest.node_name()
+                    )),
+                    None,
+                    false,
+                    false,
+                    None,
+                )
+                .await?;
+            continue;
+        };
+
+        let runtime = NodeClient::for_node(node, local_runtime.clone());
+        if let Err(error) = reconcile_deployment(store, &runtime, &deployment).await {
             store
                 .set_status(
                     deployment.manifest.deployment_name(),
@@ -46,7 +84,7 @@ pub async fn reconcile_all(
 
 pub async fn reconcile_deployment(
     store: &Store,
-    runtime: &DockerRuntime,
+    runtime: &NodeClient,
     deployment: &StoredDeployment,
 ) -> Result<()> {
     let name = deployment.manifest.deployment_name();

@@ -1,0 +1,25 @@
+apiVersion: litek8s.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: oom-demo
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: eater
+          image: python:3.12-alpine
+          command: ["python", "-c"]
+          args:
+            - |
+              import time
+              chunks = []
+              while True:
+                  chunks.append(bytearray(8 * 1024 * 1024))
+                  print(f"allocated={len(chunks) * 8}MiB", flush=True)
+                  time.sleep(0.2)
+          resources:
+            limits:
+              cpu: "500m"
+              memory: "64Mi"

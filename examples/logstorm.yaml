@@ -1,0 +1,25 @@
+apiVersion: litek8s.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: logstorm
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: logger
+          image: busybox:1.36
+          command: ["sh", "-c"]
+          args:
+            - |
+              i=0
+              while true; do
+                i=$((i + 1))
+                echo "logstorm tick=$i ts=$(date -Iseconds)"
+                sleep 0.2
+              done
+          resources:
+            limits:
+              cpu: "100m"
+              memory: "32Mi"
