@@ -775,8 +775,12 @@ fn print_response(response: Response) -> Result<()> {
         }
         Response::ServiceDescription { item } => {
             println!("{}", title(&format!("Service {}", item.name)));
-            println!("{}", muted("stable local listener backed by a deployment"));
+            println!(
+                "{}",
+                muted("local control-plane listener backed by a deployment")
+            );
             println!();
+            print_detail("service host", "local-control-plane");
             print_detail("deployment", &item.deployment_name);
             print_detail("listen", &item.listen_addr);
             print_detail(
@@ -788,10 +792,13 @@ fn print_response(response: Response) -> Result<()> {
             );
             print_detail("status", &color_status(&item.status));
             print_detail(
-                "current node",
+                "backend node",
                 item.current_node_name.as_deref().unwrap_or("-"),
             );
-            print_detail("upstream", item.current_upstream.as_deref().unwrap_or("-"));
+            print_detail(
+                "backend upstream",
+                item.current_upstream.as_deref().unwrap_or("-"),
+            );
             if let Some(message) = item.message {
                 print_detail("message", &message);
             }
