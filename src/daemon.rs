@@ -17,7 +17,8 @@ use crate::node::{
 };
 use crate::protocol::{
     DaemonTopSummary, DeploymentDescription, DeploymentSummary, DeploymentTopRow, EventItem,
-    NodeDescription, NodeSummary, Request, Response, read_message, send_message,
+    NodeDescription, NodeSummary, ProxyTarget as ProxyTargetInfo, Request, Response, read_message,
+    send_message,
 };
 use crate::reconciler;
 use crate::runtime::docker::{
@@ -416,6 +417,37 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             let runtime = state.client_for_node_name(&entry.assigned_node).await?;
             let content = runtime.logs(&name, tail).await?;
             Ok(Response::Logs { content })
+        }
+        Request::ResolveProxyTarget { name, port } => {
+            let entry = state
+                .store
+                .get(&name)
+                .await
+                .with_context(|| format!("deployment `{name}` was not found"))?;
+            let selected_port = entry.manifest.proxy_port(port)?;
+            let host_port = selected_port
+                .host_port
+                .context("selected port is missing hostPort")?;
+            let node = state
+                .store
+                .get_node(&entry.assigned_node)
+                .await
+                .with_context(|| format!("node `{}` was not found", entry.assigned_node))?;
+            let (transport, ssh_target) = match node.transport {
+                NodeTransport::Local => ("local".to_string(), None),
+                NodeTransport::Ssh { target, .. } => ("ssh".to_string(), Some(target)),
+            };
+            Ok(Response::ProxyTarget {
+                item: ProxyTargetInfo {
+                    deployment_name: name,
+                    node_name: entry.assigned_node,
+                    transport,
+                    ssh_target,
+                    container_port: selected_port.container_port,
+                    host_port,
+                    protocol: selected_port.protocol.as_printable().to_string(),
+                },
+            })
         }
         Request::Top => {
             // Keep `top` observational only: the background reconcile loop and Docker event

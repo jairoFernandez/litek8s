@@ -163,6 +163,39 @@ curl http://localhost:8090
 
 If `server77` exposes the remote ports to a reachable interface, you can also test the remote services directly from that host or over your LAN.
 
+Local proxy access:
+
+```bash
+cd "/Users/civojairo/Documents/New project/litek8s-demo"
+cargo run -- proxy echo-demo --listen 127.0.0.1:9000
+```
+
+Then in another terminal:
+
+```bash
+curl http://127.0.0.1:9000
+```
+
+For the remote edge deployment:
+
+```bash
+cd "/Users/civojairo/Documents/New project/litek8s-demo"
+cargo run -- proxy echo-edge --listen 127.0.0.1:9002
+```
+
+Then:
+
+```bash
+curl http://127.0.0.1:9002
+```
+
+This proxy is intentionally simple:
+
+- it uses the deployment's published `hostPort`
+- local deployments connect directly to `127.0.0.1:<hostPort>`
+- remote SSH nodes are reached through an `ssh -W` tunnel per connection
+- it is TCP-level forwarding, so it also works for simple non-HTTP TCP demos
+
 ## 6. Suggested demo script
 
 If you want a short verbal flow while presenting:
@@ -172,7 +205,8 @@ If you want a short verbal flow while presenting:
 3. Apply `echo-edge` and show that scheduling happens through node labels, not just hard-coded node names.
 4. Open `top --watch` and point out daemon overhead, workload CPU pressure, and the `oom-demo` backoff loop.
 5. Open `events --node server77 --watch` or `events --deployment echo-edge` and show that the control plane is emitting readable lifecycle events without `oom-demo` noise.
-6. Finish with `describe deployment echo-edge` and `describe deployment oom-demo` to connect scheduling and resource limits.
+6. Run `proxy echo-edge --listen 127.0.0.1:9002` and `curl http://127.0.0.1:9002` to show that you can reach a remote workload without a Service or ingress stack.
+7. Finish with `describe deployment echo-edge` and `describe deployment oom-demo` to connect scheduling and resource limits.
 
 ## 7. Cleanup
 

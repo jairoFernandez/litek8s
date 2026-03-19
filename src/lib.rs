@@ -4,6 +4,7 @@ pub mod daemon;
 pub mod manifest;
 pub mod node;
 pub mod protocol;
+pub mod proxy;
 pub mod reconciler;
 pub mod runtime;
 pub mod store;

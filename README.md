@@ -10,6 +10,7 @@ cargo run -- apply -f examples/nginx.yaml
 cargo run -- get deployments
 cargo run -- describe deployment demo-nginx
 cargo run -- logs demo-nginx
+cargo run -- proxy echo-demo
 cargo run -- events
 cargo run -- events --deployment demo-nginx
 cargo run -- events --node server77 --watch
@@ -23,6 +24,7 @@ cargo run -- delete deployment demo-nginx
 `top` shows a daemon summary first, then the managed deployments table.
 `events` shows the control-plane history: scheduling, starts, backoff, deletes, and node registration.
 `events` can also filter by deployment or node so noisy workloads do not drown the rest of the stream.
+`proxy` opens a local TCP listener and forwards into the deployment's published `hostPort`, using SSH tunneling automatically when the workload is on a remote node.
 
 ## Firepack
 
@@ -44,6 +46,7 @@ cargo run -- apply -f examples/oom-demo.yaml
 target/debug/litek8s top --watch --interval-secs 1
 target/debug/litek8s logs logstorm --tail 20
 target/debug/litek8s describe deployment oom-demo
+target/debug/litek8s proxy echo-demo --listen 127.0.0.1:9000
 ```
 
 To clean up:
@@ -94,6 +97,7 @@ cargo run -- describe deployment echo-server77
 cargo run -- describe deployment echo-edge
 cargo run -- events --node server77 --watch
 cargo run -- events --deployment echo-edge
+cargo run -- proxy echo-edge --listen 127.0.0.1:9002
 cargo run -- top --watch
 ```
 
@@ -104,6 +108,7 @@ The remote examples cover both scheduling paths:
 
 `get` / `describe` / `top` now show a `NODE` column so you can see where each deployment is running, and `events` lets you watch the scheduler and reconciler decisions in real time.
 `get nodes` and `describe node` also show whether a node is `Schedulable` or `Cordoned`, which makes it easy to demo controlled placement.
+`proxy` is useful when the remote node is only reachable over SSH or when you want one stable local URL during the demo.
 
 ## Manifest shape
 

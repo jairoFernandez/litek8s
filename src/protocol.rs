@@ -45,6 +45,10 @@ pub enum Request {
         name: String,
         tail: usize,
     },
+    ResolveProxyTarget {
+        name: String,
+        port: Option<u16>,
+    },
     Top,
 }
 
@@ -70,6 +74,9 @@ pub enum Response {
     },
     Logs {
         content: String,
+    },
+    ProxyTarget {
+        item: ProxyTarget,
     },
     Top {
         daemon: DaemonTopSummary,
@@ -171,6 +178,17 @@ pub struct EventItem {
     pub object_name: String,
     pub node_name: Option<String>,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyTarget {
+    pub deployment_name: String,
+    pub node_name: String,
+    pub transport: String,
+    pub ssh_target: Option<String>,
+    pub container_port: u16,
+    pub host_port: u16,
+    pub protocol: String,
 }
 
 pub async fn send_message<T>(stream: &mut UnixStream, message: &T) -> Result<()>

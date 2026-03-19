@@ -216,6 +216,52 @@ impl DeploymentManifest {
         hasher.update(canonical);
         Ok(hex::encode(hasher.finalize()))
     }
+
+    pub fn proxy_port(&self, requested: Option<u16>) -> Result<&ContainerPort> {
+        let published_ports: Vec<&ContainerPort> = self
+            .container()
+            .ports
+            .iter()
+            .filter(|port| port.host_port.is_some())
+            .collect();
+
+        ensure!(
+            !published_ports.is_empty(),
+            "deployment `{}` does not publish any hostPort",
+            self.deployment_name()
+        );
+
+        if let Some(requested) = requested {
+            return published_ports
+                .into_iter()
+                .find(|port| {
+                    port.protocol == PortProtocol::Tcp
+                        && (port.container_port == requested || port.host_port == Some(requested))
+                })
+                .with_context(|| {
+                    format!(
+                        "deployment `{}` does not publish TCP port `{requested}`",
+                        self.deployment_name()
+                    )
+                });
+        }
+
+        let tcp_ports: Vec<&ContainerPort> = published_ports
+            .into_iter()
+            .filter(|port| port.protocol == PortProtocol::Tcp)
+            .collect();
+        ensure!(
+            !tcp_ports.is_empty(),
+            "deployment `{}` does not publish a TCP hostPort",
+            self.deployment_name()
+        );
+        ensure!(
+            tcp_ports.len() == 1,
+            "deployment `{}` publishes multiple TCP ports; pass --port",
+            self.deployment_name()
+        );
+        Ok(tcp_ports[0])
+    }
 }
 
 impl ContainerPort {
@@ -578,5 +624,53 @@ spec:
                 .to_string()
                 .contains("not a valid positive integer")
         );
+    }
+
+    #[test]
+    fn selects_single_tcp_proxy_port() {
+        let manifest = DeploymentManifest::parse(&manifest_yaml()).expect("manifest should parse");
+        let port = manifest
+            .proxy_port(None)
+            .expect("proxy port should resolve");
+        assert_eq!(port.container_port, 80);
+        assert_eq!(port.host_port, Some(8080));
+    }
+
+    #[test]
+    fn rejects_ambiguous_proxy_ports_without_explicit_selection() {
+        let yaml = format!(
+            r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: demo
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: echo
+          image: hashicorp/http-echo:1.0.0
+          ports:
+            - containerPort: 5678
+              hostPort: 8090
+            - containerPort: 8080
+              hostPort: 8091
+"#
+        );
+
+        let manifest = DeploymentManifest::parse(&yaml).expect("manifest should parse");
+        assert!(manifest.proxy_port(None).is_err());
+
+        let by_container_port = manifest
+            .proxy_port(Some(5678))
+            .expect("containerPort match should resolve");
+        assert_eq!(by_container_port.host_port, Some(8090));
+
+        let by_host_port = manifest
+            .proxy_port(Some(8091))
+            .expect("hostPort match should resolve");
+        assert_eq!(by_host_port.container_port, 8080);
     }
 }

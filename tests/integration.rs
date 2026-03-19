@@ -110,6 +110,52 @@ async fn apply_get_logs_and_delete_roundtrip() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resolves_proxy_target_for_published_port() -> Result<()> {
+    let _guard = integration_lock().lock().await;
+    if !docker_available().await {
+        return Ok(());
+    }
+
+    let harness = TestHarness::spawn().await?;
+    let deployment = unique_name("proxy");
+    let manifest =
+        manifest_yaml_with_host_port(&deployment, r#"["sh"]"#, r#"["-c", "sleep 3600"]"#, 18090);
+
+    request(
+        &harness.socket_path,
+        Request::Apply {
+            manifest: manifest.clone(),
+        },
+    )
+    .await?;
+    harness.wait_until_running(&deployment).await?;
+
+    let response = request(
+        &harness.socket_path,
+        Request::ResolveProxyTarget {
+            name: deployment.clone(),
+            port: None,
+        },
+    )
+    .await?;
+
+    match response {
+        Response::ProxyTarget { item } => {
+            assert_eq!(item.deployment_name, deployment);
+            assert_eq!(item.node_name, "local");
+            assert_eq!(item.transport, "local");
+            assert_eq!(item.container_port, 8080);
+            assert_eq!(item.host_port, 18090);
+            assert_eq!(item.protocol, "TCP");
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    harness.cleanup_deployment(&deployment).await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reconciler_recreates_container_after_manual_removal() -> Result<()> {
     let _guard = integration_lock().lock().await;
     if !docker_available().await {
@@ -720,6 +766,38 @@ spec:
 "#,
         image = test_image(),
         resources = resources,
+    )
+}
+
+fn manifest_yaml_with_host_port(
+    deployment: &str,
+    command: &str,
+    args: &str,
+    host_port: u16,
+) -> String {
+    format!(
+        r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: {deployment}
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: app
+          image: {image}
+          command: {command}
+          args: {args}
+          ports:
+            - containerPort: 8080
+              hostPort: {host_port}
+"#,
+        image = test_image(),
+        command = command,
+        args = args,
     )
 }
 

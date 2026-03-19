@@ -12,6 +12,7 @@ use crate::config;
 use crate::daemon::{self, ServerConfig};
 use crate::node::{self, validate_label_key, validate_label_value};
 use crate::protocol::{self, Request, Response};
+use crate::proxy;
 
 const HELP_TEMPLATE: &str = "\
 {before-help}{name} {version}
@@ -62,6 +63,12 @@ const LOGS_AFTER_HELP: &str = "\
 Examples:
   litek8s logs demo-nginx
   litek8s logs demo-nginx --tail 200";
+
+const PROXY_AFTER_HELP: &str = "\
+Examples:
+  litek8s proxy echo-demo
+  litek8s proxy echo-edge --listen 127.0.0.1:9002
+  litek8s proxy echo-demo --port 8090";
 
 const EVENTS_AFTER_HELP: &str = "\
 Examples:
@@ -161,6 +168,26 @@ enum Command {
         name: String,
         #[arg(long, default_value_t = 100, help = "How many log lines to request")]
         tail: usize,
+    },
+    #[command(
+        about = "Open a local TCP proxy to a published deployment port",
+        help_template = HELP_TEMPLATE,
+        after_help = PROXY_AFTER_HELP
+    )]
+    Proxy {
+        #[arg(help = "Deployment name")]
+        name: String,
+        #[arg(
+            long,
+            default_value = "127.0.0.1:9000",
+            help = "Local address to listen on"
+        )]
+        listen: String,
+        #[arg(
+            long,
+            help = "Select a specific published port by containerPort or hostPort"
+        )]
+        port: Option<u16>,
     },
     #[command(
         about = "Show recent control-plane events",
@@ -318,6 +345,9 @@ pub async fn run() -> Result<()> {
         Command::Logs { name, tail } => {
             let response = protocol::request(&socket_path, Request::Logs { name, tail }).await?;
             print_response(response)
+        }
+        Command::Proxy { name, listen, port } => {
+            run_proxy(&socket_path, &name, &listen, port).await
         }
         Command::Events {
             watch,
@@ -649,6 +679,18 @@ fn print_response(response: Response) -> Result<()> {
             print!("{content}");
             Ok(())
         }
+        Response::ProxyTarget { item } => {
+            println!(
+                "{}",
+                title(&format!("Proxy target {}", item.deployment_name))
+            );
+            println!();
+            print_detail("node", &item.node_name);
+            print_detail("transport", &item.transport);
+            print_detail("container port", &item.container_port.to_string());
+            print_detail("host port", &item.host_port.to_string());
+            Ok(())
+        }
         Response::Top { daemon, items } => {
             println!("{} {}", title("Daemon"), muted("local control loop"));
             println!(
@@ -734,6 +776,49 @@ async fn run_top(socket_path: &Path, watch: bool, interval: Duration) -> Result<
             _ = tokio::time::sleep(interval) => {}
         }
     }
+}
+
+async fn run_proxy(socket_path: &Path, name: &str, listen: &str, port: Option<u16>) -> Result<()> {
+    let response = protocol::request(
+        socket_path,
+        Request::ResolveProxyTarget {
+            name: name.to_string(),
+            port,
+        },
+    )
+    .await?;
+
+    let item = match response {
+        Response::ProxyTarget { item } => item,
+        other => {
+            print_response(other)?;
+            return Ok(());
+        }
+    };
+
+    let listener = proxy::bind_listener(listen).await?;
+    let bound_addr = listener
+        .local_addr()
+        .context("failed to read bound proxy address")?;
+
+    println!("{}", title("Local Proxy"));
+    println!("{}", muted("tcp forwarding through the local litek8s CLI"));
+    println!();
+    print_detail("deployment", &item.deployment_name);
+    print_detail("node", &item.node_name);
+    print_detail("transport", &item.transport);
+    print_detail("listen", &bound_addr.to_string());
+    print_detail(
+        "upstream",
+        &format!("127.0.0.1:{} ({})", item.host_port, item.protocol),
+    );
+    if let Some(ssh_target) = item.ssh_target.as_deref() {
+        print_detail("ssh target", ssh_target);
+    }
+    println!();
+    println!("{}", muted("proxy live; ctrl+c to stop"));
+
+    proxy::serve_listener(listener, item).await
 }
 
 async fn run_events(
