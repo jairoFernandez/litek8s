@@ -21,6 +21,9 @@ pub enum Request {
         name: String,
         unschedulable: bool,
     },
+    DrainNode {
+        name: String,
+    },
     DeleteManifest {
         manifest: String,
     },

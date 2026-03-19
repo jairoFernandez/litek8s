@@ -254,6 +254,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 },
             })
         }
+        Request::DrainNode { name } => drain_node(state, &name).await,
         Request::DeleteManifest { manifest } => match ParsedManifest::parse(&manifest)? {
             ParsedManifest::Deployment(manifest) => {
                 delete_deployment(state, manifest.deployment_name()).await
@@ -679,6 +680,106 @@ async fn delete_service(state: Arc<AppState>, name: &str) -> Result<Response> {
     state.refresh_cluster_snapshot().await?;
     Ok(Response::Ack {
         message: format!("service/{name} deleted"),
+    })
+}
+
+async fn drain_node(state: Arc<AppState>, name: &str) -> Result<Response> {
+    let _node = state
+        .store
+        .get_node(name)
+        .await
+        .with_context(|| format!("node `{name}` was not found"))?;
+    let cordoned = state.store.set_node_unschedulable(name, true).await?;
+    let nodes = state.store.list_nodes().await;
+    let deployments = state.store.list().await;
+    if cordoned {
+        state
+            .record_event(NewEvent {
+                level: EventLevel::Normal,
+                reason: "NodeCordoned".to_string(),
+                object_kind: "node".to_string(),
+                object_name: name.to_string(),
+                node_name: Some(name.to_string()),
+                message: "node marked unschedulable for drain".to_string(),
+            })
+            .await?;
+    }
+    state
+        .record_event(NewEvent {
+            level: EventLevel::Normal,
+            reason: "NodeDrainStarted".to_string(),
+            object_kind: "node".to_string(),
+            object_name: name.to_string(),
+            node_name: Some(name.to_string()),
+            message: "drain requested; evacuating movable deployments".to_string(),
+        })
+        .await?;
+
+    let mut moved = 0usize;
+    let mut blocked = 0usize;
+    for deployment in deployments
+        .into_iter()
+        .filter(|deployment| deployment.assigned_node == name)
+    {
+        match drain_target_for_deployment(&deployment, &nodes, name) {
+            DrainDecision::Move(target_node) => {
+                if state
+                    .store
+                    .set_assigned_node(deployment.manifest.deployment_name(), target_node.clone())
+                    .await?
+                {
+                    let _ = state
+                        .store
+                        .set_status(
+                            deployment.manifest.deployment_name(),
+                            DeploymentStatus::Pending,
+                            false,
+                            None,
+                            Some(format!(
+                                "evicted from node `{name}`; rescheduling to `{target_node}`"
+                            )),
+                            Some("drained".to_string()),
+                            false,
+                            false,
+                            None,
+                        )
+                        .await?;
+                    state
+                        .record_event(NewEvent {
+                            level: EventLevel::Normal,
+                            reason: "Evicted".to_string(),
+                            object_kind: "deployment".to_string(),
+                            object_name: deployment.manifest.deployment_name().to_string(),
+                            node_name: Some(name.to_string()),
+                            message: format!(
+                                "evicted from node `{name}`; target node `{target_node}` selected"
+                            ),
+                        })
+                        .await?;
+                    moved = moved.saturating_add(1);
+                }
+            }
+            DrainDecision::Blocked(reason) => {
+                blocked = blocked.saturating_add(1);
+                state
+                    .record_event(NewEvent {
+                        level: EventLevel::Warning,
+                        reason: "DrainBlocked".to_string(),
+                        object_kind: "deployment".to_string(),
+                        object_name: deployment.manifest.deployment_name().to_string(),
+                        node_name: Some(name.to_string()),
+                        message: reason,
+                    })
+                    .await?;
+            }
+            DrainDecision::Skip => {}
+        }
+    }
+    state.reconcile_all().await?;
+    state.refresh_cluster_snapshot().await?;
+
+    Ok(Response::Ack {
+        message: format!("node/{name} drained: {moved} moved, {blocked} blocked"),
     })
 }
 
@@ -1157,6 +1258,42 @@ enum ServiceBackendHealth {
     Degraded,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DrainDecision {
+    Move(String),
+    Blocked(String),
+    Skip,
+}
+
+fn drain_target_for_deployment(
+    deployment: &crate::store::StoredDeployment,
+    nodes: &[ClusterNode],
+    drained_node: &str,
+) -> DrainDecision {
+    if deployment.assigned_node != drained_node {
+        return DrainDecision::Skip;
+    }
+
+    if deployment.manifest.explicit_node_name() == Some(drained_node) {
+        return DrainDecision::Blocked(format!(
+            "deployment `{}` is pinned to node `{drained_node}` via nodeName",
+            deployment.manifest.deployment_name()
+        ));
+    }
+
+    match select_node_for_manifest(&deployment.manifest, nodes, None) {
+        Ok(target) if target != drained_node => DrainDecision::Move(target),
+        Ok(_) => DrainDecision::Blocked(format!(
+            "deployment `{}` has no alternate schedulable node",
+            deployment.manifest.deployment_name()
+        )),
+        Err(error) => DrainDecision::Blocked(format!(
+            "deployment `{}` cannot be evacuated: {error}",
+            deployment.manifest.deployment_name()
+        )),
+    }
+}
+
 fn effective_service_state(
     service: &crate::store::StoredService,
     runtime_status: Option<&ServiceStatusSnapshot>,
@@ -1353,11 +1490,14 @@ mod tests {
     use std::collections::{BTreeMap, HashSet};
 
     use super::{
-        ServiceBackendHealth, ServiceBackendState, TopMetricsSampler, effective_service_state,
+        DrainDecision, ServiceBackendHealth, ServiceBackendState, TopMetricsSampler,
+        drain_target_for_deployment, effective_service_state,
     };
+    use crate::manifest::{API_VERSION, DeploymentManifest};
+    use crate::node::{ClusterNode, NodeTransport};
     use crate::runtime::docker::ContainerStatsSnapshot;
     use crate::service::ServiceStatusSnapshot;
-    use crate::store::StoredService;
+    use crate::store::{DeploymentStatus, StoredDeployment, StoredService};
 
     fn snapshot(cpu_total_usage: u64, system_cpu_usage: u64) -> ContainerStatsSnapshot {
         ContainerStatsSnapshot {
@@ -1452,5 +1592,122 @@ mod tests {
             state.message.as_deref(),
             Some("node `server77` is Offline; selector role=edge")
         );
+    }
+
+    #[test]
+    fn drain_moves_workload_to_alternate_schedulable_node() {
+        let deployment = stored_deployment(
+            "demo",
+            "local",
+            None,
+            BTreeMap::new(),
+        );
+        let nodes = vec![local_node(true), ssh_node("server77", false, BTreeMap::new())];
+
+        let decision = drain_target_for_deployment(&deployment, &nodes, "local");
+        assert_eq!(decision, DrainDecision::Move("server77".to_string()));
+    }
+
+    #[test]
+    fn drain_blocks_workload_pinned_by_nodename() {
+        let deployment = stored_deployment(
+            "demo",
+            "server77",
+            Some("server77"),
+            BTreeMap::new(),
+        );
+        let nodes = vec![local_node(false), ssh_node("server77", true, BTreeMap::new())];
+
+        let decision = drain_target_for_deployment(&deployment, &nodes, "server77");
+        assert!(matches!(decision, DrainDecision::Blocked(message) if message.contains("pinned")));
+    }
+
+    #[test]
+    fn drain_skips_workloads_not_assigned_to_the_node() {
+        let deployment = stored_deployment(
+            "demo",
+            "server77",
+            None,
+            BTreeMap::new(),
+        );
+        let nodes = vec![local_node(false), ssh_node("server77", false, BTreeMap::new())];
+
+        let decision = drain_target_for_deployment(&deployment, &nodes, "local");
+        assert_eq!(decision, DrainDecision::Skip);
+    }
+
+    fn stored_deployment(
+        name: &str,
+        assigned_node: &str,
+        explicit_node_name: Option<&str>,
+        node_selector: BTreeMap<String, String>,
+    ) -> StoredDeployment {
+        let node_name_yaml = explicit_node_name
+            .map(|value| format!("      nodeName: {value}\n"))
+            .unwrap_or_default();
+        let node_selector_yaml = if node_selector.is_empty() {
+            String::new()
+        } else {
+            let selector_lines = node_selector
+                .iter()
+                .map(|(key, value)| format!("        {key}: {value}\n"))
+                .collect::<String>();
+            format!("      nodeSelector:\n{selector_lines}")
+        };
+        let manifest = DeploymentManifest::parse(&format!(
+            r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: {name}
+spec:
+  replicas: 1
+  template:
+    spec:
+{node_name_yaml}{node_selector_yaml}      restartPolicy: Always
+      containers:
+        - name: app
+          image: alpine:3.20
+          command: ["sh"]
+          args: ["-c", "sleep 3600"]
+"#
+        ))
+        .expect("manifest should parse");
+
+        StoredDeployment {
+            manifest,
+            spec_hash: "hash".to_string(),
+            assigned_node: assigned_node.to_string(),
+            status: DeploymentStatus::Running,
+            ready: true,
+            container_id: Some("abc".to_string()),
+            message: None,
+            restart_count: 0,
+            last_exit: None,
+            restart_streak: 0,
+            next_retry_at: None,
+            healthy_since: None,
+            container_started_at: None,
+            ready_since: None,
+            updated_at: 0,
+        }
+    }
+
+    fn local_node(unschedulable: bool) -> ClusterNode {
+        let mut node = ClusterNode::local();
+        node.unschedulable = unschedulable;
+        node
+    }
+
+    fn ssh_node(name: &str, unschedulable: bool, labels: BTreeMap<String, String>) -> ClusterNode {
+        ClusterNode {
+            name: name.to_string(),
+            labels,
+            unschedulable,
+            transport: NodeTransport::Ssh {
+                target: name.to_string(),
+                remote_binary: "~/.local/bin/litek8s".to_string(),
+            },
+        }
     }
 }

@@ -99,6 +99,7 @@ Examples:
   litek8s node add server77 --ssh server77 --install
   litek8s node add server77 --ssh server77 --label role=edge --label zone=lab
   litek8s node cordon server77
+  litek8s node drain server77
   litek8s node uncordon server77
   litek8s node add edge-1 --ssh ubuntu@10.0.0.7 --remote-binary ~/.local/bin/litek8s";
 
@@ -324,6 +325,11 @@ enum NodeCommand {
         #[arg(help = "Logical node name")]
         name: String,
     },
+    #[command(about = "Cordon a node and evacuate movable workloads to other schedulable nodes")]
+    Drain {
+        #[arg(help = "Logical node name")]
+        name: String,
+    },
     #[command(about = "Re-open a node for scheduling")]
     Uncordon {
         #[arg(help = "Logical node name")]
@@ -510,6 +516,10 @@ pub async fn run() -> Result<()> {
                     },
                 )
                 .await?;
+                print_response(response)
+            }
+            NodeCommand::Drain { name } => {
+                let response = protocol::request(&socket_path, Request::DrainNode { name }).await?;
                 print_response(response)
             }
             NodeCommand::Uncordon { name } => {

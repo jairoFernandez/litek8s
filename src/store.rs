@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::config;
 use crate::manifest::DeploymentManifest;
@@ -133,6 +133,7 @@ pub struct EventQuery {
 pub struct Store {
     path: PathBuf,
     state: RwLock<StateFile>,
+    persist_lock: Mutex<()>,
 }
 
 impl Store {
@@ -176,6 +177,7 @@ impl Store {
         Ok(Self {
             path,
             state: RwLock::new(state),
+            persist_lock: Mutex::new(()),
         })
     }
 
@@ -528,6 +530,7 @@ impl Store {
     }
 
     async fn persist(&self, snapshot: &StateFile) -> Result<()> {
+        let _persist_guard = self.persist_lock.lock().await;
         config::ensure_parent_dir(&self.path)?;
         let bytes = serde_json::to_vec_pretty(snapshot).context("failed to serialize state")?;
         let tmp_path = self.path.with_extension("tmp");

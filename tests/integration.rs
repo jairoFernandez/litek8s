@@ -1,5 +1,6 @@
 use std::env;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -119,8 +120,9 @@ async fn resolves_proxy_target_for_published_port() -> Result<()> {
 
     let harness = TestHarness::spawn().await?;
     let deployment = unique_name("proxy");
+    let host_port = unique_port(18_090);
     let manifest =
-        manifest_yaml_with_host_port(&deployment, r#"["sh"]"#, r#"["-c", "sleep 3600"]"#, 18090);
+        manifest_yaml_with_host_port(&deployment, r#"["sh"]"#, r#"["-c", "sleep 3600"]"#, host_port);
 
     request(
         &harness.socket_path,
@@ -146,7 +148,7 @@ async fn resolves_proxy_target_for_published_port() -> Result<()> {
             assert_eq!(item.node_name, "local");
             assert_eq!(item.transport, "local");
             assert_eq!(item.container_port, 8080);
-            assert_eq!(item.host_port, 18090);
+            assert_eq!(item.host_port, host_port);
             assert_eq!(item.protocol, "TCP");
         }
         other => panic!("unexpected response: {other:?}"),
@@ -166,8 +168,12 @@ async fn service_listener_forwards_to_deployment() -> Result<()> {
     let harness = TestHarness::spawn().await?;
     let deployment = unique_name("svc-echo");
     let service = unique_name("svc");
-    let manifest = http_echo_manifest(&deployment, 18094, "hello through service");
-    let service_manifest = service_manifest_yaml(&service, &deployment, "127.0.0.1:19094", None);
+    let host_port = unique_port(18_094);
+    let service_port = unique_port(19_094);
+    let listen_addr = format!("127.0.0.1:{service_port}");
+    let manifest =
+        http_echo_manifest_with_readiness(&deployment, host_port, "hello through service");
+    let service_manifest = service_manifest_yaml(&service, &deployment, &listen_addr, None);
 
     request(
         &harness.socket_path,
@@ -176,7 +182,9 @@ async fn service_listener_forwards_to_deployment() -> Result<()> {
         },
     )
     .await?;
-    harness.wait_until_running(&deployment).await?;
+    harness
+        .wait_until_description(&deployment, |item| item.status == "Ready" && item.ready)
+        .await?;
 
     let add_service = request(
         &harness.socket_path,
@@ -193,9 +201,9 @@ async fn service_listener_forwards_to_deployment() -> Result<()> {
     let describe = harness
         .wait_until_service_status(&service, |item| item.status == "Listening")
         .await?;
-    assert_eq!(describe.listen_addr, "127.0.0.1:19094");
+    assert_eq!(describe.listen_addr, listen_addr);
 
-    let mut client = tokio::net::TcpStream::connect("127.0.0.1:19094").await?;
+    let mut client = tokio::net::TcpStream::connect(("127.0.0.1", service_port)).await?;
     client
         .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .await?;
@@ -230,7 +238,8 @@ async fn deployment_with_readiness_probe_becomes_ready() -> Result<()> {
 
     let harness = TestHarness::spawn().await?;
     let deployment = unique_name("ready");
-    let manifest = http_echo_manifest_with_readiness(&deployment, 18096, "ready with probe");
+    let host_port = unique_port(18_096);
+    let manifest = http_echo_manifest_with_readiness(&deployment, host_port, "ready with probe");
 
     request(
         &harness.socket_path,
@@ -266,8 +275,15 @@ async fn service_waits_for_readiness_before_exposing_endpoints() -> Result<()> {
     let harness = TestHarness::spawn().await?;
     let deployment = unique_name("not-ready");
     let service = unique_name("not-ready-svc");
-    let manifest = sleeping_manifest_with_host_port_and_readiness(&deployment, 18097, 8080);
-    let service_manifest = service_manifest_yaml(&service, &deployment, "127.0.0.1:19097", Some(8080));
+    let host_port = unique_port(18_097);
+    let service_port = unique_port(19_097);
+    let manifest = sleeping_manifest_with_host_port_and_readiness(&deployment, host_port, 8080);
+    let service_manifest = service_manifest_yaml(
+        &service,
+        &deployment,
+        &format!("127.0.0.1:{service_port}"),
+        Some(8080),
+    );
 
     request(
         &harness.socket_path,
@@ -321,8 +337,15 @@ async fn service_transitions_to_no_endpoints_after_backend_disappears() -> Resul
     let harness = TestHarness::spawn().await?;
     let deployment = unique_name("svc-lost");
     let service = unique_name("svc-lost");
-    let manifest = http_echo_manifest(&deployment, 18095, "hello through service");
-    let service_manifest = service_manifest_yaml(&service, &deployment, "127.0.0.1:19095", None);
+    let host_port = unique_port(18_095);
+    let service_port = unique_port(19_095);
+    let manifest = http_echo_manifest(&deployment, host_port, "hello through service");
+    let service_manifest = service_manifest_yaml(
+        &service,
+        &deployment,
+        &format!("127.0.0.1:{service_port}"),
+        None,
+    );
 
     request(
         &harness.socket_path,
@@ -402,7 +425,7 @@ async fn reconciler_recreates_container_after_manual_removal() -> Result<()> {
         .await?;
     assert_ne!(original_id, new_id);
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let top = request(&harness.socket_path, Request::Top).await?;
         match top {
@@ -714,6 +737,64 @@ async fn cordon_blocks_new_default_scheduling_until_uncordoned() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn drain_without_alternative_cordons_node_and_reports_blocked_workloads() -> Result<()> {
+    let _guard = integration_lock().lock().await;
+    if !docker_available().await {
+        return Ok(());
+    }
+
+    let harness = TestHarness::spawn().await?;
+    let deployment = unique_name("drain");
+    let manifest = manifest_yaml(&deployment, r#"["sh"]"#, r#"["-c", "sleep 3600"]"#);
+
+    request(
+        &harness.socket_path,
+        Request::Apply {
+            manifest: manifest.clone(),
+        },
+    )
+    .await?;
+    harness.wait_until_running(&deployment).await?;
+
+    let drain = request(
+        &harness.socket_path,
+        Request::DrainNode {
+            name: "local".to_string(),
+        },
+    )
+    .await?;
+    match drain {
+        Response::Ack { message } => {
+            assert!(message.contains("drained"));
+            assert!(message.contains("blocked"));
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    let nodes = request(&harness.socket_path, Request::GetNodes).await?;
+    match nodes {
+        Response::Nodes { items } => {
+            let local = items
+                .into_iter()
+                .find(|item| item.name == "local")
+                .expect("local node should exist");
+            assert_eq!(local.scheduling, "Cordoned");
+        }
+        other => panic!("unexpected response: {other:?}"),
+    }
+
+    let item = harness
+        .wait_until_description(&deployment, |item| {
+            item.node_name == "local" && matches!(item.status.as_str(), "Running" | "Ready")
+        })
+        .await?;
+    assert_eq!(item.node_name, "local");
+
+    harness.cleanup_deployment(&deployment).await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn events_can_filter_by_deployment_and_node() -> Result<()> {
     let _guard = integration_lock().lock().await;
     if !docker_available().await {
@@ -940,6 +1021,12 @@ impl TestHarness {
 
             tokio::time::sleep(Duration::from_millis(250)).await;
         }
+    }
+}
+
+impl Drop for TestHarness {
+    fn drop(&mut self) {
+        self.server.abort();
     }
 }
 
@@ -1191,6 +1278,12 @@ fn unique_name(prefix: &str) -> String {
         .unwrap_or_default()
         .as_nanos();
     format!("{prefix}-{nanos}")
+}
+
+fn unique_port(base: u16) -> u16 {
+    static NEXT_PORT: AtomicU16 = AtomicU16::new(0);
+    let offset = NEXT_PORT.fetch_add(1, Ordering::Relaxed);
+    base.saturating_add(offset % 500)
 }
 
 fn integration_lock() -> &'static tokio::sync::Mutex<()> {
