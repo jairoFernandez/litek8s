@@ -61,7 +61,11 @@ struct AppState {
     daemon_metrics: Arc<Mutex<DaemonMetricsSampler>>,
     top_metrics: Arc<Mutex<TopMetricsSampler>>,
     service_manager: Arc<Mutex<ServiceManager>>,
+    cluster_snapshot: Arc<Mutex<ClusterSnapshotCache>>,
 }
+
+const CLUSTER_SNAPSHOT_MAX_AGE: Duration = Duration::from_millis(900);
+const CLUSTER_REMOTE_QUERY_TIMEOUT: Duration = Duration::from_millis(1200);
 
 pub async fn serve(config: ServerConfig) -> Result<()> {
     config::ensure_parent_dir(&config.socket_path)?;
@@ -88,9 +92,9 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         daemon_metrics: Arc::new(Mutex::new(DaemonMetricsSampler::new())),
         top_metrics: Arc::new(Mutex::new(TopMetricsSampler::new())),
         service_manager: Arc::new(Mutex::new(ServiceManager::new())),
+        cluster_snapshot: Arc::new(Mutex::new(ClusterSnapshotCache::default())),
     };
     let app_state = Arc::new(app_state);
-    app_state.reconcile_all().await?;
     app_state.sync_services().await?;
 
     let listener = UnixListener::bind(&config.socket_path).with_context(|| {
@@ -103,7 +107,8 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     let notify = Arc::new(Notify::new());
     let reconcile_task =
         spawn_reconcile_loop(app_state.clone(), notify.clone(), config.poll_interval);
-    let event_listener = app_state.runtime.spawn_event_listener(notify);
+    let event_listener = app_state.runtime.spawn_event_listener(notify.clone());
+    notify.notify_one();
 
     loop {
         tokio::select! {
@@ -186,6 +191,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                     message: "node registered and answered over ssh".to_string(),
                 })
                 .await?;
+            state.invalidate_cluster_snapshot().await;
             let message = match outcome {
                 NodeApplyOutcome::Created => format!("node/{name} added"),
                 NodeApplyOutcome::Configured => format!("node/{name} updated"),
@@ -270,59 +276,16 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
         }
         Request::DeleteService { name } => delete_service(state, &name).await,
         Request::GetServices => {
-            let services = state.store.list_services().await;
-            let statuses = state.service_manager.lock().await.statuses().await;
-            let mut items = Vec::with_capacity(services.len());
-            for service in services {
-                let resolved_name = match resolve_backing_deployment(&state.store, &service).await {
-                    Ok(deployment) => deployment.manifest.deployment_name().to_string(),
-                    Err(_) if !service.deployment_name.is_empty() => {
-                        service.deployment_name.clone()
-                    }
-                    Err(_) if !service.selector.is_empty() => format!(
-                        "selector:{}",
-                        service
-                            .selector
-                            .iter()
-                            .map(|(key, value)| format!("{key}={value}"))
-                            .collect::<Vec<_>>()
-                            .join(",")
-                    ),
-                    Err(_) => "-".to_string(),
-                };
-                items.push(ServiceSummary {
-                    name: service.name.clone(),
-                    deployment_name: resolved_name,
-                    listen_addr: service.listen_addr.clone(),
-                    target_port: service.target_port,
-                    status: statuses
-                        .get(&service.name)
-                        .map(|status| status.status.clone())
-                        .unwrap_or_else(|| "Stopped".to_string()),
-                });
-            }
-            Ok(Response::Services { items })
+            let snapshot = state.cluster_snapshot().await?;
+            Ok(Response::Services {
+                items: snapshot.services,
+            })
         }
         Request::GetNodes => {
-            let nodes = state.store.list_nodes().await;
-            let deployments = state.store.list().await;
-            let mut items = Vec::with_capacity(nodes.len());
-            for node in nodes {
-                let deployment_count = deployments
-                    .iter()
-                    .filter(|entry| entry.assigned_node == node.name)
-                    .count();
-                let (status, _) = state.node_health(&node).await;
-                items.push(NodeSummary {
-                    name: node.name.clone(),
-                    transport: node.transport_label().to_string(),
-                    endpoint: node.endpoint(),
-                    status,
-                    scheduling: node.scheduling_label().to_string(),
-                    deployment_count,
-                });
-            }
-            Ok(Response::Nodes { items })
+            let snapshot = state.cluster_snapshot().await?;
+            Ok(Response::Nodes {
+                items: snapshot.nodes,
+            })
         }
         Request::GetEvents {
             limit,
@@ -555,70 +518,11 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             })
         }
         Request::Top => {
-            // Keep `top` observational only: the background reconcile loop and Docker event
-            // listener remain responsible for state convergence.
-            let deployments = state.store.list().await;
-            let mut items = Vec::with_capacity(deployments.len());
-            let mut active_container_ids = HashSet::new();
-            let mut snapshots = HashMap::new();
-
-            for entry in deployments {
-                if let Some(container_id) = entry.container_id.as_ref() {
-                    let sample_key = top_sample_key(&entry.assigned_node, container_id);
-                    active_container_ids.insert(sample_key.clone());
-                    if let Ok(runtime) = state.client_for_node_name(&entry.assigned_node).await {
-                        if let Ok(snapshot) =
-                            runtime.stats_snapshot_for_container(container_id).await
-                        {
-                            snapshots.insert(sample_key, snapshot);
-                        }
-                    }
-                }
-
-                items.push(DeploymentTopRow {
-                    name: entry.manifest.deployment_name().to_string(),
-                    node_name: entry.assigned_node,
-                    status: entry.status.to_string(),
-                    image: entry.manifest.container().image.clone(),
-                    container_id: entry.container_id,
-                    ports: entry
-                        .manifest
-                        .container()
-                        .ports
-                        .iter()
-                        .map(|port| port.printable())
-                        .collect(),
-                    restart_count: entry.restart_count,
-                    restart_streak: entry.restart_streak,
-                    last_exit: entry.last_exit,
-                    next_retry_in_secs: retry_in_secs(entry.next_retry_at),
-                    cpu_percent: None,
-                    memory_usage_bytes: None,
-                    memory_limit_bytes: None,
-                    network_rx_bytes: None,
-                    network_tx_bytes: None,
-                });
-            }
-
-            let mut top_metrics = state.top_metrics.lock().await;
-            top_metrics.retain_active(&active_container_ids);
-            for item in &mut items {
-                if let Some(container_id) = item.container_id.as_ref() {
-                    let sample_key = top_sample_key(&item.node_name, container_id);
-                    if let Some(snapshot) = snapshots.get(&sample_key) {
-                        let metrics = top_metrics.metrics_for(&sample_key, snapshot);
-                        item.cpu_percent = metrics.cpu_percent;
-                        item.memory_usage_bytes = metrics.memory_usage_bytes;
-                        item.memory_limit_bytes = metrics.memory_limit_bytes;
-                        item.network_rx_bytes = metrics.network_rx_bytes;
-                        item.network_tx_bytes = metrics.network_tx_bytes;
-                    }
-                }
-            }
-
-            let daemon = state.daemon_metrics.lock().await.snapshot();
-
-            Ok(Response::Top { daemon, items })
+            let snapshot = state.cluster_snapshot().await?;
+            Ok(Response::Top {
+                daemon: snapshot.daemon,
+                items: snapshot.deployments,
+            })
         }
     }
 }
@@ -648,6 +552,7 @@ async fn delete_deployment(state: Arc<AppState>, name: &str) -> Result<Response>
             message: "deployment removed from the control plane".to_string(),
         })
         .await?;
+    state.invalidate_cluster_snapshot().await;
     Ok(Response::Ack {
         message: format!("deployment.apps/{name} deleted"),
     })
@@ -767,6 +672,7 @@ async fn apply_service_manifest(
             message: format!("service listens on {listen_addr} and forwards to {target_text}"),
         })
         .await?;
+    state.invalidate_cluster_snapshot().await;
     Ok(Response::Ack {
         message: match outcome {
             ServiceApplyOutcome::Created => format!("service/{name} created"),
@@ -791,6 +697,7 @@ async fn delete_service(state: Arc<AppState>, name: &str) -> Result<Response> {
             message: "service listener removed from the control plane".to_string(),
         })
         .await?;
+    state.invalidate_cluster_snapshot().await;
     Ok(Response::Ack {
         message: format!("service/{name} deleted"),
     })
@@ -820,7 +727,9 @@ impl AppState {
     async fn reconcile_all(&self) -> Result<()> {
         let _guard = self.reconcile_guard.lock().await;
         let nodes = self.store.list_nodes().await;
-        reconciler::reconcile_all(&self.store, &self.runtime, &nodes, self.cleanup_orphans).await
+        reconciler::reconcile_all(&self.store, &self.runtime, &nodes, self.cleanup_orphans).await?;
+        self.invalidate_cluster_snapshot().await;
+        Ok(())
     }
 
     async fn client_for_node_name(&self, name: &str) -> Result<NodeClient> {
@@ -834,9 +743,16 @@ impl AppState {
 
     async fn node_health(&self, node: &ClusterNode) -> (String, Option<String>) {
         let client = NodeClient::for_node(node, self.runtime.clone());
-        match client.ping().await {
-            Ok(()) => ("Ready".to_string(), None),
-            Err(error) => ("Offline".to_string(), Some(error.to_string())),
+        match tokio::time::timeout(CLUSTER_REMOTE_QUERY_TIMEOUT, client.ping()).await {
+            Ok(Ok(())) => ("Ready".to_string(), None),
+            Ok(Err(error)) => ("Offline".to_string(), Some(error.to_string())),
+            Err(_) => (
+                "Offline".to_string(),
+                Some(format!(
+                    "health check timed out after {}ms",
+                    CLUSTER_REMOTE_QUERY_TIMEOUT.as_millis()
+                )),
+            ),
         }
     }
 
@@ -851,6 +767,151 @@ impl AppState {
             .await
             .sync(self.store.clone())
             .await
+    }
+
+    async fn cluster_snapshot(&self) -> Result<ClusterSnapshot> {
+        let mut cache = self.cluster_snapshot.lock().await;
+        let now = Instant::now();
+        if let (Some(generated_at), Some(snapshot)) = (cache.generated_at, cache.snapshot.as_ref())
+        {
+            if now.duration_since(generated_at) <= CLUSTER_SNAPSHOT_MAX_AGE {
+                return Ok(snapshot.clone());
+            }
+        }
+
+        let snapshot = self.collect_cluster_snapshot().await?;
+        cache.generated_at = Some(Instant::now());
+        cache.snapshot = Some(snapshot.clone());
+        Ok(snapshot)
+    }
+
+    async fn invalidate_cluster_snapshot(&self) {
+        let mut cache = self.cluster_snapshot.lock().await;
+        cache.generated_at = None;
+        cache.snapshot = None;
+    }
+
+    async fn collect_cluster_snapshot(&self) -> Result<ClusterSnapshot> {
+        let deployments = self.store.list().await;
+        let nodes = self.store.list_nodes().await;
+        let services = self.store.list_services().await;
+        let service_statuses = self.service_manager.lock().await.statuses().await;
+
+        let mut deployment_items = Vec::with_capacity(deployments.len());
+        let mut active_container_ids = HashSet::new();
+        let mut stats_snapshots = HashMap::new();
+
+        for entry in &deployments {
+            if let Some(container_id) = entry.container_id.as_ref() {
+                let sample_key = top_sample_key(&entry.assigned_node, container_id);
+                active_container_ids.insert(sample_key.clone());
+                if let Ok(runtime) = self.client_for_node_name(&entry.assigned_node).await {
+                    if let Ok(Ok(snapshot)) = tokio::time::timeout(
+                        CLUSTER_REMOTE_QUERY_TIMEOUT,
+                        runtime.stats_snapshot_for_container(container_id),
+                    )
+                    .await
+                    {
+                        stats_snapshots.insert(sample_key, snapshot);
+                    }
+                }
+            }
+
+            deployment_items.push(DeploymentTopRow {
+                name: entry.manifest.deployment_name().to_string(),
+                node_name: entry.assigned_node.clone(),
+                status: entry.status.to_string(),
+                image: entry.manifest.container().image.clone(),
+                container_id: entry.container_id.clone(),
+                ports: entry
+                    .manifest
+                    .container()
+                    .ports
+                    .iter()
+                    .map(|port| port.printable())
+                    .collect(),
+                restart_count: entry.restart_count,
+                restart_streak: entry.restart_streak,
+                last_exit: entry.last_exit.clone(),
+                next_retry_in_secs: retry_in_secs(entry.next_retry_at),
+                cpu_percent: None,
+                memory_usage_bytes: None,
+                memory_limit_bytes: None,
+                network_rx_bytes: None,
+                network_tx_bytes: None,
+            });
+        }
+
+        let mut top_metrics = self.top_metrics.lock().await;
+        top_metrics.retain_active(&active_container_ids);
+        for item in &mut deployment_items {
+            if let Some(container_id) = item.container_id.as_ref() {
+                let sample_key = top_sample_key(&item.node_name, container_id);
+                if let Some(snapshot) = stats_snapshots.get(&sample_key) {
+                    let metrics = top_metrics.metrics_for(&sample_key, snapshot);
+                    item.cpu_percent = metrics.cpu_percent;
+                    item.memory_usage_bytes = metrics.memory_usage_bytes;
+                    item.memory_limit_bytes = metrics.memory_limit_bytes;
+                    item.network_rx_bytes = metrics.network_rx_bytes;
+                    item.network_tx_bytes = metrics.network_tx_bytes;
+                }
+            }
+        }
+        drop(top_metrics);
+
+        let mut node_items = Vec::with_capacity(nodes.len());
+        for node in nodes {
+            let deployment_count = deployments
+                .iter()
+                .filter(|entry| entry.assigned_node == node.name)
+                .count();
+            let (status, _) = self.node_health(&node).await;
+            node_items.push(NodeSummary {
+                name: node.name.clone(),
+                transport: node.transport_label().to_string(),
+                endpoint: node.endpoint(),
+                status,
+                scheduling: node.scheduling_label().to_string(),
+                deployment_count,
+            });
+        }
+
+        let mut service_items = Vec::with_capacity(services.len());
+        for service in services {
+            let resolved_name = match resolve_backing_deployment(&self.store, &service).await {
+                Ok(deployment) => deployment.manifest.deployment_name().to_string(),
+                Err(_) if !service.deployment_name.is_empty() => service.deployment_name.clone(),
+                Err(_) if !service.selector.is_empty() => format!(
+                    "selector:{}",
+                    service
+                        .selector
+                        .iter()
+                        .map(|(key, value)| format!("{key}={value}"))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                Err(_) => "-".to_string(),
+            };
+            service_items.push(ServiceSummary {
+                name: service.name.clone(),
+                deployment_name: resolved_name,
+                listen_addr: service.listen_addr.clone(),
+                target_port: service.target_port,
+                status: service_statuses
+                    .get(&service.name)
+                    .map(|status| status.status.clone())
+                    .unwrap_or_else(|| "Stopped".to_string()),
+            });
+        }
+
+        let daemon = self.daemon_metrics.lock().await.snapshot();
+
+        Ok(ClusterSnapshot {
+            daemon,
+            deployments: deployment_items,
+            nodes: node_items,
+            services: service_items,
+        })
     }
 }
 
@@ -874,6 +935,20 @@ struct DaemonMetricsSampler {
     pid: Pid,
     started_at: Instant,
     system: System,
+}
+
+#[derive(Debug, Clone)]
+struct ClusterSnapshot {
+    daemon: DaemonTopSummary,
+    deployments: Vec<DeploymentTopRow>,
+    nodes: Vec<NodeSummary>,
+    services: Vec<ServiceSummary>,
+}
+
+#[derive(Default)]
+struct ClusterSnapshotCache {
+    generated_at: Option<Instant>,
+    snapshot: Option<ClusterSnapshot>,
 }
 
 impl DaemonMetricsSampler {

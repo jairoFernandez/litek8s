@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 
 use crate::node::{ClusterNode, NodeClient, select_node_for_manifest};
 use crate::runtime::docker::{DockerRuntime, summarize_exit_state};
@@ -42,7 +42,12 @@ pub async fn reconcile_all(
                 .get(&node.name)
                 .cloned()
                 .unwrap_or_default();
-            runtime.remove_orphans(&desired_names).await?;
+            if let Err(error) = runtime.remove_orphans(&desired_names).await {
+                eprintln!(
+                    "skipping orphan cleanup on node `{}` because it is unavailable: {error}",
+                    node.name
+                );
+            }
         }
     }
 
@@ -90,16 +95,16 @@ pub async fn reconcile_all(
         if deployment.assigned_node != target_node {
             if let Some(previous_node) = nodes_by_name.get(&deployment.assigned_node) {
                 let previous_runtime = NodeClient::for_node(previous_node, local_runtime.clone());
-                previous_runtime
+                if let Err(error) = previous_runtime
                     .remove_deployment(deployment.manifest.deployment_name())
                     .await
-                    .with_context(|| {
-                        format!(
-                            "failed to move deployment `{}` off node `{}`",
-                            deployment.manifest.deployment_name(),
-                            deployment.assigned_node
-                        )
-                    })?;
+                {
+                    eprintln!(
+                        "failed to clean deployment `{}` off previous node `{}` during reschedule: {error}",
+                        deployment.manifest.deployment_name(),
+                        deployment.assigned_node
+                    );
+                }
             }
             if store
                 .set_assigned_node(deployment.manifest.deployment_name(), target_node.clone())

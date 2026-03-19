@@ -939,9 +939,19 @@ async fn run_top(socket_path: &Path, watch: bool, interval: Duration) -> Result<
         .transpose()?;
 
     loop {
-        let response = protocol::request(socket_path, Request::Top).await?;
         if let Some(display) = watch_display.as_mut() {
             display.begin_frame(interval)?;
+            println!("{}", muted("loading snapshot..."));
+            io::stdout().flush().context("failed to flush top output")?;
+        }
+        let Some(response) = request_with_ctrl_c(socket_path, Request::Top).await? else {
+            return Ok(());
+        };
+        if watch_display.is_some() {
+            watch_display
+                .as_mut()
+                .expect("watch display should exist")
+                .begin_frame(interval)?;
         }
         print_response(response)?;
         io::stdout().flush().context("failed to flush top output")?;
@@ -977,9 +987,21 @@ async fn run_tree(socket_path: &Path, watch: bool, interval: Duration) -> Result
         .transpose()?;
 
     loop {
-        let snapshot = fetch_tree_snapshot(socket_path).await?;
         if let Some(display) = watch_display.as_mut() {
             display.begin_frame(interval)?;
+            println!("{}", muted("loading snapshot..."));
+            io::stdout()
+                .flush()
+                .context("failed to flush tree output")?;
+        }
+        let Some(snapshot) = fetch_tree_snapshot(socket_path).await? else {
+            return Ok(());
+        };
+        if watch_display.is_some() {
+            watch_display
+                .as_mut()
+                .expect("watch display should exist")
+                .begin_frame(interval)?;
         }
         println!("{}", render_tree(&snapshot));
         io::stdout()
@@ -997,12 +1019,18 @@ async fn run_tree(socket_path: &Path, watch: bool, interval: Duration) -> Result
     }
 }
 
-async fn fetch_tree_snapshot(socket_path: &Path) -> Result<TreeSnapshot> {
+async fn fetch_tree_snapshot(socket_path: &Path) -> Result<Option<TreeSnapshot>> {
     let (top_response, nodes_response, services_response) = tokio::try_join!(
-        protocol::request(socket_path, Request::Top),
-        protocol::request(socket_path, Request::GetNodes),
-        protocol::request(socket_path, Request::GetServices),
+        request_with_ctrl_c(socket_path, Request::Top),
+        request_with_ctrl_c(socket_path, Request::GetNodes),
+        request_with_ctrl_c(socket_path, Request::GetServices),
     )?;
+
+    let (Some(top_response), Some(nodes_response), Some(services_response)) =
+        (top_response, nodes_response, services_response)
+    else {
+        return Ok(None);
+    };
 
     let (daemon, deployments) = match top_response {
         Response::Top { daemon, items } => (daemon, items),
@@ -1022,12 +1050,12 @@ async fn fetch_tree_snapshot(socket_path: &Path) -> Result<TreeSnapshot> {
         _ => bail!("unexpected response to Request::GetServices"),
     };
 
-    Ok(TreeSnapshot {
+    Ok(Some(TreeSnapshot {
         daemon,
         deployments,
         nodes,
         services,
-    })
+    }))
 }
 
 fn render_tree(snapshot: &TreeSnapshot) -> String {
@@ -1332,7 +1360,14 @@ async fn run_events(
         .transpose()?;
 
     loop {
-        let response = protocol::request(
+        if let Some(display) = watch_display.as_mut() {
+            display.begin_frame(interval)?;
+            println!("{}", muted("loading events..."));
+            io::stdout()
+                .flush()
+                .context("failed to flush events output")?;
+        }
+        let Some(response) = request_with_ctrl_c(
             socket_path,
             Request::GetEvents {
                 limit,
@@ -1341,9 +1376,15 @@ async fn run_events(
                 node_name: node.clone(),
             },
         )
-        .await?;
-        if let Some(display) = watch_display.as_mut() {
-            display.begin_frame(interval)?;
+        .await?
+        else {
+            return Ok(());
+        };
+        if watch_display.is_some() {
+            watch_display
+                .as_mut()
+                .expect("watch display should exist")
+                .begin_frame(interval)?;
         }
         print_response(response)?;
         io::stdout()
@@ -1358,6 +1399,13 @@ async fn run_events(
             _ = tokio::signal::ctrl_c() => return Ok(()),
             _ = tokio::time::sleep(interval) => {}
         }
+    }
+}
+
+async fn request_with_ctrl_c(socket_path: &Path, request: Request) -> Result<Option<Response>> {
+    tokio::select! {
+        response = protocol::request(socket_path, request) => response.map(Some),
+        _ = tokio::signal::ctrl_c() => Ok(None),
     }
 }
 
