@@ -261,7 +261,7 @@ impl DockerRuntime {
                     content.push_str(&String::from_utf8_lossy(&message));
                 }
                 Err(BollardError::DockerStreamError { .. }) => break,
-                Err(error) if !content.is_empty() => return Ok(content),
+                Err(_) if !content.is_empty() => return Ok(content),
                 Err(error) => return Err(error).context("failed to fetch Docker logs"),
             }
         }
@@ -427,7 +427,7 @@ impl DockerRuntime {
             items.push(ManagedContainer {
                 id: container.id.unwrap_or_default(),
                 name,
-                deployment,
+                deployment: deployment.clone(),
                 state: container.state.clone(),
                 status: container.status.clone(),
                 running: container.state.as_deref() == Some("running"),
