@@ -27,7 +27,7 @@ use super::config::TypeConfig;
 use super::{ClusterCommand, CommandResult};
 use crate::manifest::DeploymentManifest;
 use crate::node::ClusterNode;
-use crate::store::{NewEvent, StateFile, Store};
+use crate::store::{NewEvent, ServiceApplyOutcome, StateFile, Store};
 
 // ---------------------------------------------------------------------------
 // Log storage (in-memory)
@@ -177,8 +177,8 @@ impl StateMachineStore {
             ClusterCommand::ApplyDeployment { manifest_yaml } => {
                 match serde_yaml::from_str::<DeploymentManifest>(&manifest_yaml) {
                     Ok(manifest) => match self.store.upsert(manifest).await {
-                        Ok(_outcome) => CommandResult::Ack {
-                            message: Some("applied".into()),
+                        Ok(outcome) => CommandResult::Applied {
+                            created: outcome == crate::store::ApplyOutcome::Created,
                         },
                         Err(e) => CommandResult::Ack {
                             message: Some(format!("error: {e}")),
@@ -190,26 +190,35 @@ impl StateMachineStore {
                 }
             }
             ClusterCommand::DeleteDeployment { name } => {
-                let _ = self.store.remove(&name).await;
-                CommandResult::Ack {
-                    message: Some(format!("deleted deployment {name}")),
+                match self.store.remove(&name).await {
+                    Ok(Some(_)) => CommandResult::Changed { changed: true },
+                    _ => CommandResult::Changed { changed: false },
                 }
             }
-            ClusterCommand::ApplyService { manifest_yaml } => {
-                // Service manifest application is delegated to the daemon layer
-                // since it involves binding listeners. The state machine only
-                // records the intent.
-                CommandResult::Ack {
-                    message: Some(format!(
-                        "service manifest queued ({}b)",
-                        manifest_yaml.len()
-                    )),
+            ClusterCommand::ApplyService {
+                name,
+                deployment_name,
+                selector,
+                listen_addr,
+                target_port,
+            } => {
+                match self
+                    .store
+                    .upsert_service(name, deployment_name, selector, listen_addr, target_port)
+                    .await
+                {
+                    Ok(outcome) => CommandResult::Applied {
+                        created: outcome == ServiceApplyOutcome::Created,
+                    },
+                    Err(e) => CommandResult::Ack {
+                        message: Some(format!("error: {e}")),
+                    },
                 }
             }
             ClusterCommand::DeleteService { name } => {
-                let _ = self.store.remove_service(&name).await;
-                CommandResult::Ack {
-                    message: Some(format!("deleted service {name}")),
+                match self.store.remove_service(&name).await {
+                    Ok(Some(_)) => CommandResult::Changed { changed: true },
+                    _ => CommandResult::Changed { changed: false },
                 }
             }
             ClusterCommand::AddWorkerNode {
@@ -220,27 +229,26 @@ impl StateMachineStore {
             } => {
                 let binary = remote_binary.unwrap_or_else(|| "litek8s".into());
                 match ClusterNode::ssh(name.clone(), ssh_target, binary, labels) {
-                    Ok(node) => { let _ = self.store.upsert_node(node).await; }
-                    Err(_) => {}
-                }
-                CommandResult::Ack {
-                    message: Some(format!("added node {name}")),
+                    Ok(node) => match self.store.upsert_node(node).await {
+                        Ok(outcome) => CommandResult::Applied {
+                            created: outcome == crate::store::NodeApplyOutcome::Created,
+                        },
+                        Err(e) => CommandResult::Ack {
+                            message: Some(format!("error: {e}")),
+                        },
+                    },
+                    Err(e) => CommandResult::Ack {
+                        message: Some(format!("error: {e}")),
+                    },
                 }
             }
             ClusterCommand::SetWorkerNodeScheduling {
                 name,
                 unschedulable,
             } => {
-                let _ = self.store.set_node_unschedulable(&name, unschedulable).await;
-                CommandResult::Ack {
-                    message: Some(format!(
-                        "node {name} {}",
-                        if unschedulable {
-                            "cordoned"
-                        } else {
-                            "uncordoned"
-                        }
-                    )),
+                match self.store.set_node_unschedulable(&name, unschedulable).await {
+                    Ok(changed) => CommandResult::Changed { changed },
+                    Err(_) => CommandResult::Changed { changed: false },
                 }
             }
             ClusterCommand::RemoveWorkerNode { name: _ } => {
@@ -251,8 +259,10 @@ impl StateMachineStore {
                 name,
                 assigned_node,
             } => {
-                let _ = self.store.set_assigned_node(&name, assigned_node).await;
-                CommandResult::Ack { message: None }
+                match self.store.set_assigned_node(&name, assigned_node).await {
+                    Ok(changed) => CommandResult::Changed { changed },
+                    Err(_) => CommandResult::Changed { changed: false },
+                }
             }
             ClusterCommand::SetDeploymentStatus {
                 name,
@@ -265,7 +275,7 @@ impl StateMachineStore {
                 increment_restart_streak,
                 next_retry_at,
             } => {
-                let _ = self
+                match self
                     .store
                     .set_status(
                         &name,
@@ -278,17 +288,27 @@ impl StateMachineStore {
                         increment_restart_streak,
                         next_retry_at,
                     )
-                    .await;
-                CommandResult::Ack { message: None }
+                    .await
+                {
+                    Ok(changed) => CommandResult::Changed { changed },
+                    Err(_) => CommandResult::Changed { changed: false },
+                }
             }
-            ClusterCommand::AppendEvent { event } => {
+            ClusterCommand::AppendEvent {
+                level,
+                reason,
+                object_kind,
+                object_name,
+                node_name,
+                message,
+            } => {
                 let new_event = NewEvent {
-                    level: event.level,
-                    reason: event.reason,
-                    object_kind: event.object_kind,
-                    object_name: event.object_name,
-                    node_name: event.node_name,
-                    message: event.message,
+                    level,
+                    reason,
+                    object_kind,
+                    object_name,
+                    node_name,
+                    message,
                 };
                 match self.store.record_event(new_event).await {
                     Ok(stored) => CommandResult::EventRecorded { id: stored.id },

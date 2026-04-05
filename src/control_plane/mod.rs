@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use anyhow::{Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 
-use crate::store::{DeploymentStatus, EventLevel, StoredEvent};
+use crate::store::{DeploymentStatus, EventLevel};
 
 pub type ControlPlaneId = String;
 
@@ -29,7 +29,11 @@ pub enum ClusterCommand {
         name: String,
     },
     ApplyService {
-        manifest_yaml: String,
+        name: String,
+        deployment_name: String,
+        selector: BTreeMap<String, String>,
+        listen_addr: String,
+        target_port: Option<u16>,
     },
     DeleteService {
         name: String,
@@ -63,7 +67,12 @@ pub enum ClusterCommand {
         next_retry_at: Option<u64>,
     },
     AppendEvent {
-        event: StoredEvent,
+        level: EventLevel,
+        reason: String,
+        object_kind: String,
+        object_name: String,
+        node_name: Option<String>,
+        message: String,
     },
 }
 
@@ -72,21 +81,16 @@ pub enum CommandResult {
     Ack {
         message: Option<String>,
     },
+    Applied {
+        created: bool,
+    },
+    Changed {
+        changed: bool,
+    },
     EventRecorded {
         id: u64,
     },
     Noop,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct NewReplicatedEvent {
-    pub timestamp_secs: u64,
-    pub level: EventLevel,
-    pub reason: String,
-    pub object_kind: String,
-    pub object_name: String,
-    pub node_name: Option<String>,
-    pub message: String,
 }
 
 pub fn parse_peer_spec(raw: &str) -> Result<(String, String)> {
@@ -97,6 +101,9 @@ pub fn parse_peer_spec(raw: &str) -> Result<(String, String)> {
     ensure!(!addr.trim().is_empty(), "peer address must not be empty");
     Ok((id.trim().to_string(), addr.trim().to_string()))
 }
+
+#[cfg(test)]
+mod tests;
 
 pub fn validate_peer_map(
     node_id: &str,

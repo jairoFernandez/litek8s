@@ -11,6 +11,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify};
 
 use crate::config;
+use crate::control_plane::{ClusterCommand, CommandResult};
 use crate::control_plane::raft::ControlPlaneNode;
 use crate::manifest::{
     API_VERSION, DeploymentManifest, KIND_SERVICE, Metadata, ParsedManifest, ServiceManifest,
@@ -31,8 +32,7 @@ use crate::runtime::docker::{
 };
 use crate::service::{ServiceManager, ServiceStatusSnapshot, resolve_backing_deployment};
 use crate::store::{
-    ApplyOutcome, DeploymentStatus, EventLevel, EventQuery, NewEvent, NodeApplyOutcome,
-    ServiceApplyOutcome, Store,
+    DeploymentStatus, EventLevel, EventQuery, NewEvent, Store,
 };
 
 #[derive(Debug, Clone)]
@@ -221,13 +221,30 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 .await
                 .with_context(|| format!("node `{name}` did not answer over ssh"))?;
 
-            let outcome = state.store.upsert_node(node).await?;
+            let (ssh_target, remote_binary) = match &node.transport {
+                NodeTransport::Ssh {
+                    target,
+                    remote_binary,
+                } => (target.clone(), Some(remote_binary.clone())),
+                NodeTransport::Local => bail!("cannot add local node via AddNode"),
+            };
+            let result = state
+                .ha_node
+                .propose(ClusterCommand::AddWorkerNode {
+                    name: name.clone(),
+                    ssh_target,
+                    remote_binary,
+                    labels: node.labels.clone(),
+                })
+                .await?;
+            let created = matches!(result, CommandResult::Applied { created: true });
             state
                 .record_event(NewEvent {
                     level: EventLevel::Normal,
-                    reason: match outcome {
-                        NodeApplyOutcome::Created => "NodeAdded".to_string(),
-                        NodeApplyOutcome::Configured => "NodeUpdated".to_string(),
+                    reason: if created {
+                        "NodeAdded".to_string()
+                    } else {
+                        "NodeUpdated".to_string()
                     },
                     object_kind: "node".to_string(),
                     object_name: name.clone(),
@@ -236,9 +253,10 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 })
                 .await?;
             state.refresh_cluster_snapshot().await?;
-            let message = match outcome {
-                NodeApplyOutcome::Created => format!("node/{name} added"),
-                NodeApplyOutcome::Configured => format!("node/{name} updated"),
+            let message = if created {
+                format!("node/{name} added")
+            } else {
+                format!("node/{name} updated")
             };
             Ok(Response::Ack { message })
         }
@@ -251,10 +269,14 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 .get_node(&name)
                 .await
                 .with_context(|| format!("node `{name}` was not found"))?;
-            let changed = state
-                .store
-                .set_node_unschedulable(&name, unschedulable)
+            let result = state
+                .ha_node
+                .propose(ClusterCommand::SetWorkerNodeScheduling {
+                    name: name.clone(),
+                    unschedulable,
+                })
                 .await?;
+            let changed = matches!(result, CommandResult::Changed { changed: true });
             if changed {
                 state
                     .record_event(NewEvent {
@@ -578,8 +600,13 @@ async fn delete_deployment(state: Arc<AppState>, name: &str) -> Result<Response>
         .get(name)
         .await
         .with_context(|| format!("deployment `{name}` was not found"))?;
-    let removed = state.store.remove(name).await?;
-    if removed.is_none() {
+    let result = state
+        .ha_node
+        .propose(ClusterCommand::DeleteDeployment {
+            name: name.to_string(),
+        })
+        .await?;
+    if !matches!(result, CommandResult::Changed { changed: true }) {
         bail!("deployment `{name}` was not found");
     }
     state
@@ -618,17 +645,27 @@ async fn apply_deployment_manifest(
         &state.store.list_nodes().await,
         current_assignment.as_deref(),
     )?;
-    let outcome = state.store.upsert(manifest).await?;
+    let manifest_yaml =
+        serde_yaml::to_string(&manifest).context("failed to serialize manifest")?;
+    let result = state
+        .ha_node
+        .propose(ClusterCommand::ApplyDeployment { manifest_yaml })
+        .await?;
+    let created = matches!(result, CommandResult::Applied { created: true });
     let _ = state
-        .store
-        .set_assigned_node(&name, assigned_node.clone())
+        .ha_node
+        .propose(ClusterCommand::SetDeploymentAssignment {
+            name: name.clone(),
+            assigned_node: assigned_node.clone(),
+        })
         .await?;
     state
         .record_event(NewEvent {
             level: EventLevel::Normal,
-            reason: match outcome {
-                ApplyOutcome::Created => "Applied".to_string(),
-                ApplyOutcome::Configured => "Configured".to_string(),
+            reason: if created {
+                "Applied".to_string()
+            } else {
+                "Configured".to_string()
             },
             object_kind: "deployment".to_string(),
             object_name: name.clone(),
@@ -640,9 +677,10 @@ async fn apply_deployment_manifest(
     state.refresh_cluster_snapshot().await?;
 
     Ok(Response::Ack {
-        message: match outcome {
-            ApplyOutcome::Created => format!("deployment.apps/{name} created"),
-            ApplyOutcome::Configured => format!("deployment.apps/{name} configured"),
+        message: if created {
+            format!("deployment.apps/{name} created")
+        } else {
+            format!("deployment.apps/{name} configured")
         },
     })
 }
@@ -682,16 +720,17 @@ async fn apply_service_manifest(
             .with_context(|| format!("failed to bind service listen address {listen_addr}"))?;
     }
 
-    let outcome = state
-        .store
-        .upsert_service(
-            name.clone(),
-            deployment_name.clone(),
-            selector.clone(),
-            listen_addr.clone(),
+    let result = state
+        .ha_node
+        .propose(ClusterCommand::ApplyService {
+            name: name.clone(),
+            deployment_name: deployment_name.clone(),
+            selector: selector.clone(),
+            listen_addr: listen_addr.clone(),
             target_port,
-        )
+        })
         .await?;
+    let created = matches!(result, CommandResult::Applied { created: true });
     state.sync_services().await?;
     let target_text = if deployment_name.is_empty() {
         format!(
@@ -708,9 +747,10 @@ async fn apply_service_manifest(
     state
         .record_event(NewEvent {
             level: EventLevel::Normal,
-            reason: match outcome {
-                ServiceApplyOutcome::Created => "ServiceAdded".to_string(),
-                ServiceApplyOutcome::Configured => "ServiceUpdated".to_string(),
+            reason: if created {
+                "ServiceAdded".to_string()
+            } else {
+                "ServiceUpdated".to_string()
             },
             object_kind: "service".to_string(),
             object_name: name.clone(),
@@ -720,16 +760,22 @@ async fn apply_service_manifest(
         .await?;
     state.refresh_cluster_snapshot().await?;
     Ok(Response::Ack {
-        message: match outcome {
-            ServiceApplyOutcome::Created => format!("service/{name} created"),
-            ServiceApplyOutcome::Configured => format!("service/{name} configured"),
+        message: if created {
+            format!("service/{name} created")
+        } else {
+            format!("service/{name} configured")
         },
     })
 }
 
 async fn delete_service(state: Arc<AppState>, name: &str) -> Result<Response> {
-    let removed = state.store.remove_service(name).await?;
-    if removed.is_none() {
+    let result = state
+        .ha_node
+        .propose(ClusterCommand::DeleteService {
+            name: name.to_string(),
+        })
+        .await?;
+    if !matches!(result, CommandResult::Changed { changed: true }) {
         bail!("service `{name}` was not found");
     }
     state.sync_services().await?;
@@ -755,7 +801,14 @@ async fn drain_node(state: Arc<AppState>, name: &str) -> Result<Response> {
         .get_node(name)
         .await
         .with_context(|| format!("node `{name}` was not found"))?;
-    let cordoned = state.store.set_node_unschedulable(name, true).await?;
+    let cordon_result = state
+        .ha_node
+        .propose(ClusterCommand::SetWorkerNodeScheduling {
+            name: name.to_string(),
+            unschedulable: true,
+        })
+        .await?;
+    let cordoned = matches!(cordon_result, CommandResult::Changed { changed: true });
     let nodes = state.store.list_nodes().await;
     let deployments = state.store.list().await;
     if cordoned {
@@ -789,26 +842,29 @@ async fn drain_node(state: Arc<AppState>, name: &str) -> Result<Response> {
     {
         match drain_target_for_deployment(&deployment, &nodes, name) {
             DrainDecision::Move(target_node) => {
-                if state
-                    .store
-                    .set_assigned_node(deployment.manifest.deployment_name(), target_node.clone())
-                    .await?
-                {
+                let assign_result = state
+                    .ha_node
+                    .propose(ClusterCommand::SetDeploymentAssignment {
+                        name: deployment.manifest.deployment_name().to_string(),
+                        assigned_node: target_node.clone(),
+                    })
+                    .await?;
+                if matches!(assign_result, CommandResult::Changed { changed: true }) {
                     let _ = state
-                        .store
-                        .set_status(
-                            deployment.manifest.deployment_name(),
-                            DeploymentStatus::Pending,
-                            false,
-                            None,
-                            Some(format!(
+                        .ha_node
+                        .propose(ClusterCommand::SetDeploymentStatus {
+                            name: deployment.manifest.deployment_name().to_string(),
+                            status: DeploymentStatus::Pending,
+                            ready: false,
+                            container_id: None,
+                            message: Some(format!(
                                 "evicted from node `{name}`; rescheduling to `{target_node}`"
                             )),
-                            Some("drained".to_string()),
-                            false,
-                            false,
-                            None,
-                        )
+                            last_exit: Some("drained".to_string()),
+                            increment_restart_count: false,
+                            increment_restart_streak: false,
+                            next_retry_at: None,
+                        })
                         .await?;
                     state
                         .record_event(NewEvent {
@@ -895,7 +951,7 @@ impl AppState {
     async fn reconcile_all(&self) -> Result<()> {
         let _guard = self.reconcile_guard.lock().await;
         let nodes = self.store.list_nodes().await;
-        reconciler::reconcile_all(&self.store, &self.runtime, &nodes, self.cleanup_orphans).await?;
+        reconciler::reconcile_all(&self.store, &self.ha_node, &self.runtime, &nodes, self.cleanup_orphans).await?;
         self.request_cluster_snapshot_refresh();
         Ok(())
     }
@@ -925,7 +981,16 @@ impl AppState {
     }
 
     async fn record_event(&self, event: NewEvent) -> Result<()> {
-        self.store.record_event(event).await?;
+        self.ha_node
+            .propose(ClusterCommand::AppendEvent {
+                level: event.level,
+                reason: event.reason,
+                object_kind: event.object_kind,
+                object_name: event.object_name,
+                node_name: event.node_name,
+                message: event.message,
+            })
+            .await?;
         Ok(())
     }
 

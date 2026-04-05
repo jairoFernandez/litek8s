@@ -3,15 +3,18 @@ use std::time::Duration;
 
 use anyhow::Result;
 
+use crate::control_plane::raft::ControlPlaneNode;
+use crate::control_plane::{ClusterCommand, CommandResult};
 use crate::node::{ClusterNode, NodeClient, select_node_for_manifest};
 use crate::runtime::docker::{DockerRuntime, summarize_exit_state};
-use crate::store::{DeploymentStatus, EventLevel, NewEvent, Store, StoredDeployment};
+use crate::store::{DeploymentStatus, EventLevel, Store, StoredDeployment};
 
 const RECREATE_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const MAX_RESTART_BACKOFF_SECS: u64 = 15;
 
 pub async fn reconcile_all(
     store: &Store,
+    ha_node: &ControlPlaneNode,
     local_runtime: &DockerRuntime,
     nodes: &[ClusterNode],
     cleanup_orphans: bool,
@@ -59,22 +62,22 @@ pub async fn reconcile_all(
         ) {
             Ok(target_node) => target_node,
             Err(error) => {
-                let changed = store
-                    .set_status(
-                        deployment.manifest.deployment_name(),
-                        DeploymentStatus::Failed,
-                        false,
-                        None,
-                        Some(error.to_string()),
-                        None,
-                        false,
-                        false,
-                        None,
-                    )
+                let result = ha_node
+                    .propose(ClusterCommand::SetDeploymentStatus {
+                        name: deployment.manifest.deployment_name().to_string(),
+                        status: DeploymentStatus::Failed,
+                        ready: false,
+                        container_id: None,
+                        message: Some(error.to_string()),
+                        last_exit: None,
+                        increment_restart_count: false,
+                        increment_restart_streak: false,
+                        next_retry_at: None,
+                    })
                     .await?;
-                if changed {
+                if matches!(result, CommandResult::Changed { changed: true }) {
                     record_deployment_event(
-                        store,
+                        ha_node,
                         EventLevel::Warning,
                         "FailedScheduling",
                         deployment.manifest.deployment_name(),
@@ -107,12 +110,15 @@ pub async fn reconcile_all(
                     );
                 }
             }
-            if store
-                .set_assigned_node(deployment.manifest.deployment_name(), target_node.clone())
-                .await?
-            {
+            let assign_result = ha_node
+                .propose(ClusterCommand::SetDeploymentAssignment {
+                    name: deployment.manifest.deployment_name().to_string(),
+                    assigned_node: target_node.clone(),
+                })
+                .await?;
+            if matches!(assign_result, CommandResult::Changed { changed: true }) {
                 record_deployment_event(
-                    store,
+                    ha_node,
                     EventLevel::Normal,
                     "Scheduled",
                     deployment.manifest.deployment_name(),
@@ -121,18 +127,18 @@ pub async fn reconcile_all(
                 )
                 .await?;
             }
-            let _ = store
-                .set_status(
-                    deployment.manifest.deployment_name(),
-                    DeploymentStatus::Pending,
-                    false,
-                    None,
-                    Some(format!("scheduled on node `{target_node}`")),
-                    Some("rescheduled".to_string()),
-                    false,
-                    false,
-                    None,
-                )
+            let _ = ha_node
+                .propose(ClusterCommand::SetDeploymentStatus {
+                    name: deployment.manifest.deployment_name().to_string(),
+                    status: DeploymentStatus::Pending,
+                    ready: false,
+                    container_id: None,
+                    message: Some(format!("scheduled on node `{target_node}`")),
+                    last_exit: Some("rescheduled".to_string()),
+                    increment_restart_count: false,
+                    increment_restart_streak: false,
+                    next_retry_at: None,
+                })
                 .await?;
             deployment.assigned_node = target_node.clone();
             deployment.container_id = None;
@@ -143,23 +149,23 @@ pub async fn reconcile_all(
         };
 
         let runtime = NodeClient::for_node(node, local_runtime.clone());
-        if let Err(error) = reconcile_deployment(store, &runtime, &deployment).await {
-            let changed = store
-                .set_status(
-                    deployment.manifest.deployment_name(),
-                    DeploymentStatus::Failed,
-                    false,
-                    None,
-                    Some(error.to_string()),
-                    None,
-                    false,
-                    false,
-                    None,
-                )
+        if let Err(error) = reconcile_deployment(ha_node, &runtime, &deployment).await {
+            let result = ha_node
+                .propose(ClusterCommand::SetDeploymentStatus {
+                    name: deployment.manifest.deployment_name().to_string(),
+                    status: DeploymentStatus::Failed,
+                    ready: false,
+                    container_id: None,
+                    message: Some(error.to_string()),
+                    last_exit: None,
+                    increment_restart_count: false,
+                    increment_restart_streak: false,
+                    next_retry_at: None,
+                })
                 .await?;
-            if changed {
+            if matches!(result, CommandResult::Changed { changed: true }) {
                 record_deployment_event(
-                    store,
+                    ha_node,
                     EventLevel::Warning,
                     "Failed",
                     deployment.manifest.deployment_name(),
@@ -175,7 +181,7 @@ pub async fn reconcile_all(
 }
 
 pub async fn reconcile_deployment(
-    store: &Store,
+    ha_node: &ControlPlaneNode,
     runtime: &NodeClient,
     deployment: &StoredDeployment,
 ) -> Result<()> {
@@ -190,22 +196,22 @@ pub async fn reconcile_deployment(
         let new_id = runtime
             .create_and_start(&deployment.manifest, &deployment.spec_hash)
             .await?;
-        let changed = store
-            .set_status(
-                name,
-                DeploymentStatus::Restarting,
-                false,
-                Some(new_id),
-                Some("recreated after duplicate managed containers were found".to_string()),
-                Some("duplicate containers".to_string()),
-                true,
-                false,
-                None,
-            )
+        let result = ha_node
+            .propose(ClusterCommand::SetDeploymentStatus {
+                name: name.to_string(),
+                status: DeploymentStatus::Restarting,
+                ready: false,
+                container_id: Some(new_id),
+                message: Some("recreated after duplicate managed containers were found".to_string()),
+                last_exit: Some("duplicate containers".to_string()),
+                increment_restart_count: true,
+                increment_restart_streak: false,
+                next_retry_at: None,
+            })
             .await?;
-        if changed {
+        if matches!(result, CommandResult::Changed { changed: true }) {
             record_deployment_event(
-                store,
+                ha_node,
                 EventLevel::Warning,
                 "Recreated",
                 name,
@@ -259,22 +265,22 @@ pub async fn reconcile_deployment(
             } else {
                 (true, "container is healthy".to_string(), Some("Running"))
             };
-            let changed = store
-                .set_status(
-                    name,
-                    DeploymentStatus::Running,
+            let result = ha_node
+                .propose(ClusterCommand::SetDeploymentStatus {
+                    name: name.to_string(),
+                    status: DeploymentStatus::Running,
                     ready,
-                    Some(container.id),
-                    Some(message.clone()),
-                    None,
-                    false,
-                    false,
-                    None,
-                )
+                    container_id: Some(container.id),
+                    message: Some(message.clone()),
+                    last_exit: None,
+                    increment_restart_count: false,
+                    increment_restart_streak: false,
+                    next_retry_at: None,
+                })
                 .await?;
-            if changed {
+            if matches!(result, CommandResult::Changed { changed: true }) {
                 record_deployment_event(
-                    store,
+                    ha_node,
                     EventLevel::Normal,
                     event_reason.unwrap_or("Running"),
                     name,
@@ -310,25 +316,25 @@ pub async fn reconcile_deployment(
             let reason = last_exit
                 .clone()
                 .unwrap_or_else(|| "container exited".to_string());
-            let changed = store
-                .set_status(
-                    name,
-                    DeploymentStatus::Restarting,
-                    false,
-                    None,
-                    Some(format!(
+            let result = ha_node
+                .propose(ClusterCommand::SetDeploymentStatus {
+                    name: name.to_string(),
+                    status: DeploymentStatus::Restarting,
+                    ready: false,
+                    container_id: None,
+                    message: Some(format!(
                         "backing off {}s before retry after {reason}",
                         backoff.as_secs()
                     )),
                     last_exit,
-                    true,
-                    true,
-                    Some(next_retry_at),
-                )
+                    increment_restart_count: true,
+                    increment_restart_streak: true,
+                    next_retry_at: Some(next_retry_at),
+                })
                 .await?;
-            if changed {
+            if matches!(result, CommandResult::Changed { changed: true }) {
                 record_deployment_event(
-                    store,
+                    ha_node,
                     EventLevel::Warning,
                     "Backoff",
                     name,
@@ -346,22 +352,22 @@ pub async fn reconcile_deployment(
             .create_and_start(&deployment.manifest, &deployment.spec_hash)
             .await?;
 
-        let changed = store
-            .set_status(
-                name,
-                DeploymentStatus::Restarting,
-                false,
-                Some(new_id),
-                Some(message.to_string()),
+        let result = ha_node
+            .propose(ClusterCommand::SetDeploymentStatus {
+                name: name.to_string(),
+                status: DeploymentStatus::Restarting,
+                ready: false,
+                container_id: Some(new_id),
+                message: Some(message.to_string()),
                 last_exit,
-                true,
-                false,
-                None,
-            )
+                increment_restart_count: true,
+                increment_restart_streak: false,
+                next_retry_at: None,
+            })
             .await?;
-        if changed {
+        if matches!(result, CommandResult::Changed { changed: true }) {
             record_deployment_event(
-                store,
+                ha_node,
                 EventLevel::Normal,
                 "Recreated",
                 name,
@@ -396,14 +402,16 @@ pub async fn reconcile_deployment(
         "container was created"
     };
 
-    let changed = store
-        .set_status(
-            name,
+    let result = ha_node
+        .propose(ClusterCommand::SetDeploymentStatus {
+            name: name.to_string(),
             status,
-            false,
-            Some(new_id),
-            Some(message.to_string()),
-            if deployment.status == DeploymentStatus::Restarting && deployment.last_exit.is_some() {
+            ready: false,
+            container_id: Some(new_id),
+            message: Some(message.to_string()),
+            last_exit: if deployment.status == DeploymentStatus::Restarting
+                && deployment.last_exit.is_some()
+            {
                 deployment.last_exit.clone()
             } else {
                 deployment
@@ -411,14 +419,14 @@ pub async fn reconcile_deployment(
                     .as_ref()
                     .map(|_| "container disappeared".to_string())
             },
-            deployment.container_id.is_some(),
-            false,
-            None,
-        )
+            increment_restart_count: deployment.container_id.is_some(),
+            increment_restart_streak: false,
+            next_retry_at: None,
+        })
         .await?;
-    if changed {
+    if matches!(result, CommandResult::Changed { changed: true }) {
         record_deployment_event(
-            store,
+            ha_node,
             EventLevel::Normal,
             if retried_after_backoff {
                 "Restarted"
@@ -452,15 +460,15 @@ fn now_unix() -> u64 {
 }
 
 async fn record_deployment_event(
-    store: &Store,
+    ha_node: &ControlPlaneNode,
     level: EventLevel,
     reason: impl Into<String>,
     deployment_name: &str,
     node_name: Option<String>,
     message: impl Into<String>,
 ) -> Result<()> {
-    store
-        .record_event(NewEvent {
+    ha_node
+        .propose(ClusterCommand::AppendEvent {
             level,
             reason: reason.into(),
             object_kind: "deployment".to_string(),
