@@ -9,3 +9,4 @@ target/
 state.json
 *.pid
 *.log
+.claude/settings.local.json

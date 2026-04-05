@@ -36,7 +36,14 @@ const SERVE_AFTER_HELP: &str = "\
 Examples:
   litek8s serve
   litek8s serve --poll-interval-secs 1
-  litek8s serve --state-file /tmp/litek8s-state.json";
+  litek8s serve --state-file /tmp/litek8s-state.json
+  litek8s serve --peer-addr 0.0.0.0:4002";
+
+const CONTROL_PLANE_AFTER_HELP: &str = "\
+Examples:
+  litek8s control-plane join cp2 --ssh dev@192.168.0.77 --install
+  litek8s control-plane join cp2 --ssh dev@192.168.0.77 --peer-port 4002
+  litek8s control-plane status";
 
 const APPLY_AFTER_HELP: &str = "\
 Examples:
@@ -147,6 +154,20 @@ enum Command {
             help = "How often the reconciler polls, in seconds"
         )]
         poll_interval_secs: u64,
+        #[arg(
+            long,
+            default_value_t = 1,
+            help = "Numeric ID for this control-plane node"
+        )]
+        peer_id: u64,
+        #[arg(
+            long,
+            default_value = "0.0.0.0:4001",
+            help = "TCP address for Raft peer communication"
+        )]
+        peer_addr: String,
+        #[arg(long, hide = true, help = "Join an existing cluster at this address instead of self-initializing")]
+        join: Option<String>,
     },
     #[command(
         about = "Apply a reduced Deployment or Service manifest",
@@ -290,6 +311,15 @@ enum Command {
         #[arg(help = "Resource name when deleting by name")]
         name: Option<String>,
     },
+    #[command(
+        about = "Manage control-plane HA cluster membership",
+        help_template = HELP_TEMPLATE,
+        after_help = CONTROL_PLANE_AFTER_HELP
+    )]
+    ControlPlane {
+        #[command(subcommand)]
+        command: ControlPlaneCommand,
+    },
     #[command(hide = true)]
     Agent,
 }
@@ -338,6 +368,36 @@ enum NodeCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum ControlPlaneCommand {
+    #[command(about = "Install litek8s on a remote host and join it to the HA cluster")]
+    Join {
+        #[arg(help = "Logical name for the new control-plane peer")]
+        name: String,
+        #[arg(long, help = "SSH target such as `dev@192.168.0.77`")]
+        ssh: String,
+        #[arg(
+            long,
+            help = "Build a compatible binary locally, copy it to the remote host"
+        )]
+        install: bool,
+        #[arg(
+            long,
+            default_value_t = 4001,
+            help = "TCP port the remote peer will use for Raft communication"
+        )]
+        peer_port: u16,
+        #[arg(
+            long,
+            help = "Path to the litek8s binary on the remote machine",
+            default_value = "~/.local/bin/litek8s"
+        )]
+        remote_binary: String,
+    },
+    #[command(about = "Show the current HA cluster status")]
+    Status,
+}
+
+#[derive(Debug, Subcommand)]
 enum ServiceCommand {
     #[command(about = "Create or update a local service listener")]
     Add {
@@ -367,6 +427,9 @@ pub async fn run() -> Result<()> {
         Command::Serve {
             state_file,
             poll_interval_secs,
+            peer_id,
+            peer_addr,
+            join,
         } => {
             let config = ServerConfig {
                 socket_path,
@@ -376,6 +439,9 @@ pub async fn run() -> Result<()> {
                 },
                 poll_interval: Duration::from_secs(poll_interval_secs),
                 cleanup_orphans: true,
+                peer_id,
+                peer_addr,
+                join_addr: join,
             };
             daemon::serve(config).await
         }
@@ -580,6 +646,170 @@ pub async fn run() -> Result<()> {
             let response = protocol::request(&socket_path, request).await?;
             print_response(response)
         }
+        Command::ControlPlane { command } => match command {
+            ControlPlaneCommand::Status => {
+                let response =
+                    protocol::request(&socket_path, Request::GetClusterStatus).await?;
+                match response {
+                    Response::ClusterStatus {
+                        ha_enabled,
+                        node_id,
+                        leader_id,
+                        state,
+                        members,
+                    } => {
+                        if !ha_enabled {
+                            println!("{}", muted("HA is not enabled (standalone mode)"));
+                            return Ok(());
+                        }
+                        println!("{}", title("Control Plane HA"));
+                        println!(
+                            "{} {}",
+                            label("node id"),
+                            node_id.map(|n| n.to_string()).unwrap_or_default()
+                        );
+                        println!("{} {}", label("state"), state);
+                        println!(
+                            "{} {}",
+                            label("leader"),
+                            leader_id
+                                .map(|n| n.to_string())
+                                .unwrap_or_else(|| "(none)".into())
+                        );
+                        println!();
+                        println!(
+                            "{:<10} {:<25} {}",
+                            muted("NODE ID"),
+                            muted("ADDRESS"),
+                            muted("ROLE")
+                        );
+                        for member in &members {
+                            let role = if member.is_leader {
+                                "leader"
+                            } else {
+                                "follower"
+                            };
+                            println!("{:<10} {:<25} {}", member.node_id, member.addr, role);
+                        }
+                        Ok(())
+                    }
+                    other => print_response(other),
+                }
+            }
+            ControlPlaneCommand::Join {
+                name,
+                ssh,
+                install,
+                peer_port,
+                remote_binary,
+            } => {
+                println!("{}", title("Control Plane Join"));
+
+                // Step 1: install binary on remote if requested
+                if install {
+                    let project_root = resolve_project_root()?;
+                    println!(
+                        "{} {} {}",
+                        muted("installing litek8s on"),
+                        label(&ssh),
+                        muted("...")
+                    );
+                    let summary =
+                        node::install_remote_agent(&ssh, &remote_binary, &project_root).await?;
+                    println!("{} {}", label("platform"), summary.platform_label);
+                    println!("{} {}", label("remote"), remote_binary);
+                }
+
+                // Step 2: get cluster status to determine next node ID
+                let status_resp =
+                    protocol::request(&socket_path, Request::GetClusterStatus).await?;
+                let next_id = match &status_resp {
+                    Response::ClusterStatus { members, .. } => {
+                        members.iter().map(|m| m.node_id).max().unwrap_or(0) + 1
+                    }
+                    _ => bail!("unexpected response from daemon"),
+                };
+                let leader_port = match &status_resp {
+                    Response::ClusterStatus { members, .. } => {
+                        members
+                            .iter()
+                            .find(|m| m.is_leader)
+                            .and_then(|m| m.addr.rsplit_once(':').map(|(_, p)| p.to_string()))
+                            .unwrap_or_else(|| "4001".into())
+                    }
+                    _ => unreachable!(),
+                };
+
+                // Step 3: detect remote IP by extracting the host from --ssh target
+                // and detect local IP as seen from the remote
+                let ssh_host = ssh
+                    .rsplit_once('@')
+                    .map(|(_, h)| h)
+                    .unwrap_or(&ssh);
+                let remote_addr = format!("{ssh_host}:{peer_port}");
+                println!("{} {}", label("remote addr"), remote_addr);
+
+                // Detect local IP as seen from the remote (the route to us)
+                let local_ip = node::run_ssh_capture_pub(
+                    &ssh,
+                    &format!("ip route get {} | awk '{{for(i=1;i<=NF;i++) if($i==\"src\") print $(i+1)}}'", ssh_host),
+                )
+                .await
+                .unwrap_or_else(|_| "127.0.0.1".into());
+                let local_peer_addr = if local_ip.is_empty() {
+                    format!("127.0.0.1:{leader_port}")
+                } else {
+                    format!("{local_ip}:{leader_port}")
+                };
+                println!("{} {}", label("leader addr"), local_peer_addr);
+
+                // Step 4: start remote daemon with --join
+                println!(
+                    "{} {} {}",
+                    muted("starting remote daemon as node"),
+                    label(&next_id.to_string()),
+                    muted("...")
+                );
+                let serve_cmd = format!(
+                    "{remote_binary} serve --peer-id {next_id} --peer-addr 0.0.0.0:{peer_port} --join {local_peer_addr}"
+                );
+                node::run_ssh_capture_pub(
+                    &ssh,
+                    &format!("{serve_cmd} </dev/null >/tmp/litek8s-cp.log 2>&1 & echo started"),
+                )
+                .await
+                .context("failed to start remote daemon")?;
+
+                // Step 5: wait for remote to be listening
+                println!("{}", muted("waiting for remote peer..."));
+                for _ in 0..15 {
+                    if tokio::net::TcpStream::connect(&remote_addr).await.is_ok() {
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+
+                // Step 6: tell leader to add the new member
+                let join_resp = protocol::request(
+                    &socket_path,
+                    Request::JoinCluster {
+                        node_id: next_id,
+                        addr: remote_addr.clone(),
+                    },
+                )
+                .await?;
+                print_response(join_resp)?;
+
+                println!(
+                    "\n{} {} {} {}",
+                    ok("ok"),
+                    label(&name),
+                    muted("joined as node"),
+                    label(&next_id.to_string()),
+                );
+                Ok(())
+            }
+        },
         Command::Agent => crate::node::run_agent_stdio().await,
     }
 }
@@ -914,6 +1144,14 @@ fn print_response(response: Response) -> Result<()> {
         }
         Response::Top { daemon, items } => {
             print!("{}", format_top_body(&daemon, &items));
+            Ok(())
+        }
+        Response::ClusterStatus { ha_enabled, state, .. } => {
+            if ha_enabled {
+                println!("{} HA {}", ok("ok"), state);
+            } else {
+                println!("{}", muted("standalone mode (HA not enabled)"));
+            }
             Ok(())
         }
         Response::Error { message } => Err(anyhow!(message)),

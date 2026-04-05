@@ -66,6 +66,11 @@ pub enum Request {
         port: Option<u16>,
     },
     Top,
+    GetClusterStatus,
+    JoinCluster {
+        node_id: u64,
+        addr: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -103,6 +108,13 @@ pub enum Response {
     Top {
         daemon: DaemonTopSummary,
         items: Vec<DeploymentTopRow>,
+    },
+    ClusterStatus {
+        ha_enabled: bool,
+        node_id: Option<u64>,
+        leader_id: Option<u64>,
+        state: String,
+        members: Vec<ClusterMember>,
     },
     Error {
         message: String,
@@ -248,6 +260,13 @@ pub struct ProxyTarget {
     pub container_port: u16,
     pub host_port: u16,
     pub protocol: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClusterMember {
+    pub node_id: u64,
+    pub addr: String,
+    pub is_leader: bool,
 }
 
 pub async fn send_message<T>(stream: &mut UnixStream, message: &T) -> Result<()>

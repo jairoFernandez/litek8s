@@ -1039,6 +1039,9 @@ async fn spawn_server(
         state_file,
         poll_interval: Duration::from_millis(500),
         cleanup_orphans: false,
+        peer_id: 1,
+        peer_addr: "0.0.0.0:0".into(),
+        join_addr: None,
     };
     let handle = tokio::spawn(async move { serve(config).await });
     wait_for_socket(&socket_path).await?;

@@ -529,6 +529,14 @@ impl Store {
         Ok(true)
     }
 
+    pub async fn snapshot(&self) -> StateFile {
+        self.state.read().await.clone()
+    }
+
+    pub async fn replace_state(&self, new_state: StateFile) {
+        *self.state.write().await = new_state;
+    }
+
     async fn persist(&self, snapshot: &StateFile) -> Result<()> {
         let _persist_guard = self.persist_lock.lock().await;
         config::ensure_parent_dir(&self.path)?;

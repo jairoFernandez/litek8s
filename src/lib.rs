@@ -1,5 +1,6 @@
 pub mod cli;
 pub mod config;
+pub mod control_plane;
 pub mod daemon;
 pub mod manifest;
 pub mod node;

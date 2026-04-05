@@ -11,6 +11,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify};
 
 use crate::config;
+use crate::control_plane::raft::ControlPlaneNode;
 use crate::manifest::{
     API_VERSION, DeploymentManifest, KIND_SERVICE, Metadata, ParsedManifest, ServiceManifest,
     ServiceSpec,
@@ -40,6 +41,9 @@ pub struct ServerConfig {
     pub state_file: PathBuf,
     pub poll_interval: Duration,
     pub cleanup_orphans: bool,
+    pub peer_id: u64,
+    pub peer_addr: String,
+    pub join_addr: Option<String>,
 }
 
 impl ServerConfig {
@@ -49,6 +53,9 @@ impl ServerConfig {
             state_file: config::default_state_file()?,
             poll_interval: Duration::from_secs(2),
             cleanup_orphans: true,
+            peer_id: 1,
+            peer_addr: "0.0.0.0:4001".into(),
+            join_addr: None,
         })
     }
 }
@@ -64,6 +71,7 @@ struct AppState {
     service_manager: Arc<Mutex<ServiceManager>>,
     cluster_snapshot: Arc<Mutex<ClusterSnapshotCache>>,
     snapshot_refresh: Arc<Notify>,
+    ha_node: Arc<ControlPlaneNode>,
 }
 
 const CLUSTER_SNAPSHOT_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
@@ -88,6 +96,29 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     runtime.ping().await?;
     let snapshot_refresh = Arc::new(Notify::new());
 
+    let cp_node = ControlPlaneNode::start(
+        config.peer_id,
+        config.peer_addr.clone(),
+        Arc::clone(&store),
+        config.join_addr.clone(),
+    )
+    .await?;
+
+    cp_node.spawn_rpc_listener(&config.peer_addr).await?;
+
+    if config.join_addr.is_some() {
+        eprintln!(
+            "raft: node {} listening on {} (joining existing cluster)",
+            config.peer_id, config.peer_addr,
+        );
+    } else {
+        eprintln!(
+            "raft: node {} listening on {} (leader)",
+            config.peer_id, config.peer_addr,
+        );
+    }
+    let ha_node = Arc::new(cp_node);
+
     let app_state = AppState {
         store,
         runtime,
@@ -98,6 +129,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         service_manager: Arc::new(Mutex::new(ServiceManager::new())),
         cluster_snapshot: Arc::new(Mutex::new(ClusterSnapshotCache::default())),
         snapshot_refresh: snapshot_refresh.clone(),
+        ha_node,
     };
     let app_state = Arc::new(app_state);
     app_state.sync_services().await?;
@@ -501,6 +533,40 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             Ok(Response::Top {
                 daemon: snapshot.daemon,
                 items: snapshot.deployments,
+            })
+        }
+        Request::GetClusterStatus => {
+            use crate::protocol::ClusterMember;
+
+            let metrics = state.ha_node.raft.metrics().borrow().clone();
+            let leader_id = metrics.current_leader;
+            let node_id = metrics.id;
+            let state_str = format!("{:?}", metrics.state);
+            let members = metrics
+                .membership_config
+                .membership()
+                .nodes()
+                .map(|(id, node)| ClusterMember {
+                    node_id: *id,
+                    addr: node.addr.clone(),
+                    is_leader: Some(*id) == leader_id,
+                })
+                .collect();
+            Ok(Response::ClusterStatus {
+                ha_enabled: true,
+                node_id: Some(node_id),
+                leader_id,
+                state: state_str,
+                members,
+            })
+        }
+        Request::JoinCluster { node_id, addr } => {
+            state
+                .ha_node
+                .add_member(node_id, addr)
+                .await?;
+            Ok(Response::Ack {
+                message: format!("control-plane node {node_id} joined the cluster"),
             })
         }
     }

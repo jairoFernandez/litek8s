@@ -762,6 +762,10 @@ async fn run_local_inherit(program: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
+pub async fn run_ssh_capture_pub(ssh_target: &str, remote_command: &str) -> Result<String> {
+    run_ssh_capture(ssh_target, remote_command).await
+}
+
 async fn run_ssh_capture(ssh_target: &str, remote_command: &str) -> Result<String> {
     let output = Command::new("ssh")
         .arg("-o")
