@@ -1042,6 +1042,7 @@ async fn spawn_server(
         peer_id: 1,
         peer_addr: "0.0.0.0:0".into(),
         join_addr: None,
+        api_addr: None,
     };
     let handle = tokio::spawn(async move { serve(config).await });
     wait_for_socket(&socket_path).await?;

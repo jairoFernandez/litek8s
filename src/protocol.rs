@@ -269,9 +269,9 @@ pub struct ClusterMember {
     pub is_leader: bool,
 }
 
-pub async fn send_message<T>(stream: &mut UnixStream, message: &T) -> Result<()>
+pub async fn send_message<S>(stream: &mut S, message: &impl Serialize) -> Result<()>
 where
-    T: Serialize,
+    S: AsyncWriteExt + Unpin,
 {
     let payload = serde_json::to_vec(message).context("failed to serialize protocol message")?;
     stream
@@ -285,9 +285,10 @@ where
     Ok(())
 }
 
-pub async fn read_message<T>(stream: &mut UnixStream) -> Result<T>
+pub async fn read_message<T, S>(stream: &mut S) -> Result<T>
 where
     T: DeserializeOwned,
+    S: AsyncReadExt + Unpin,
 {
     let length = stream
         .read_u32()
@@ -306,5 +307,13 @@ pub async fn request(socket_path: &Path, request: Request) -> Result<Response> {
         .await
         .with_context(|| format!("failed to connect to {}", socket_path.display()))?;
     send_message(&mut stream, &request).await?;
+    read_message(&mut stream).await
+}
+
+pub async fn request_tcp(addr: &str, req: Request) -> Result<Response> {
+    let mut stream = tokio::net::TcpStream::connect(addr)
+        .await
+        .with_context(|| format!("failed to connect to {addr}"))?;
+    send_message(&mut stream, &req).await?;
     read_message(&mut stream).await
 }

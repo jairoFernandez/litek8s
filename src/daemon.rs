@@ -44,6 +44,7 @@ pub struct ServerConfig {
     pub peer_id: u64,
     pub peer_addr: String,
     pub join_addr: Option<String>,
+    pub api_addr: Option<String>,
 }
 
 impl ServerConfig {
@@ -56,6 +57,7 @@ impl ServerConfig {
             peer_id: 1,
             peer_addr: "0.0.0.0:4001".into(),
             join_addr: None,
+            api_addr: None,
         })
     }
 }
@@ -141,6 +143,29 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         )
     })?;
 
+    let tcp_api_task = if let Some(api_addr) = &config.api_addr {
+        let tcp_listener = tokio::net::TcpListener::bind(api_addr)
+            .await
+            .with_context(|| format!("failed to bind TCP API listener on {api_addr}"))?;
+        eprintln!("api: listening on {api_addr}");
+        let state = app_state.clone();
+        Some(tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = tcp_listener.accept().await else {
+                    continue;
+                };
+                let state = state.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = handle_tcp_connection(state, stream).await {
+                        eprintln!("failed to serve TCP API request: {error}");
+                    }
+                });
+            }
+        }))
+    } else {
+        None
+    };
+
     let notify = Arc::new(Notify::new());
     let reconcile_task =
         spawn_reconcile_loop(app_state.clone(), notify.clone(), config.poll_interval);
@@ -174,6 +199,9 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     reconcile_task.abort();
     snapshot_task.abort();
     event_listener.abort();
+    if let Some(task) = tcp_api_task {
+        task.abort();
+    }
     if config.socket_path.exists() {
         std::fs::remove_file(&config.socket_path)
             .with_context(|| format!("failed to remove socket {}", config.socket_path.display()))?;
@@ -182,7 +210,21 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
 }
 
 async fn handle_connection(state: Arc<AppState>, mut stream: UnixStream) -> Result<()> {
-    let request = read_message::<Request>(&mut stream).await?;
+    let request = read_message::<Request, _>(&mut stream).await?;
+    let response = match process_request(state, request).await {
+        Ok(response) => response,
+        Err(error) => Response::Error {
+            message: format!("{error:#}"),
+        },
+    };
+    send_message(&mut stream, &response).await
+}
+
+async fn handle_tcp_connection(
+    state: Arc<AppState>,
+    mut stream: tokio::net::TcpStream,
+) -> Result<()> {
+    let request = read_message::<Request, _>(&mut stream).await?;
     let response = match process_request(state, request).await {
         Ok(response) => response,
         Err(error) => Response::Error {

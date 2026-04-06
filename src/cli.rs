@@ -45,6 +45,13 @@ Examples:
   litek8s control-plane join cp2 --ssh dev@192.168.0.77 --peer-port 4002
   litek8s control-plane status";
 
+const CLUSTER_AFTER_HELP: &str = "\
+Examples:
+  litek8s cluster create my-cluster --control-planes 3
+  litek8s cluster create dev --control-planes 3 --workers 2
+  litek8s cluster list
+  litek8s cluster delete my-cluster";
+
 const APPLY_AFTER_HELP: &str = "\
 Examples:
   litek8s apply -f examples/nginx.yaml
@@ -131,6 +138,12 @@ Examples:
 struct Cli {
     #[arg(long, global = true, help = "Use a custom daemon socket path")]
     socket_path: Option<PathBuf>,
+    #[arg(
+        long,
+        global = true,
+        help = "Connect to a daemon over TCP (e.g. 127.0.0.1:6443)"
+    )]
+    server: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -168,6 +181,8 @@ enum Command {
         peer_addr: String,
         #[arg(long, hide = true, help = "Join an existing cluster at this address instead of self-initializing")]
         join: Option<String>,
+        #[arg(long, hide = true, help = "Expose the daemon API on a TCP address (e.g. 0.0.0.0:6443)")]
+        api_addr: Option<String>,
     },
     #[command(
         about = "Apply a reduced Deployment or Service manifest",
@@ -320,6 +335,15 @@ enum Command {
         #[command(subcommand)]
         command: ControlPlaneCommand,
     },
+    #[command(
+        about = "Create and manage local multi-node clusters using Docker",
+        help_template = HELP_TEMPLATE,
+        after_help = CLUSTER_AFTER_HELP
+    )]
+    Cluster {
+        #[command(subcommand)]
+        command: ClusterCommand,
+    },
     #[command(hide = true)]
     Agent,
 }
@@ -398,6 +422,31 @@ enum ControlPlaneCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum ClusterCommand {
+    #[command(about = "Create a local multi-node cluster in Docker containers")]
+    Create {
+        #[arg(help = "Cluster name")]
+        name: String,
+        #[arg(long, default_value_t = 1, help = "Number of control-plane nodes")]
+        control_planes: u32,
+        #[arg(long, default_value_t = 0, help = "Number of worker nodes")]
+        workers: u32,
+        #[arg(
+            long,
+            help = "Path to a pre-built Linux litek8s binary (cross-compiles automatically if omitted)"
+        )]
+        binary: Option<PathBuf>,
+    },
+    #[command(about = "Delete a local cluster and its containers")]
+    Delete {
+        #[arg(help = "Cluster name")]
+        name: String,
+    },
+    #[command(about = "List running local clusters")]
+    List,
+}
+
+#[derive(Debug, Subcommand)]
 enum ServiceCommand {
     #[command(about = "Create or update a local service listener")]
     Add {
@@ -419,9 +468,28 @@ enum ServiceCommand {
     },
 }
 
+enum DaemonEndpoint {
+    Unix(PathBuf),
+    Tcp(String),
+}
+
+impl DaemonEndpoint {
+    async fn request(&self, request: Request) -> Result<Response> {
+        match self {
+            DaemonEndpoint::Unix(path) => protocol::request(path, request).await,
+            DaemonEndpoint::Tcp(addr) => protocol::request_tcp(addr, request).await,
+        }
+    }
+
+}
+
 pub async fn run() -> Result<()> {
     let cli = Cli::parse();
-    let socket_path = cli.socket_path.unwrap_or_else(config::default_socket_path);
+    let endpoint = if let Some(server) = cli.server {
+        DaemonEndpoint::Tcp(server)
+    } else {
+        DaemonEndpoint::Unix(cli.socket_path.unwrap_or_else(config::default_socket_path))
+    };
 
     match cli.command {
         Command::Serve {
@@ -430,7 +498,12 @@ pub async fn run() -> Result<()> {
             peer_id,
             peer_addr,
             join,
+            api_addr,
         } => {
+            let socket_path = match &endpoint {
+                DaemonEndpoint::Unix(path) => path.clone(),
+                DaemonEndpoint::Tcp(_) => config::default_socket_path(),
+            };
             let config = ServerConfig {
                 socket_path,
                 state_file: match state_file {
@@ -442,23 +515,24 @@ pub async fn run() -> Result<()> {
                 peer_id,
                 peer_addr,
                 join_addr: join,
+                api_addr,
             };
             daemon::serve(config).await
         }
         Command::Apply { file } => {
             let manifest = read_manifest(&file)?;
-            let response = protocol::request(&socket_path, Request::Apply { manifest }).await?;
+            let response = endpoint.request(Request::Apply { manifest }).await?;
             print_response(response)
         }
         Command::Get { resource } => {
             let response = match resource.as_str() {
                 "deployment" | "deployments" => {
-                    protocol::request(&socket_path, Request::GetDeployments).await?
+                    endpoint.request(Request::GetDeployments).await?
                 }
                 "service" | "services" => {
-                    protocol::request(&socket_path, Request::GetServices).await?
+                    endpoint.request(Request::GetServices).await?
                 }
-                "node" | "nodes" => protocol::request(&socket_path, Request::GetNodes).await?,
+                "node" | "nodes" => endpoint.request(Request::GetNodes).await?,
                 _ => {
                     ensure_resource(
                         &resource,
@@ -479,13 +553,13 @@ pub async fn run() -> Result<()> {
         Command::Describe { resource, name } => {
             let response = match resource.as_str() {
                 "deployment" | "deployments" => {
-                    protocol::request(&socket_path, Request::DescribeDeployment { name }).await?
+                    endpoint.request(Request::DescribeDeployment { name }).await?
                 }
                 "service" | "services" => {
-                    protocol::request(&socket_path, Request::DescribeService { name }).await?
+                    endpoint.request(Request::DescribeService { name }).await?
                 }
                 "node" | "nodes" => {
-                    protocol::request(&socket_path, Request::DescribeNode { name }).await?
+                    endpoint.request(Request::DescribeNode { name }).await?
                 }
                 _ => {
                     ensure_resource(
@@ -505,11 +579,11 @@ pub async fn run() -> Result<()> {
             print_response(response)
         }
         Command::Logs { name, tail } => {
-            let response = protocol::request(&socket_path, Request::Logs { name, tail }).await?;
+            let response = endpoint.request(Request::Logs { name, tail }).await?;
             print_response(response)
         }
         Command::Proxy { name, listen, port } => {
-            run_proxy(&socket_path, &name, &listen, port).await
+            run_proxy(&endpoint, &name, &listen, port).await
         }
         Command::Events {
             watch,
@@ -519,7 +593,7 @@ pub async fn run() -> Result<()> {
             interval_secs,
         } => {
             run_events(
-                &socket_path,
+                &endpoint,
                 watch,
                 limit,
                 deployment,
@@ -531,11 +605,11 @@ pub async fn run() -> Result<()> {
         Command::Top {
             watch,
             interval_secs,
-        } => run_top(&socket_path, watch, Duration::from_secs(interval_secs)).await,
+        } => run_top(&endpoint, watch, Duration::from_secs(interval_secs)).await,
         Command::Tree {
             watch,
             interval_secs,
-        } => run_tree(&socket_path, watch, Duration::from_secs(interval_secs)).await,
+        } => run_tree(&endpoint, watch, Duration::from_secs(interval_secs)).await,
         Command::Node { command } => match command {
             NodeCommand::Add {
                 name,
@@ -561,8 +635,7 @@ pub async fn run() -> Result<()> {
                     println!("{} {}", label("remote"), remote_binary);
                     println!();
                 }
-                let response = protocol::request(
-                    &socket_path,
+                let response = endpoint.request(
                     Request::AddNode {
                         name,
                         ssh_target: ssh,
@@ -574,8 +647,7 @@ pub async fn run() -> Result<()> {
                 print_response(response)
             }
             NodeCommand::Cordon { name } => {
-                let response = protocol::request(
-                    &socket_path,
+                let response = endpoint.request(
                     Request::SetNodeScheduling {
                         name,
                         unschedulable: true,
@@ -585,12 +657,11 @@ pub async fn run() -> Result<()> {
                 print_response(response)
             }
             NodeCommand::Drain { name } => {
-                let response = protocol::request(&socket_path, Request::DrainNode { name }).await?;
+                let response = endpoint.request(Request::DrainNode { name }).await?;
                 print_response(response)
             }
             NodeCommand::Uncordon { name } => {
-                let response = protocol::request(
-                    &socket_path,
+                let response = endpoint.request(
                     Request::SetNodeScheduling {
                         name,
                         unschedulable: false,
@@ -607,8 +678,7 @@ pub async fn run() -> Result<()> {
                 listen,
                 port,
             } => {
-                let response = protocol::request(
-                    &socket_path,
+                let response = endpoint.request(
                     Request::AddService {
                         name,
                         deployment_name: deployment,
@@ -643,13 +713,13 @@ pub async fn run() -> Result<()> {
                 }
             };
 
-            let response = protocol::request(&socket_path, request).await?;
+            let response = endpoint.request(request).await?;
             print_response(response)
         }
         Command::ControlPlane { command } => match command {
             ControlPlaneCommand::Status => {
                 let response =
-                    protocol::request(&socket_path, Request::GetClusterStatus).await?;
+                    endpoint.request(Request::GetClusterStatus).await?;
                 match response {
                     Response::ClusterStatus {
                         ha_enabled,
@@ -722,7 +792,7 @@ pub async fn run() -> Result<()> {
 
                 // Step 2: get cluster status to determine next node ID
                 let status_resp =
-                    protocol::request(&socket_path, Request::GetClusterStatus).await?;
+                    endpoint.request(Request::GetClusterStatus).await?;
                 let next_id = match &status_resp {
                     Response::ClusterStatus { members, .. } => {
                         members.iter().map(|m| m.node_id).max().unwrap_or(0) + 1
@@ -790,8 +860,7 @@ pub async fn run() -> Result<()> {
                 }
 
                 // Step 6: tell leader to add the new member
-                let join_resp = protocol::request(
-                    &socket_path,
+                let join_resp = endpoint.request(
                     Request::JoinCluster {
                         node_id: next_id,
                         addr: remote_addr.clone(),
@@ -807,6 +876,69 @@ pub async fn run() -> Result<()> {
                     muted("joined as node"),
                     label(&next_id.to_string()),
                 );
+                Ok(())
+            }
+        },
+        Command::Cluster { command } => match command {
+            ClusterCommand::Create {
+                name,
+                control_planes,
+                workers,
+                binary,
+            } => {
+                println!("{}", title("Cluster Create"));
+                let config = crate::cluster::ClusterConfig {
+                    name,
+                    control_planes,
+                    workers,
+                    binary,
+                };
+                let info = crate::cluster::create_cluster(config).await?;
+                println!();
+                println!(
+                    "{} cluster {} with {} node(s)",
+                    ok("ok"),
+                    label(&info.name),
+                    info.nodes.len()
+                );
+                println!();
+                println!(
+                    "{}",
+                    muted("connect with:")
+                );
+                println!(
+                    "  litek8s --server {} get deployments",
+                    info.api_addr
+                );
+                Ok(())
+            }
+            ClusterCommand::Delete { name } => {
+                crate::cluster::delete_cluster(&name).await?;
+                println!("{} cluster {} deleted", ok("ok"), label(&name));
+                Ok(())
+            }
+            ClusterCommand::List => {
+                let entries = crate::cluster::list_clusters().await?;
+                if entries.is_empty() {
+                    println!("{}", muted("no clusters found"));
+                    return Ok(());
+                }
+                println!(
+                    "{:<20} {:<5} {:<8} {}",
+                    muted("NAME"),
+                    muted("CP"),
+                    muted("WORKERS"),
+                    muted("API")
+                );
+                for entry in &entries {
+                    println!(
+                        "{:<20} {:<5} {:<8} {}",
+                        entry.name,
+                        entry.control_planes,
+                        entry.workers,
+                        entry.api_addr
+                    );
+                }
                 Ok(())
             }
         },
@@ -1158,14 +1290,14 @@ fn print_response(response: Response) -> Result<()> {
     }
 }
 
-async fn run_top(socket_path: &Path, watch: bool, interval: Duration) -> Result<()> {
+async fn run_top(endpoint: &DaemonEndpoint, watch: bool, interval: Duration) -> Result<()> {
     let mut watch_display = watch
         .then(|| WatchDisplay::new(build_watch_banner("top", interval, None, None)))
         .transpose()?;
 
     loop {
         let Some(response) = request_with_loading(
-            socket_path,
+            endpoint,
             Request::Top,
             watch_display.as_mut(),
             interval,
@@ -1222,14 +1354,14 @@ struct TreeEntry {
     children: Vec<TreeEntry>,
 }
 
-async fn run_tree(socket_path: &Path, watch: bool, interval: Duration) -> Result<()> {
+async fn run_tree(endpoint: &DaemonEndpoint, watch: bool, interval: Duration) -> Result<()> {
     let mut watch_display = watch
         .then(|| WatchDisplay::new(build_watch_banner("tree", interval, None, None)))
         .transpose()?;
 
     loop {
         let snapshot =
-            match fetch_tree_snapshot(socket_path, watch_display.as_mut(), interval).await {
+            match fetch_tree_snapshot(endpoint, watch_display.as_mut(), interval).await {
                 Ok(Some(snapshot)) => snapshot,
                 Ok(None) => return Ok(()),
                 Err(error) if error.to_string().contains("warming up") => {
@@ -1265,27 +1397,27 @@ async fn run_tree(socket_path: &Path, watch: bool, interval: Duration) -> Result
 }
 
 async fn fetch_tree_snapshot(
-    socket_path: &Path,
+    endpoint: &DaemonEndpoint,
     watch_display: Option<&mut WatchDisplay>,
     interval: Duration,
 ) -> Result<Option<TreeSnapshot>> {
     let (top_response, nodes_response, services_response) = tokio::try_join!(
         request_with_loading(
-            socket_path,
+            endpoint,
             Request::Top,
             None,
             interval,
             "loading snapshot..."
         ),
         request_with_loading(
-            socket_path,
+            endpoint,
             Request::GetNodes,
             None,
             interval,
             "loading snapshot..."
         ),
         request_with_loading(
-            socket_path,
+            endpoint,
             Request::GetServices,
             watch_display,
             interval,
@@ -1635,9 +1767,8 @@ fn append_tree_entries(lines: &mut Vec<String>, prefix: &str, entries: &[TreeEnt
     }
 }
 
-async fn run_proxy(socket_path: &Path, name: &str, listen: &str, port: Option<u16>) -> Result<()> {
-    let response = protocol::request(
-        socket_path,
+async fn run_proxy(endpoint: &DaemonEndpoint, name: &str, listen: &str, port: Option<u16>) -> Result<()> {
+    let response = endpoint.request(
         Request::ResolveProxyTarget {
             name: name.to_string(),
             port,
@@ -1679,7 +1810,7 @@ async fn run_proxy(socket_path: &Path, name: &str, listen: &str, port: Option<u1
 }
 
 async fn run_events(
-    socket_path: &Path,
+    endpoint: &DaemonEndpoint,
     watch: bool,
     limit: usize,
     deployment: Option<String>,
@@ -1699,7 +1830,7 @@ async fn run_events(
 
     loop {
         let Some(response) = request_with_loading(
-            socket_path,
+            endpoint,
             Request::GetEvents {
                 limit,
                 since_id: None,
@@ -1737,7 +1868,7 @@ async fn run_events(
 }
 
 async fn request_with_loading(
-    socket_path: &Path,
+    endpoint: &DaemonEndpoint,
     request: Request,
     mut watch_display: Option<&mut WatchDisplay>,
     _interval: Duration,
@@ -1745,7 +1876,7 @@ async fn request_with_loading(
 ) -> Result<Option<Response>> {
     const LOADING_THRESHOLD: Duration = Duration::from_millis(180);
 
-    let response = protocol::request(socket_path, request);
+    let response = endpoint.request(request);
     tokio::pin!(response);
 
     let loading_delay = tokio::time::sleep(LOADING_THRESHOLD);
