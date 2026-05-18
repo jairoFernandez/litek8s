@@ -12,6 +12,7 @@ La idea es que cada sesión futura pueda arrancar desde aquí sin re-descubrir e
 - Tiene reconciler, backoff, readiness básica, `service`, `proxy`, `events`, `top`, `tree`, `cordon` y `drain`.
 - El control plane ya usa Raft, pero todavía no cubre todos los requisitos de una operación de producción.
 - El manifiesto sigue siendo deliberadamente estrecho: una réplica, un contenedor, sin overlay network, sin secrets, sin volumes, sin rollouts complejos.
+- El foco inmediato es orquestar varias máquinas virtuales o nodos modestos con bajo consumo; la malla de inferencia IA queda documentada como extensión futura.
 
 ## Cómo usar estos specs
 
@@ -42,6 +43,10 @@ La idea es que cada sesión futura pueda arrancar desde aquí sin re-descubrir e
 
 7. `07-vpc-lite.md`
 
+### P3 — extensiones futuras
+
+8. `08-ai-inference-mesh.md` — diferido hasta tener multi-VM liviano, scheduling por capacidad y conectividad privada.
+
 ## Dependencias entre specs
 
 - `02-secrets-and-config.md` depende parcialmente de `01-security-baseline.md`.
@@ -49,6 +54,7 @@ La idea es que cada sesión futura pueda arrancar desde aquí sin re-descubrir e
 - `04-observability.md` puede iniciarse en paralelo, pero conviene después de `01` para exponer métricas de seguridad y networking desde el comienzo.
 - `05-sandbox-isolation.md` depende de `01-security-baseline.md` y se beneficia de `06-scheduler-cost-aware.md`.
 - `07-vpc-lite.md` depende de `03-vpn-pack.md`.
+- `08-ai-inference-mesh.md` depende de `03-vpn-pack`, `04-observability` y `06-scheduler-cost-aware`; por ahora no debe bloquear el trabajo de multi-VM liviano.
 
 ## Criterios de diseño globales
 
@@ -68,13 +74,14 @@ La idea es que cada sesión futura pueda arrancar desde aquí sin re-descubrir e
 
 ## Próxima sesión recomendada
 
-Arrancar por `docs/specs/01-security-baseline.md`.
+Arrancar por el camino de multi-VM liviano: `docs/specs/03-vpn-pack.md` y `docs/specs/06-scheduler-cost-aware.md`.
 
 Razón:
 
-- Impacta directamente la ejecución de contenedores.
-- Reduce superficie de riesgo antes de introducir secrets o VPN.
-- Prepara los presets que luego puede reutilizar `sandbox isolation`.
+- La prioridad práctica actual es coordinar varias VMs con pocos recursos.
+- `03-vpn-pack` reduce dependencia de SSH y puertos públicos.
+- `06-scheduler-cost-aware` permite decidir placement según capacidad real y costo.
+- `01-security-baseline.md` sigue siendo P0 y debe entrar antes de exponer APIs o workloads menos confiables.
 
 ## Archivos de referencia
 
@@ -86,3 +93,4 @@ Razón:
 - `docs/specs/05-sandbox-isolation.md`
 - `docs/specs/06-scheduler-cost-aware.md`
 - `docs/specs/07-vpc-lite.md`
+- `docs/specs/08-ai-inference-mesh.md`

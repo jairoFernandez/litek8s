@@ -3,7 +3,8 @@
 ## Estado global
 
 - Proyecto: `litek8s`
-- Objetivo de esta línea de trabajo: seguridad, secretos, conectividad privada, observabilidad, aislamiento y scheduling orientado a nodos económicos.
+- Objetivo de esta línea de trabajo: orquestar varias máquinas virtuales o nodos modestos con pocos recursos, sumando seguridad, conectividad privada, observabilidad, aislamiento y scheduling orientado a capacidad/costo.
+- Nota: la malla de inferencia IA queda documentada para más adelante; no forma parte del foco inmediato.
 - Dueño: por definir
 
 ## Estado por spec
@@ -17,11 +18,12 @@
 | `docs/specs/05-sandbox-isolation.md` | P1 | Draft | Diseñar abstracción de runtime y capability discovery por nodo |
 | `docs/specs/06-scheduler-cost-aware.md` | P1 | Draft | Definir `requests`, capacidad por nodo y scoring policy inicial |
 | `docs/specs/07-vpc-lite.md` | P2 | Draft | Delimitar el alcance mínimo viable de red privada de servicios |
+| `docs/specs/08-ai-inference-mesh.md` | P3 | Deferred | Reabrir después de multi-VM liviano, scheduler por capacidad y conectividad privada |
 
 ## Sesión actual recomendada
 
-- Trabajar `docs/specs/01-security-baseline.md`
-- Entregable esperado: diseño aprobado de presets y campos de manifiesto
+- Trabajar el camino de multi-VM liviano con `docs/specs/03-vpn-pack.md` y `docs/specs/06-scheduler-cost-aware.md`
+- Entregable esperado: modelo mínimo de conectividad privada entre VMs, capacidad por nodo y scheduling por requests/costo
 
 ## Registro de decisiones
 
@@ -30,6 +32,7 @@
 - Decidir si el manifiesto usará un perfil propio (`securityProfile`) o un subset k8s-like de `securityContext`.
 - Decidir si el VPN pack será gestionado por `litek8s` o si primero se soportará un mesh externo con autodetección.
 - Decidir si `Secret` y `ConfigMap` salen juntos o por fases.
+- Decidir el modelo mínimo de capacidad por nodo para varias VMs pequeñas.
 
 ### Notas para futuras sesiones
 
