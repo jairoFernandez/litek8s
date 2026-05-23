@@ -45,6 +45,29 @@ pub struct ServerConfig {
     pub api_addr: Option<String>,
 }
 
+const DEFAULT_API_PORT: u16 = 6443;
+
+fn resolve_api_bind_addr_with(
+    api_addr: Option<&str>,
+    membership: Option<&crate::vpn::VpnMembership>,
+) -> Option<String> {
+    if let Some(addr) = api_addr {
+        return Some(addr.to_string());
+    }
+    membership.map(|m| format!("{}:{}", m.ip, DEFAULT_API_PORT))
+}
+
+fn resolve_api_bind_addr(config: &ServerConfig) -> Option<String> {
+    let membership = match crate::vpn::current_local_membership() {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("failed to read VPN membership for API bind: {error}");
+            None
+        }
+    };
+    resolve_api_bind_addr_with(config.api_addr.as_deref(), membership.as_ref())
+}
+
 impl ServerConfig {
     pub fn from_defaults() -> Result<Self> {
         Ok(Self {
@@ -92,6 +115,24 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     }
 
     let store = Arc::new(Store::load(config.state_file.clone()).await?);
+    match crate::vpn::current_local_membership() {
+        Ok(membership) => {
+            if let Err(error) = store
+                .set_node_vpn(crate::node::LOCAL_NODE_NAME, membership.clone())
+                .await
+            {
+                eprintln!("failed to record local VPN membership: {error}");
+            } else if let Some(m) = membership {
+                eprintln!(
+                    "[vpn] local node membership loaded: ip={} role={:?}",
+                    m.ip, m.role
+                );
+            }
+        }
+        Err(error) => {
+            eprintln!("failed to load local VPN membership: {error}");
+        }
+    }
     let runtime = DockerRuntime::connect()?;
     runtime.ping().await?;
     let snapshot_refresh = Arc::new(Notify::new());
@@ -141,11 +182,16 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         )
     })?;
 
-    let tcp_api_task = if let Some(api_addr) = &config.api_addr {
+    let effective_api_addr = resolve_api_bind_addr(&config);
+    let tcp_api_task = if let Some(api_addr) = effective_api_addr.as_ref() {
         let tcp_listener = tokio::net::TcpListener::bind(api_addr)
             .await
             .with_context(|| format!("failed to bind TCP API listener on {api_addr}"))?;
-        eprintln!("api: listening on {api_addr}");
+        if config.api_addr.is_some() {
+            eprintln!("api: listening on {api_addr}");
+        } else {
+            eprintln!("api: listening on {api_addr} (auto-rebound to VPN IP)");
+        }
         let state = app_state.clone();
         Some(tokio::spawn(async move {
             loop {
@@ -245,16 +291,34 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             ssh_target,
             remote_binary,
             labels,
+            vpn_ip,
         } => {
             if matches!(name.as_str(), "local") {
                 bail!("`local` is reserved for the built-in node");
             }
-            let node = ClusterNode::ssh(
+            let mut node = ClusterNode::ssh(
                 name.clone(),
                 ssh_target,
                 remote_binary.unwrap_or_else(|| DEFAULT_REMOTE_BINARY.to_string()),
                 labels,
             )?;
+            if let Some(raw_ip) = vpn_ip.as_deref() {
+                let ip: std::net::Ipv4Addr = raw_ip
+                    .parse()
+                    .with_context(|| format!("invalid VPN IPv4 `{raw_ip}`"))?;
+                let hub = crate::vpn::HubState::load()
+                    .context("failed to load hub VPN state — is this node the hub?")?;
+                let peer = hub
+                    .peers
+                    .iter()
+                    .find(|peer| peer.membership.ip == ip)
+                    .with_context(|| {
+                        format!(
+                            "no peer registered at {ip} in hub state; run `litek8s vpn add-peer` or bootstrap via SSH first"
+                        )
+                    })?;
+                node.vpn = Some(peer.membership.clone());
+            }
             let client = NodeClient::for_node(&node, state.runtime.clone());
             client
                 .ping()
@@ -278,6 +342,13 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 })
                 .await?;
             let created = matches!(result, CommandResult::Applied { created: true });
+            if node.vpn.is_some() {
+                state
+                    .store
+                    .set_node_vpn(&name, node.vpn.clone())
+                    .await
+                    .with_context(|| format!("failed to record VPN membership for `{name}`"))?;
+            }
             state
                 .record_event(NewEvent {
                     level: EventLevel::Normal,
@@ -289,7 +360,11 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                     object_kind: "node".to_string(),
                     object_name: name.clone(),
                     node_name: Some(name.clone()),
-                    message: "node registered and answered over ssh".to_string(),
+                    message: if node.vpn.is_some() {
+                        "node registered and answered over ssh; VPN IP attached".to_string()
+                    } else {
+                        "node registered and answered over ssh".to_string()
+                    },
                 })
                 .await?;
             state.refresh_cluster_snapshot().await?;
@@ -533,6 +608,14 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 .into_iter()
                 .filter(|entry| entry.assigned_node == node.name)
                 .count();
+            let vpn = node.vpn.as_ref().map(|vpn| crate::protocol::NodeVpnInfo {
+                role: format!("{:?}", vpn.role).to_lowercase(),
+                ip: vpn.ip.to_string(),
+                pubkey: vpn.pubkey.as_str().to_string(),
+                endpoint: vpn.endpoint.clone(),
+                status: format!("{:?}", vpn.status).to_lowercase(),
+                last_handshake_unix: vpn.last_handshake_unix,
+            });
             let item = NodeDescription {
                 name: node.name.clone(),
                 transport: node.transport_label().to_string(),
@@ -546,6 +629,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 scheduling: node.scheduling_label().to_string(),
                 deployment_count,
                 message,
+                vpn,
             };
             Ok(Response::NodeDescription { item })
         }
@@ -1259,6 +1343,11 @@ impl AppState {
                 status,
                 scheduling: node.scheduling_label().to_string(),
                 deployment_count,
+                vpn_ip: node.vpn.as_ref().map(|vpn| vpn.ip.to_string()),
+                vpn_role: node
+                    .vpn
+                    .as_ref()
+                    .map(|vpn| format!("{:?}", vpn.role).to_lowercase()),
             });
         }
 
@@ -1669,13 +1758,39 @@ mod tests {
 
     use super::{
         DrainDecision, ServiceBackendHealth, ServiceBackendState, TopMetricsSampler,
-        drain_target_for_deployment, effective_service_state,
+        drain_target_for_deployment, effective_service_state, resolve_api_bind_addr_with,
     };
     use crate::manifest::{API_VERSION, DeploymentManifest};
     use crate::node::{ClusterNode, NodeTransport};
     use crate::runtime::docker::ContainerStatsSnapshot;
     use crate::service::ServiceStatusSnapshot;
     use crate::store::{DeploymentStatus, StoredDeployment, StoredService};
+    use crate::vpn::{KeyPair, VpnMembership};
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn api_bind_addr_uses_explicit_when_provided() {
+        let kp = KeyPair::generate();
+        let membership =
+            VpnMembership::new_spoke(Ipv4Addr::new(10, 42, 0, 5), kp.public());
+        let got = resolve_api_bind_addr_with(Some("0.0.0.0:7000"), Some(&membership));
+        assert_eq!(got.as_deref(), Some("0.0.0.0:7000"));
+    }
+
+    #[test]
+    fn api_bind_addr_falls_back_to_vpn_ip() {
+        let kp = KeyPair::generate();
+        let membership =
+            VpnMembership::new_spoke(Ipv4Addr::new(10, 42, 0, 5), kp.public());
+        let got = resolve_api_bind_addr_with(None, Some(&membership));
+        assert_eq!(got.as_deref(), Some("10.42.0.5:6443"));
+    }
+
+    #[test]
+    fn api_bind_addr_none_without_explicit_nor_vpn() {
+        let got = resolve_api_bind_addr_with(None, None);
+        assert!(got.is_none());
+    }
 
     fn snapshot(cpu_total_usage: u64, system_cpu_usage: u64) -> ContainerStatsSnapshot {
         ContainerStatsSnapshot {
@@ -1880,6 +1995,7 @@ spec:
                 target: name.to_string(),
                 remote_binary: "~/.local/bin/litek8s".to_string(),
             },
+            vpn: None,
         }
     }
 }

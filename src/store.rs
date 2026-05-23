@@ -338,6 +338,28 @@ impl Store {
         guard.nodes.values().cloned().collect()
     }
 
+    pub async fn set_node_vpn(
+        &self,
+        name: &str,
+        membership: Option<crate::vpn::VpnMembership>,
+    ) -> Result<bool> {
+        let mut guard = self.state.write().await;
+        let mut changed = false;
+        if let Some(node) = guard.nodes.get_mut(name) {
+            if node.vpn != membership {
+                node.vpn = membership;
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(false);
+        }
+        let snapshot = guard.clone();
+        drop(guard);
+        self.persist(&snapshot).await?;
+        Ok(true)
+    }
+
     pub async fn set_node_unschedulable(&self, name: &str, unschedulable: bool) -> Result<bool> {
         let mut guard = self.state.write().await;
         let mut changed = false;

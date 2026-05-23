@@ -16,6 +16,8 @@ pub enum Request {
         ssh_target: String,
         remote_binary: Option<String>,
         labels: BTreeMap<String, String>,
+        #[serde(default)]
+        vpn_ip: Option<String>,
     },
     SetNodeScheduling {
         name: String,
@@ -203,6 +205,10 @@ pub struct NodeSummary {
     pub status: String,
     pub scheduling: String,
     pub deployment_count: usize,
+    #[serde(default)]
+    pub vpn_ip: Option<String>,
+    #[serde(default)]
+    pub vpn_role: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +222,18 @@ pub struct NodeDescription {
     pub scheduling: String,
     pub deployment_count: usize,
     pub message: Option<String>,
+    #[serde(default)]
+    pub vpn: Option<NodeVpnInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeVpnInfo {
+    pub role: String,
+    pub ip: String,
+    pub pubkey: String,
+    pub endpoint: Option<String>,
+    pub status: String,
+    pub last_handshake_unix: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

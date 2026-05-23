@@ -352,8 +352,114 @@ enum Command {
         #[command(subcommand)]
         command: ClusterCommand,
     },
+    #[command(
+        about = "Manage the WireGuard mesh that connects nodes across clouds",
+        help_template = HELP_TEMPLATE
+    )]
+    Vpn {
+        #[command(subcommand)]
+        command: VpnCommand,
+    },
     #[command(hide = true)]
     Agent,
+}
+
+#[derive(Debug, Subcommand)]
+enum VpnCommand {
+    #[command(
+        about = "Generate a hub key pair and print a join token for spokes",
+        help_template = HELP_TEMPLATE
+    )]
+    Init {
+        #[arg(
+            long,
+            default_value = "10.42.0.0/24",
+            help = "Private IPv4 CIDR for the mesh (e.g. 10.42.0.0/24)"
+        )]
+        cidr: String,
+        #[arg(
+            long,
+            help = "Publicly reachable hub endpoint as `host:port` (e.g. 54.123.45.67:51820)"
+        )]
+        public_endpoint: String,
+    },
+    #[command(
+        about = "Show the current VPN state (hub network, peers, spoke membership)",
+        help_template = HELP_TEMPLATE
+    )]
+    Status,
+    #[command(
+        about = "Register a spoke pub key on the hub (escape hatch when SSH bootstrap is unavailable)",
+        help_template = HELP_TEMPLATE
+    )]
+    AddPeer {
+        #[arg(long, help = "Logical node name for the spoke")]
+        name: String,
+        #[arg(long, help = "Spoke base64 public key")]
+        pubkey: String,
+    },
+    #[command(
+        about = "Remove a registered spoke from the hub",
+        help_template = HELP_TEMPLATE
+    )]
+    RemovePeer {
+        #[arg(long, help = "Logical node name for the spoke")]
+        name: String,
+    },
+    #[command(
+        about = "Write a wg-quick-compatible config file for the hub or current spoke",
+        help_template = HELP_TEMPLATE
+    )]
+    ShowConfig {
+        #[arg(
+            long,
+            value_parser = ["hub", "spoke"],
+            default_value = "spoke",
+            help = "Which side of the mesh to dump the config for"
+        )]
+        role: String,
+        #[arg(
+            long,
+            default_value_t = 51820,
+            help = "Hub UDP listen port (only used for --role hub)"
+        )]
+        listen_port: u16,
+        #[arg(long, help = "Path to write the config. Defaults to stdout if omitted")]
+        output: Option<PathBuf>,
+    },
+    #[command(
+        about = "Apply a join token on this spoke (generates local key, persists pending state)",
+        help_template = HELP_TEMPLATE
+    )]
+    Join {
+        #[arg(long, help = "Join token previously printed by `vpn init`")]
+        token: String,
+        #[arg(
+            long,
+            help = "SSH target for the hub (e.g. ec2-user@54.123.45.67); enables one-shot SSH bootstrap"
+        )]
+        ssh_hub: Option<String>,
+        #[arg(
+            long,
+            help = "Logical node name to register this spoke as on the hub",
+            default_value = ""
+        )]
+        node_name: String,
+        #[arg(
+            long,
+            default_value = "~/.local/bin/litek8s",
+            help = "Path to the litek8s binary on the hub (only used with --ssh-hub)"
+        )]
+        remote_binary: String,
+    },
+    #[command(
+        about = "Finalize the spoke after the hub has assigned an IP",
+        help_template = HELP_TEMPLATE
+    )]
+    Complete {
+        #[arg(long, help = "IPv4 address the hub assigned to this spoke")]
+        ip: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -381,6 +487,11 @@ enum NodeCommand {
             default_value = "~/.local/bin/litek8s"
         )]
         remote_binary: String,
+        #[arg(
+            long,
+            help = "VPN IPv4 of the remote node (e.g. 10.42.0.2). Once set, the daemon prefers this over the public SSH target."
+        )]
+        vpn_ip: Option<String>,
     },
     #[command(about = "Mark a node unschedulable for new selector-based or default placements")]
     Cordon {
@@ -618,6 +729,7 @@ pub async fn run() -> Result<()> {
                 install,
                 labels,
                 remote_binary,
+                vpn_ip,
             } => {
                 let labels = parse_labels(&labels)?;
                 if install {
@@ -642,6 +754,7 @@ pub async fn run() -> Result<()> {
                         ssh_target: ssh,
                         remote_binary: Some(remote_binary),
                         labels,
+                        vpn_ip,
                     })
                     .await?;
                 print_response(response)
@@ -923,7 +1036,276 @@ pub async fn run() -> Result<()> {
             }
         },
         Command::Agent => crate::node::run_agent_stdio().await,
+        Command::Vpn { command } => match command {
+            VpnCommand::Init {
+                cidr,
+                public_endpoint,
+            } => run_vpn_init(&cidr, &public_endpoint),
+            VpnCommand::Status => run_vpn_status(),
+            VpnCommand::AddPeer { name, pubkey } => run_vpn_add_peer(&name, &pubkey),
+            VpnCommand::RemovePeer { name } => run_vpn_remove_peer(&name),
+            VpnCommand::ShowConfig {
+                role,
+                listen_port,
+                output,
+            } => run_vpn_show_config(&role, listen_port, output.as_deref()),
+            VpnCommand::Join {
+                token,
+                ssh_hub,
+                node_name,
+                remote_binary,
+            } => {
+                run_vpn_join(
+                    &token,
+                    ssh_hub.as_deref(),
+                    &node_name,
+                    &remote_binary,
+                )
+                .await
+            }
+            VpnCommand::Complete { ip } => run_vpn_complete(&ip),
+        },
     }
+}
+
+fn run_vpn_init(cidr: &str, public_endpoint: &str) -> Result<()> {
+    use crate::vpn;
+
+    let (cidr_base, cidr_prefix) = parse_cidr(cidr)?;
+    let (network, _keypair, token) =
+        vpn::init_hub(cidr_base, cidr_prefix, public_endpoint.to_string())
+            .context("failed to initialize hub")?;
+    let encoded = token.encode().context("failed to encode join token")?;
+
+    let state_path = config::default_vpn_state_file()?;
+    let key_path = config::default_vpn_private_key_file()?;
+
+    println!("Hub initialized (state persisted).");
+    println!("  hub pubkey   : {}", network.hub_pubkey.as_str());
+    println!("  hub IP       : {}", network.hub_ip());
+    println!("  hub endpoint : {}", network.hub_endpoint);
+    println!("  CIDR         : {}/{}", network.cidr_base, network.cidr_prefix);
+    println!("  state file   : {}", state_path.display());
+    println!("  private key  : {} (chmod 0600)", key_path.display());
+    println!();
+    println!("Share this join token with spokes:");
+    println!("  {encoded}");
+    Ok(())
+}
+
+fn run_vpn_status() -> Result<()> {
+    use crate::vpn::{HubState, SpokeState};
+
+    let hub = HubState::load()?;
+    let spoke = SpokeState::load()?;
+    let mut shown = false;
+
+    if let Some(network) = hub.network.as_ref() {
+        shown = true;
+        println!("Hub:");
+        println!("  endpoint : {}", network.hub_endpoint);
+        println!("  hub pub  : {}", network.hub_pubkey.as_str());
+        println!("  CIDR     : {}/{}", network.cidr_base, network.cidr_prefix);
+        println!();
+        println!("Peers ({}):", hub.peers.len());
+        println!(
+            "  {:<14} {:<8} {:<14} {:<6} {}",
+            "NAME", "ROLE", "VPN-IP", "STATUS", "PUBKEY"
+        );
+        for peer in &hub.peers {
+            println!(
+                "  {:<14} {:<8} {:<14} {:<6} {}",
+                peer.node_name,
+                format!("{:?}", peer.membership.role),
+                peer.membership.ip,
+                format!("{:?}", peer.membership.status),
+                truncate(peer.membership.pubkey.as_str(), 22)
+            );
+        }
+        println!();
+    }
+
+    if let Some(spoke) = spoke {
+        shown = true;
+        println!("Spoke (local):");
+        println!("  hub      : {}", spoke.network.hub_endpoint);
+        println!("  vpn IP   : {}", spoke.membership.ip);
+        println!("  pubkey   : {}", spoke.membership.pubkey.as_str());
+        println!("  status   : {:?}", spoke.membership.status);
+    }
+
+    if !shown {
+        println!("No VPN state on this host. Run `litek8s vpn init` or `litek8s vpn join`.");
+    }
+    Ok(())
+}
+
+fn run_vpn_add_peer(name: &str, pubkey: &str) -> Result<()> {
+    use crate::vpn::{self, PublicKey};
+
+    let pubkey = PublicKey::parse(pubkey).context("invalid spoke public key")?;
+    let membership = vpn::register_spoke(name, pubkey).context("failed to register spoke")?;
+    println!("Registered `{name}` at {} (role Spoke).", membership.ip);
+    println!("Tell the spoke to run:");
+    println!("  litek8s vpn complete --ip {}", membership.ip);
+    Ok(())
+}
+
+fn run_vpn_remove_peer(name: &str) -> Result<()> {
+    use crate::vpn;
+
+    let removed = vpn::remove_spoke(name)?;
+    if removed {
+        println!("Removed peer `{name}`.");
+    } else {
+        println!("No peer named `{name}` was registered.");
+    }
+    Ok(())
+}
+
+fn run_vpn_show_config(role: &str, listen_port: u16, output: Option<&Path>) -> Result<()> {
+    use crate::vpn::{HubState, SpokeState, load_or_generate_keypair, write_wg_quick_config,
+        write_wg_quick_hub_config};
+
+    let keypair = load_or_generate_keypair()?;
+    match role {
+        "hub" => {
+            let hub = HubState::load()?;
+            let target = output
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("/tmp/litek8s-hub.conf"));
+            let written =
+                write_wg_quick_hub_config(&target, &hub, &keypair.secret_base64(), listen_port)?;
+            println!("Wrote hub wg-quick config to {}", written.display());
+            println!("Bring it up with: sudo wg-quick up {}", written.display());
+        }
+        "spoke" => {
+            let spoke = SpokeState::load()?
+                .context("no spoke state on disk — run `litek8s vpn join --token ...` first")?;
+            let target = output
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("/tmp/litek8s-spoke.conf"));
+            let written = write_wg_quick_config(&target, &spoke, &keypair.secret_base64())?;
+            println!("Wrote spoke wg-quick config to {}", written.display());
+            println!("Bring it up with: sudo wg-quick up {}", written.display());
+        }
+        other => bail!("unknown role `{other}` (use `hub` or `spoke`)"),
+    }
+    Ok(())
+}
+
+async fn run_vpn_join(
+    token: &str,
+    ssh_hub: Option<&str>,
+    node_name: &str,
+    remote_binary: &str,
+) -> Result<()> {
+    use crate::node::{AgentRequest, AgentResponse, SshNodeClient};
+    use crate::vpn::{self, JoinToken};
+
+    let token = JoinToken::decode(token).context("failed to decode join token")?;
+    let (state, _keypair) = vpn::prepare_spoke(&token).context("failed to prepare spoke")?;
+
+    let Some(ssh_target) = ssh_hub else {
+        println!("Spoke prepared (manual mode — no --ssh-hub supplied).");
+        println!("  hub endpoint : {}", state.network.hub_endpoint);
+        println!("  hub pubkey   : {}", state.network.hub_pubkey.as_str());
+        println!("  spoke pubkey : {}", state.membership.pubkey.as_str());
+        println!();
+        println!("Hand the spoke pubkey to the hub operator. On the hub, run:");
+        println!(
+            "  litek8s vpn add-peer --name <name> --pubkey {}",
+            state.membership.pubkey.as_str()
+        );
+        println!("The hub will reply with an assigned IP; finish here with:");
+        println!("  litek8s vpn complete --ip <assigned-ip>");
+        return Ok(());
+    };
+
+    let resolved_name = if node_name.is_empty() {
+        hostname_fallback()
+    } else {
+        node_name.to_string()
+    };
+
+    println!("Contacting hub via SSH ({ssh_target}) as `{resolved_name}`…");
+    let ssh = SshNodeClient::new(ssh_target.to_string(), remote_binary.to_string());
+    let response = ssh
+        .send_agent_request(AgentRequest::VpnAttach {
+            node_name: resolved_name.clone(),
+            spoke_pubkey: state.membership.pubkey.clone(),
+        })
+        .await
+        .context("SSH bootstrap failed")?;
+
+    let (assigned, _hub_token) = match response {
+        AgentResponse::VpnAssignment { membership, token } => (membership, token),
+        other => bail!("unexpected agent response from hub: {other:?}"),
+    };
+
+    let completed = vpn::complete_spoke(assigned).context("failed to persist assignment")?;
+    println!("Spoke registered.");
+    println!("  vpn IP   : {}", completed.membership.ip);
+    println!("  hub      : {}", completed.network.hub_endpoint);
+    println!();
+    println!("Write the wg-quick config and bring it up:");
+    println!("  litek8s vpn show-config --role spoke --output /tmp/wg0.conf");
+    println!("  sudo wg-quick up /tmp/wg0.conf");
+    Ok(())
+}
+
+fn hostname_fallback() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .or_else(|| {
+            std::process::Command::new("hostname")
+                .output()
+                .ok()
+                .and_then(|output| {
+                    String::from_utf8(output.stdout)
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                })
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "spoke".to_string())
+}
+
+fn run_vpn_complete(ip: &str) -> Result<()> {
+    use crate::vpn::{self, SpokeState, VpnMembership};
+
+    let ip: std::net::Ipv4Addr = ip
+        .parse()
+        .with_context(|| format!("invalid IPv4 address `{ip}`"))?;
+    let pending = SpokeState::load()?
+        .context("no pending spoke state — run `litek8s vpn join --token ...` first")?;
+
+    let mut assigned = VpnMembership::new_spoke(ip, pending.membership.pubkey.clone());
+    assigned.endpoint = pending.membership.endpoint.clone();
+    let state = vpn::complete_spoke(assigned).context("failed to complete spoke")?;
+
+    println!("Spoke completed.");
+    println!("  vpn IP     : {}", state.membership.ip);
+    println!("  hub        : {}", state.network.hub_endpoint);
+    println!();
+    println!("Generate a wg-quick config with:");
+    println!("  litek8s vpn show-config --role spoke --output /tmp/wg0.conf");
+    println!("Then bring it up with: sudo wg-quick up /tmp/wg0.conf");
+    Ok(())
+}
+
+
+fn parse_cidr(value: &str) -> Result<(std::net::Ipv4Addr, u8)> {
+    let (base, prefix) = value
+        .split_once('/')
+        .with_context(|| format!("CIDR `{value}` must be in `A.B.C.D/N` form"))?;
+    let base: std::net::Ipv4Addr = base
+        .parse()
+        .with_context(|| format!("CIDR `{value}` has invalid IPv4 base"))?;
+    let prefix: u8 = prefix
+        .parse()
+        .with_context(|| format!("CIDR `{value}` has invalid prefix length"))?;
+    Ok((base, prefix))
 }
 
 fn read_manifest(path: &Path) -> Result<String> {
@@ -1045,22 +1427,25 @@ fn print_response(response: Response) -> Result<()> {
             );
             println!();
             println!(
-                "{} {} {} {} {} {}",
+                "{} {} {} {} {} {} {}",
                 header_left("NAME", 18),
                 header_left("TYPE", 8),
                 header_left("STATUS", 10),
                 header_left("SCHED", 12),
                 header_left("ENDPOINT", 24),
+                header_left("VPN-IP", 14),
                 label("DEPLOYMENTS")
             );
             for item in items {
+                let vpn_cell = item.vpn_ip.clone().unwrap_or_else(|| "-".to_string());
                 println!(
-                    "{} {} {} {} {} {}",
+                    "{} {} {} {} {} {} {}",
                     left_cell(&item.name, 18),
                     left_cell(&item.transport, 8),
                     status_cell(&item.status, 10),
                     scheduling_cell(&item.scheduling, 12),
                     left_cell(&truncate(&item.endpoint, 24), 24),
+                    left_cell(&vpn_cell, 14),
                     item.deployment_count
                 );
             }
@@ -1199,6 +1584,18 @@ fn print_response(response: Response) -> Result<()> {
             print_detail("deployments", &item.deployment_count.to_string());
             if let Some(message) = item.message {
                 print_detail("message", &message);
+            }
+            if let Some(vpn) = item.vpn {
+                println!();
+                println!("{}", title("VPN"));
+                print_detail("role", &vpn.role);
+                print_detail("ip", &vpn.ip);
+                print_detail("pubkey", &vpn.pubkey);
+                print_detail("endpoint", vpn.endpoint.as_deref().unwrap_or("-"));
+                print_detail("status", &vpn.status);
+                if let Some(ts) = vpn.last_handshake_unix {
+                    print_detail("last handshake", &format!("unix {ts}"));
+                }
             }
             Ok(())
         }
@@ -1589,6 +1986,8 @@ fn build_tree_entries(snapshot: &TreeSnapshot) -> Vec<TreeEntry> {
                     .get(node_name)
                     .map(|items| items.len())
                     .unwrap_or(0),
+                vpn_ip: None,
+                vpn_role: None,
             });
         }
     }
@@ -2260,6 +2659,8 @@ mod tests {
                     status: "Ready".to_string(),
                     scheduling: "Schedulable".to_string(),
                     deployment_count: 1,
+                    vpn_ip: None,
+                    vpn_role: None,
                 },
                 NodeSummary {
                     name: "server77".to_string(),
@@ -2268,6 +2669,8 @@ mod tests {
                     status: "Ready".to_string(),
                     scheduling: "Schedulable".to_string(),
                     deployment_count: 1,
+                    vpn_ip: None,
+                    vpn_role: None,
                 },
             ],
             deployments: vec![
@@ -2355,6 +2758,8 @@ mod tests {
                 status: "Ready".to_string(),
                 scheduling: "Schedulable".to_string(),
                 deployment_count: 0,
+                vpn_ip: None,
+                vpn_role: None,
             }],
             deployments: Vec::new(),
             services: vec![ServiceSummary {

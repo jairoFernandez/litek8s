@@ -11,3 +11,4 @@ pub mod reconciler;
 pub mod runtime;
 pub mod service;
 pub mod store;
+pub mod vpn;

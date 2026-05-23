@@ -7,6 +7,9 @@ use directories::ProjectDirs;
 const APP_DIR: &str = "litek8s";
 const SOCKET_FILE: &str = "daemon.sock";
 const STATE_FILE: &str = "state.json";
+const VPN_STATE_FILE: &str = "vpn-state.json";
+const VPN_PRIVATE_KEY_FILE: &str = "vpn-private.key";
+const VPN_SPOKE_CONFIG_FILE: &str = "vpn-spoke.json";
 
 pub fn default_socket_path() -> PathBuf {
     let base = env::var_os("XDG_RUNTIME_DIR")
@@ -27,4 +30,22 @@ pub fn ensure_parent_dir(path: &Path) -> Result<()> {
             .with_context(|| format!("failed to create parent directory for {}", path.display()))?;
     }
     Ok(())
+}
+
+fn vpn_data_dir() -> Result<PathBuf> {
+    let dirs = ProjectDirs::from("dev", "civojairo", APP_DIR)
+        .context("failed to resolve a data directory for the litek8s VPN state")?;
+    Ok(dirs.data_local_dir().join("vpn"))
+}
+
+pub fn default_vpn_state_file() -> Result<PathBuf> {
+    Ok(vpn_data_dir()?.join(VPN_STATE_FILE))
+}
+
+pub fn default_vpn_private_key_file() -> Result<PathBuf> {
+    Ok(vpn_data_dir()?.join(VPN_PRIVATE_KEY_FILE))
+}
+
+pub fn default_vpn_spoke_config_file() -> Result<PathBuf> {
+    Ok(vpn_data_dir()?.join(VPN_SPOKE_CONFIG_FILE))
 }

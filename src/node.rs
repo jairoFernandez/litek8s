@@ -13,6 +13,7 @@ use crate::runtime::docker::{
     ContainerExitState, ContainerStatsSnapshot, DockerRuntime, ManagedContainer,
 };
 use crate::runtime::{ContainerRuntime, LocalRuntime};
+use crate::vpn::{self, JoinToken, PublicKey, VpnMembership};
 
 pub const LOCAL_NODE_NAME: &str = "local";
 pub const DEFAULT_REMOTE_BINARY: &str = "~/.local/bin/litek8s";
@@ -26,6 +27,8 @@ pub struct ClusterNode {
     #[serde(default)]
     pub unschedulable: bool,
     pub transport: NodeTransport,
+    #[serde(default)]
+    pub vpn: Option<VpnMembership>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -67,6 +70,10 @@ pub enum AgentRequest {
         port: u16,
         timeout_ms: u64,
     },
+    VpnAttach {
+        node_name: String,
+        spoke_pubkey: PublicKey,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -78,6 +85,10 @@ pub enum AgentResponse {
     Logs { content: String },
     ExitState { state: ContainerExitState },
     StatsSnapshot { snapshot: ContainerStatsSnapshot },
+    VpnAssignment {
+        membership: VpnMembership,
+        token: JoinToken,
+    },
     Error { message: String },
 }
 
@@ -113,6 +124,7 @@ impl ClusterNode {
             labels: default_local_labels(),
             unschedulable: false,
             transport: NodeTransport::Local,
+            vpn: None,
         }
     }
 
@@ -141,6 +153,7 @@ impl ClusterNode {
                 target,
                 remote_binary,
             },
+            vpn: None,
         })
     }
 
@@ -177,6 +190,26 @@ impl ClusterNode {
         } else {
             "Schedulable"
         }
+    }
+
+    /// SSH target preferred for connecting to this node.
+    ///
+    /// When the node has a registered VPN membership, the target is rewritten
+    /// to use the VPN IP so traffic flows over the mesh instead of the public
+    /// cloud endpoint. Falls back to the original SSH target when no VPN IP
+    /// is known.
+    pub fn preferred_ssh_target(&self) -> Option<String> {
+        let NodeTransport::Ssh { target, .. } = &self.transport else {
+            return None;
+        };
+        let Some(vpn) = self.vpn.as_ref() else {
+            return Some(target.clone());
+        };
+        let user = target.split_once('@').map(|(user, _)| user);
+        Some(match user {
+            Some(user) => format!("{user}@{}", vpn.ip),
+            None => vpn.ip.to_string(),
+        })
     }
 }
 
@@ -238,10 +271,15 @@ impl NodeClient {
             NodeTransport::Ssh {
                 target,
                 remote_binary,
-            } => Self::Ssh(SshNodeClient {
-                target: target.clone(),
-                remote_binary: remote_binary.clone(),
-            }),
+            } => {
+                let effective = node
+                    .preferred_ssh_target()
+                    .unwrap_or_else(|| target.clone());
+                Self::Ssh(SshNodeClient {
+                    target: effective,
+                    remote_binary: remote_binary.clone(),
+                })
+            }
         }
     }
 
@@ -429,6 +467,17 @@ impl NodeClient {
 }
 
 impl SshNodeClient {
+    pub fn new(target: String, remote_binary: String) -> Self {
+        Self {
+            target,
+            remote_binary,
+        }
+    }
+
+    pub async fn send_agent_request(&self, request: AgentRequest) -> Result<AgentResponse> {
+        self.request(request).await
+    }
+
     async fn request(&self, request: AgentRequest) -> Result<AgentResponse> {
         let payload =
             serde_json::to_vec(&request).context("failed to serialize remote agent request")?;
@@ -577,6 +626,23 @@ async fn handle_agent_request(
                 .probe_container_tcp(&container_id, port, Duration::from_millis(timeout_ms))
                 .await?;
             Ok(AgentResponse::Ack)
+        }
+        AgentRequest::VpnAttach {
+            node_name,
+            spoke_pubkey,
+        } => {
+            let membership = vpn::register_spoke(&node_name, spoke_pubkey)?;
+            let hub_state = vpn::HubState::load()?;
+            let network = hub_state
+                .network
+                .context("hub has no network — run `litek8s vpn init` first")?;
+            let token = JoinToken {
+                hub_pubkey: network.hub_pubkey.clone(),
+                hub_endpoint: network.hub_endpoint.clone(),
+                cidr_base: network.cidr_base,
+                cidr_prefix: network.cidr_prefix,
+            };
+            Ok(AgentResponse::VpnAssignment { membership, token })
         }
     }
 }
@@ -879,6 +945,55 @@ mod tests {
     };
     use crate::manifest::{API_VERSION, DeploymentManifest};
     use std::collections::BTreeMap;
+
+    #[test]
+    fn prefers_vpn_ip_in_ssh_target_when_membership_present() {
+        use crate::vpn::{KeyPair, VpnMembership};
+        use std::net::Ipv4Addr;
+
+        let mut node = ClusterNode::ssh(
+            "civo-1".to_string(),
+            "ec2-user@54.1.2.3".to_string(),
+            DEFAULT_REMOTE_BINARY.to_string(),
+            BTreeMap::new(),
+        )
+        .expect("ssh node should build");
+
+        assert_eq!(
+            node.preferred_ssh_target().as_deref(),
+            Some("ec2-user@54.1.2.3")
+        );
+
+        let kp = KeyPair::generate();
+        node.vpn = Some(VpnMembership::new_spoke(
+            Ipv4Addr::new(10, 42, 0, 7),
+            kp.public(),
+        ));
+        assert_eq!(
+            node.preferred_ssh_target().as_deref(),
+            Some("ec2-user@10.42.0.7")
+        );
+    }
+
+    #[test]
+    fn falls_back_to_bare_vpn_ip_when_target_has_no_user() {
+        use crate::vpn::{KeyPair, VpnMembership};
+        use std::net::Ipv4Addr;
+
+        let mut node = ClusterNode::ssh(
+            "civo-1".to_string(),
+            "54.1.2.3".to_string(),
+            DEFAULT_REMOTE_BINARY.to_string(),
+            BTreeMap::new(),
+        )
+        .expect("ssh node should build");
+        let kp = KeyPair::generate();
+        node.vpn = Some(VpnMembership::new_spoke(
+            Ipv4Addr::new(10, 42, 0, 9),
+            kp.public(),
+        ));
+        assert_eq!(node.preferred_ssh_target().as_deref(), Some("10.42.0.9"));
+    }
 
     #[tokio::test]
     async fn node_client_dispatches_to_fake_local_runtime() {
