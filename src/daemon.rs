@@ -11,8 +11,8 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify};
 
 use crate::config;
-use crate::control_plane::{ClusterCommand, CommandResult};
 use crate::control_plane::raft::ControlPlaneNode;
+use crate::control_plane::{ClusterCommand, CommandResult};
 use crate::manifest::{
     API_VERSION, DeploymentManifest, KIND_SERVICE, Metadata, ParsedManifest, ServiceManifest,
     ServiceSpec,
@@ -31,9 +31,7 @@ use crate::runtime::docker::{
     deployment_container_name,
 };
 use crate::service::{ServiceManager, ServiceStatusSnapshot, resolve_backing_deployment};
-use crate::store::{
-    DeploymentStatus, EventLevel, EventQuery, NewEvent, Store,
-};
+use crate::store::{DeploymentStatus, EventLevel, EventQuery, NewEvent, Store};
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -625,10 +623,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             })
         }
         Request::JoinCluster { node_id, addr } => {
-            state
-                .ha_node
-                .add_member(node_id, addr)
-                .await?;
+            state.ha_node.add_member(node_id, addr).await?;
             Ok(Response::Ack {
                 message: format!("control-plane node {node_id} joined the cluster"),
             })
@@ -687,8 +682,7 @@ async fn apply_deployment_manifest(
         &state.store.list_nodes().await,
         current_assignment.as_deref(),
     )?;
-    let manifest_yaml =
-        serde_yaml::to_string(&manifest).context("failed to serialize manifest")?;
+    let manifest_yaml = serde_yaml::to_string(&manifest).context("failed to serialize manifest")?;
     let result = state
         .ha_node
         .propose(ClusterCommand::ApplyDeployment { manifest_yaml })
@@ -993,7 +987,15 @@ impl AppState {
     async fn reconcile_all(&self) -> Result<()> {
         let _guard = self.reconcile_guard.lock().await;
         let nodes = self.store.list_nodes().await;
-        reconciler::reconcile_all(&self.store, &self.ha_node, &self.runtime, &nodes, self.cleanup_orphans).await?;
+        let local_runtime = crate::runtime::LocalRuntime::Docker(self.runtime.clone());
+        reconciler::reconcile_all(
+            &self.store,
+            &self.ha_node,
+            &local_runtime,
+            &nodes,
+            self.cleanup_orphans,
+        )
+        .await?;
         self.request_cluster_snapshot_refresh();
         Ok(())
     }
@@ -1386,7 +1388,10 @@ fn deployment_conditions(entry: &crate::store::StoredDeployment) -> Vec<Deployme
     });
     items.push(DeploymentCondition {
         type_name: "Degraded".to_string(),
-        status: if matches!(entry.status, DeploymentStatus::Failed | DeploymentStatus::Restarting) {
+        status: if matches!(
+            entry.status,
+            DeploymentStatus::Failed | DeploymentStatus::Restarting
+        ) {
             "True".to_string()
         } else {
             "False".to_string()
@@ -1769,13 +1774,11 @@ mod tests {
 
     #[test]
     fn drain_moves_workload_to_alternate_schedulable_node() {
-        let deployment = stored_deployment(
-            "demo",
-            "local",
-            None,
-            BTreeMap::new(),
-        );
-        let nodes = vec![local_node(true), ssh_node("server77", false, BTreeMap::new())];
+        let deployment = stored_deployment("demo", "local", None, BTreeMap::new());
+        let nodes = vec![
+            local_node(true),
+            ssh_node("server77", false, BTreeMap::new()),
+        ];
 
         let decision = drain_target_for_deployment(&deployment, &nodes, "local");
         assert_eq!(decision, DrainDecision::Move("server77".to_string()));
@@ -1783,13 +1786,11 @@ mod tests {
 
     #[test]
     fn drain_blocks_workload_pinned_by_nodename() {
-        let deployment = stored_deployment(
-            "demo",
-            "server77",
-            Some("server77"),
-            BTreeMap::new(),
-        );
-        let nodes = vec![local_node(false), ssh_node("server77", true, BTreeMap::new())];
+        let deployment = stored_deployment("demo", "server77", Some("server77"), BTreeMap::new());
+        let nodes = vec![
+            local_node(false),
+            ssh_node("server77", true, BTreeMap::new()),
+        ];
 
         let decision = drain_target_for_deployment(&deployment, &nodes, "server77");
         assert!(matches!(decision, DrainDecision::Blocked(message) if message.contains("pinned")));
@@ -1797,13 +1798,11 @@ mod tests {
 
     #[test]
     fn drain_skips_workloads_not_assigned_to_the_node() {
-        let deployment = stored_deployment(
-            "demo",
-            "server77",
-            None,
-            BTreeMap::new(),
-        );
-        let nodes = vec![local_node(false), ssh_node("server77", false, BTreeMap::new())];
+        let deployment = stored_deployment("demo", "server77", None, BTreeMap::new());
+        let nodes = vec![
+            local_node(false),
+            ssh_node("server77", false, BTreeMap::new()),
+        ];
 
         let decision = drain_target_for_deployment(&deployment, &nodes, "local");
         assert_eq!(decision, DrainDecision::Skip);

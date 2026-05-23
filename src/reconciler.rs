@@ -6,7 +6,8 @@ use anyhow::Result;
 use crate::control_plane::raft::ControlPlaneNode;
 use crate::control_plane::{ClusterCommand, CommandResult};
 use crate::node::{ClusterNode, NodeClient, select_node_for_manifest};
-use crate::runtime::docker::{DockerRuntime, summarize_exit_state};
+use crate::runtime::LocalRuntime;
+use crate::runtime::docker::summarize_exit_state;
 use crate::store::{DeploymentStatus, EventLevel, Store, StoredDeployment};
 
 const RECREATE_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -15,7 +16,7 @@ const MAX_RESTART_BACKOFF_SECS: u64 = 15;
 pub async fn reconcile_all(
     store: &Store,
     ha_node: &ControlPlaneNode,
-    local_runtime: &DockerRuntime,
+    local_runtime: &LocalRuntime,
     nodes: &[ClusterNode],
     cleanup_orphans: bool,
 ) -> Result<()> {
@@ -202,7 +203,9 @@ pub async fn reconcile_deployment(
                 status: DeploymentStatus::Restarting,
                 ready: false,
                 container_id: Some(new_id),
-                message: Some("recreated after duplicate managed containers were found".to_string()),
+                message: Some(
+                    "recreated after duplicate managed containers were found".to_string(),
+                ),
                 last_exit: Some("duplicate containers".to_string()),
                 increment_restart_count: true,
                 increment_restart_streak: false,
@@ -226,45 +229,44 @@ pub async fn reconcile_deployment(
     if let Some(container) = containers.into_iter().next() {
         let hash_matches = container.spec_hash.as_deref() == Some(deployment.spec_hash.as_str());
         if hash_matches && container.running {
-            let (ready, message, event_reason) = if let Some(probe) =
-                deployment.manifest.container().readiness_probe()
-            {
-                let probe_target = format!("tcpSocket:{}", probe.tcp_socket.port);
-                let started_at = deployment.container_started_at.unwrap_or_else(now_unix);
-                let initial_delay = probe.initial_delay_seconds();
-                if initial_delay > 0 && now_unix().saturating_sub(started_at) < initial_delay {
-                    (
-                        false,
-                        format!(
-                            "waiting {}s before readiness probe begins on {probe_target}",
-                            initial_delay
-                        ),
-                        Some("NotReady"),
-                    )
-                } else {
-                    match runtime
-                        .probe_container_tcp(
-                            &container.id,
-                            probe.tcp_socket.port,
-                            Duration::from_secs(probe.timeout_seconds()),
-                        )
-                        .await
-                    {
-                        Ok(()) => (
-                            true,
-                            format!("readiness probe succeeded on {probe_target}"),
-                            Some("Ready"),
-                        ),
-                        Err(_) => (
+            let (ready, message, event_reason) =
+                if let Some(probe) = deployment.manifest.container().readiness_probe() {
+                    let probe_target = format!("tcpSocket:{}", probe.tcp_socket.port);
+                    let started_at = deployment.container_started_at.unwrap_or_else(now_unix);
+                    let initial_delay = probe.initial_delay_seconds();
+                    if initial_delay > 0 && now_unix().saturating_sub(started_at) < initial_delay {
+                        (
                             false,
-                            format!("readiness probe is still failing on {probe_target}"),
+                            format!(
+                                "waiting {}s before readiness probe begins on {probe_target}",
+                                initial_delay
+                            ),
                             Some("NotReady"),
-                        ),
+                        )
+                    } else {
+                        match runtime
+                            .probe_container_tcp(
+                                &container.id,
+                                probe.tcp_socket.port,
+                                Duration::from_secs(probe.timeout_seconds()),
+                            )
+                            .await
+                        {
+                            Ok(()) => (
+                                true,
+                                format!("readiness probe succeeded on {probe_target}"),
+                                Some("Ready"),
+                            ),
+                            Err(_) => (
+                                false,
+                                format!("readiness probe is still failing on {probe_target}"),
+                                Some("NotReady"),
+                            ),
+                        }
                     }
-                }
-            } else {
-                (true, "container is healthy".to_string(), Some("Running"))
-            };
+                } else {
+                    (true, "container is healthy".to_string(), Some("Running"))
+                };
             let result = ha_node
                 .propose(ClusterCommand::SetDeploymentStatus {
                     name: name.to_string(),

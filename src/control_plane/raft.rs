@@ -47,15 +47,9 @@ impl ControlPlaneNode {
         let state_machine = StateMachineStore::new(Arc::clone(&store));
         let network = NetworkFactory;
 
-        let raft = Raft::new(
-            node_id,
-            Arc::new(config),
-            network,
-            log_store,
-            state_machine,
-        )
-        .await
-        .context("failed to create raft node")?;
+        let raft = Raft::new(node_id, Arc::new(config), network, log_store, state_machine)
+            .await
+            .context("failed to create raft node")?;
 
         let node = Self {
             raft,
@@ -149,10 +143,7 @@ async fn handle_rpc_connection(
             RaftRpcResponse::AppendEntries(resp)
         }
         RaftRpc::Vote(req) => {
-            let resp = raft
-                .vote(req)
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let resp = raft.vote(req).await.map_err(|e| anyhow::anyhow!("{e}"))?;
             RaftRpcResponse::Vote(resp)
         }
         RaftRpc::InstallSnapshot(req) => {

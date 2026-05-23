@@ -1,7 +1,7 @@
 use std::env;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -121,8 +121,12 @@ async fn resolves_proxy_target_for_published_port() -> Result<()> {
     let harness = TestHarness::spawn().await?;
     let deployment = unique_name("proxy");
     let host_port = unique_port(18_090);
-    let manifest =
-        manifest_yaml_with_host_port(&deployment, r#"["sh"]"#, r#"["-c", "sleep 3600"]"#, host_port);
+    let manifest = manifest_yaml_with_host_port(
+        &deployment,
+        r#"["sh"]"#,
+        r#"["-c", "sleep 3600"]"#,
+        host_port,
+    );
 
     request(
         &harness.socket_path,
@@ -256,10 +260,12 @@ async fn deployment_with_readiness_probe_becomes_ready() -> Result<()> {
         describe.readiness_probe.as_deref(),
         Some("tcpSocket:5678 (initialDelay=0s timeout=1s)")
     );
-    assert!(describe
-        .conditions
-        .iter()
-        .any(|condition| condition.type_name == "Ready" && condition.status == "True"));
+    assert!(
+        describe
+            .conditions
+            .iter()
+            .any(|condition| condition.type_name == "Ready" && condition.status == "True")
+    );
 
     harness.cleanup_deployment(&deployment).await?;
     Ok(())
@@ -285,13 +291,7 @@ async fn service_waits_for_readiness_before_exposing_endpoints() -> Result<()> {
         Some(8080),
     );
 
-    request(
-        &harness.socket_path,
-        Request::Apply {
-            manifest,
-        },
-    )
-    .await?;
+    request(&harness.socket_path, Request::Apply { manifest }).await?;
 
     let describe = harness
         .wait_until_description(&deployment, |item| {
@@ -317,11 +317,13 @@ async fn service_waits_for_readiness_before_exposing_endpoints() -> Result<()> {
     let service_describe = harness
         .wait_until_service_status(&service, |item| item.status == "NoEndpoints")
         .await?;
-    assert!(service_describe
-        .message
-        .as_deref()
-        .unwrap_or_default()
-        .contains("deployment"));
+    assert!(
+        service_describe
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("deployment")
+    );
 
     harness.cleanup_deployment(&deployment).await?;
     Ok(())

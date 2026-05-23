@@ -21,6 +21,7 @@ use tokio::net::TcpStream;
 use tokio::sync::Notify;
 
 use crate::manifest::{ContainerPort, DeploymentManifest, NormalizedResourceLimits};
+use crate::runtime::ContainerRuntime;
 
 const LABEL_MANAGED: &str = "litek8s.managed";
 const LABEL_DEPLOYMENT: &str = "litek8s.deployment";
@@ -582,6 +583,79 @@ fn select_primary_container(containers: Vec<ManagedContainer>) -> Option<Managed
         }
     }
     first
+}
+
+impl ContainerRuntime for DockerRuntime {
+    async fn ping(&self) -> Result<()> {
+        DockerRuntime::ping(self).await
+    }
+
+    async fn list_managed_containers(&self) -> Result<Vec<ManagedContainer>> {
+        DockerRuntime::list_managed_containers(self).await
+    }
+
+    async fn list_containers_for_deployment(&self, name: &str) -> Result<Vec<ManagedContainer>> {
+        DockerRuntime::list_containers_for_deployment(self, name).await
+    }
+
+    async fn create_and_start(
+        &self,
+        manifest: &DeploymentManifest,
+        spec_hash: &str,
+    ) -> Result<String> {
+        DockerRuntime::create_and_start(self, manifest, spec_hash).await
+    }
+
+    async fn remove_deployment(&self, name: &str) -> Result<()> {
+        DockerRuntime::remove_deployment(self, name).await
+    }
+
+    async fn wait_until_deployment_cleared(&self, name: &str, timeout: Duration) -> Result<()> {
+        DockerRuntime::wait_until_deployment_cleared(self, name, timeout).await
+    }
+
+    async fn remove_orphans(&self, desired_names: &HashSet<String>) -> Result<()> {
+        DockerRuntime::remove_orphans(self, desired_names).await
+    }
+
+    async fn remove_container(&self, container_id: &str) -> Result<()> {
+        DockerRuntime::remove_container(self, container_id).await
+    }
+
+    async fn logs(&self, name: &str, tail: usize) -> Result<String> {
+        DockerRuntime::logs(self, name, tail).await
+    }
+
+    async fn configured_limits_for_deployment(
+        &self,
+        name: &str,
+    ) -> Result<ConfiguredResourceLimits> {
+        DockerRuntime::configured_limits_for_deployment(self, name).await
+    }
+
+    async fn inspect_exit_state(&self, container_id: &str) -> Result<ContainerExitState> {
+        DockerRuntime::inspect_exit_state(self, container_id).await
+    }
+
+    async fn metrics_for_container(&self, container_id: &str) -> Result<ContainerMetrics> {
+        DockerRuntime::metrics_for_container(self, container_id).await
+    }
+
+    async fn stats_snapshot_for_container(
+        &self,
+        container_id: &str,
+    ) -> Result<ContainerStatsSnapshot> {
+        DockerRuntime::stats_snapshot_for_container(self, container_id).await
+    }
+
+    async fn probe_container_tcp(
+        &self,
+        container_id: &str,
+        port: u16,
+        timeout: Duration,
+    ) -> Result<()> {
+        DockerRuntime::probe_container_tcp(self, container_id, port, timeout).await
+    }
 }
 
 fn connect_docker() -> Result<Docker> {

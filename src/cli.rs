@@ -179,9 +179,17 @@ enum Command {
             help = "TCP address for Raft peer communication"
         )]
         peer_addr: String,
-        #[arg(long, hide = true, help = "Join an existing cluster at this address instead of self-initializing")]
+        #[arg(
+            long,
+            hide = true,
+            help = "Join an existing cluster at this address instead of self-initializing"
+        )]
         join: Option<String>,
-        #[arg(long, hide = true, help = "Expose the daemon API on a TCP address (e.g. 0.0.0.0:6443)")]
+        #[arg(
+            long,
+            hide = true,
+            help = "Expose the daemon API on a TCP address (e.g. 0.0.0.0:6443)"
+        )]
         api_addr: Option<String>,
     },
     #[command(
@@ -480,7 +488,6 @@ impl DaemonEndpoint {
             DaemonEndpoint::Tcp(addr) => protocol::request_tcp(addr, request).await,
         }
     }
-
 }
 
 pub async fn run() -> Result<()> {
@@ -526,12 +533,8 @@ pub async fn run() -> Result<()> {
         }
         Command::Get { resource } => {
             let response = match resource.as_str() {
-                "deployment" | "deployments" => {
-                    endpoint.request(Request::GetDeployments).await?
-                }
-                "service" | "services" => {
-                    endpoint.request(Request::GetServices).await?
-                }
+                "deployment" | "deployments" => endpoint.request(Request::GetDeployments).await?,
+                "service" | "services" => endpoint.request(Request::GetServices).await?,
                 "node" | "nodes" => endpoint.request(Request::GetNodes).await?,
                 _ => {
                     ensure_resource(
@@ -553,14 +556,14 @@ pub async fn run() -> Result<()> {
         Command::Describe { resource, name } => {
             let response = match resource.as_str() {
                 "deployment" | "deployments" => {
-                    endpoint.request(Request::DescribeDeployment { name }).await?
+                    endpoint
+                        .request(Request::DescribeDeployment { name })
+                        .await?
                 }
                 "service" | "services" => {
                     endpoint.request(Request::DescribeService { name }).await?
                 }
-                "node" | "nodes" => {
-                    endpoint.request(Request::DescribeNode { name }).await?
-                }
+                "node" | "nodes" => endpoint.request(Request::DescribeNode { name }).await?,
                 _ => {
                     ensure_resource(
                         &resource,
@@ -582,9 +585,7 @@ pub async fn run() -> Result<()> {
             let response = endpoint.request(Request::Logs { name, tail }).await?;
             print_response(response)
         }
-        Command::Proxy { name, listen, port } => {
-            run_proxy(&endpoint, &name, &listen, port).await
-        }
+        Command::Proxy { name, listen, port } => run_proxy(&endpoint, &name, &listen, port).await,
         Command::Events {
             watch,
             limit,
@@ -635,25 +636,23 @@ pub async fn run() -> Result<()> {
                     println!("{} {}", label("remote"), remote_binary);
                     println!();
                 }
-                let response = endpoint.request(
-                    Request::AddNode {
+                let response = endpoint
+                    .request(Request::AddNode {
                         name,
                         ssh_target: ssh,
                         remote_binary: Some(remote_binary),
                         labels,
-                    },
-                )
-                .await?;
+                    })
+                    .await?;
                 print_response(response)
             }
             NodeCommand::Cordon { name } => {
-                let response = endpoint.request(
-                    Request::SetNodeScheduling {
+                let response = endpoint
+                    .request(Request::SetNodeScheduling {
                         name,
                         unschedulable: true,
-                    },
-                )
-                .await?;
+                    })
+                    .await?;
                 print_response(response)
             }
             NodeCommand::Drain { name } => {
@@ -661,13 +660,12 @@ pub async fn run() -> Result<()> {
                 print_response(response)
             }
             NodeCommand::Uncordon { name } => {
-                let response = endpoint.request(
-                    Request::SetNodeScheduling {
+                let response = endpoint
+                    .request(Request::SetNodeScheduling {
                         name,
                         unschedulable: false,
-                    },
-                )
-                .await?;
+                    })
+                    .await?;
                 print_response(response)
             }
         },
@@ -678,15 +676,14 @@ pub async fn run() -> Result<()> {
                 listen,
                 port,
             } => {
-                let response = endpoint.request(
-                    Request::AddService {
+                let response = endpoint
+                    .request(Request::AddService {
                         name,
                         deployment_name: deployment,
                         listen_addr: listen,
                         target_port: port,
-                    },
-                )
-                .await?;
+                    })
+                    .await?;
                 print_response(response)
             }
         },
@@ -718,8 +715,7 @@ pub async fn run() -> Result<()> {
         }
         Command::ControlPlane { command } => match command {
             ControlPlaneCommand::Status => {
-                let response =
-                    endpoint.request(Request::GetClusterStatus).await?;
+                let response = endpoint.request(Request::GetClusterStatus).await?;
                 match response {
                     Response::ClusterStatus {
                         ha_enabled,
@@ -791,8 +787,7 @@ pub async fn run() -> Result<()> {
                 }
 
                 // Step 2: get cluster status to determine next node ID
-                let status_resp =
-                    endpoint.request(Request::GetClusterStatus).await?;
+                let status_resp = endpoint.request(Request::GetClusterStatus).await?;
                 let next_id = match &status_resp {
                     Response::ClusterStatus { members, .. } => {
                         members.iter().map(|m| m.node_id).max().unwrap_or(0) + 1
@@ -800,22 +795,17 @@ pub async fn run() -> Result<()> {
                     _ => bail!("unexpected response from daemon"),
                 };
                 let leader_port = match &status_resp {
-                    Response::ClusterStatus { members, .. } => {
-                        members
-                            .iter()
-                            .find(|m| m.is_leader)
-                            .and_then(|m| m.addr.rsplit_once(':').map(|(_, p)| p.to_string()))
-                            .unwrap_or_else(|| "4001".into())
-                    }
+                    Response::ClusterStatus { members, .. } => members
+                        .iter()
+                        .find(|m| m.is_leader)
+                        .and_then(|m| m.addr.rsplit_once(':').map(|(_, p)| p.to_string()))
+                        .unwrap_or_else(|| "4001".into()),
                     _ => unreachable!(),
                 };
 
                 // Step 3: detect remote IP by extracting the host from --ssh target
                 // and detect local IP as seen from the remote
-                let ssh_host = ssh
-                    .rsplit_once('@')
-                    .map(|(_, h)| h)
-                    .unwrap_or(&ssh);
+                let ssh_host = ssh.rsplit_once('@').map(|(_, h)| h).unwrap_or(&ssh);
                 let remote_addr = format!("{ssh_host}:{peer_port}");
                 println!("{} {}", label("remote addr"), remote_addr);
 
@@ -860,13 +850,12 @@ pub async fn run() -> Result<()> {
                 }
 
                 // Step 6: tell leader to add the new member
-                let join_resp = endpoint.request(
-                    Request::JoinCluster {
+                let join_resp = endpoint
+                    .request(Request::JoinCluster {
                         node_id: next_id,
                         addr: remote_addr.clone(),
-                    },
-                )
-                .await?;
+                    })
+                    .await?;
                 print_response(join_resp)?;
 
                 println!(
@@ -902,14 +891,8 @@ pub async fn run() -> Result<()> {
                     info.nodes.len()
                 );
                 println!();
-                println!(
-                    "{}",
-                    muted("connect with:")
-                );
-                println!(
-                    "  litek8s --server {} get deployments",
-                    info.api_addr
-                );
+                println!("{}", muted("connect with:"));
+                println!("  litek8s --server {} get deployments", info.api_addr);
                 Ok(())
             }
             ClusterCommand::Delete { name } => {
@@ -933,10 +916,7 @@ pub async fn run() -> Result<()> {
                 for entry in &entries {
                     println!(
                         "{:<20} {:<5} {:<8} {}",
-                        entry.name,
-                        entry.control_planes,
-                        entry.workers,
-                        entry.api_addr
+                        entry.name, entry.control_planes, entry.workers, entry.api_addr
                     );
                 }
                 Ok(())
@@ -1134,10 +1114,7 @@ fn print_response(response: Response) -> Result<()> {
             }
             print_detail("command", &command);
             print_detail("args", &args);
-            print_detail(
-                "readiness",
-                item.readiness_probe.as_deref().unwrap_or("-"),
-            );
+            print_detail("readiness", item.readiness_probe.as_deref().unwrap_or("-"));
             print_detail("cpu limit", item.cpu_limit.as_deref().unwrap_or("-"));
             print_detail("memory limit", item.memory_limit.as_deref().unwrap_or("-"));
             print_detail("restarts", &item.restart_count.to_string());
@@ -1278,7 +1255,9 @@ fn print_response(response: Response) -> Result<()> {
             print!("{}", format_top_body(&daemon, &items));
             Ok(())
         }
-        Response::ClusterStatus { ha_enabled, state, .. } => {
+        Response::ClusterStatus {
+            ha_enabled, state, ..
+        } => {
             if ha_enabled {
                 println!("{} HA {}", ok("ok"), state);
             } else {
@@ -1360,21 +1339,20 @@ async fn run_tree(endpoint: &DaemonEndpoint, watch: bool, interval: Duration) ->
         .transpose()?;
 
     loop {
-        let snapshot =
-            match fetch_tree_snapshot(endpoint, watch_display.as_mut(), interval).await {
-                Ok(Some(snapshot)) => snapshot,
-                Ok(None) => return Ok(()),
-                Err(error) if error.to_string().contains("warming up") => {
-                    if let Some(display) = watch_display.as_mut() {
-                        let loading = muted("loading snapshot...");
-                        display.render_frame(&loading)?;
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                        continue;
-                    }
-                    return Err(error);
+        let snapshot = match fetch_tree_snapshot(endpoint, watch_display.as_mut(), interval).await {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => return Ok(()),
+            Err(error) if error.to_string().contains("warming up") => {
+                if let Some(display) = watch_display.as_mut() {
+                    let loading = muted("loading snapshot...");
+                    display.render_frame(&loading)?;
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
                 }
-                Err(error) => return Err(error),
-            };
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+        };
         let body = render_tree(&snapshot);
         if let Some(display) = watch_display.as_mut() {
             display.render_frame(&body)?;
@@ -1767,14 +1745,18 @@ fn append_tree_entries(lines: &mut Vec<String>, prefix: &str, entries: &[TreeEnt
     }
 }
 
-async fn run_proxy(endpoint: &DaemonEndpoint, name: &str, listen: &str, port: Option<u16>) -> Result<()> {
-    let response = endpoint.request(
-        Request::ResolveProxyTarget {
+async fn run_proxy(
+    endpoint: &DaemonEndpoint,
+    name: &str,
+    listen: &str,
+    port: Option<u16>,
+) -> Result<()> {
+    let response = endpoint
+        .request(Request::ResolveProxyTarget {
             name: name.to_string(),
             port,
-        },
-    )
-    .await?;
+        })
+        .await?;
 
     let item = match response {
         Response::ProxyTarget { item } => item,

@@ -188,9 +188,7 @@ async fn perf_raft_propose_event_throughput() {
     let throughput = iterations as f64 / elapsed.as_secs_f64();
 
     eprintln!("\n--- Raft propose (AppendEvent) throughput ---");
-    eprintln!(
-        "  {iterations} events in {elapsed:?} — {throughput:.0} ops/sec"
-    );
+    eprintln!("  {iterations} events in {elapsed:?} — {throughput:.0} ops/sec");
 
     // Single-node Raft should sustain at least 500 ops/sec for events.
     assert!(
@@ -251,9 +249,7 @@ async fn perf_raft_propose_mixed_workload() {
     let avg = elapsed / total_ops as u32;
 
     eprintln!("\n--- Raft mixed workload (reconcile simulation) ---");
-    eprintln!(
-        "  {total_ops} ops ({cycles} cycles × 5 deployments × 2 ops) in {elapsed:?}"
-    );
+    eprintln!("  {total_ops} ops ({cycles} cycles × 5 deployments × 2 ops) in {elapsed:?}");
     eprintln!("  avg={avg:?}, throughput={throughput:.0} ops/sec");
 
     // Mixed workload should sustain at least 400 ops/sec.

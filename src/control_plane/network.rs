@@ -3,6 +3,9 @@ use std::future::Future;
 use std::io;
 use std::time::Duration;
 
+use openraft::BasicNode;
+use openraft::Snapshot;
+use openraft::Vote;
 use openraft::error::InstallSnapshotError;
 use openraft::error::RPCError;
 use openraft::error::RaftError;
@@ -18,9 +21,6 @@ use openraft::raft::InstallSnapshotResponse;
 use openraft::raft::SnapshotResponse;
 use openraft::raft::VoteRequest;
 use openraft::raft::VoteResponse;
-use openraft::BasicNode;
-use openraft::Snapshot;
-use openraft::Vote;
 
 use super::config::TypeConfig;
 
@@ -86,8 +86,8 @@ impl NetworkClient {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         let mut stream = tokio::net::TcpStream::connect(&self.addr).await?;
-        let req_bytes = serde_json::to_vec(&rpc)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        let req_bytes =
+            serde_json::to_vec(&rpc).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
         // Length-prefixed JSON (same pattern as protocol.rs)
         let len = req_bytes.len() as u32;
@@ -112,10 +112,7 @@ impl RaftNetwork<TypeConfig> for NetworkClient {
         &mut self,
         rpc: AppendEntriesRequest<TypeConfig>,
         _option: RPCOption,
-    ) -> Result<
-        AppendEntriesResponse<u64>,
-        RPCError<u64, BasicNode, RaftError<u64>>,
-    > {
+    ) -> Result<AppendEntriesResponse<u64>, RPCError<u64, BasicNode, RaftError<u64>>> {
         match self.send_rpc(RaftRpc::AppendEntries(rpc)).await {
             Ok(RaftRpcResponse::AppendEntries(resp)) => Ok(resp),
             Ok(_) => Err(RPCError::Network(openraft::error::NetworkError::new(
@@ -162,16 +159,14 @@ impl RaftNetwork<TypeConfig> for NetworkClient {
         snapshot: Snapshot<TypeConfig>,
         _cancel: impl Future<Output = ReplicationClosed> + Send + 'static,
         _option: RPCOption,
-    ) -> Result<
-        SnapshotResponse<u64>,
-        StreamingError<TypeConfig, openraft::error::Fatal<u64>>,
-    > {
+    ) -> Result<SnapshotResponse<u64>, StreamingError<TypeConfig, openraft::error::Fatal<u64>>>
+    {
         use std::io::Read;
         let mut data = Vec::new();
         let mut cursor = *snapshot.snapshot;
-        cursor.read_to_end(&mut data).map_err(|e| {
-            StreamingError::Unreachable(openraft::error::Unreachable::new(&e))
-        })?;
+        cursor
+            .read_to_end(&mut data)
+            .map_err(|e| StreamingError::Unreachable(openraft::error::Unreachable::new(&e)))?;
 
         let rpc = InstallSnapshotRequest {
             vote,

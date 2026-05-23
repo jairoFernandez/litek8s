@@ -78,18 +78,10 @@ pub enum ClusterCommand {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum CommandResult {
-    Ack {
-        message: Option<String>,
-    },
-    Applied {
-        created: bool,
-    },
-    Changed {
-        changed: bool,
-    },
-    EventRecorded {
-        id: u64,
-    },
+    Ack { message: Option<String> },
+    Applied { created: bool },
+    Changed { changed: bool },
+    EventRecorded { id: u64 },
     Noop,
 }
 

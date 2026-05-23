@@ -4,6 +4,15 @@ use std::io::Cursor;
 use std::ops::RangeBounds;
 use std::sync::Arc;
 
+use openraft::Entry;
+use openraft::EntryPayload;
+use openraft::ErrorSubject;
+use openraft::ErrorVerb;
+use openraft::LogId;
+use openraft::StorageError;
+use openraft::StorageIOError;
+use openraft::StoredMembership;
+use openraft::Vote;
 use openraft::storage::LogFlushed;
 use openraft::storage::LogState;
 use openraft::storage::RaftLogReader;
@@ -12,15 +21,6 @@ use openraft::storage::RaftSnapshotBuilder;
 use openraft::storage::RaftStateMachine;
 use openraft::storage::Snapshot;
 use openraft::storage::SnapshotMeta;
-use openraft::Entry;
-use openraft::EntryPayload;
-use openraft::LogId;
-use openraft::StorageError;
-use openraft::StorageIOError;
-use openraft::StoredMembership;
-use openraft::Vote;
-use openraft::ErrorSubject;
-use openraft::ErrorVerb;
 use tokio::sync::RwLock;
 
 use super::config::TypeConfig;
@@ -189,12 +189,10 @@ impl StateMachineStore {
                     },
                 }
             }
-            ClusterCommand::DeleteDeployment { name } => {
-                match self.store.remove(&name).await {
-                    Ok(Some(_)) => CommandResult::Changed { changed: true },
-                    _ => CommandResult::Changed { changed: false },
-                }
-            }
+            ClusterCommand::DeleteDeployment { name } => match self.store.remove(&name).await {
+                Ok(Some(_)) => CommandResult::Changed { changed: true },
+                _ => CommandResult::Changed { changed: false },
+            },
             ClusterCommand::ApplyService {
                 name,
                 deployment_name,
@@ -246,7 +244,11 @@ impl StateMachineStore {
                 name,
                 unschedulable,
             } => {
-                match self.store.set_node_unschedulable(&name, unschedulable).await {
+                match self
+                    .store
+                    .set_node_unschedulable(&name, unschedulable)
+                    .await
+                {
                     Ok(changed) => CommandResult::Changed { changed },
                     Err(_) => CommandResult::Changed { changed: false },
                 }
@@ -258,12 +260,10 @@ impl StateMachineStore {
             ClusterCommand::SetDeploymentAssignment {
                 name,
                 assigned_node,
-            } => {
-                match self.store.set_assigned_node(&name, assigned_node).await {
-                    Ok(changed) => CommandResult::Changed { changed },
-                    Err(_) => CommandResult::Changed { changed: false },
-                }
-            }
+            } => match self.store.set_assigned_node(&name, assigned_node).await {
+                Ok(changed) => CommandResult::Changed { changed },
+                Err(_) => CommandResult::Changed { changed: false },
+            },
             ClusterCommand::SetDeploymentStatus {
                 name,
                 status,
@@ -322,9 +322,8 @@ impl StateMachineStore {
 impl RaftSnapshotBuilder<TypeConfig> for StateMachineStore {
     async fn build_snapshot(&mut self) -> Result<Snapshot<TypeConfig>, StorageError<u64>> {
         let state = self.store.snapshot().await;
-        let data = serde_json::to_vec(&state).map_err(|e| {
-            StorageIOError::new(ErrorSubject::StateMachine, ErrorVerb::Read, &e)
-        })?;
+        let data = serde_json::to_vec(&state)
+            .map_err(|e| StorageIOError::new(ErrorSubject::StateMachine, ErrorVerb::Read, &e))?;
 
         let last_applied = self.last_applied.read().await;
         let last_membership = self.last_membership.read().await;
@@ -363,10 +362,7 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         Ok((last_applied, membership))
     }
 
-    async fn apply<I>(
-        &mut self,
-        entries: I,
-    ) -> Result<Vec<CommandResult>, StorageError<u64>>
+    async fn apply<I>(&mut self, entries: I) -> Result<Vec<CommandResult>, StorageError<u64>>
     where
         I: IntoIterator<Item = Entry<TypeConfig>> + Send,
         I::IntoIter: Send,
@@ -417,9 +413,8 @@ impl RaftStateMachine<TypeConfig> for StateMachineStore {
         snapshot: Box<Cursor<Vec<u8>>>,
     ) -> Result<(), StorageError<u64>> {
         let data = snapshot.into_inner();
-        let state: StateFile = serde_json::from_slice(&data).map_err(|e| {
-            StorageIOError::new(ErrorSubject::Snapshot(None), ErrorVerb::Read, &e)
-        })?;
+        let state: StateFile = serde_json::from_slice(&data)
+            .map_err(|e| StorageIOError::new(ErrorSubject::Snapshot(None), ErrorVerb::Read, &e))?;
 
         self.store.replace_state(state).await;
         *self.last_applied.write().await = meta.last_log_id;

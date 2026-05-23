@@ -4,13 +4,13 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use bollard::Docker;
 use bollard::container::{
     Config, CreateContainerOptions, ListContainersOptions, LogOutput, LogsOptions,
     RemoveContainerOptions, StartContainerOptions,
 };
 use bollard::models::HostConfig;
 use bollard::network::{CreateNetworkOptions, ListNetworksOptions};
-use bollard::Docker;
 use futures_util::stream::StreamExt;
 
 const LABEL_CLUSTER: &str = "litek8s.cluster";
@@ -52,10 +52,8 @@ fn detect_docker_socket() -> Result<PathBuf> {
 
     let home = env::var("HOME").ok().map(PathBuf::from);
     let candidates = [
-        home.as_ref()
-            .map(|h| h.join(".orbstack/run/docker.sock")),
-        home.as_ref()
-            .map(|h| h.join(".docker/run/docker.sock")),
+        home.as_ref().map(|h| h.join(".orbstack/run/docker.sock")),
+        home.as_ref().map(|h| h.join(".docker/run/docker.sock")),
         Some(PathBuf::from("/var/run/docker.sock")),
     ];
 
@@ -124,7 +122,10 @@ async fn build_linux_binary(project_root: &Path) -> Result<PathBuf> {
         .context("failed to run docker build")?;
 
     if !status.success() {
-        bail!("cross-compilation failed with exit code {:?}", status.code());
+        bail!(
+            "cross-compilation failed with exit code {:?}",
+            status.code()
+        );
     }
 
     let artifact = project_root
@@ -252,10 +253,7 @@ pub async fn create_cluster(config: ClusterConfig) -> Result<ClusterInfo> {
         }))
         .await
         .context("failed to list Docker networks")?;
-    if existing
-        .iter()
-        .any(|n| n.name.as_deref() == Some(&network))
-    {
+    if existing.iter().any(|n| n.name.as_deref() == Some(&network)) {
         bail!(
             "cluster `{}` already exists; delete it first with `litek8s cluster delete {}`",
             config.name,
@@ -338,10 +336,7 @@ pub async fn create_cluster(config: ClusterConfig) -> Result<ClusterInfo> {
 
         let api_port_key = format!("{API_PORT}/tcp");
         let exposed_ports: Option<HashMap<&str, HashMap<(), ()>>> = if i == 1 {
-            Some(HashMap::from([(
-                api_port_key.as_str(),
-                HashMap::new(),
-            )]))
+            Some(HashMap::from([(api_port_key.as_str(), HashMap::new())]))
         } else {
             None
         };
@@ -378,7 +373,10 @@ pub async fn create_cluster(config: ClusterConfig) -> Result<ClusterInfo> {
 
         let created = docker
             .create_container(
-                Some(CreateContainerOptions { name: name.as_str(), platform: None }),
+                Some(CreateContainerOptions {
+                    name: name.as_str(),
+                    platform: None,
+                }),
                 container_config,
             )
             .await
@@ -501,7 +499,10 @@ pub async fn create_cluster(config: ClusterConfig) -> Result<ClusterInfo> {
 
         let created = docker
             .create_container(
-                Some(CreateContainerOptions { name: name.as_str(), platform: None }),
+                Some(CreateContainerOptions {
+                    name: name.as_str(),
+                    platform: None,
+                }),
                 container_config,
             )
             .await
@@ -569,7 +570,10 @@ pub async fn delete_cluster(name: &str) -> Result<()> {
     let containers = docker
         .list_containers(Some(ListContainersOptions {
             all: true,
-            filters: HashMap::from([("label".to_string(), vec![format!("{LABEL_CLUSTER}={name}")])]),
+            filters: HashMap::from([(
+                "label".to_string(),
+                vec![format!("{LABEL_CLUSTER}={name}")],
+            )]),
             ..Default::default()
         }))
         .await
@@ -606,10 +610,7 @@ pub async fn delete_cluster(name: &str) -> Result<()> {
         .await
         .unwrap_or_default();
 
-    if networks
-        .iter()
-        .any(|n| n.name.as_deref() == Some(&network))
-    {
+    if networks.iter().any(|n| n.name.as_deref() == Some(&network)) {
         docker
             .remove_network(&network)
             .await
@@ -666,13 +667,11 @@ pub async fn list_clusters() -> Result<Vec<ClusterListEntry>> {
 
     let mut entries: Vec<ClusterListEntry> = clusters
         .into_iter()
-        .map(|(name, (cp, workers))| {
-            ClusterListEntry {
-                name,
-                control_planes: cp,
-                workers,
-                api_addr: format!("127.0.0.1:{API_PORT}"),
-            }
+        .map(|(name, (cp, workers))| ClusterListEntry {
+            name,
+            control_planes: cp,
+            workers,
+            api_addr: format!("127.0.0.1:{API_PORT}"),
         })
         .collect();
 

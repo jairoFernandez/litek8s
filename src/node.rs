@@ -12,6 +12,7 @@ use crate::manifest::DeploymentManifest;
 use crate::runtime::docker::{
     ContainerExitState, ContainerStatsSnapshot, DockerRuntime, ManagedContainer,
 };
+use crate::runtime::{ContainerRuntime, LocalRuntime};
 
 pub const LOCAL_NODE_NAME: &str = "local";
 pub const DEFAULT_REMOTE_BINARY: &str = "~/.local/bin/litek8s";
@@ -82,7 +83,7 @@ pub enum AgentResponse {
 
 #[derive(Clone)]
 pub enum NodeClient {
-    Local(DockerRuntime),
+    Local(LocalRuntime),
     Ssh(SshNodeClient),
 }
 
@@ -231,9 +232,9 @@ pub fn select_node_for_manifest(
 }
 
 impl NodeClient {
-    pub fn for_node(node: &ClusterNode, local_runtime: DockerRuntime) -> Self {
+    pub fn for_node(node: &ClusterNode, local_runtime: impl Into<LocalRuntime>) -> Self {
         match &node.transport {
-            NodeTransport::Local => Self::Local(local_runtime),
+            NodeTransport::Local => Self::Local(local_runtime.into()),
             NodeTransport::Ssh {
                 target,
                 remote_binary,
@@ -407,7 +408,11 @@ impl NodeClient {
         timeout: Duration,
     ) -> Result<()> {
         match self {
-            Self::Local(runtime) => runtime.probe_container_tcp(container_id, port, timeout).await,
+            Self::Local(runtime) => {
+                runtime
+                    .probe_container_tcp(container_id, port, timeout)
+                    .await
+            }
             Self::Ssh(client) => match client
                 .request(AgentRequest::ProbeContainerTcp {
                     container_id: container_id.to_string(),
@@ -874,6 +879,48 @@ mod tests {
     };
     use crate::manifest::{API_VERSION, DeploymentManifest};
     use std::collections::BTreeMap;
+
+    #[tokio::test]
+    async fn node_client_dispatches_to_fake_local_runtime() {
+        use super::NodeClient;
+        use crate::runtime::{FakeRuntime, LocalRuntime};
+        use std::sync::Arc;
+
+        let fake = Arc::new(FakeRuntime::new());
+        let local = ClusterNode::local();
+        let client = NodeClient::for_node(&local, LocalRuntime::Fake(fake.clone()));
+
+        let manifest = DeploymentManifest::parse(&format!(
+            r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: demo
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: web
+          image: nginx:alpine
+"#
+        ))
+        .expect("manifest should parse");
+
+        let id = client
+            .create_and_start(&manifest, "hash1")
+            .await
+            .expect("create");
+        assert_eq!(fake.create_calls(), 1);
+
+        let containers = client
+            .list_containers_for_deployment("demo")
+            .await
+            .expect("list");
+        assert_eq!(containers.len(), 1);
+        assert_eq!(containers[0].id, id);
+    }
 
     #[test]
     fn validates_node_names() {
