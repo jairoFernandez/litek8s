@@ -1,5 +1,7 @@
 pub mod cli;
 pub mod cluster;
+pub mod cluster_manifest;
+pub mod cluster_orchestrator;
 pub mod config;
 pub mod control_plane;
 pub mod daemon;

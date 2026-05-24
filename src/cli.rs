@@ -563,6 +563,42 @@ enum ClusterCommand {
     },
     #[command(about = "List running local clusters")]
     List,
+    #[command(
+        about = "Apply a declarative cluster manifest (kind: Cluster) idempotently",
+        help_template = HELP_TEMPLATE
+    )]
+    Apply {
+        #[arg(short = 'f', long, help = "Path to a cluster manifest YAML")]
+        file: PathBuf,
+    },
+    #[command(
+        about = "Show what `cluster apply` would change without mutating state",
+        help_template = HELP_TEMPLATE
+    )]
+    Diff {
+        #[arg(short = 'f', long, help = "Path to a cluster manifest YAML")]
+        file: PathBuf,
+    },
+    #[command(
+        about = "Tear down workloads and worker nodes declared in a cluster manifest (preserves VPN state)",
+        help_template = HELP_TEMPLATE
+    )]
+    Destroy {
+        #[arg(short = 'f', long, help = "Path to a cluster manifest YAML")]
+        file: PathBuf,
+    },
+    #[command(
+        about = "Dump the current cluster state as a kind: Cluster manifest on stdout",
+        help_template = HELP_TEMPLATE
+    )]
+    Export {
+        #[arg(
+            long,
+            default_value = "exported-cluster",
+            help = "metadata.name to embed in the exported manifest"
+        )]
+        name: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -598,6 +634,12 @@ impl DaemonEndpoint {
             DaemonEndpoint::Unix(path) => protocol::request(path, request).await,
             DaemonEndpoint::Tcp(addr) => protocol::request_tcp(addr, request).await,
         }
+    }
+}
+
+impl crate::cluster_orchestrator::DaemonEndpoint for DaemonEndpoint {
+    async fn request(&self, request: Request) -> Result<Response> {
+        DaemonEndpoint::request(self, request).await
     }
 }
 
@@ -1034,6 +1076,10 @@ pub async fn run() -> Result<()> {
                 }
                 Ok(())
             }
+            ClusterCommand::Apply { file } => run_cluster_apply(&endpoint, &file).await,
+            ClusterCommand::Diff { file } => run_cluster_diff(&endpoint, &file).await,
+            ClusterCommand::Destroy { file } => run_cluster_destroy(&endpoint, &file).await,
+            ClusterCommand::Export { name } => run_cluster_export(&endpoint, &name).await,
         },
         Command::Agent => crate::node::run_agent_stdio().await,
         Command::Vpn { command } => match command {
@@ -1251,6 +1297,91 @@ async fn run_vpn_join(
     println!("Write the wg-quick config and bring it up:");
     println!("  litek8s vpn show-config --role spoke --output /tmp/wg0.conf");
     println!("  sudo wg-quick up /tmp/wg0.conf");
+    Ok(())
+}
+
+async fn run_cluster_apply(endpoint: &DaemonEndpoint, file: &Path) -> Result<()> {
+    use crate::cluster_manifest::ClusterManifest;
+
+    let manifest = ClusterManifest::parse_file(file)
+        .with_context(|| format!("failed to parse {}", file.display()))?;
+    println!("{}", title(&format!("Cluster Apply ({})", manifest.metadata.name)));
+
+    let report = crate::cluster_orchestrator::apply(&manifest, endpoint).await?;
+    if let Some(message) = report.vpn_initialized.as_deref() {
+        println!("  {} {}", ok("vpn"), message);
+    }
+    for name in &report.nodes_added {
+        println!("  {} node/{}", ok("added"), name);
+    }
+    for name in &report.nodes_unchanged {
+        println!("  {} node/{}", muted("kept"), name);
+    }
+    for path in &report.workloads_applied {
+        println!("  {} workload {}", ok("applied"), path.display());
+    }
+    if report.nodes_added.is_empty()
+        && report.nodes_unchanged.is_empty()
+        && report.workloads_applied.is_empty()
+        && report.vpn_initialized.is_none()
+    {
+        println!("  {}", muted("nothing to do"));
+    }
+    Ok(())
+}
+
+async fn run_cluster_diff(endpoint: &DaemonEndpoint, file: &Path) -> Result<()> {
+    use crate::cluster_manifest::ClusterManifest;
+
+    let manifest = ClusterManifest::parse_file(file)
+        .with_context(|| format!("failed to parse {}", file.display()))?;
+    println!("{}", title(&format!("Cluster Diff ({})", manifest.metadata.name)));
+
+    let report = crate::cluster_orchestrator::diff(&manifest, endpoint).await?;
+    if let Some(action) = report.vpn_to_initialize.as_deref() {
+        println!("  {} vpn → {}", ok("init"), action);
+    } else if report.vpn_already_initialized {
+        println!("  {} vpn (already initialized)", muted("="));
+    }
+    for name in &report.nodes_to_add {
+        println!("  {} node/{}", ok("+"), name);
+    }
+    for name in &report.nodes_already_present {
+        println!("  {} node/{}", muted("="), name);
+    }
+    for name in &report.nodes_extra {
+        println!("  {} node/{} (extra, not in manifest)", muted("?"), name);
+    }
+    for path in &report.workloads_to_apply {
+        println!("  {} workload {}", ok("apply"), path.display());
+    }
+    Ok(())
+}
+
+async fn run_cluster_destroy(endpoint: &DaemonEndpoint, file: &Path) -> Result<()> {
+    use crate::cluster_manifest::ClusterManifest;
+
+    let manifest = ClusterManifest::parse_file(file)
+        .with_context(|| format!("failed to parse {}", file.display()))?;
+    println!(
+        "{}",
+        title(&format!("Cluster Destroy ({})", manifest.metadata.name))
+    );
+
+    let report = crate::cluster_orchestrator::destroy(&manifest, endpoint).await?;
+    for path in &report.workloads_deleted {
+        println!("  {} workload {}", ok("deleted"), path.display());
+    }
+    for name in &report.nodes_drained {
+        println!("  {} node/{}", ok("drained"), name);
+    }
+    Ok(())
+}
+
+async fn run_cluster_export(endpoint: &DaemonEndpoint, name: &str) -> Result<()> {
+    let manifest = crate::cluster_orchestrator::export(name, endpoint).await?;
+    let yaml = serde_yaml::to_string(&manifest).context("failed to serialize cluster manifest")?;
+    print!("{yaml}");
     Ok(())
 }
 
