@@ -6,6 +6,7 @@ pub mod config;
 pub mod control_plane;
 pub mod daemon;
 pub mod manifest;
+pub mod matrix;
 pub mod node;
 pub mod protocol;
 pub mod proxy;
