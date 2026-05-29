@@ -491,8 +491,28 @@ impl SshNodeClient {
     }
 
     async fn request(&self, request: AgentRequest) -> Result<AgentResponse> {
+        let result = self.request_once(&request).await;
+
+        // A freshly-booted node can hand the ControlMaster a login session that
+        // predates the `docker` group landing in the user's session. That stale
+        // master is then pinned for the whole ControlPersist window, so every
+        // multiplexed agent call fails the Docker ping with EACCES even though
+        // the node is healthy. Detect that case, drop the master, and retry once
+        // — the reopened connection picks up the now-active group membership.
+        if let Err(error) = &result
+            && is_docker_permission_error(error)
+        {
+            self.close_control_master().await;
+            return self.request_once(&request).await;
+        }
+
+        result
+    }
+
+    /// Issue a single agent request over the (possibly multiplexed) SSH connection.
+    async fn request_once(&self, request: &AgentRequest) -> Result<AgentResponse> {
         let payload =
-            serde_json::to_vec(&request).context("failed to serialize remote agent request")?;
+            serde_json::to_vec(request).context("failed to serialize remote agent request")?;
 
         // Reuse a persistent SSH connection per target via ControlMaster so that
         // only the first request pays the full handshake cost; subsequent pings
@@ -548,6 +568,33 @@ impl SshNodeClient {
             other => Ok(other),
         }
     }
+
+    /// Tear down the persistent ControlMaster for this target so the next request
+    /// opens a fresh login session. Best-effort: `ssh -O exit` fails harmlessly if
+    /// no master is currently running.
+    async fn close_control_master(&self) {
+        let control_path = control_socket_path(&self.target);
+        let _ = Command::new("ssh")
+            .arg("-o")
+            .arg(format!("ControlPath={control_path}"))
+            .arg("-O")
+            .arg("exit")
+            .arg(&self.target)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+    }
+}
+
+/// True when an agent failure is the remote Docker daemon rejecting us for lack
+/// of permission — the signature of a multiplexed SSH session that opened before
+/// `docker` group membership activated on a freshly-provisioned node.
+fn is_docker_permission_error(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}");
+    message.contains("failed to ping the Docker daemon")
+        && (message.contains("Permission denied") || message.contains("os error 13"))
 }
 
 /// Build a stable per-target SSH ControlPath under the temp dir. The target may
