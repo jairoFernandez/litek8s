@@ -414,6 +414,7 @@ mod tests {
                         deployment_count: 0,
                         vpn_ip: None,
                         vpn_role: None,
+                        host_resources: None,
                     });
                     Ok(Response::Ack {
                         message: "added".to_string(),
@@ -467,6 +468,7 @@ spec:
             deployment_count: 0,
             vpn_ip: None,
             vpn_role: None,
+            host_resources: None,
         }]);
 
         let manifest = minimal_manifest();
@@ -491,6 +493,7 @@ spec:
                 deployment_count: 0,
                 vpn_ip: None,
                 vpn_role: None,
+                host_resources: None,
             },
             NodeSummary {
                 name: "old-node".to_string(),
@@ -501,6 +504,7 @@ spec:
                 deployment_count: 0,
                 vpn_ip: None,
                 vpn_role: None,
+                host_resources: None,
             },
         ]);
 

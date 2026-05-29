@@ -191,6 +191,12 @@ enum Command {
             help = "Expose the daemon API on a TCP address (e.g. 0.0.0.0:6443)"
         )]
         api_addr: Option<String>,
+        #[arg(
+            long,
+            default_value_t = 5,
+            help = "How often to refresh per-node host resources in `top`, in seconds"
+        )]
+        node_resource_interval_secs: u64,
     },
     #[command(
         about = "Apply a reduced Deployment or Service manifest",
@@ -659,6 +665,7 @@ pub async fn run() -> Result<()> {
             peer_addr,
             join,
             api_addr,
+            node_resource_interval_secs,
         } => {
             let socket_path = match &endpoint {
                 DaemonEndpoint::Unix(path) => path.clone(),
@@ -676,6 +683,7 @@ pub async fn run() -> Result<()> {
                 peer_addr,
                 join_addr: join,
                 api_addr,
+                node_resource_interval: Duration::from_secs(node_resource_interval_secs),
             };
             daemon::serve(config).await
         }
@@ -1558,26 +1566,45 @@ fn print_response(response: Response) -> Result<()> {
             );
             println!();
             println!(
-                "{} {} {} {} {} {} {}",
+                "{} {} {} {} {} {} {} {} {}",
                 header_left("NAME", 18),
                 header_left("TYPE", 8),
                 header_left("STATUS", 10),
                 header_left("SCHED", 12),
-                header_left("ENDPOINT", 24),
-                header_left("VPN-IP", 14),
-                label("DEPLOYMENTS")
+                header_left("CPU", 12),
+                header_left("MEM", 18),
+                header_left("DISK", 18),
+                header_right("DEPLOY", 6),
+                label("ENDPOINT")
             );
             for item in items {
-                let vpn_cell = item.vpn_ip.clone().unwrap_or_else(|| "-".to_string());
+                let (cpu_cell, mem_cell, disk_cell) = match item.host_resources.as_ref() {
+                    Some(r) => (
+                        format!("{:.0}% ({}c)", r.cpu_usage_percent, r.cpu_cores),
+                        format!(
+                            "{}/{}",
+                            human_bytes(r.memory_used_bytes),
+                            human_bytes(r.memory_total_bytes)
+                        ),
+                        format!(
+                            "{}/{}",
+                            human_bytes(r.disk_total_bytes.saturating_sub(r.disk_free_bytes)),
+                            human_bytes(r.disk_total_bytes)
+                        ),
+                    ),
+                    None => ("-".to_string(), "-".to_string(), "-".to_string()),
+                };
                 println!(
-                    "{} {} {} {} {} {} {}",
+                    "{} {} {} {} {} {} {} {} {}",
                     left_cell(&item.name, 18),
                     left_cell(&item.transport, 8),
                     status_cell(&item.status, 10),
                     scheduling_cell(&item.scheduling, 12),
-                    left_cell(&truncate(&item.endpoint, 24), 24),
-                    left_cell(&vpn_cell, 14),
-                    item.deployment_count
+                    left_cell(&truncate(&cpu_cell, 12), 12),
+                    left_cell(&truncate(&mem_cell, 18), 18),
+                    left_cell(&truncate(&disk_cell, 18), 18),
+                    right_cell(&item.deployment_count.to_string(), 6),
+                    truncate(&item.endpoint, 24)
                 );
             }
             Ok(())
@@ -1779,8 +1806,12 @@ fn print_response(response: Response) -> Result<()> {
             print_detail("host port", &item.host_port.to_string());
             Ok(())
         }
-        Response::Top { daemon, items } => {
-            print!("{}", format_top_body(&daemon, &items));
+        Response::Top {
+            daemon,
+            items,
+            nodes,
+        } => {
+            print!("{}", format_top_body(&daemon, &items, &nodes));
             Ok(())
         }
         Response::ClusterStatus {
@@ -1816,7 +1847,11 @@ async fn run_top(endpoint: &DaemonEndpoint, watch: bool, interval: Duration) -> 
         };
         if let Some(display) = watch_display.as_mut() {
             let body = match response {
-                Response::Top { daemon, items } => format_top_body(&daemon, &items),
+                Response::Top {
+                    daemon,
+                    items,
+                    nodes,
+                } => format_top_body(&daemon, &items, &nodes),
                 Response::Error { message } if message.contains("warming up") => {
                     let loading = muted("loading snapshot...");
                     display.render_frame(&loading)?;
@@ -1938,7 +1973,7 @@ async fn fetch_tree_snapshot(
     };
 
     let (daemon, deployments) = match top_response {
-        Response::Top { daemon, items } => (daemon, items),
+        Response::Top { daemon, items, .. } => (daemon, items),
         Response::Error { message } => return Err(anyhow!(message)),
         _ => bail!("unexpected response to Request::Top"),
     };
@@ -1995,10 +2030,172 @@ fn render_tree(snapshot: &TreeSnapshot) -> String {
     lines.join("\n")
 }
 
+/// Alignment for a top-table column.
+enum TopAlign {
+    Left,
+    Right,
+}
+
+/// One column of `litek8s top`, with the data needed to lay it out responsively.
+struct TopColumn {
+    header: &'static str,
+    width: usize,
+    align: TopAlign,
+    /// Lower runs first when the terminal is too narrow to fit every column.
+    /// Essential columns (NAME/STATUS/CPU/MEMORY) use 0 and are never dropped.
+    priority: u8,
+    /// Renders the already-truncated, already-padded cell for a row. Status uses
+    /// its own colorizer, so the cell renderer owns padding + color per column.
+    cell: fn(&protocol::DeploymentTopRow, usize) -> String,
+}
+
+/// Detect the usable terminal width, falling back to a wide default when output
+/// is not a tty (pipes, files) so redirected output keeps every column.
+fn terminal_width() -> usize {
+    match terminal_size::terminal_size() {
+        Some((terminal_size::Width(cols), _)) => cols as usize,
+        None => 200,
+    }
+}
+
 fn format_top_body(
     daemon: &protocol::DaemonTopSummary,
     items: &[protocol::DeploymentTopRow],
+    nodes: &[protocol::NodeSummary],
 ) -> String {
+    format_top_body_for_width(daemon, items, nodes, terminal_width())
+}
+
+fn format_top_body_for_width(
+    daemon: &protocol::DaemonTopSummary,
+    items: &[protocol::DeploymentTopRow],
+    nodes: &[protocol::NodeSummary],
+    available_width: usize,
+) -> String {
+    // Columns in display order. priority 0 = essential (never dropped); higher
+    // numbers are shed first as the terminal narrows.
+    let columns: &[TopColumn] = &[
+        TopColumn {
+            header: "NAME",
+            width: 24,
+            align: TopAlign::Left,
+            priority: 0,
+            cell: |item, w| left_cell(&truncate(&item.name, w), w),
+        },
+        TopColumn {
+            header: "NODE",
+            width: 14,
+            align: TopAlign::Left,
+            priority: 3,
+            cell: |item, w| left_cell(&truncate(&item.node_name, w), w),
+        },
+        TopColumn {
+            header: "STATUS",
+            width: 12,
+            align: TopAlign::Left,
+            priority: 0,
+            cell: |item, w| status_cell(&item.status, w),
+        },
+        TopColumn {
+            header: "RESTARTS",
+            width: 8,
+            align: TopAlign::Right,
+            priority: 4,
+            cell: |item, w| right_cell(&item.restart_count.to_string(), w),
+        },
+        TopColumn {
+            header: "STREAK",
+            width: 6,
+            align: TopAlign::Right,
+            priority: 6,
+            cell: |item, w| right_cell(&item.restart_streak.to_string(), w),
+        },
+        TopColumn {
+            header: "NEXT RETRY",
+            width: 10,
+            align: TopAlign::Left,
+            priority: 5,
+            cell: |item, w| left_cell(&format_retry_countdown(item.next_retry_in_secs), w),
+        },
+        TopColumn {
+            header: "LAST EXIT",
+            width: 16,
+            align: TopAlign::Left,
+            priority: 7,
+            cell: |item, w| left_cell(&truncate(item.last_exit.as_deref().unwrap_or("-"), w), w),
+        },
+        TopColumn {
+            header: "CPU",
+            width: 8,
+            align: TopAlign::Right,
+            priority: 0,
+            cell: |item, w| {
+                right_cell(
+                    &format_top_cpu(
+                        item.cpu_percent,
+                        item.memory_usage_bytes.is_some()
+                            || item.network_rx_bytes.is_some()
+                            || item.network_tx_bytes.is_some(),
+                    ),
+                    w,
+                )
+            },
+        },
+        TopColumn {
+            header: "MEMORY",
+            width: 14,
+            align: TopAlign::Right,
+            priority: 0,
+            cell: |item, w| {
+                right_cell(&format_memory(item.memory_usage_bytes, item.memory_limit_bytes), w)
+            },
+        },
+        TopColumn {
+            header: "NET I/O",
+            width: 18,
+            align: TopAlign::Right,
+            priority: 2,
+            cell: |item, w| right_cell(&format_net_io(item.network_rx_bytes, item.network_tx_bytes), w),
+        },
+        TopColumn {
+            header: "CONTAINER ID",
+            width: 12,
+            align: TopAlign::Left,
+            priority: 8,
+            cell: |item, w| left_cell(&short_id(item.container_id.as_deref()), w),
+        },
+        TopColumn {
+            header: "IMAGE",
+            width: 32,
+            align: TopAlign::Left,
+            priority: 1,
+            cell: |item, w| truncate(&item.image, w),
+        },
+    ];
+
+    // Greedily keep essentials, then add columns by ascending priority while they
+    // fit (each column costs its width + one separating space).
+    let mut order: Vec<usize> = (0..columns.len()).collect();
+    order.sort_by_key(|&idx| columns[idx].priority);
+
+    let mut keep = vec![false; columns.len()];
+    let mut used = 0usize;
+    for &idx in &order {
+        let cost = columns[idx].width + if used == 0 { 0 } else { 1 };
+        let essential = columns[idx].priority == 0;
+        if essential || used + cost <= available_width {
+            keep[idx] = true;
+            used += cost;
+        }
+    }
+
+    let visible: Vec<&TopColumn> = columns
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| keep[*idx])
+        .map(|(_, col)| col)
+        .collect();
+
     let mut lines = vec![
         format!("{} {}", title("Daemon"), muted("local control loop")),
         format!(
@@ -2010,56 +2207,189 @@ fn format_top_body(
             format_uptime(daemon.uptime_secs),
         ),
         String::new(),
-        format!(
-            "{} {} {} {} {} {} {} {} {} {} {} {}",
-            header_left("NAME", 24),
-            header_left("NODE", 14),
-            header_left("STATUS", 12),
-            header_right("RESTARTS", 8),
-            header_right("STREAK", 6),
-            header_left("NEXT RETRY", 10),
-            header_left("LAST EXIT", 16),
-            header_right("CPU", 8),
-            header_right("MEMORY", 14),
-            header_right("NET I/O", 18),
-            header_left("CONTAINER ID", 12),
-            label("IMAGE")
-        ),
     ];
 
+    // Per-node host resources, rendered above the deployment table.
+    if !nodes.is_empty() {
+        lines.extend(format_node_section(nodes, available_width));
+        lines.push(String::new());
+    }
+
+    let header = visible
+        .iter()
+        .map(|col| match col.align {
+            TopAlign::Left => header_left(col.header, col.width),
+            TopAlign::Right => header_right(col.header, col.width),
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    lines.push(header);
+
     for item in items {
-        lines.push(format!(
-            "{} {} {} {} {} {} {} {} {} {} {} {}",
-            left_cell(&item.name, 24),
-            left_cell(&truncate(&item.node_name, 14), 14),
-            status_cell(&item.status, 12),
-            right_cell(&item.restart_count.to_string(), 8),
-            right_cell(&item.restart_streak.to_string(), 6),
-            left_cell(&format_retry_countdown(item.next_retry_in_secs), 10),
-            left_cell(&truncate(item.last_exit.as_deref().unwrap_or("-"), 16), 16),
-            right_cell(
-                &format_top_cpu(
-                    item.cpu_percent,
-                    item.memory_usage_bytes.is_some()
-                        || item.network_rx_bytes.is_some()
-                        || item.network_tx_bytes.is_some(),
-                ),
-                8,
-            ),
-            right_cell(
-                &format_memory(item.memory_usage_bytes, item.memory_limit_bytes),
-                14,
-            ),
-            right_cell(
-                &format_net_io(item.network_rx_bytes, item.network_tx_bytes),
-                18,
-            ),
-            left_cell(&short_id(item.container_id.as_deref()), 12),
-            truncate(&item.image, 32)
-        ));
+        let row = visible
+            .iter()
+            .map(|col| (col.cell)(item, col.width))
+            .collect::<Vec<_>>()
+            .join(" ");
+        lines.push(row);
     }
 
     lines.join("\n")
+}
+
+/// A responsive column for the node-resources section of `top`.
+struct NodeColumn {
+    header: &'static str,
+    width: usize,
+    align: TopAlign,
+    /// 0 = essential (never dropped); higher numbers shed first when narrow.
+    priority: u8,
+    cell: fn(&protocol::NodeSummary, usize) -> String,
+}
+
+/// Render the "Nodes" section: a responsive table of real host resources per
+/// node. Columns drop by priority on narrow terminals; nodes without resources
+/// (offline / old agent) render "-".
+fn format_node_section(nodes: &[protocol::NodeSummary], available_width: usize) -> Vec<String> {
+    let columns: &[NodeColumn] = &[
+        NodeColumn {
+            header: "NAME",
+            width: 18,
+            align: TopAlign::Left,
+            priority: 0,
+            cell: |node, w| left_cell(&truncate(&node.name, w), w),
+        },
+        NodeColumn {
+            header: "STATUS",
+            width: 10,
+            align: TopAlign::Left,
+            priority: 0,
+            cell: |node, w| status_cell(&node.status, w),
+        },
+        NodeColumn {
+            header: "CPU",
+            width: 14,
+            align: TopAlign::Left,
+            priority: 0,
+            cell: |node, w| {
+                let text = node
+                    .host_resources
+                    .as_ref()
+                    .map(|r| format!("{:.0}% ({}c)", r.cpu_usage_percent, r.cpu_cores))
+                    .unwrap_or_else(|| "-".to_string());
+                left_cell(&truncate(&text, w), w)
+            },
+        },
+        NodeColumn {
+            header: "MEM",
+            width: 20,
+            align: TopAlign::Left,
+            priority: 0,
+            cell: |node, w| {
+                let text = node
+                    .host_resources
+                    .as_ref()
+                    .map(|r| {
+                        format!(
+                            "{}/{}",
+                            human_bytes(r.memory_used_bytes),
+                            human_bytes(r.memory_total_bytes)
+                        )
+                    })
+                    .unwrap_or_else(|| "-".to_string());
+                left_cell(&truncate(&text, w), w)
+            },
+        },
+        NodeColumn {
+            header: "DISK",
+            width: 20,
+            align: TopAlign::Left,
+            priority: 1,
+            cell: |node, w| {
+                let text = node
+                    .host_resources
+                    .as_ref()
+                    .map(|r| {
+                        let used = r.disk_total_bytes.saturating_sub(r.disk_free_bytes);
+                        format!("{}/{}", human_bytes(used), human_bytes(r.disk_total_bytes))
+                    })
+                    .unwrap_or_else(|| "-".to_string());
+                left_cell(&truncate(&text, w), w)
+            },
+        },
+        NodeColumn {
+            header: "LOAD",
+            width: 8,
+            align: TopAlign::Right,
+            priority: 2,
+            cell: |node, w| {
+                let text = node
+                    .host_resources
+                    .as_ref()
+                    .map(|r| format!("{:.2}", r.load_avg_1m))
+                    .unwrap_or_else(|| "-".to_string());
+                right_cell(&text, w)
+            },
+        },
+        NodeColumn {
+            header: "UPTIME",
+            width: 10,
+            align: TopAlign::Right,
+            priority: 3,
+            cell: |node, w| {
+                let text = node
+                    .host_resources
+                    .as_ref()
+                    .map(|r| format_uptime(r.uptime_secs))
+                    .unwrap_or_else(|| "-".to_string());
+                right_cell(&text, w)
+            },
+        },
+    ];
+
+    let mut order: Vec<usize> = (0..columns.len()).collect();
+    order.sort_by_key(|&idx| columns[idx].priority);
+
+    let mut keep = vec![false; columns.len()];
+    let mut used = 0usize;
+    for &idx in &order {
+        let cost = columns[idx].width + if used == 0 { 0 } else { 1 };
+        let essential = columns[idx].priority == 0;
+        if essential || used + cost <= available_width {
+            keep[idx] = true;
+            used += cost;
+        }
+    }
+
+    let visible: Vec<&NodeColumn> = columns
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| keep[*idx])
+        .map(|(_, col)| col)
+        .collect();
+
+    let mut lines = vec![title("Nodes")];
+
+    let header = visible
+        .iter()
+        .map(|col| match col.align {
+            TopAlign::Left => header_left(col.header, col.width),
+            TopAlign::Right => header_right(col.header, col.width),
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    lines.push(header);
+
+    for node in nodes {
+        let row = visible
+            .iter()
+            .map(|col| (col.cell)(node, col.width))
+            .collect::<Vec<_>>()
+            .join(" ");
+        lines.push(row);
+    }
+
+    lines
 }
 
 fn format_error_body(message: &str) -> String {
@@ -2119,6 +2449,7 @@ fn build_tree_entries(snapshot: &TreeSnapshot) -> Vec<TreeEntry> {
                     .unwrap_or(0),
                 vpn_ip: None,
                 vpn_role: None,
+                host_resources: None,
             });
         }
     }
@@ -2723,9 +3054,117 @@ mod tests {
     use crate::protocol::{DaemonTopSummary, DeploymentTopRow, NodeSummary, ServiceSummary};
 
     use super::{
-        TreeSnapshot, build_watch_frame_lines, format_retry_countdown, format_top_cpu,
-        format_uptime, render_tree, render_watch_frame_patch,
+        TreeSnapshot, build_watch_frame_lines, format_retry_countdown, format_top_body_for_width,
+        format_top_cpu, format_uptime, render_tree, render_watch_frame_patch,
     };
+
+    fn sample_top_row() -> DeploymentTopRow {
+        DeploymentTopRow {
+            name: "echo-demo".to_string(),
+            node_name: "litek8s-node-0".to_string(),
+            status: "Running".to_string(),
+            ready: true,
+            image: "hashicorp/http-echo:1.0".to_string(),
+            container_id: Some("abcd1234efgh5678".to_string()),
+            ports: vec!["8090->5678/TCP".to_string()],
+            restart_count: 2,
+            restart_streak: 1,
+            last_exit: Some("spec changed".to_string()),
+            next_retry_in_secs: None,
+            cpu_percent: Some(1.5),
+            memory_usage_bytes: Some(20 * 1024 * 1024),
+            memory_limit_bytes: None,
+            network_rx_bytes: Some(2300),
+            network_tx_bytes: Some(126),
+        }
+    }
+
+    fn sample_daemon() -> DaemonTopSummary {
+        DaemonTopSummary {
+            pid: 10513,
+            cpu_percent: Some(2.5),
+            memory_bytes: 20 * 1024 * 1024,
+            uptime_secs: 797,
+        }
+    }
+
+    fn sample_node(name: &str, with_resources: bool) -> NodeSummary {
+        NodeSummary {
+            name: name.to_string(),
+            transport: "ssh".to_string(),
+            endpoint: name.to_string(),
+            status: "Ready".to_string(),
+            scheduling: "Schedulable".to_string(),
+            deployment_count: 0,
+            vpn_ip: None,
+            vpn_role: None,
+            host_resources: with_resources.then(|| crate::protocol::HostResources {
+                cpu_cores: 2,
+                cpu_usage_percent: 12.0,
+                memory_used_bytes: 600 * 1024 * 1024,
+                memory_total_bytes: 2 * 1024 * 1024 * 1024,
+                disk_free_bytes: 4 * 1024 * 1024 * 1024,
+                disk_total_bytes: 8 * 1024 * 1024 * 1024,
+                load_avg_1m: 0.34,
+                load_avg_5m: 0.20,
+                load_avg_15m: 0.10,
+                uptime_secs: 3920,
+            }),
+        }
+    }
+
+    #[test]
+    fn top_table_drops_columns_when_terminal_is_narrow() {
+        let daemon = sample_daemon();
+        let rows = vec![sample_top_row()];
+
+        // Wide terminal keeps every column.
+        let wide = format_top_body_for_width(&daemon, &rows, &[], 200);
+        for header in [
+            "NAME", "NODE", "STATUS", "RESTARTS", "STREAK", "NEXT RETRY", "LAST EXIT", "CPU",
+            "MEMORY", "NET I/O", "CONTAINER ID", "IMAGE",
+        ] {
+            assert!(wide.contains(header), "wide layout should keep `{header}`");
+        }
+
+        // Narrow terminal keeps the essentials and sheds the lowest-priority columns.
+        let narrow = format_top_body_for_width(&daemon, &rows, &[], 60);
+        for header in ["NAME", "STATUS", "CPU", "MEMORY"] {
+            assert!(narrow.contains(header), "narrow layout must keep `{header}`");
+        }
+        for header in ["CONTAINER ID", "LAST EXIT", "STREAK"] {
+            assert!(
+                !narrow.contains(header),
+                "narrow layout should drop low-priority `{header}`"
+            );
+        }
+    }
+
+    #[test]
+    fn top_renders_node_resources_and_degrades_when_absent() {
+        let daemon = sample_daemon();
+        let rows = vec![sample_top_row()];
+        let nodes = vec![sample_node("litek8s-node-0", true), sample_node("offline", false)];
+
+        let body = format_top_body_for_width(&daemon, &rows, &nodes, 200);
+
+        // Nodes section appears with its headers and real values.
+        assert!(body.contains("Nodes"), "should render a Nodes section");
+        assert!(body.contains("litek8s-node-0"));
+        assert!(body.contains("(2c)"), "should show core count");
+        assert!(body.contains("0.34"), "should show load average");
+
+        // The node without resources still lists, showing `-` placeholders.
+        assert!(body.contains("offline"));
+
+        // Narrow terminal drops low-priority node columns (UPTIME, LOAD) but keeps NAME/CPU/MEM.
+        let narrow = format_top_body_for_width(&daemon, &rows, &nodes, 55);
+        assert!(narrow.contains("CPU") && narrow.contains("MEM"));
+        assert!(
+            !narrow.contains("UPTIME"),
+            "narrow node section should drop UPTIME"
+        );
+    }
 
     #[test]
     fn formats_uptime_compactly() {
@@ -2792,6 +3231,7 @@ mod tests {
                     deployment_count: 1,
                     vpn_ip: None,
                     vpn_role: None,
+                    host_resources: None,
                 },
                 NodeSummary {
                     name: "server77".to_string(),
@@ -2802,6 +3242,7 @@ mod tests {
                     deployment_count: 1,
                     vpn_ip: None,
                     vpn_role: None,
+                    host_resources: None,
                 },
             ],
             deployments: vec![
@@ -2891,6 +3332,7 @@ mod tests {
                 deployment_count: 0,
                 vpn_ip: None,
                 vpn_role: None,
+                host_resources: None,
             }],
             deployments: Vec::new(),
             services: vec![ServiceSummary {

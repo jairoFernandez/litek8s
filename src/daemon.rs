@@ -43,6 +43,8 @@ pub struct ServerConfig {
     pub peer_addr: String,
     pub join_addr: Option<String>,
     pub api_addr: Option<String>,
+    /// How long per-node host resource samples are cached before re-querying.
+    pub node_resource_interval: Duration,
 }
 
 const DEFAULT_API_PORT: u16 = 6443;
@@ -79,6 +81,7 @@ impl ServerConfig {
             peer_addr: "0.0.0.0:4001".into(),
             join_addr: None,
             api_addr: None,
+            node_resource_interval: Duration::from_secs(5),
         })
     }
 }
@@ -91,6 +94,8 @@ struct AppState {
     cleanup_orphans: bool,
     daemon_metrics: Arc<Mutex<DaemonMetricsSampler>>,
     top_metrics: Arc<Mutex<TopMetricsSampler>>,
+    node_resources: Arc<Mutex<NodeResourcesCache>>,
+    node_resource_interval: Duration,
     service_manager: Arc<Mutex<ServiceManager>>,
     cluster_snapshot: Arc<Mutex<ClusterSnapshotCache>>,
     snapshot_refresh: Arc<Notify>,
@@ -98,7 +103,10 @@ struct AppState {
 }
 
 const CLUSTER_SNAPSHOT_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
-const CLUSTER_REMOTE_QUERY_TIMEOUT: Duration = Duration::from_millis(1200);
+// Cold SSH connects to WAN nodes (e.g. EC2 across the internet) routinely take
+// ~1.3s for the handshake plus remote agent spawn, so the old 1.2s budget marked
+// healthy remote nodes Offline. Aligned with the ssh ConnectTimeout=5 used in node.rs.
+const CLUSTER_REMOTE_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 const CLUSTER_SNAPSHOT_WARMING_UP: &str = "cluster snapshot is warming up";
 
 pub async fn serve(config: ServerConfig) -> Result<()> {
@@ -167,6 +175,8 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         cleanup_orphans: config.cleanup_orphans,
         daemon_metrics: Arc::new(Mutex::new(DaemonMetricsSampler::new())),
         top_metrics: Arc::new(Mutex::new(TopMetricsSampler::new())),
+        node_resources: Arc::new(Mutex::new(NodeResourcesCache::default())),
+        node_resource_interval: config.node_resource_interval,
         service_manager: Arc::new(Mutex::new(ServiceManager::new())),
         cluster_snapshot: Arc::new(Mutex::new(ClusterSnapshotCache::default())),
         snapshot_refresh: snapshot_refresh.clone(),
@@ -679,6 +689,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             Ok(Response::Top {
                 daemon: snapshot.daemon,
                 items: snapshot.deployments,
+                nodes: snapshot.nodes,
             })
         }
         Request::GetClusterStatus => {
@@ -1108,6 +1119,20 @@ impl AppState {
         }
     }
 
+    /// Fetch host resources for a node, returning None on timeout or error so the
+    /// snapshot never blocks on a slow/old node (an old agent that doesn't know
+    /// the HostResources op simply errors and degrades to None).
+    async fn collect_node_resources(
+        &self,
+        node: &ClusterNode,
+    ) -> Option<crate::protocol::HostResources> {
+        let client = NodeClient::for_node(node, self.runtime.clone());
+        match tokio::time::timeout(CLUSTER_REMOTE_QUERY_TIMEOUT, client.host_resources()).await {
+            Ok(Ok(resources)) => Some(resources),
+            _ => None,
+        }
+    }
+
     async fn record_event(&self, event: NewEvent) -> Result<()> {
         self.ha_node
             .propose(ClusterCommand::AppendEvent {
@@ -1329,6 +1354,13 @@ impl AppState {
         }
         drop(top_metrics);
 
+        let live_node_names: HashSet<String> =
+            nodes.iter().map(|node| node.name.clone()).collect();
+        {
+            let mut cache = self.node_resources.lock().await;
+            cache.retain_nodes(&live_node_names);
+        }
+
         let mut node_items = Vec::with_capacity(nodes.len());
         for node in nodes {
             let deployment_count = deployments
@@ -1336,6 +1368,33 @@ impl AppState {
                 .filter(|entry| entry.assigned_node == node.name)
                 .count();
             let (status, _) = self.node_health(&node).await;
+
+            // Host resources, served from cache unless the TTL has lapsed. Only
+            // query Ready nodes; failures degrade to None ("-" in the UI).
+            let host_resources = if status == "Ready" {
+                let cached = self
+                    .node_resources
+                    .lock()
+                    .await
+                    .get_fresh(&node.name, self.node_resource_interval);
+                match cached {
+                    Some(resources) => Some(resources),
+                    None => match self.collect_node_resources(&node).await {
+                        Some(resources) => {
+                            self.node_resources.lock().await.store(
+                                &node.name,
+                                Instant::now(),
+                                resources.clone(),
+                            );
+                            Some(resources)
+                        }
+                        None => None,
+                    },
+                }
+            } else {
+                None
+            };
+
             node_items.push(NodeSummary {
                 name: node.name.clone(),
                 transport: node.transport_label().to_string(),
@@ -1348,6 +1407,7 @@ impl AppState {
                     .vpn
                     .as_ref()
                     .map(|vpn| format!("{:?}", vpn.role).to_lowercase()),
+                host_resources,
             });
         }
 
@@ -1710,6 +1770,30 @@ impl DaemonMetricsSampler {
             memory_bytes: process.map(|process| process.memory()).unwrap_or_default(),
             uptime_secs: self.started_at.elapsed().as_secs(),
         }
+    }
+}
+
+/// Caches the last host-resource sample per node so the daemon does not query
+/// every node over SSH on each 1s snapshot tick. Entries expire after the
+/// configured `node_resource_interval` (default 5s).
+#[derive(Default)]
+struct NodeResourcesCache {
+    entries: HashMap<String, (Instant, crate::protocol::HostResources)>,
+}
+
+impl NodeResourcesCache {
+    fn get_fresh(&self, node: &str, ttl: Duration) -> Option<crate::protocol::HostResources> {
+        self.entries.get(node).and_then(|(at, resources)| {
+            (at.elapsed() < ttl).then(|| resources.clone())
+        })
+    }
+
+    fn store(&mut self, node: &str, at: Instant, resources: crate::protocol::HostResources) {
+        self.entries.insert(node.to_string(), (at, resources));
+    }
+
+    fn retain_nodes(&mut self, live: &HashSet<String>) {
+        self.entries.retain(|name, _| live.contains(name));
     }
 }
 

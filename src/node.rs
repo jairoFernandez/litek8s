@@ -74,6 +74,7 @@ pub enum AgentRequest {
         node_name: String,
         spoke_pubkey: PublicKey,
     },
+    HostResources,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +90,7 @@ pub enum AgentResponse {
         membership: VpnMembership,
         token: JoinToken,
     },
+    HostResources { resources: crate::protocol::HostResources },
     Error { message: String },
 }
 
@@ -293,6 +295,16 @@ impl NodeClient {
         }
     }
 
+    pub async fn host_resources(&self) -> Result<crate::protocol::HostResources> {
+        match self {
+            Self::Local(_) => collect_host_resources().await,
+            Self::Ssh(client) => match client.request(AgentRequest::HostResources).await? {
+                AgentResponse::HostResources { resources } => Ok(resources),
+                other => bail!("unexpected agent response for host resources: {other:?}"),
+            },
+        }
+    }
+
     pub async fn list_managed_containers(&self) -> Result<Vec<ManagedContainer>> {
         match self {
             Self::Local(runtime) => runtime.list_managed_containers().await,
@@ -482,11 +494,22 @@ impl SshNodeClient {
         let payload =
             serde_json::to_vec(&request).context("failed to serialize remote agent request")?;
 
+        // Reuse a persistent SSH connection per target via ControlMaster so that
+        // only the first request pays the full handshake cost; subsequent pings
+        // and agent calls multiplex over the existing socket in a few ms.
+        let control_path = control_socket_path(&self.target);
+
         let mut child = Command::new("ssh")
             .arg("-o")
             .arg("BatchMode=yes")
             .arg("-o")
             .arg("ConnectTimeout=5")
+            .arg("-o")
+            .arg("ControlMaster=auto")
+            .arg("-o")
+            .arg(format!("ControlPath={control_path}"))
+            .arg("-o")
+            .arg("ControlPersist=60s")
             .arg(&self.target)
             .arg(&self.remote_binary)
             .arg("agent")
@@ -527,6 +550,18 @@ impl SshNodeClient {
     }
 }
 
+/// Build a stable per-target SSH ControlPath under the temp dir. The target may
+/// be `host` or `user@host`, so non-filesystem-safe characters are folded to `_`.
+fn control_socket_path(target: &str) -> String {
+    let sanitized: String = target
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    let mut path: PathBuf = std::env::temp_dir();
+    path.push(format!("litek8s-ssh-{sanitized}.sock"));
+    path.to_string_lossy().into_owned()
+}
+
 pub async fn install_remote_agent(
     ssh_target: &str,
     remote_binary: &str,
@@ -544,13 +579,29 @@ pub async fn install_remote_agent(
         target: ssh_target.to_string(),
         remote_binary: remote_binary.to_string(),
     };
-    match client.request(AgentRequest::Ping).await? {
-        AgentResponse::Pong => Ok(RemoteInstallSummary {
-            platform_label: build_spec.platform_label,
-            artifact_path,
-        }),
-        other => bail!("unexpected remote agent response after install: {other:?}"),
+
+    // Verify with a few retries: right after the atomic rename, the first agent
+    // spawn can race the SSH ControlMaster connection that the copy/chmod just
+    // used and return EOF. The binary is in place, so a short retry settles it.
+    let mut last_error = None;
+    for attempt in 0..3 {
+        if attempt > 0 {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+        match client.request(AgentRequest::Ping).await {
+            Ok(AgentResponse::Pong) => {
+                return Ok(RemoteInstallSummary {
+                    platform_label: build_spec.platform_label,
+                    artifact_path,
+                });
+            }
+            Ok(other) => {
+                bail!("unexpected remote agent response after install: {other:?}")
+            }
+            Err(error) => last_error = Some(error),
+        }
     }
+    Err(last_error.unwrap_or_else(|| anyhow!("agent did not answer after install")))
 }
 
 pub async fn run_agent_stdio() -> Result<()> {
@@ -644,7 +695,55 @@ async fn handle_agent_request(
             };
             Ok(AgentResponse::VpnAssignment { membership, token })
         }
+        AgentRequest::HostResources => Ok(AgentResponse::HostResources {
+            resources: collect_host_resources().await?,
+        }),
     }
+}
+
+/// Sample host-level resources via `sysinfo`. CPU usage needs two samples spaced
+/// by sysinfo's minimum interval, so this briefly sleeps; callers cache the
+/// result (default 5s) so the cost is paid at most once per refresh window.
+pub async fn collect_host_resources() -> Result<crate::protocol::HostResources> {
+    use sysinfo::{Disks, MINIMUM_CPU_UPDATE_INTERVAL, System};
+
+    let mut system = System::new();
+    // First CPU sample, wait the minimum interval, then re-sample for a real %.
+    system.refresh_cpu_all();
+    tokio::time::sleep(MINIMUM_CPU_UPDATE_INTERVAL).await;
+    system.refresh_cpu_all();
+    system.refresh_memory();
+
+    let cpu_cores = system.cpus().len() as u32;
+    let cpu_usage_percent = system.global_cpu_usage() as f64;
+    let memory_total_bytes = system.total_memory();
+    let memory_used_bytes = system.used_memory();
+
+    // Pick the disk backing the root filesystem; fall back to the largest disk
+    // so we report a real device rather than summing tmpfs/overlay mounts.
+    let disks = Disks::new_with_refreshed_list();
+    let root_disk = disks
+        .iter()
+        .find(|disk| disk.mount_point() == std::path::Path::new("/"))
+        .or_else(|| disks.iter().max_by_key(|disk| disk.total_space()));
+    let (disk_total_bytes, disk_free_bytes) = root_disk
+        .map(|disk| (disk.total_space(), disk.available_space()))
+        .unwrap_or((0, 0));
+
+    let load = System::load_average();
+
+    Ok(crate::protocol::HostResources {
+        cpu_cores,
+        cpu_usage_percent,
+        memory_total_bytes,
+        memory_used_bytes,
+        disk_total_bytes,
+        disk_free_bytes,
+        load_avg_1m: load.one,
+        load_avg_5m: load.five,
+        load_avg_15m: load.fifteen,
+        uptime_secs: System::uptime(),
+    })
 }
 
 pub fn validate_node_name(name: &str) -> Result<()> {
@@ -752,7 +851,11 @@ async fn copy_artifact_to_remote(
     ssh_target: &str,
     remote_binary: &str,
 ) -> Result<()> {
-    let destination = format!("{ssh_target}:{remote_binary}");
+    // Copy to a sibling temp path, then atomically rename over the target. A
+    // direct scp onto a running agent binary fails with "Text file busy"; the
+    // rename swaps the inode so an in-flight agent keeps its old file.
+    let staging = format!("{remote_binary}.new");
+    let destination = format!("{ssh_target}:{staging}");
     run_local_inherit(
         "scp",
         &[artifact_path.to_string_lossy().as_ref(), &destination],
@@ -763,7 +866,13 @@ async fn copy_artifact_to_remote(
             "failed to copy `{}` to {destination}",
             artifact_path.display()
         )
-    })
+    })?;
+
+    run_ssh_status(ssh_target, &format!("mv -f {staging} {remote_binary}"))
+        .await
+        .with_context(|| {
+            format!("failed to install `{remote_binary}` (atomic rename) on {ssh_target}")
+        })
 }
 
 async fn mark_remote_binary_executable(ssh_target: &str, remote_binary: &str) -> Result<()> {

@@ -110,6 +110,8 @@ pub enum Response {
     Top {
         daemon: DaemonTopSummary,
         items: Vec<DeploymentTopRow>,
+        #[serde(default)]
+        nodes: Vec<NodeSummary>,
     },
     ClusterStatus {
         ha_enabled: bool,
@@ -209,6 +211,24 @@ pub struct NodeSummary {
     pub vpn_ip: Option<String>,
     #[serde(default)]
     pub vpn_role: Option<String>,
+    #[serde(default)]
+    pub host_resources: Option<HostResources>,
+}
+
+/// Real host-level resource metrics for a node, sampled by the node agent
+/// (local node) or the remote `litek8s agent` (SSH nodes).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HostResources {
+    pub cpu_cores: u32,
+    pub cpu_usage_percent: f64,
+    pub memory_total_bytes: u64,
+    pub memory_used_bytes: u64,
+    pub disk_total_bytes: u64,
+    pub disk_free_bytes: u64,
+    pub load_avg_1m: f64,
+    pub load_avg_5m: f64,
+    pub load_avg_15m: f64,
+    pub uptime_secs: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
