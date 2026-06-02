@@ -83,6 +83,22 @@ pub enum AgentRequest {
         left_band: Vec<Vec<f64>>,
         right: Vec<Vec<f64>>,
     },
+    /// Ask whether the node already has a weight matrix cached on disk, so the
+    /// caller can skip re-uploading it.
+    HasWeights {
+        weight_id: String,
+    },
+    /// Upload a weight matrix to the node's on-disk cache under `weight_id`.
+    PutWeights {
+        weight_id: String,
+        matrix: Vec<Vec<f64>>,
+    },
+    /// Multiply a row band against a weight matrix already cached on the node,
+    /// avoiding re-transfer of the (large) right-hand matrix.
+    ComputeMatmulBandCached {
+        left_band: Vec<Vec<f64>>,
+        weight_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +116,7 @@ pub enum AgentResponse {
     },
     HostResources { resources: crate::protocol::HostResources },
     MatmulBand { rows: Vec<Vec<f64>> },
+    HasWeights { present: bool },
     Error { message: String },
 }
 
@@ -338,6 +355,85 @@ impl NodeClient {
             {
                 AgentResponse::MatmulBand { rows } => Ok(rows),
                 other => bail!("unexpected agent response while computing matmul band: {other:?}"),
+            },
+        }
+    }
+
+    /// Whether this node already has the given weight matrix cached on disk.
+    pub async fn has_weights(&self, weight_id: &str) -> Result<bool> {
+        match self {
+            Self::Local(_) => Ok(local_weight_path(weight_id)?.exists()),
+            Self::Ssh(client) => match client
+                .request(AgentRequest::HasWeights {
+                    weight_id: weight_id.to_string(),
+                })
+                .await?
+            {
+                AgentResponse::HasWeights { present } => Ok(present),
+                other => bail!("unexpected agent response while checking weights: {other:?}"),
+            },
+        }
+    }
+
+    /// Upload a weight matrix to this node's on-disk cache under `weight_id`.
+    pub async fn put_weights(&self, weight_id: &str, matrix: Vec<Vec<f64>>) -> Result<()> {
+        match self {
+            Self::Local(_) => {
+                let path = local_weight_path(weight_id)?;
+                tokio::task::spawn_blocking(move || crate::matrix::write_matrix_bin(&path, &matrix))
+                    .await
+                    .context("local weight write panicked")?
+            }
+            Self::Ssh(client) => match client
+                .request(AgentRequest::PutWeights {
+                    weight_id: weight_id.to_string(),
+                    matrix,
+                })
+                .await?
+            {
+                AgentResponse::Ack => Ok(()),
+                other => bail!("unexpected agent response while uploading weights: {other:?}"),
+            },
+        }
+    }
+
+    /// Upload the weight matrix only if the node does not already have it, then
+    /// return whether it was already cached (true = cache hit, no transfer).
+    pub async fn ensure_weights(&self, weight_id: &str, matrix: &[Vec<f64>]) -> Result<bool> {
+        if self.has_weights(weight_id).await? {
+            return Ok(true);
+        }
+        self.put_weights(weight_id, matrix.to_vec()).await?;
+        Ok(false)
+    }
+
+    /// Multiply a row band against a weight matrix already cached on this node.
+    pub async fn compute_matmul_band_cached(
+        &self,
+        left_band: Vec<Vec<f64>>,
+        weight_id: &str,
+    ) -> Result<Vec<Vec<f64>>> {
+        match self {
+            Self::Local(_) => {
+                let path = local_weight_path(weight_id)?;
+                tokio::task::spawn_blocking(move || {
+                    let right = crate::matrix::read_matrix_bin(&path)?;
+                    crate::matrix::multiply_band(&left_band, &right)
+                })
+                .await
+                .context("local cached matmul worker panicked")?
+            }
+            Self::Ssh(client) => match client
+                .request(AgentRequest::ComputeMatmulBandCached {
+                    left_band,
+                    weight_id: weight_id.to_string(),
+                })
+                .await?
+            {
+                AgentResponse::MatmulBand { rows } => Ok(rows),
+                other => {
+                    bail!("unexpected agent response while computing cached matmul band: {other:?}")
+                }
             },
         }
     }
@@ -822,7 +918,40 @@ async fn handle_agent_request(
             .context("matmul worker panicked")??;
             Ok(AgentResponse::MatmulBand { rows })
         }
+        AgentRequest::HasWeights { weight_id } => {
+            let path = local_weight_path(&weight_id)?;
+            Ok(AgentResponse::HasWeights {
+                present: path.exists(),
+            })
+        }
+        AgentRequest::PutWeights { weight_id, matrix } => {
+            let path = local_weight_path(&weight_id)?;
+            tokio::task::spawn_blocking(move || crate::matrix::write_matrix_bin(&path, &matrix))
+                .await
+                .context("weight write panicked")??;
+            Ok(AgentResponse::Ack)
+        }
+        AgentRequest::ComputeMatmulBandCached {
+            left_band,
+            weight_id,
+        } => {
+            let path = local_weight_path(&weight_id)?;
+            let rows = tokio::task::spawn_blocking(move || {
+                let right = crate::matrix::read_matrix_bin(&path)?;
+                crate::matrix::multiply_band(&left_band, &right)
+            })
+            .await
+            .context("cached matmul worker panicked")??;
+            Ok(AgentResponse::MatmulBand { rows })
+        }
     }
+}
+
+/// Resolve the on-disk path for a cached weight matrix, validating the id so it
+/// can never escape the weights directory.
+fn local_weight_path(weight_id: &str) -> Result<PathBuf> {
+    crate::matrix::validate_weight_id(weight_id)?;
+    Ok(crate::config::weights_dir()?.join(format!("{weight_id}.bin")))
 }
 
 /// Sample host-level resources via `sysinfo`. CPU usage needs two samples spaced

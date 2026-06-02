@@ -1,7 +1,12 @@
-use anyhow::{Result, anyhow, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
+use std::path::Path;
 use std::thread;
 
 pub type Matrix = Vec<Vec<f64>>;
+
+/// Magic prefix for the on-disk weight format, so a truncated or foreign file
+/// is rejected rather than read as garbage dimensions.
+const MATRIX_BIN_MAGIC: &[u8; 4] = b"LK8M";
 
 pub fn multiply_sequential(left: &[Vec<f64>], right: &[Vec<f64>]) -> Result<Matrix> {
     let (rows, cols, shared) = validate_dimensions(left, right)?;
@@ -91,6 +96,114 @@ pub fn deterministic_matrix(rows: usize, cols: usize, seed: u64) -> Matrix {
     (0..rows)
         .map(|_| (0..cols).map(|_| next()).collect())
         .collect()
+}
+
+/// Content-address a matrix: a stable hex digest of its dimensions and values.
+/// Two identical matrices get the same id, so a weight matrix is uploaded to a
+/// node at most once regardless of how many matmuls reference it.
+pub fn matrix_id(matrix: &[Vec<f64>]) -> String {
+    // FNV-1a over the same byte layout used on disk — cheap, no extra deps, and
+    // collisions are astronomically unlikely for the distinct weight sets a
+    // home cluster will hold.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut feed = |bytes: &[u8]| {
+        for &b in bytes {
+            hash ^= u64::from(b);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    let rows = matrix.len() as u64;
+    let cols = matrix.first().map(|r| r.len()).unwrap_or(0) as u64;
+    feed(&rows.to_le_bytes());
+    feed(&cols.to_le_bytes());
+    for row in matrix {
+        for value in row {
+            feed(&value.to_le_bytes());
+        }
+    }
+    format!("{hash:016x}")
+}
+
+/// Serialize a matrix to a compact binary blob: magic + rows/cols (u64 LE) +
+/// row-major f64 LE values. Far cheaper to write/read than JSON for the large
+/// weight matrices the cache holds.
+pub fn write_matrix_bin(path: &Path, matrix: &[Vec<f64>]) -> Result<()> {
+    let rows = matrix.len();
+    let cols = matrix.first().map(|r| r.len()).unwrap_or(0);
+    ensure!(
+        matrix.iter().all(|row| row.len() == cols),
+        "cannot serialize a ragged matrix"
+    );
+
+    let mut buf = Vec::with_capacity(20 + rows * cols * 8);
+    buf.extend_from_slice(MATRIX_BIN_MAGIC);
+    buf.extend_from_slice(&(rows as u64).to_le_bytes());
+    buf.extend_from_slice(&(cols as u64).to_le_bytes());
+    for row in matrix {
+        for value in row {
+            buf.extend_from_slice(&value.to_le_bytes());
+        }
+    }
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create weights dir {}", parent.display()))?;
+    }
+    // Write to a sibling temp path then rename so a reader never sees a partial
+    // file if two uploads of the same id race.
+    let staging = path.with_extension("partial");
+    std::fs::write(&staging, &buf)
+        .with_context(|| format!("failed to write weight file {}", staging.display()))?;
+    std::fs::rename(&staging, path)
+        .with_context(|| format!("failed to finalize weight file {}", path.display()))?;
+    Ok(())
+}
+
+/// Read a matrix written by [`write_matrix_bin`], validating the magic and that
+/// the declared dimensions match the payload length.
+pub fn read_matrix_bin(path: &Path) -> Result<Matrix> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("failed to read weight file {}", path.display()))?;
+    ensure!(bytes.len() >= 20, "weight file {} is truncated", path.display());
+    ensure!(
+        &bytes[0..4] == MATRIX_BIN_MAGIC,
+        "weight file {} has an unrecognized format",
+        path.display()
+    );
+
+    let rows = u64::from_le_bytes(bytes[4..12].try_into().unwrap()) as usize;
+    let cols = u64::from_le_bytes(bytes[12..20].try_into().unwrap()) as usize;
+    let expected = 20 + rows * cols * 8;
+    ensure!(
+        bytes.len() == expected,
+        "weight file {} length {} does not match {rows}x{cols}",
+        path.display(),
+        bytes.len()
+    );
+
+    let mut matrix = Vec::with_capacity(rows);
+    let mut offset = 20;
+    for _ in 0..rows {
+        let mut row = Vec::with_capacity(cols);
+        for _ in 0..cols {
+            let value = f64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
+            row.push(value);
+            offset += 8;
+        }
+        matrix.push(row);
+    }
+    Ok(matrix)
+}
+
+/// Validate that a weight id is a safe filename component (the agent turns it
+/// into a path). Hex digests from [`matrix_id`] always pass; this guards against
+/// a caller injecting `../` or absolute paths.
+pub fn validate_weight_id(id: &str) -> Result<()> {
+    ensure!(!id.is_empty(), "weight id must not be empty");
+    if !id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_')) {
+        bail!("weight id `{id}` contains unsupported characters");
+    }
+    Ok(())
 }
 
 fn validate_dimensions(left: &[Vec<f64>], right: &[Vec<f64>]) -> Result<(usize, usize, usize)> {

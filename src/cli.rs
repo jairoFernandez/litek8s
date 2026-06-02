@@ -414,6 +414,11 @@ enum TensorCommand {
             help = "Print the full result matrix (off by default for large sizes)"
         )]
         show_result: bool,
+        #[arg(
+            long,
+            help = "Re-send the right matrix on every call instead of caching it per node"
+        )]
+        no_cache: bool,
     },
 }
 
@@ -1199,7 +1204,18 @@ pub async fn run() -> Result<()> {
                 size,
                 seed,
                 show_result,
-            } => run_tensor_multiply(&endpoint, file.as_deref(), size, seed, show_result).await,
+                no_cache,
+            } => {
+                run_tensor_multiply(
+                    &endpoint,
+                    file.as_deref(),
+                    size,
+                    seed,
+                    show_result,
+                    !no_cache,
+                )
+                .await
+            }
         },
     }
 }
@@ -1216,6 +1232,7 @@ async fn run_tensor_multiply(
     size: Option<usize>,
     seed: u64,
     show_result: bool,
+    use_cache: bool,
 ) -> Result<()> {
     let (left, right) = match (file, size) {
         (Some(path), _) => {
@@ -1255,8 +1272,23 @@ async fn run_tensor_multiply(
     );
     println!();
 
+    println!(
+        "{} {}",
+        label("weight cache"),
+        if use_cache {
+            ok("on")
+        } else {
+            muted("off (re-send right each call)")
+        }
+    );
+    println!();
+
     let response = endpoint
-        .request(Request::DistributedMatmul { left, right })
+        .request(Request::DistributedMatmul {
+            left,
+            right,
+            use_cache,
+        })
         .await?;
 
     match response {
@@ -1274,8 +1306,13 @@ async fn run_tensor_multiply(
                 ok(&format!("{wall_ms}ms"))
             );
             for p in &placements {
+                let cache_tag = match p.weight_cached {
+                    Some(true) => ok("[cache hit]"),
+                    Some(false) => muted("[uploaded]"),
+                    None => String::new(),
+                };
                 println!(
-                    "  {:<16} {:<6} rows {:>5}..{:<5} ({:>4})  {}",
+                    "  {:<16} {:<6} rows {:>5}..{:<5} ({:>4})  {:>8}  {}",
                     p.node_name,
                     color_status(if p.transport == "local" {
                         "Schedulable"
@@ -1285,7 +1322,8 @@ async fn run_tensor_multiply(
                     p.start_row,
                     p.start_row + p.rows,
                     p.rows,
-                    muted(&format!("{}ms", p.elapsed_ms))
+                    muted(&format!("{}ms", p.elapsed_ms)),
+                    cache_tag
                 );
             }
             println!();

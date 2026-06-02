@@ -83,16 +83,42 @@ checksum (Σ) -212.519207
 | Piece | File |
 |-------|------|
 | Band compute + deterministic input | [`matrix.rs`](../src/matrix.rs) — `multiply_band`, `deterministic_matrix` |
-| Agent op (per-node compute) | [`node.rs`](../src/node.rs) — `AgentRequest::ComputeMatmulBand` |
-| Fan-out + stitch | [`daemon.rs`](../src/daemon.rs) — `distributed_matmul` |
-| CLI | [`cli.rs`](../src/cli.rs) — `tensor multiply` |
+| Weight serialization + content hash | [`matrix.rs`](../src/matrix.rs) — `write_matrix_bin`, `read_matrix_bin`, `matrix_id` |
+| Agent ops (compute + weight cache) | [`node.rs`](../src/node.rs) — `ComputeMatmulBand`, `PutWeights`, `HasWeights`, `ComputeMatmulBandCached` |
+| Fan-out + stitch + cache orchestration | [`daemon.rs`](../src/daemon.rs) — `distributed_matmul` |
+| CLI | [`cli.rs`](../src/cli.rs) — `tensor multiply` (`--no-cache`) |
+
+## Weight caching (default on)
+
+The right-hand matrix `B` is the "weights" of the op. Re-sending it on every band
+call is the dominant cost on weak nodes over a WAN. So by default the daemon
+**content-addresses `B`** (a hash of its contents), uploads it to each node's
+on-disk cache (`~/.local/share/litek8s/weights/<id>.bin`) once, and the compute
+call references the id — no per-band transfer. A repeat run with identical
+weights skips the upload entirely.
+
+```bash
+litek8s tensor multiply --size 512 --seed 7              # run 1: [uploaded]
+litek8s tensor multiply --size 512 --seed 7              # run 2: [cache hit]
+litek8s tensor multiply --size 512 --seed 7 --no-cache   # re-send B every call
+```
+
+Measured on the two t3.micro EC2 nodes (512×512):
+
+| Mode | Wall |
+|------|------|
+| `--no-cache` (re-send `B` each call) | ~8.1s |
+| cache, first run (uploads `B`)       | ~7.4s |
+| cache, warm (cache hit, no transfer) | ~2.2s |
+
+~3.5× faster once the weights are resident — the cache survives agent restarts
+because it's on disk. Each placement line is tagged `[uploaded]` / `[cache hit]`.
 
 ## Limits / next steps
 
-- Each remote band re-sends the full `B` matrix over SSH (N×N f64). For an LLM
-  weight matmul you'd cache the weights on each node instead of shipping them
-  per call.
+- Caching covers the right-hand matrix. The next step toward serving a model is
+  **chaining layers into a pipeline** — passing activations node→node instead of
+  collecting every band back at the daemon between ops.
 - Bands are split evenly by row count, not by node speed — a faster node finishes
   early and idles. A weighted split by `host_resources` CPU would balance better.
-- Only `f64` dense matmul. Real model serving wants quantized/tiled kernels and
-  a layer pipeline, not a single op.
+- Only `f64` dense matmul. Real model serving wants quantized/tiled kernels.

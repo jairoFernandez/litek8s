@@ -42,6 +42,15 @@ pub fn default_vpn_state_file() -> Result<PathBuf> {
     Ok(vpn_data_dir()?.join(VPN_STATE_FILE))
 }
 
+/// Directory where a node agent caches uploaded weight matrices on disk so a
+/// distributed matmul ships each `right` matrix once per node instead of on
+/// every band call. Survives agent restarts.
+pub fn weights_dir() -> Result<PathBuf> {
+    let dirs = ProjectDirs::from("dev", "civojairo", APP_DIR)
+        .context("failed to resolve a data directory for cached weights")?;
+    Ok(dirs.data_local_dir().join("weights"))
+}
+
 pub fn default_vpn_private_key_file() -> Result<PathBuf> {
     Ok(vpn_data_dir()?.join(VPN_PRIVATE_KEY_FILE))
 }

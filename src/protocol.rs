@@ -80,6 +80,10 @@ pub enum Request {
     DistributedMatmul {
         left: Vec<Vec<f64>>,
         right: Vec<Vec<f64>>,
+        /// Cache `right` on each node by content hash and reference it on the
+        /// compute call, so it transfers once per node instead of per band.
+        #[serde(default)]
+        use_cache: bool,
     },
 }
 
@@ -147,6 +151,10 @@ pub struct MatmulPlacement {
     pub start_row: usize,
     pub rows: usize,
     pub elapsed_ms: u64,
+    /// True when the node already had the weight matrix cached (no transfer);
+    /// false when this run uploaded it. None when caching was disabled.
+    #[serde(default)]
+    pub weight_cached: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

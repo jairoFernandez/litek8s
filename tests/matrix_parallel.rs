@@ -1,5 +1,6 @@
 use litek8s::matrix::{
-    deterministic_matrix, multiply_band, multiply_parallel, multiply_sequential,
+    deterministic_matrix, matrix_id, multiply_band, multiply_parallel, multiply_sequential,
+    read_matrix_bin, validate_weight_id, write_matrix_bin,
 };
 
 #[test]
@@ -75,6 +76,37 @@ fn deterministic_matrix_is_reproducible() {
         deterministic_matrix(5, 5, 123),
         deterministic_matrix(5, 5, 124)
     );
+}
+
+#[test]
+fn matrix_bin_roundtrips_through_disk() {
+    let matrix = deterministic_matrix(17, 23, 5);
+    let dir = std::env::temp_dir().join(format!("litek8s-test-weights-{}", std::process::id()));
+    let path = dir.join("w.bin");
+    write_matrix_bin(&path, &matrix).expect("write");
+    let read = read_matrix_bin(&path).expect("read");
+    assert_eq!(read, matrix);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn matrix_id_is_content_addressed() {
+    // Same content → same id; any change → different id.
+    let a = deterministic_matrix(8, 8, 1);
+    let b = deterministic_matrix(8, 8, 1);
+    let c = deterministic_matrix(8, 8, 2);
+    assert_eq!(matrix_id(&a), matrix_id(&b));
+    assert_ne!(matrix_id(&a), matrix_id(&c));
+    // Hex digest is always a safe filename component.
+    assert!(validate_weight_id(&matrix_id(&a)).is_ok());
+}
+
+#[test]
+fn rejects_unsafe_weight_ids() {
+    assert!(validate_weight_id("../escape").is_err());
+    assert!(validate_weight_id("/abs/path").is_err());
+    assert!(validate_weight_id("").is_err());
+    assert!(validate_weight_id("abc123_-").is_ok());
 }
 
 #[test]

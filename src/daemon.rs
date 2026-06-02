@@ -720,9 +720,11 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 members,
             })
         }
-        Request::DistributedMatmul { left, right } => {
-            state.distributed_matmul(left, right).await
-        }
+        Request::DistributedMatmul {
+            left,
+            right,
+            use_cache,
+        } => state.distributed_matmul(left, right, use_cache).await,
         Request::JoinCluster { node_id, addr } => {
             state.ha_node.add_member(node_id, addr).await?;
             Ok(Response::Ack {
@@ -1119,6 +1121,7 @@ impl AppState {
         &self,
         left: Vec<Vec<f64>>,
         right: Vec<Vec<f64>>,
+        use_cache: bool,
     ) -> Result<Response> {
         ensure!(!left.is_empty(), "left matrix cannot be empty");
         ensure!(!right.is_empty(), "right matrix cannot be empty");
@@ -1161,7 +1164,14 @@ impl AppState {
         let base = total_rows / node_count;
         let remainder = total_rows % node_count;
 
+        // When caching is on, content-address `right` once so every node stores
+        // it under the same id and a repeat run with identical weights skips the
+        // upload entirely.
+        let weight_id = use_cache.then(|| crate::matrix::matrix_id(&right));
+
         let right = Arc::new(right);
+        let weight_id = weight_id.map(Arc::new);
+        let wall_started = Instant::now();
         let mut tasks = Vec::with_capacity(node_count);
         let mut cursor = 0;
         for (idx, node) in targets.iter().enumerate() {
@@ -1171,15 +1181,42 @@ impl AppState {
             let band = left[start_row..cursor].to_vec();
             let client = NodeClient::for_node(node, self.runtime.clone());
             let right = Arc::clone(&right);
+            let weight_id = weight_id.clone();
             let node_name = node.name.clone();
             let transport = node.transport_label().to_string();
 
             tasks.push(tokio::spawn(async move {
                 let started = Instant::now();
-                let result = client
-                    .compute_matmul_band(band, (*right).clone())
-                    .await
-                    .with_context(|| format!("node `{node_name}` failed its matmul band"));
+                let (result, weight_cached) = match weight_id.as_deref() {
+                    Some(id) => {
+                        // Upload `right` only if the node lacks it, then compute
+                        // against the cached copy — no per-band transfer.
+                        match client.ensure_weights(id, &right).await {
+                            Ok(cached) => {
+                                let result = client
+                                    .compute_matmul_band_cached(band, id)
+                                    .await
+                                    .with_context(|| {
+                                        format!("node `{node_name}` failed its cached matmul band")
+                                    });
+                                (result, Some(cached))
+                            }
+                            Err(error) => (
+                                Err(error.context(format!(
+                                    "node `{node_name}` failed to cache weights"
+                                ))),
+                                None,
+                            ),
+                        }
+                    }
+                    None => {
+                        let result = client
+                            .compute_matmul_band(band, (*right).clone())
+                            .await
+                            .with_context(|| format!("node `{node_name}` failed its matmul band"));
+                        (result, None)
+                    }
+                };
                 let elapsed_ms = started.elapsed().as_millis() as u64;
                 (
                     node_name,
@@ -1187,16 +1224,16 @@ impl AppState {
                     start_row,
                     rows_here,
                     elapsed_ms,
+                    weight_cached,
                     result,
                 )
             }));
         }
 
-        let wall_started = Instant::now();
         let mut bands: Vec<(usize, Vec<Vec<f64>>)> = Vec::with_capacity(node_count);
         let mut placements = Vec::with_capacity(node_count);
         for task in tasks {
-            let (node_name, transport, start_row, rows, elapsed_ms, result) =
+            let (node_name, transport, start_row, rows, elapsed_ms, weight_cached, result) =
                 task.await.context("matmul dispatch task panicked")?;
             let rows_out = result?;
             placements.push(crate::protocol::MatmulPlacement {
@@ -1205,6 +1242,7 @@ impl AppState {
                 start_row,
                 rows,
                 elapsed_ms,
+                weight_cached,
             });
             bands.push((start_row, rows_out));
         }
