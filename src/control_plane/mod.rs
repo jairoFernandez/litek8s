@@ -42,6 +42,8 @@ pub enum ClusterCommand {
         name: String,
         ssh_target: String,
         remote_binary: Option<String>,
+        #[serde(default)]
+        identity_file: Option<String>,
         labels: BTreeMap<String, String>,
     },
     SetWorkerNodeScheduling {

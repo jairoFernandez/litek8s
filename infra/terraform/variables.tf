@@ -19,7 +19,7 @@ variable "project_prefix" {
 variable "node_count" {
   description = "Number of EC2 worker nodes to provision"
   type        = number
-  default     = 2
+  default     = 6
 }
 
 variable "instance_type" {

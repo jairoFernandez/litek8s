@@ -223,10 +223,11 @@ impl StateMachineStore {
                 name,
                 ssh_target,
                 remote_binary,
+                identity_file,
                 labels,
             } => {
                 let binary = remote_binary.unwrap_or_else(|| "litek8s".into());
-                match ClusterNode::ssh(name.clone(), ssh_target, binary, None, labels) {
+                match ClusterNode::ssh(name.clone(), ssh_target, binary, identity_file, labels) {
                     Ok(node) => match self.store.upsert_node(node).await {
                         Ok(outcome) => CommandResult::Applied {
                             created: outcome == crate::store::NodeApplyOutcome::Created,

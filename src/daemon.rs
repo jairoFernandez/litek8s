@@ -337,12 +337,16 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 .await
                 .with_context(|| format!("node `{name}` did not answer over ssh"))?;
 
-            let (ssh_target, remote_binary) = match &node.transport {
+            let (ssh_target, remote_binary, identity_file) = match &node.transport {
                 NodeTransport::Ssh {
                     target,
                     remote_binary,
-                    ..
-                } => (target.clone(), Some(remote_binary.clone())),
+                    identity_file,
+                } => (
+                    target.clone(),
+                    Some(remote_binary.clone()),
+                    identity_file.clone(),
+                ),
                 NodeTransport::Local => bail!("cannot add local node via AddNode"),
             };
             let result = state
@@ -351,6 +355,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                     name: name.clone(),
                     ssh_target,
                     remote_binary,
+                    identity_file,
                     labels: node.labels.clone(),
                 })
                 .await?;
