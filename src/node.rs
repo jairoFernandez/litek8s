@@ -760,16 +760,20 @@ fn is_cold_transport_error(error: &anyhow::Error) -> bool {
             || message.contains("line 1 column 0"))
 }
 
-/// Build a stable per-target SSH ControlPath under the temp dir. The target may
-/// be `host` or `user@host`, so non-filesystem-safe characters are folded to `_`.
+/// Build a stable per-target SSH ControlPath. Unix domain sockets cap the path
+/// at ~104 bytes (macOS) and ssh appends a ~17-char random suffix under
+/// ControlPersist, so the base must stay short. A long `$TMPDIR` plus a
+/// sanitized `user@long.ip.add.ress` target blew past the limit; instead hash
+/// the target to a fixed 16 hex chars and root the socket at `/tmp` (short and
+/// always present), keeping the whole path well under the cap regardless of how
+/// long the target is.
 fn control_socket_path(target: &str) -> String {
-    let sanitized: String = target
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
-    let mut path: PathBuf = std::env::temp_dir();
-    path.push(format!("litek8s-ssh-{sanitized}.sock"));
-    path.to_string_lossy().into_owned()
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in target.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("/tmp/lk8s-{hash:016x}.sock")
 }
 
 pub async fn install_remote_agent(
