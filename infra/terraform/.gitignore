@@ -6,3 +6,5 @@
 *.pem
 crash.log
 crash.*.log
+tfplan
+*.tfplan
