@@ -85,6 +85,13 @@ pub enum Request {
         #[serde(default)]
         use_cache: bool,
     },
+    /// Run a feed-forward pipeline: the input activation flows through each
+    /// layer's weight matmul in order. Within a layer the weight is sharded by
+    /// columns across nodes (weighted by CPU), each node holding only its shard.
+    DistributedPipeline {
+        input: Vec<Vec<f64>>,
+        layers: Vec<LayerSpec>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -137,9 +144,50 @@ pub enum Response {
         placements: Vec<MatmulPlacement>,
         wall_ms: u64,
     },
+    Pipeline {
+        output: Vec<Vec<f64>>,
+        layers: Vec<LayerReport>,
+        wall_ms: u64,
+    },
     Error {
         message: String,
     },
+}
+
+/// One layer of a feed-forward pipeline. The weight is `in_dim x out_dim`,
+/// generated deterministically from `seed` so a multi-GB model never crosses
+/// the wire — only the small spec does. `relu` applies a non-linearity after
+/// the matmul.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerSpec {
+    pub in_dim: usize,
+    pub out_dim: usize,
+    pub seed: u64,
+    #[serde(default)]
+    pub relu: bool,
+}
+
+/// How one pipeline layer was sharded and how long it took.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LayerReport {
+    pub index: usize,
+    pub in_dim: usize,
+    pub out_dim: usize,
+    pub relu: bool,
+    pub elapsed_ms: u64,
+    pub shards: Vec<ShardPlacement>,
+}
+
+/// One node's column shard of a layer's weight.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShardPlacement {
+    pub node_name: String,
+    pub transport: String,
+    pub cpu_cores: u32,
+    pub col_start: usize,
+    pub cols: usize,
+    pub weight_cached: bool,
+    pub elapsed_ms: u64,
 }
 
 /// One node's slice of a distributed matmul: which rows it owned and how long

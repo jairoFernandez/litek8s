@@ -78,6 +78,110 @@ pub fn multiply_band(left_band: &[Vec<f64>], right: &[Vec<f64>]) -> Result<Matri
     multiply_parallel(left_band, right)
 }
 
+/// Multiply `left` (the activation, replicated to every node) against a vertical
+/// band of the weight matrix — i.e. a contiguous subset of `right`'s columns,
+/// already stored column-major as `right_cols` where each inner Vec is one
+/// column. Returns `left.rows x right_cols.len()`: this node's slice of the
+/// layer output. Concatenating every node's slice horizontally reproduces the
+/// full `left · right`. This is the column (model-parallel) shard: each node
+/// holds only its columns of the weight, so a weight too large for one node is
+/// split across many.
+pub fn multiply_column_shard(left: &[Vec<f64>], right_cols: &[Vec<f64>]) -> Result<Matrix> {
+    ensure!(!left.is_empty(), "activation cannot be empty");
+    let shared = left[0].len();
+    ensure!(
+        left.iter().all(|row| row.len() == shared),
+        "activation must be rectangular"
+    );
+    if right_cols.is_empty() {
+        // A node may own zero columns when there are more nodes than columns.
+        return Ok(left.iter().map(|_| Vec::new()).collect());
+    }
+    ensure!(
+        right_cols.iter().all(|col| col.len() == shared),
+        "weight column length ({shared}) must match activation width"
+    );
+
+    let workers = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(left.len().max(1));
+    let chunk_size = left.len().div_ceil(workers);
+
+    let chunks = thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for start in (0..left.len()).step_by(chunk_size) {
+            let end = (start + chunk_size).min(left.len());
+            let rows = &left[start..end];
+            handles.push(scope.spawn(move || {
+                rows.iter()
+                    .map(|row| right_cols.iter().map(|col| dot(row, col)).collect())
+                    .collect::<Matrix>()
+            }));
+        }
+        let mut all = Vec::with_capacity(handles.len());
+        for handle in handles {
+            all.push(handle.join().map_err(|_| anyhow!("matrix worker panicked"))?);
+        }
+        Ok::<Vec<Matrix>, anyhow::Error>(all)
+    })?;
+
+    Ok(chunks.into_iter().flatten().collect())
+}
+
+/// Transpose a matrix into its columns: `columns(m)[j][i] == m[i][j]`. Weights
+/// are sharded and cached column-major so a node stores exactly the columns it
+/// owns, contiguous on disk.
+pub fn columns(matrix: &[Vec<f64>]) -> Matrix {
+    if matrix.is_empty() {
+        return Vec::new();
+    }
+    let cols = matrix[0].len();
+    let rows = matrix.len();
+    transpose(matrix, rows, cols)
+}
+
+/// Apply ReLU in place: clamp negatives to zero. Cheap non-linearity so the
+/// pipeline behaves like a real feed-forward network rather than collapsing
+/// into a single linear map across layers.
+pub fn apply_relu(matrix: &mut [Vec<f64>]) {
+    for row in matrix {
+        for value in row {
+            if *value < 0.0 {
+                *value = 0.0;
+            }
+        }
+    }
+}
+
+/// Split `total` columns across nodes proportional to their integer weights
+/// (e.g. CPU cores), returning the column count for each node. Every weight is
+/// treated as at least 1 so no node is starved; the largest share absorbs
+/// rounding so the parts always sum to `total`.
+pub fn weighted_split(total: usize, weights: &[u32]) -> Vec<usize> {
+    if weights.is_empty() {
+        return Vec::new();
+    }
+    let adjusted: Vec<u64> = weights.iter().map(|&w| u64::from(w.max(1))).collect();
+    let sum: u64 = adjusted.iter().sum();
+    let mut parts: Vec<usize> = adjusted
+        .iter()
+        .map(|&w| (w * total as u64 / sum) as usize)
+        .collect();
+    // Hand any rounding remainder to the heaviest node.
+    let assigned: usize = parts.iter().sum();
+    if assigned < total {
+        let heaviest = adjusted
+            .iter()
+            .enumerate()
+            .max_by_key(|&(_, &w)| w)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        parts[heaviest] += total - assigned;
+    }
+    parts
+}
+
 /// Build a deterministic `rows x cols` matrix from a seed. Lets the demo stress
 /// the cluster with an arbitrarily large input (`--size N`) while keeping the
 /// result reproducible across runs and nodes — no RNG dependency, no I/O.

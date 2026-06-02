@@ -1,6 +1,7 @@
 use litek8s::matrix::{
-    deterministic_matrix, matrix_id, multiply_band, multiply_parallel, multiply_sequential,
-    read_matrix_bin, validate_weight_id, write_matrix_bin,
+    apply_relu, columns, deterministic_matrix, matrix_id, multiply_band, multiply_column_shard,
+    multiply_parallel, multiply_sequential, read_matrix_bin, validate_weight_id, weighted_split,
+    write_matrix_bin,
 };
 
 #[test]
@@ -107,6 +108,84 @@ fn rejects_unsafe_weight_ids() {
     assert!(validate_weight_id("/abs/path").is_err());
     assert!(validate_weight_id("").is_err());
     assert!(validate_weight_id("abc123_-").is_ok());
+}
+
+#[test]
+fn column_shards_concatenate_to_full_product() {
+    // Splitting the weight's columns across shards, computing each shard, and
+    // concatenating horizontally must equal the full activation·weight — the
+    // invariant the layer pipeline relies on.
+    let act = deterministic_matrix(5, 6, 1);
+    let weight = deterministic_matrix(6, 9, 2);
+    let full = multiply_parallel(&act, &weight).expect("full product");
+
+    let cols = columns(&weight);
+    let splits = weighted_split(9, &[1, 2, 3]); // 3 nodes, uneven weights
+    assert_eq!(splits.iter().sum::<usize>(), 9);
+
+    let mut rebuilt = vec![Vec::new(); act.len()];
+    let mut cursor = 0;
+    for n in splits {
+        let shard = &cols[cursor..cursor + n];
+        cursor += n;
+        let out = multiply_column_shard(&act, shard).expect("shard");
+        for (i, row) in out.into_iter().enumerate() {
+            rebuilt[i].extend(row);
+        }
+    }
+    assert_eq!(rebuilt, full);
+}
+
+#[test]
+fn sharded_pipeline_matches_local_forward() {
+    // A 2-layer ReLU pipeline computed via column shards (the distributed path)
+    // must equal the same forward done locally and undivided.
+    let input = deterministic_matrix(3, 8, 1);
+    let w0 = deterministic_matrix(8, 10, 2);
+    let w1 = deterministic_matrix(10, 6, 3);
+
+    // Reference: plain local forward with ReLU between layers.
+    let mut a = multiply_parallel(&input, &w0).unwrap();
+    apply_relu(&mut a);
+    let mut reference = multiply_parallel(&a, &w1).unwrap();
+    apply_relu(&mut reference);
+
+    // Sharded forward: split each layer's columns, compute shards, concat, relu.
+    let forward = |act: &[Vec<f64>], w: &[Vec<f64>], weights: &[u32]| {
+        let cols = columns(w);
+        let splits = weighted_split(w[0].len(), weights);
+        let mut out = vec![Vec::new(); act.len()];
+        let mut cur = 0;
+        for n in splits {
+            let shard = &cols[cur..cur + n];
+            cur += n;
+            let part = multiply_column_shard(act, shard).unwrap();
+            for (i, row) in part.into_iter().enumerate() {
+                out[i].extend(row);
+            }
+        }
+        apply_relu(&mut out);
+        out
+    };
+    let weights = [1u32, 3, 2];
+    let a1 = forward(&input, &w0, &weights);
+    let a2 = forward(&a1, &w1, &weights);
+
+    assert_eq!(a2, reference);
+}
+
+#[test]
+fn weighted_split_is_proportional_and_exact() {
+    // Parts always sum to total; heavier weight gets more.
+    let parts = weighted_split(100, &[1, 4]);
+    assert_eq!(parts.iter().sum::<usize>(), 100);
+    assert!(parts[1] > parts[0]);
+    // More nodes than columns: still sums, no panic.
+    let small = weighted_split(2, &[1, 1, 1, 1]);
+    assert_eq!(small.iter().sum::<usize>(), 2);
+    // Zero weights are floored to 1, never starved to a negative split.
+    let floored = weighted_split(10, &[0, 0]);
+    assert_eq!(floored.iter().sum::<usize>(), 10);
 }
 
 #[test]

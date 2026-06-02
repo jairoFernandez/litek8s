@@ -99,6 +99,15 @@ pub enum AgentRequest {
         left_band: Vec<Vec<f64>>,
         weight_id: String,
     },
+    /// Compute this node's column shard of a pipeline layer: multiply the full
+    /// activation against the weight columns cached under `weight_id` (stored
+    /// column-major), optionally applying ReLU. Returns the activation slice for
+    /// the columns this node owns.
+    ComputeLayerShardCached {
+        activation: Vec<Vec<f64>>,
+        weight_id: String,
+        relu: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -438,6 +447,45 @@ impl NodeClient {
         }
     }
 
+    /// Compute this node's column shard of a pipeline layer against weight
+    /// columns cached under `weight_id` (stored column-major: each cached row is
+    /// one weight column). Returns this node's slice of the layer output.
+    pub async fn compute_layer_shard_cached(
+        &self,
+        activation: Vec<Vec<f64>>,
+        weight_id: &str,
+        relu: bool,
+    ) -> Result<Vec<Vec<f64>>> {
+        match self {
+            Self::Local(_) => {
+                let path = local_weight_path(weight_id)?;
+                tokio::task::spawn_blocking(move || {
+                    let cols = crate::matrix::read_matrix_bin(&path)?;
+                    let mut out = crate::matrix::multiply_column_shard(&activation, &cols)?;
+                    if relu {
+                        crate::matrix::apply_relu(&mut out);
+                    }
+                    Ok(out)
+                })
+                .await
+                .context("local layer shard worker panicked")?
+            }
+            Self::Ssh(client) => match client
+                .request(AgentRequest::ComputeLayerShardCached {
+                    activation,
+                    weight_id: weight_id.to_string(),
+                    relu,
+                })
+                .await?
+            {
+                AgentResponse::MatmulBand { rows } => Ok(rows),
+                other => {
+                    bail!("unexpected agent response while computing layer shard: {other:?}")
+                }
+            },
+        }
+    }
+
     pub async fn list_managed_containers(&self) -> Result<Vec<ManagedContainer>> {
         match self {
             Self::Local(runtime) => runtime.list_managed_containers().await,
@@ -625,31 +673,37 @@ impl SshNodeClient {
     }
 
     async fn request(&self, request: AgentRequest) -> Result<AgentResponse> {
-        let result = self.request_once(&request).await;
-
-        // Two cold-connection failure modes warrant dropping the ControlMaster
-        // and retrying once:
+        // Transient SSH transport failures warrant dropping the ControlMaster
+        // and retrying with a short backoff:
         //
         // 1. A freshly-booted node can hand the ControlMaster a login session
-        //    that predates the `docker` group landing in the user's session.
-        //    That stale master is pinned for the whole ControlPersist window,
-        //    so every multiplexed agent call fails the Docker ping with EACCES
-        //    even though the node is healthy.
-        // 2. The first call against a cold target races the ControlMaster
-        //    setup: ssh can exit 0 having multiplexed onto a half-open master,
-        //    leaving stdout empty — the agent response then fails to decode
-        //    with an EOF. The agent itself is fine (a warm retry succeeds).
+        //    that predates the `docker` group landing in the user's session —
+        //    every multiplexed call then fails the Docker ping with EACCES.
+        // 2. A cold target races ControlMaster setup: ssh exits 0 having
+        //    multiplexed onto a half-open master, leaving stdout empty (EOF).
+        // 3. Under a burst of concurrent calls to the same host (a pipeline
+        //    layer fans out many shards at once), ssh connects race the master
+        //    and exit non-zero (status 255) before the socket is shared.
         //
-        // Both clear by reopening the connection, so collapse them into one
-        // retry path.
-        if let Err(error) = &result
-            && (is_docker_permission_error(error) || is_cold_transport_error(error))
-        {
+        // All three clear by reopening the connection, so retry a few times,
+        // backing off so the master has a moment to settle.
+        const MAX_ATTEMPTS: u32 = 4;
+        let mut last = self.request_once(&request).await;
+        let mut attempt = 1;
+        while attempt < MAX_ATTEMPTS {
+            let Err(error) = &last else { break };
+            if !(is_docker_permission_error(error)
+                || is_cold_transport_error(error)
+                || is_transient_ssh_error(error))
+            {
+                break;
+            }
             self.close_control_master().await;
-            return self.request_once(&request).await;
+            tokio::time::sleep(Duration::from_millis(150 * u64::from(attempt))).await;
+            last = self.request_once(&request).await;
+            attempt += 1;
         }
-
-        result
+        last
     }
 
     /// Issue a single agent request over the (possibly multiplexed) SSH connection.
@@ -758,6 +812,20 @@ fn is_cold_transport_error(error: &anyhow::Error) -> bool {
     message.contains("failed to decode agent response")
         && (message.contains("EOF while parsing")
             || message.contains("line 1 column 0"))
+}
+
+/// True when ssh itself failed to connect rather than the agent erroring —
+/// status 255 (ssh's connect-failure code), connection refused/reset, or a
+/// timeout. Common when many calls fan out to one host at once and race the
+/// ControlMaster; reopening and retrying clears it.
+fn is_transient_ssh_error(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}");
+    message.contains("exit status: 255")
+        || message.contains("Connection refused")
+        || message.contains("Connection reset")
+        || message.contains("Connection closed")
+        || message.contains("Connection timed out")
+        || message.contains("kex_exchange_identification")
 }
 
 /// Build a stable per-target SSH ControlPath. Unix domain sockets cap the path
@@ -946,6 +1014,24 @@ async fn handle_agent_request(
             })
             .await
             .context("cached matmul worker panicked")??;
+            Ok(AgentResponse::MatmulBand { rows })
+        }
+        AgentRequest::ComputeLayerShardCached {
+            activation,
+            weight_id,
+            relu,
+        } => {
+            let path = local_weight_path(&weight_id)?;
+            let rows = tokio::task::spawn_blocking(move || {
+                let cols = crate::matrix::read_matrix_bin(&path)?;
+                let mut out = crate::matrix::multiply_column_shard(&activation, &cols)?;
+                if relu {
+                    crate::matrix::apply_relu(&mut out);
+                }
+                Ok::<_, anyhow::Error>(out)
+            })
+            .await
+            .context("layer shard worker panicked")??;
             Ok(AgentResponse::MatmulBand { rows })
         }
     }

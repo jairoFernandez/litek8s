@@ -730,6 +730,9 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             right,
             use_cache,
         } => state.distributed_matmul(left, right, use_cache).await,
+        Request::DistributedPipeline { input, layers } => {
+            state.distributed_pipeline(input, layers).await
+        }
         Request::JoinCluster { node_id, addr } => {
             state.ha_node.add_member(node_id, addr).await?;
             Ok(Response::Ack {
@@ -1261,6 +1264,162 @@ impl AppState {
         Ok(Response::Matmul {
             result,
             placements,
+            wall_ms,
+        })
+    }
+
+    /// Run a feed-forward pipeline across the cluster. Each layer's weight is
+    /// generated deterministically (so a large model never crosses the wire),
+    /// sharded by columns across the reachable nodes weighted by CPU cores, and
+    /// cached per node. The activation flows layer to layer; within a layer the
+    /// column shards run concurrently and are concatenated back into the full
+    /// activation that feeds the next layer.
+    async fn distributed_pipeline(
+        &self,
+        input: Vec<Vec<f64>>,
+        layers: Vec<crate::protocol::LayerSpec>,
+    ) -> Result<Response> {
+        ensure!(!input.is_empty(), "input activation cannot be empty");
+        ensure!(!layers.is_empty(), "pipeline needs at least one layer");
+        let in_width = input[0].len();
+        ensure!(
+            layers[0].in_dim == in_width,
+            "input width ({in_width}) must match first layer in_dim ({})",
+            layers[0].in_dim
+        );
+        for pair in layers.windows(2) {
+            ensure!(
+                pair[0].out_dim == pair[1].in_dim,
+                "layer dim mismatch: {} -> {} then in_dim {}",
+                pair[0].in_dim,
+                pair[0].out_dim,
+                pair[1].in_dim
+            );
+        }
+
+        // Reachable, schedulable nodes plus their CPU-core weight for the split.
+        let all_nodes = self.store.list_nodes().await;
+        let mut targets: Vec<(ClusterNode, u32)> = Vec::new();
+        for node in all_nodes {
+            if node.unschedulable {
+                continue;
+            }
+            let (status, _) = self.node_health(&node).await;
+            if status != "Ready" {
+                continue;
+            }
+            let cores = self
+                .collect_node_resources(&node)
+                .await
+                .map(|r| r.cpu_cores.max(1))
+                .unwrap_or(1);
+            targets.push((node, cores));
+        }
+        ensure!(
+            !targets.is_empty(),
+            "no schedulable, reachable node is available to compute"
+        );
+
+        let wall_started = Instant::now();
+        let mut activation = input;
+        let mut layer_reports = Vec::with_capacity(layers.len());
+
+        for (index, layer) in layers.iter().enumerate() {
+            // Generate this layer's weight (in_dim x out_dim) and shard it by
+            // columns, weighted by node CPU. Nodes that would get zero columns
+            // are dropped for this layer.
+            let weight =
+                crate::matrix::deterministic_matrix(layer.in_dim, layer.out_dim, layer.seed);
+            let weight_cols = crate::matrix::columns(&weight);
+
+            let weights: Vec<u32> = targets.iter().map(|(_, c)| *c).collect();
+            let splits = crate::matrix::weighted_split(layer.out_dim, &weights);
+
+            let act = Arc::new(activation);
+            let rows = act.len();
+            let layer_started = Instant::now();
+            let mut tasks = Vec::new();
+            let mut col_cursor = 0;
+            for ((node, cores), cols_here) in targets.iter().zip(splits.iter().copied()) {
+                let col_start = col_cursor;
+                col_cursor += cols_here;
+                if cols_here == 0 {
+                    continue;
+                }
+                // Cache this node's column shard under a content hash of the
+                // shard itself (so different layers/shards never collide).
+                let shard: Vec<Vec<f64>> = weight_cols[col_start..col_start + cols_here].to_vec();
+                let weight_id = format!("layer{index}-{}", crate::matrix::matrix_id(&shard));
+                let client = NodeClient::for_node(node, self.runtime.clone());
+                let act = Arc::clone(&act);
+                let node_name = node.name.clone();
+                let transport = node.transport_label().to_string();
+                let cores = *cores;
+                let relu = layer.relu;
+
+                tasks.push(tokio::spawn(async move {
+                    let started = Instant::now();
+                    let outcome = async {
+                        let cached = client.ensure_weights(&weight_id, &shard).await?;
+                        let out = client
+                            .compute_layer_shard_cached((*act).clone(), &weight_id, relu)
+                            .await?;
+                        Ok::<_, anyhow::Error>((cached, out))
+                    }
+                    .await
+                    .with_context(|| format!("node `{node_name}` failed layer {index} shard"));
+                    let elapsed_ms = started.elapsed().as_millis() as u64;
+                    (
+                        node_name, transport, cores, col_start, cols_here, elapsed_ms, outcome,
+                    )
+                }));
+            }
+
+            // Collect shards and concatenate them column-wise into the next
+            // activation. Sort by col_start so columns land in the right order.
+            let mut shards: Vec<(usize, Vec<Vec<f64>>)> = Vec::new();
+            let mut placements = Vec::new();
+            for task in tasks {
+                let (node_name, transport, cpu_cores, col_start, cols, elapsed_ms, outcome) =
+                    task.await.context("pipeline shard task panicked")?;
+                let (weight_cached, out) = outcome?;
+                placements.push(crate::protocol::ShardPlacement {
+                    node_name,
+                    transport,
+                    cpu_cores,
+                    col_start,
+                    cols,
+                    weight_cached,
+                    elapsed_ms,
+                });
+                shards.push((col_start, out));
+            }
+            shards.sort_by_key(|(start, _)| *start);
+            placements.sort_by_key(|p| p.col_start);
+
+            let mut next = vec![Vec::with_capacity(layer.out_dim); rows];
+            for (_, shard_rows) in shards {
+                for (row_idx, shard_row) in shard_rows.into_iter().enumerate() {
+                    next[row_idx].extend(shard_row);
+                }
+            }
+
+            layer_reports.push(crate::protocol::LayerReport {
+                index,
+                in_dim: layer.in_dim,
+                out_dim: layer.out_dim,
+                relu: layer.relu,
+                elapsed_ms: layer_started.elapsed().as_millis() as u64,
+                shards: placements,
+            });
+
+            activation = next;
+        }
+
+        let wall_ms = wall_started.elapsed().as_millis() as u64;
+        Ok(Response::Pipeline {
+            output: activation,
+            layers: layer_reports,
             wall_ms,
         })
     }

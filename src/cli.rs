@@ -70,6 +70,12 @@ Examples:
   litek8s tensor multiply --size 256
   litek8s tensor multiply --size 512 --seed 7";
 
+const PIPELINE_AFTER_HELP: &str = "\
+Examples:
+  litek8s pipeline run --layers 6 --dim 512
+  litek8s pipeline run --layers 4 --dim 1024 --batch 2
+  litek8s pipeline run -f examples/pipeline-demo.yaml --show-output";
+
 const TREE_AFTER_HELP: &str = "\
 Examples:
   litek8s tree
@@ -381,8 +387,51 @@ enum Command {
         #[command(subcommand)]
         command: TensorCommand,
     },
+    #[command(
+        about = "Run a feed-forward layer pipeline sharded across the cluster",
+        help_template = HELP_TEMPLATE,
+        after_help = PIPELINE_AFTER_HELP
+    )]
+    Pipeline {
+        #[command(subcommand)]
+        command: PipelineCommand,
+    },
     #[command(hide = true)]
     Agent,
+}
+
+#[derive(Debug, Subcommand)]
+enum PipelineCommand {
+    #[command(
+        about = "Run an input through stacked weight layers, each column-sharded by node",
+        help_template = HELP_TEMPLATE
+    )]
+    Run {
+        #[arg(
+            short = 'f',
+            long,
+            help = "YAML model file with `input:` and `layers:` (in_dim/out_dim/seed/relu)"
+        )]
+        file: Option<PathBuf>,
+        #[arg(long, help = "Generate a deterministic model: number of layers")]
+        layers: Option<usize>,
+        #[arg(
+            long,
+            default_value_t = 512,
+            help = "Hidden dimension for generated layers (square)"
+        )]
+        dim: usize,
+        #[arg(
+            long,
+            default_value_t = 1,
+            help = "Batch size (rows of the generated input)"
+        )]
+        batch: usize,
+        #[arg(long, default_value_t = 7, help = "Seed for the generated model")]
+        seed: u64,
+        #[arg(long, help = "Print the full output activation")]
+        show_output: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1217,6 +1266,27 @@ pub async fn run() -> Result<()> {
                 .await
             }
         },
+        Command::Pipeline { command } => match command {
+            PipelineCommand::Run {
+                file,
+                layers,
+                dim,
+                batch,
+                seed,
+                show_output,
+            } => {
+                run_pipeline(
+                    &endpoint,
+                    file.as_deref(),
+                    layers,
+                    dim,
+                    batch,
+                    seed,
+                    show_output,
+                )
+                .await
+            }
+        },
     }
 }
 
@@ -1343,6 +1413,127 @@ async fn run_tensor_multiply(
         }
         Response::Error { message } => bail!(message),
         other => bail!("unexpected response to tensor multiply: {other:?}"),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct PipelineInput {
+    input: Vec<Vec<f64>>,
+    layers: Vec<protocol::LayerSpec>,
+}
+
+async fn run_pipeline(
+    endpoint: &DaemonEndpoint,
+    file: Option<&Path>,
+    layers: Option<usize>,
+    dim: usize,
+    batch: usize,
+    seed: u64,
+    show_output: bool,
+) -> Result<()> {
+    let (input, specs) = match (file, layers) {
+        (Some(path), _) => {
+            let raw = std::fs::read_to_string(path)
+                .with_context(|| format!("failed to read model file {}", path.display()))?;
+            let parsed: PipelineInput = serde_yaml::from_str(&raw)
+                .with_context(|| format!("failed to parse model file {}", path.display()))?;
+            (parsed.input, parsed.layers)
+        }
+        (None, Some(n)) => {
+            ensure!(n > 0, "--layers must be greater than zero");
+            ensure!(batch > 0, "--batch must be greater than zero");
+            // A square stack: batch x dim input through n layers of dim x dim,
+            // each with a distinct seed and ReLU between them.
+            let input = crate::matrix::deterministic_matrix(batch, dim, seed);
+            let specs = (0..n)
+                .map(|i| protocol::LayerSpec {
+                    in_dim: dim,
+                    out_dim: dim,
+                    seed: seed.wrapping_add(i as u64 + 1),
+                    relu: true,
+                })
+                .collect();
+            (input, specs)
+        }
+        (None, None) => bail!("provide either -f <file> or --layers <N>"),
+    };
+
+    let total_weights: usize = specs.iter().map(|l| l.in_dim * l.out_dim).sum();
+    println!("{}", title("Distributed Layer Pipeline"));
+    println!(
+        "{} {} layers, input {}x{}, weights ~{:.1} MB (f64)",
+        label("model"),
+        specs.len(),
+        input.len(),
+        input.first().map(|r| r.len()).unwrap_or(0),
+        (total_weights * 8) as f64 / 1_048_576.0
+    );
+    println!();
+
+    let response = endpoint
+        .request(Request::DistributedPipeline {
+            input,
+            layers: specs,
+        })
+        .await?;
+
+    match response {
+        Response::Pipeline {
+            output,
+            layers,
+            wall_ms,
+        } => {
+            for l in &layers {
+                let relu = if l.relu { " +relu" } else { "" };
+                println!(
+                    "{} {} {}x{}{} {} {}",
+                    label(&format!("layer {}", l.index)),
+                    muted("—"),
+                    l.in_dim,
+                    l.out_dim,
+                    relu,
+                    muted("took"),
+                    ok(&format!("{}ms", l.elapsed_ms))
+                );
+                for s in &l.shards {
+                    let cache_tag = if s.weight_cached {
+                        ok("[cache hit]")
+                    } else {
+                        muted("[uploaded]")
+                    };
+                    println!(
+                        "    {:<16} {:>2}c  cols {:>5}..{:<5} ({:>4})  {:>8}  {}",
+                        s.node_name,
+                        s.cpu_cores,
+                        s.col_start,
+                        s.col_start + s.cols,
+                        s.cols,
+                        muted(&format!("{}ms", s.elapsed_ms)),
+                        cache_tag
+                    );
+                }
+            }
+            println!();
+            let checksum: f64 = output.iter().flat_map(|r| r.iter()).sum();
+            println!(
+                "{} {}x{}",
+                label("output"),
+                output.len(),
+                output.first().map(|r| r.len()).unwrap_or(0)
+            );
+            println!("{} {:.6}", label("checksum (Σ)"), checksum);
+            println!("{} {}", label("wall"), ok(&format!("{wall_ms}ms")));
+            if show_output {
+                println!();
+                for row in &output {
+                    let cells: Vec<String> = row.iter().map(|v| format!("{v:8.3}")).collect();
+                    println!("  [{}]", cells.join(", "));
+                }
+            }
+            Ok(())
+        }
+        Response::Error { message } => bail!(message),
+        other => bail!("unexpected response to pipeline run: {other:?}"),
     }
 }
 
@@ -2050,6 +2241,9 @@ fn print_response(response: Response) -> Result<()> {
         }
         Response::Matmul { .. } => {
             bail!("tensor multiply results are rendered by `tensor multiply`, not print_response")
+        }
+        Response::Pipeline { .. } => {
+            bail!("pipeline results are rendered by `pipeline run`, not print_response")
         }
         Response::Error { message } => Err(anyhow!(message)),
     }
