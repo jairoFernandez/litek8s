@@ -38,6 +38,8 @@ pub enum NodeTransport {
     Ssh {
         target: String,
         remote_binary: String,
+        #[serde(default)]
+        identity_file: Option<String>,
     },
 }
 
@@ -75,6 +77,12 @@ pub enum AgentRequest {
         spoke_pubkey: PublicKey,
     },
     HostResources,
+    /// Multiply a row band of a matrix against the full right-hand matrix. The
+    /// node computes the band with its own cores and returns the result rows.
+    ComputeMatmulBand {
+        left_band: Vec<Vec<f64>>,
+        right: Vec<Vec<f64>>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +99,7 @@ pub enum AgentResponse {
         token: JoinToken,
     },
     HostResources { resources: crate::protocol::HostResources },
+    MatmulBand { rows: Vec<Vec<f64>> },
     Error { message: String },
 }
 
@@ -104,6 +113,7 @@ pub enum NodeClient {
 pub struct SshNodeClient {
     target: String,
     remote_binary: String,
+    identity_file: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +144,7 @@ impl ClusterNode {
         name: String,
         target: String,
         remote_binary: String,
+        identity_file: Option<String>,
         labels: BTreeMap<String, String>,
     ) -> Result<Self> {
         validate_node_name(&name)?;
@@ -154,6 +165,7 @@ impl ClusterNode {
             transport: NodeTransport::Ssh {
                 target,
                 remote_binary,
+                identity_file,
             },
             vpn: None,
         })
@@ -273,6 +285,7 @@ impl NodeClient {
             NodeTransport::Ssh {
                 target,
                 remote_binary,
+                identity_file,
             } => {
                 let effective = node
                     .preferred_ssh_target()
@@ -280,6 +293,7 @@ impl NodeClient {
                 Self::Ssh(SshNodeClient {
                     target: effective,
                     remote_binary: remote_binary.clone(),
+                    identity_file: identity_file.clone(),
                 })
             }
         }
@@ -301,6 +315,29 @@ impl NodeClient {
             Self::Ssh(client) => match client.request(AgentRequest::HostResources).await? {
                 AgentResponse::HostResources { resources } => Ok(resources),
                 other => bail!("unexpected agent response for host resources: {other:?}"),
+            },
+        }
+    }
+
+    /// Compute one matmul row band on this node. The local node runs it in a
+    /// blocking thread pool; an SSH node ships the band to its remote agent.
+    pub async fn compute_matmul_band(
+        &self,
+        left_band: Vec<Vec<f64>>,
+        right: Vec<Vec<f64>>,
+    ) -> Result<Vec<Vec<f64>>> {
+        match self {
+            Self::Local(_) => tokio::task::spawn_blocking(move || {
+                crate::matrix::multiply_band(&left_band, &right)
+            })
+            .await
+            .context("local matmul worker panicked")?,
+            Self::Ssh(client) => match client
+                .request(AgentRequest::ComputeMatmulBand { left_band, right })
+                .await?
+            {
+                AgentResponse::MatmulBand { rows } => Ok(rows),
+                other => bail!("unexpected agent response while computing matmul band: {other:?}"),
             },
         }
     }
@@ -479,10 +516,11 @@ impl NodeClient {
 }
 
 impl SshNodeClient {
-    pub fn new(target: String, remote_binary: String) -> Self {
+    pub fn new(target: String, remote_binary: String, identity_file: Option<String>) -> Self {
         Self {
             target,
             remote_binary,
+            identity_file,
         }
     }
 
@@ -519,11 +557,20 @@ impl SshNodeClient {
         // and agent calls multiplex over the existing socket in a few ms.
         let control_path = control_socket_path(&self.target);
 
-        let mut child = Command::new("ssh")
+        let mut command = Command::new("ssh");
+        command
             .arg("-o")
             .arg("BatchMode=yes")
             .arg("-o")
-            .arg("ConnectTimeout=5")
+            .arg("ConnectTimeout=5");
+        if let Some(identity) = self.identity_file.as_deref() {
+            command
+                .arg("-i")
+                .arg(identity)
+                .arg("-o")
+                .arg("IdentitiesOnly=yes");
+        }
+        let mut child = command
             .arg("-o")
             .arg("ControlMaster=auto")
             .arg("-o")
@@ -612,19 +659,21 @@ fn control_socket_path(target: &str) -> String {
 pub async fn install_remote_agent(
     ssh_target: &str,
     remote_binary: &str,
+    identity_file: Option<&str>,
     project_root: &Path,
 ) -> Result<RemoteInstallSummary> {
     ensure_safe_remote_path(remote_binary)?;
 
-    let build_spec = detect_remote_build_spec(ssh_target).await?;
+    let build_spec = detect_remote_build_spec(ssh_target, identity_file).await?;
     let artifact_path = build_release_artifact(project_root, &build_spec).await?;
-    ensure_remote_parent_dir(ssh_target, remote_binary).await?;
-    copy_artifact_to_remote(&artifact_path, ssh_target, remote_binary).await?;
-    mark_remote_binary_executable(ssh_target, remote_binary).await?;
+    ensure_remote_parent_dir(ssh_target, remote_binary, identity_file).await?;
+    copy_artifact_to_remote(&artifact_path, ssh_target, remote_binary, identity_file).await?;
+    mark_remote_binary_executable(ssh_target, remote_binary, identity_file).await?;
 
     let client = SshNodeClient {
         target: ssh_target.to_string(),
         remote_binary: remote_binary.to_string(),
+        identity_file: identity_file.map(str::to_string),
     };
 
     // Verify with a few retries: right after the atomic rename, the first agent
@@ -745,6 +794,14 @@ async fn handle_agent_request(
         AgentRequest::HostResources => Ok(AgentResponse::HostResources {
             resources: collect_host_resources().await?,
         }),
+        AgentRequest::ComputeMatmulBand { left_band, right } => {
+            let rows = tokio::task::spawn_blocking(move || {
+                crate::matrix::multiply_band(&left_band, &right)
+            })
+            .await
+            .context("matmul worker panicked")??;
+            Ok(AgentResponse::MatmulBand { rows })
+        }
     }
 }
 
@@ -803,8 +860,11 @@ pub fn validate_node_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-async fn detect_remote_build_spec(ssh_target: &str) -> Result<RemoteBuildSpec> {
-    let uname = run_ssh_capture(ssh_target, "uname -s -m").await?;
+async fn detect_remote_build_spec(
+    ssh_target: &str,
+    identity_file: Option<&str>,
+) -> Result<RemoteBuildSpec> {
+    let uname = run_ssh_capture(ssh_target, "uname -s -m", identity_file).await?;
     parse_remote_build_spec(&uname)
 }
 
@@ -886,9 +946,13 @@ async fn build_release_artifact(
     Ok(artifact_path)
 }
 
-async fn ensure_remote_parent_dir(ssh_target: &str, remote_binary: &str) -> Result<()> {
+async fn ensure_remote_parent_dir(
+    ssh_target: &str,
+    remote_binary: &str,
+    identity_file: Option<&str>,
+) -> Result<()> {
     let parent = remote_parent_dir(remote_binary);
-    run_ssh_status(ssh_target, &format!("mkdir -p {parent}"))
+    run_ssh_status(ssh_target, &format!("mkdir -p {parent}"), identity_file)
         .await
         .with_context(|| format!("failed to create remote directory `{parent}` on {ssh_target}"))
 }
@@ -897,33 +961,49 @@ async fn copy_artifact_to_remote(
     artifact_path: &Path,
     ssh_target: &str,
     remote_binary: &str,
+    identity_file: Option<&str>,
 ) -> Result<()> {
     // Copy to a sibling temp path, then atomically rename over the target. A
     // direct scp onto a running agent binary fails with "Text file busy"; the
     // rename swaps the inode so an in-flight agent keeps its old file.
     let staging = format!("{remote_binary}.new");
     let destination = format!("{ssh_target}:{staging}");
-    run_local_inherit(
-        "scp",
-        &[artifact_path.to_string_lossy().as_ref(), &destination],
+    let mut scp_args: Vec<String> = Vec::new();
+    if let Some(identity) = identity_file {
+        scp_args.push("-i".to_string());
+        scp_args.push(identity.to_string());
+        scp_args.push("-o".to_string());
+        scp_args.push("IdentitiesOnly=yes".to_string());
+    }
+    scp_args.push(artifact_path.to_string_lossy().into_owned());
+    scp_args.push(destination.clone());
+    let scp_args_ref: Vec<&str> = scp_args.iter().map(String::as_str).collect();
+    run_local_inherit("scp", &scp_args_ref)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to copy `{}` to {destination}",
+                artifact_path.display()
+            )
+        })?;
+
+    run_ssh_status(
+        ssh_target,
+        &format!("mv -f {staging} {remote_binary}"),
+        identity_file,
     )
     .await
     .with_context(|| {
-        format!(
-            "failed to copy `{}` to {destination}",
-            artifact_path.display()
-        )
-    })?;
-
-    run_ssh_status(ssh_target, &format!("mv -f {staging} {remote_binary}"))
-        .await
-        .with_context(|| {
-            format!("failed to install `{remote_binary}` (atomic rename) on {ssh_target}")
-        })
+        format!("failed to install `{remote_binary}` (atomic rename) on {ssh_target}")
+    })
 }
 
-async fn mark_remote_binary_executable(ssh_target: &str, remote_binary: &str) -> Result<()> {
-    run_ssh_status(ssh_target, &format!("chmod +x {remote_binary}"))
+async fn mark_remote_binary_executable(
+    ssh_target: &str,
+    remote_binary: &str,
+    identity_file: Option<&str>,
+) -> Result<()> {
+    run_ssh_status(ssh_target, &format!("chmod +x {remote_binary}"), identity_file)
         .await
         .with_context(|| format!("failed to mark `{remote_binary}` executable on {ssh_target}"))
 }
@@ -989,16 +1069,33 @@ async fn run_local_inherit(program: &str, args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-pub async fn run_ssh_capture_pub(ssh_target: &str, remote_command: &str) -> Result<String> {
-    run_ssh_capture(ssh_target, remote_command).await
+pub async fn run_ssh_capture_pub(
+    ssh_target: &str,
+    remote_command: &str,
+    identity_file: Option<&str>,
+) -> Result<String> {
+    run_ssh_capture(ssh_target, remote_command, identity_file).await
 }
 
-async fn run_ssh_capture(ssh_target: &str, remote_command: &str) -> Result<String> {
-    let output = Command::new("ssh")
+async fn run_ssh_capture(
+    ssh_target: &str,
+    remote_command: &str,
+    identity_file: Option<&str>,
+) -> Result<String> {
+    let mut command = Command::new("ssh");
+    command
         .arg("-o")
         .arg("BatchMode=yes")
         .arg("-o")
-        .arg("ConnectTimeout=5")
+        .arg("ConnectTimeout=5");
+    if let Some(identity) = identity_file {
+        command
+            .arg("-i")
+            .arg(identity)
+            .arg("-o")
+            .arg("IdentitiesOnly=yes");
+    }
+    let output = command
         .arg(ssh_target)
         .arg(remote_command)
         .stdin(Stdio::null())
@@ -1020,12 +1117,25 @@ async fn run_ssh_capture(ssh_target: &str, remote_command: &str) -> Result<Strin
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-async fn run_ssh_status(ssh_target: &str, remote_command: &str) -> Result<()> {
-    let status = Command::new("ssh")
+async fn run_ssh_status(
+    ssh_target: &str,
+    remote_command: &str,
+    identity_file: Option<&str>,
+) -> Result<()> {
+    let mut command = Command::new("ssh");
+    command
         .arg("-o")
         .arg("BatchMode=yes")
         .arg("-o")
-        .arg("ConnectTimeout=5")
+        .arg("ConnectTimeout=5");
+    if let Some(identity) = identity_file {
+        command
+            .arg("-i")
+            .arg(identity)
+            .arg("-o")
+            .arg("IdentitiesOnly=yes");
+    }
+    let status = command
         .arg(ssh_target)
         .arg(remote_command)
         .stdin(Stdio::null())
@@ -1111,6 +1221,7 @@ mod tests {
             "civo-1".to_string(),
             "ec2-user@54.1.2.3".to_string(),
             DEFAULT_REMOTE_BINARY.to_string(),
+            None,
             BTreeMap::new(),
         )
         .expect("ssh node should build");
@@ -1140,6 +1251,7 @@ mod tests {
             "civo-1".to_string(),
             "54.1.2.3".to_string(),
             DEFAULT_REMOTE_BINARY.to_string(),
+            None,
             BTreeMap::new(),
         )
         .expect("ssh node should build");
@@ -1207,6 +1319,7 @@ spec:
             "server77".to_string(),
             "server77".to_string(),
             DEFAULT_REMOTE_BINARY.to_string(),
+            None,
             BTreeMap::from([("role".to_string(), "edge".to_string())]),
         )
         .expect("ssh node should build");
@@ -1276,6 +1389,7 @@ spec:
                 "server77".to_string(),
                 "server77".to_string(),
                 DEFAULT_REMOTE_BINARY.to_string(),
+                None,
                 BTreeMap::from([("role".to_string(), "edge".to_string())]),
             )
             .expect("ssh node should build"),
@@ -1316,6 +1430,7 @@ spec:
             "server77".to_string(),
             "server77".to_string(),
             DEFAULT_REMOTE_BINARY.to_string(),
+            None,
             BTreeMap::from([("role".to_string(), "edge".to_string())]),
         )
         .expect("ssh node should build");

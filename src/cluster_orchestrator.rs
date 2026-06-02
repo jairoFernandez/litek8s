@@ -266,7 +266,7 @@ fn ensure_vpn(vpn: &ClusterVpnSpec) -> Result<bool> {
 async fn add_node<E: DaemonEndpoint>(endpoint: &E, node_spec: &ClusterNodeSpec) -> Result<()> {
     if node_spec.install {
         let project_root = current_project_root()?;
-        node::install_remote_agent(&node_spec.ssh, &node_spec.remote_binary, &project_root)
+        node::install_remote_agent(&node_spec.ssh, &node_spec.remote_binary, None, &project_root)
             .await
             .with_context(|| {
                 format!(
@@ -297,6 +297,7 @@ async fn add_node<E: DaemonEndpoint>(endpoint: &E, node_spec: &ClusterNodeSpec) 
             name: node_spec.name.clone(),
             ssh_target: node_spec.ssh.clone(),
             remote_binary: Some(node_spec.remote_binary.clone()),
+            identity_file: None,
             labels: node_spec.labels.clone(),
             vpn_ip: node_spec.vpn_ip.clone(),
         })

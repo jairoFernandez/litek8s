@@ -4,7 +4,7 @@ use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Parser, Subcommand};
 
@@ -63,6 +63,12 @@ Examples:
   litek8s top
   litek8s top --watch
   litek8s top --watch --interval-secs 1";
+
+const TENSOR_AFTER_HELP: &str = "\
+Examples:
+  litek8s tensor multiply -f examples/tensor-demo.yaml --show-result
+  litek8s tensor multiply --size 256
+  litek8s tensor multiply --size 512 --seed 7";
 
 const TREE_AFTER_HELP: &str = "\
 Examples:
@@ -366,8 +372,49 @@ enum Command {
         #[command(subcommand)]
         command: VpnCommand,
     },
+    #[command(
+        about = "Run distributed tensor (matrix) compute across the cluster nodes",
+        help_template = HELP_TEMPLATE,
+        after_help = TENSOR_AFTER_HELP
+    )]
+    Tensor {
+        #[command(subcommand)]
+        command: TensorCommand,
+    },
     #[command(hide = true)]
     Agent,
+}
+
+#[derive(Debug, Subcommand)]
+enum TensorCommand {
+    #[command(
+        about = "Multiply two matrices, fanning row bands across the cluster",
+        help_template = HELP_TEMPLATE
+    )]
+    Multiply {
+        #[arg(
+            short = 'f',
+            long,
+            help = "YAML file with `left:` and `right:` matrices (lists of number rows)"
+        )]
+        file: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Generate a deterministic NxN input instead of reading a file"
+        )]
+        size: Option<usize>,
+        #[arg(
+            long,
+            default_value_t = 42,
+            help = "Seed for --size generation (reproducible)"
+        )]
+        seed: u64,
+        #[arg(
+            long,
+            help = "Print the full result matrix (off by default for large sizes)"
+        )]
+        show_result: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -494,6 +541,12 @@ enum NodeCommand {
         )]
         remote_binary: String,
         #[arg(
+            long = "ssh-key",
+            value_name = "PATH",
+            help = "Path to the SSH private key (sets IdentitiesOnly=yes)"
+        )]
+        ssh_key: Option<String>,
+        #[arg(
             long,
             help = "VPN IPv4 of the remote node (e.g. 10.42.0.2). Once set, the daemon prefers this over the public SSH target."
         )]
@@ -541,6 +594,12 @@ enum ControlPlaneCommand {
             default_value = "~/.local/bin/litek8s"
         )]
         remote_binary: String,
+        #[arg(
+            long = "ssh-key",
+            value_name = "PATH",
+            help = "Path to the SSH private key (sets IdentitiesOnly=yes)"
+        )]
+        ssh_key: Option<String>,
     },
     #[command(about = "Show the current HA cluster status")]
     Status,
@@ -779,6 +838,7 @@ pub async fn run() -> Result<()> {
                 install,
                 labels,
                 remote_binary,
+                ssh_key,
                 vpn_ip,
             } => {
                 let labels = parse_labels(&labels)?;
@@ -791,8 +851,13 @@ pub async fn run() -> Result<()> {
                         label(&ssh),
                         muted("before node registration")
                     );
-                    let summary =
-                        node::install_remote_agent(&ssh, &remote_binary, &project_root).await?;
+                    let summary = node::install_remote_agent(
+                        &ssh,
+                        &remote_binary,
+                        ssh_key.as_deref(),
+                        &project_root,
+                    )
+                    .await?;
                     println!("{} {}", label("platform"), summary.platform_label);
                     println!("{} {}", label("artifact"), summary.artifact_path.display());
                     println!("{} {}", label("remote"), remote_binary);
@@ -803,6 +868,7 @@ pub async fn run() -> Result<()> {
                         name,
                         ssh_target: ssh,
                         remote_binary: Some(remote_binary),
+                        identity_file: ssh_key,
                         labels,
                         vpn_ip,
                     })
@@ -931,6 +997,7 @@ pub async fn run() -> Result<()> {
                 install,
                 peer_port,
                 remote_binary,
+                ssh_key,
             } => {
                 println!("{}", title("Control Plane Join"));
 
@@ -943,8 +1010,13 @@ pub async fn run() -> Result<()> {
                         label(&ssh),
                         muted("...")
                     );
-                    let summary =
-                        node::install_remote_agent(&ssh, &remote_binary, &project_root).await?;
+                    let summary = node::install_remote_agent(
+                        &ssh,
+                        &remote_binary,
+                        ssh_key.as_deref(),
+                        &project_root,
+                    )
+                    .await?;
                     println!("{} {}", label("platform"), summary.platform_label);
                     println!("{} {}", label("remote"), remote_binary);
                 }
@@ -976,6 +1048,7 @@ pub async fn run() -> Result<()> {
                 let local_ip = node::run_ssh_capture_pub(
                     &ssh,
                     &format!("ip route get {} | awk '{{for(i=1;i<=NF;i++) if($i==\"src\") print $(i+1)}}'", ssh_host),
+                    ssh_key.as_deref(),
                 )
                 .await
                 .unwrap_or_else(|_| "127.0.0.1".into());
@@ -999,6 +1072,7 @@ pub async fn run() -> Result<()> {
                 node::run_ssh_capture_pub(
                     &ssh,
                     &format!("{serve_cmd} </dev/null >/tmp/litek8s-cp.log 2>&1 & echo started"),
+                    ssh_key.as_deref(),
                 )
                 .await
                 .context("failed to start remote daemon")?;
@@ -1119,6 +1193,118 @@ pub async fn run() -> Result<()> {
             }
             VpnCommand::Complete { ip } => run_vpn_complete(&ip),
         },
+        Command::Tensor { command } => match command {
+            TensorCommand::Multiply {
+                file,
+                size,
+                seed,
+                show_result,
+            } => run_tensor_multiply(&endpoint, file.as_deref(), size, seed, show_result).await,
+        },
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct TensorInput {
+    left: Vec<Vec<f64>>,
+    right: Vec<Vec<f64>>,
+}
+
+async fn run_tensor_multiply(
+    endpoint: &DaemonEndpoint,
+    file: Option<&Path>,
+    size: Option<usize>,
+    seed: u64,
+    show_result: bool,
+) -> Result<()> {
+    let (left, right) = match (file, size) {
+        (Some(path), _) => {
+            let raw = std::fs::read_to_string(path)
+                .with_context(|| format!("failed to read tensor file {}", path.display()))?;
+            let input: TensorInput = serde_yaml::from_str(&raw)
+                .with_context(|| format!("failed to parse tensor file {}", path.display()))?;
+            (input.left, input.right)
+        }
+        (None, Some(n)) => {
+            ensure!(n > 0, "--size must be greater than zero");
+            // Square A·B so both bands and the product are NxN — easy to reason
+            // about while still scaling work with N^3.
+            let left = crate::matrix::deterministic_matrix(n, n, seed);
+            let right = crate::matrix::deterministic_matrix(n, n, seed ^ 0xABCD);
+            (left, right)
+        }
+        (None, None) => bail!("provide either -f <file> or --size <N>"),
+    };
+
+    let rows = left.len();
+    let cols = right.first().map(|r| r.len()).unwrap_or(0);
+    let shared = right.len();
+
+    println!("{}", title("Distributed Tensor Multiply"));
+    println!(
+        "{} {}x{} {} {}x{} {} {}x{}",
+        label("shapes"),
+        rows,
+        shared,
+        muted("·"),
+        shared,
+        cols,
+        muted("="),
+        rows,
+        cols
+    );
+    println!();
+
+    let response = endpoint
+        .request(Request::DistributedMatmul { left, right })
+        .await?;
+
+    match response {
+        Response::Matmul {
+            result,
+            placements,
+            wall_ms,
+        } => {
+            println!(
+                "{} {} {} {} {}",
+                label("placement"),
+                muted("— row bands fanned across"),
+                ok(&placements.len().to_string()),
+                muted("node(s), wall"),
+                ok(&format!("{wall_ms}ms"))
+            );
+            for p in &placements {
+                println!(
+                    "  {:<16} {:<6} rows {:>5}..{:<5} ({:>4})  {}",
+                    p.node_name,
+                    color_status(if p.transport == "local" {
+                        "Schedulable"
+                    } else {
+                        "Ready"
+                    }),
+                    p.start_row,
+                    p.start_row + p.rows,
+                    p.rows,
+                    muted(&format!("{}ms", p.elapsed_ms))
+                );
+            }
+            println!();
+            // Checksum lets you confirm every node agreed on the math without
+            // dumping a huge matrix; --show-result prints the full product.
+            let checksum: f64 = result.iter().flat_map(|r| r.iter()).sum();
+            println!("{} {}", label("result rows"), result.len());
+            println!("{} {:.6}", label("checksum (Σ)"), checksum);
+            if show_result {
+                println!();
+                for row in &result {
+                    let cells: Vec<String> = row.iter().map(|v| format!("{v:8.3}")).collect();
+                    println!("  [{}]", cells.join(", "));
+                }
+            }
+            Ok(())
+        }
+        Response::Error { message } => bail!(message),
+        other => bail!("unexpected response to tensor multiply: {other:?}"),
     }
 }
 
@@ -1283,7 +1469,7 @@ async fn run_vpn_join(
     };
 
     println!("Contacting hub via SSH ({ssh_target}) as `{resolved_name}`…");
-    let ssh = SshNodeClient::new(ssh_target.to_string(), remote_binary.to_string());
+    let ssh = SshNodeClient::new(ssh_target.to_string(), remote_binary.to_string(), None);
     let response = ssh
         .send_agent_request(AgentRequest::VpnAttach {
             node_name: resolved_name.clone(),
@@ -1823,6 +2009,9 @@ fn print_response(response: Response) -> Result<()> {
                 println!("{}", muted("standalone mode (HA not enabled)"));
             }
             Ok(())
+        }
+        Response::Matmul { .. } => {
+            bail!("tensor multiply results are rendered by `tensor multiply`, not print_response")
         }
         Response::Error { message } => Err(anyhow!(message)),
     }

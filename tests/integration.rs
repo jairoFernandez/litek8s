@@ -72,7 +72,7 @@ async fn apply_get_logs_and_delete_roundtrip() -> Result<()> {
 
     let top = request(&harness.socket_path, Request::Top).await?;
     match top {
-        Response::Top { daemon, items } => {
+        Response::Top { daemon, items, .. } => {
             assert!(daemon.pid > 0);
             assert!(daemon.memory_bytes > 0);
             let row = items
@@ -1040,6 +1040,7 @@ async fn spawn_server(
         socket_path: socket_path.clone(),
         state_file,
         poll_interval: Duration::from_millis(500),
+        node_resource_interval: Duration::from_secs(5),
         cleanup_orphans: false,
         peer_id: 1,
         peer_addr: "0.0.0.0:0".into(),

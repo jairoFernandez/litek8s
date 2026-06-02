@@ -5,7 +5,7 @@ use std::time::Duration;
 use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, RefreshKind, System};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{Mutex, Notify};
@@ -300,6 +300,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             name,
             ssh_target,
             remote_binary,
+            identity_file,
             labels,
             vpn_ip,
         } => {
@@ -310,6 +311,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 name.clone(),
                 ssh_target,
                 remote_binary.unwrap_or_else(|| DEFAULT_REMOTE_BINARY.to_string()),
+                identity_file,
                 labels,
             )?;
             if let Some(raw_ip) = vpn_ip.as_deref() {
@@ -339,6 +341,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 NodeTransport::Ssh {
                     target,
                     remote_binary,
+                    ..
                 } => (target.clone(), Some(remote_binary.clone())),
                 NodeTransport::Local => bail!("cannot add local node via AddNode"),
             };
@@ -716,6 +719,9 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 state: state_str,
                 members,
             })
+        }
+        Request::DistributedMatmul { left, right } => {
+            state.distributed_matmul(left, right).await
         }
         Request::JoinCluster { node_id, addr } => {
             state.ha_node.add_member(node_id, addr).await?;
@@ -1102,6 +1108,118 @@ impl AppState {
             .await
             .with_context(|| format!("node `{name}` was not found"))?;
         Ok(NodeClient::for_node(&node, self.runtime.clone()))
+    }
+
+    /// Distribute a matrix multiply across the cluster's schedulable, reachable
+    /// nodes. Splits `left` into contiguous row bands (one per node), ships each
+    /// band with the full `right` to its node concurrently, then stitches the
+    /// returned rows back in order. Mirrors how a weight matmul is sharded for
+    /// tensor parallelism — each node holds a row slice and computes it locally.
+    async fn distributed_matmul(
+        &self,
+        left: Vec<Vec<f64>>,
+        right: Vec<Vec<f64>>,
+    ) -> Result<Response> {
+        ensure!(!left.is_empty(), "left matrix cannot be empty");
+        ensure!(!right.is_empty(), "right matrix cannot be empty");
+        let shared = left[0].len();
+        ensure!(
+            left.iter().all(|row| row.len() == shared),
+            "left matrix must be rectangular"
+        );
+        ensure!(
+            right.len() == shared,
+            "dimension mismatch: left columns ({shared}) must match right rows ({})",
+            right.len()
+        );
+
+        // Only fan out to nodes that are schedulable and answer a ping. A node
+        // that's cordoned or offline is skipped so the job still completes on
+        // whatever capacity is live.
+        let all_nodes = self.store.list_nodes().await;
+        let mut targets: Vec<ClusterNode> = Vec::new();
+        for node in all_nodes {
+            if node.unschedulable {
+                continue;
+            }
+            let (status, _) = self.node_health(&node).await;
+            if status == "Ready" {
+                targets.push(node);
+            }
+        }
+        ensure!(
+            !targets.is_empty(),
+            "no schedulable, reachable node is available to compute"
+        );
+
+        // Split rows as evenly as possible: the first `remainder` nodes get one
+        // extra row. Nodes that would receive zero rows (more nodes than rows)
+        // are dropped rather than handed empty bands.
+        let total_rows = left.len();
+        let node_count = targets.len().min(total_rows);
+        let targets = &targets[..node_count];
+        let base = total_rows / node_count;
+        let remainder = total_rows % node_count;
+
+        let right = Arc::new(right);
+        let mut tasks = Vec::with_capacity(node_count);
+        let mut cursor = 0;
+        for (idx, node) in targets.iter().enumerate() {
+            let rows_here = base + if idx < remainder { 1 } else { 0 };
+            let start_row = cursor;
+            cursor += rows_here;
+            let band = left[start_row..cursor].to_vec();
+            let client = NodeClient::for_node(node, self.runtime.clone());
+            let right = Arc::clone(&right);
+            let node_name = node.name.clone();
+            let transport = node.transport_label().to_string();
+
+            tasks.push(tokio::spawn(async move {
+                let started = Instant::now();
+                let result = client
+                    .compute_matmul_band(band, (*right).clone())
+                    .await
+                    .with_context(|| format!("node `{node_name}` failed its matmul band"));
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+                (
+                    node_name,
+                    transport,
+                    start_row,
+                    rows_here,
+                    elapsed_ms,
+                    result,
+                )
+            }));
+        }
+
+        let wall_started = Instant::now();
+        let mut bands: Vec<(usize, Vec<Vec<f64>>)> = Vec::with_capacity(node_count);
+        let mut placements = Vec::with_capacity(node_count);
+        for task in tasks {
+            let (node_name, transport, start_row, rows, elapsed_ms, result) =
+                task.await.context("matmul dispatch task panicked")?;
+            let rows_out = result?;
+            placements.push(crate::protocol::MatmulPlacement {
+                node_name,
+                transport,
+                start_row,
+                rows,
+                elapsed_ms,
+            });
+            bands.push((start_row, rows_out));
+        }
+        let wall_ms = wall_started.elapsed().as_millis() as u64;
+
+        // Stitch bands back in row order regardless of which node finished first.
+        bands.sort_by_key(|(start, _)| *start);
+        placements.sort_by_key(|p| p.start_row);
+        let result: Vec<Vec<f64>> = bands.into_iter().flat_map(|(_, rows)| rows).collect();
+
+        Ok(Response::Matmul {
+            result,
+            placements,
+            wall_ms,
+        })
     }
 
     async fn node_health(&self, node: &ClusterNode) -> (String, Option<String>) {
@@ -2078,6 +2196,7 @@ spec:
             transport: NodeTransport::Ssh {
                 target: name.to_string(),
                 remote_binary: "~/.local/bin/litek8s".to_string(),
+                identity_file: None,
             },
             vpn: None,
         }

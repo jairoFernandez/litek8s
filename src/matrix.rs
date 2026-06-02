@@ -57,6 +57,42 @@ pub fn multiply_parallel(left: &[Vec<f64>], right: &[Vec<f64>]) -> Result<Matrix
     Ok(chunks.into_iter().flatten().collect())
 }
 
+/// Multiply a horizontal band of `left` (a contiguous set of rows) against the
+/// full `right` matrix. This is the unit of work shipped to a remote node: each
+/// node owns a row band, computes it with its own cores via `multiply_parallel`,
+/// and returns the resulting rows. Stitching the bands back in order reproduces
+/// the full `left · right` product — the same decomposition tensor/model
+/// parallelism uses to shard a weight matmul across machines.
+pub fn multiply_band(left_band: &[Vec<f64>], right: &[Vec<f64>]) -> Result<Matrix> {
+    if left_band.is_empty() {
+        // An empty band is legal (a node may be handed zero rows when the row
+        // count is smaller than the node count) — nothing to multiply.
+        ensure!(!right.is_empty(), "right matrix cannot be empty");
+        return Ok(Vec::new());
+    }
+    multiply_parallel(left_band, right)
+}
+
+/// Build a deterministic `rows x cols` matrix from a seed. Lets the demo stress
+/// the cluster with an arbitrarily large input (`--size N`) while keeping the
+/// result reproducible across runs and nodes — no RNG dependency, no I/O.
+pub fn deterministic_matrix(rows: usize, cols: usize, seed: u64) -> Matrix {
+    let mut state = seed ^ 0x9E37_79B9_7F4A_7C15;
+    let mut next = || {
+        // SplitMix64: cheap, well-distributed, fully reproducible.
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^= z >> 31;
+        // Map to a small signed-ish float so products stay readable.
+        (z >> 40) as f64 / 16_777_216.0 - 0.5
+    };
+    (0..rows)
+        .map(|_| (0..cols).map(|_| next()).collect())
+        .collect()
+}
+
 fn validate_dimensions(left: &[Vec<f64>], right: &[Vec<f64>]) -> Result<(usize, usize, usize)> {
     ensure!(!left.is_empty(), "left matrix cannot be empty");
     ensure!(!right.is_empty(), "right matrix cannot be empty");

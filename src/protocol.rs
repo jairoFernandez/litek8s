@@ -15,6 +15,8 @@ pub enum Request {
         name: String,
         ssh_target: String,
         remote_binary: Option<String>,
+        #[serde(default)]
+        identity_file: Option<String>,
         labels: BTreeMap<String, String>,
         #[serde(default)]
         vpn_ip: Option<String>,
@@ -73,6 +75,12 @@ pub enum Request {
         node_id: u64,
         addr: String,
     },
+    /// Multiply `left · right`, fanning row bands across the cluster's
+    /// schedulable nodes and stitching the partial results back together.
+    DistributedMatmul {
+        left: Vec<Vec<f64>>,
+        right: Vec<Vec<f64>>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -120,9 +128,25 @@ pub enum Response {
         state: String,
         members: Vec<ClusterMember>,
     },
+    Matmul {
+        result: Vec<Vec<f64>>,
+        placements: Vec<MatmulPlacement>,
+        wall_ms: u64,
+    },
     Error {
         message: String,
     },
+}
+
+/// One node's slice of a distributed matmul: which rows it owned and how long
+/// its band took (including the SSH round-trip for remote nodes).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MatmulPlacement {
+    pub node_name: String,
+    pub transport: String,
+    pub start_row: usize,
+    pub rows: usize,
+    pub elapsed_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
