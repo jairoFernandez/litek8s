@@ -531,14 +531,23 @@ impl SshNodeClient {
     async fn request(&self, request: AgentRequest) -> Result<AgentResponse> {
         let result = self.request_once(&request).await;
 
-        // A freshly-booted node can hand the ControlMaster a login session that
-        // predates the `docker` group landing in the user's session. That stale
-        // master is then pinned for the whole ControlPersist window, so every
-        // multiplexed agent call fails the Docker ping with EACCES even though
-        // the node is healthy. Detect that case, drop the master, and retry once
-        // — the reopened connection picks up the now-active group membership.
+        // Two cold-connection failure modes warrant dropping the ControlMaster
+        // and retrying once:
+        //
+        // 1. A freshly-booted node can hand the ControlMaster a login session
+        //    that predates the `docker` group landing in the user's session.
+        //    That stale master is pinned for the whole ControlPersist window,
+        //    so every multiplexed agent call fails the Docker ping with EACCES
+        //    even though the node is healthy.
+        // 2. The first call against a cold target races the ControlMaster
+        //    setup: ssh can exit 0 having multiplexed onto a half-open master,
+        //    leaving stdout empty — the agent response then fails to decode
+        //    with an EOF. The agent itself is fine (a warm retry succeeds).
+        //
+        // Both clear by reopening the connection, so collapse them into one
+        // retry path.
         if let Err(error) = &result
-            && is_docker_permission_error(error)
+            && (is_docker_permission_error(error) || is_cold_transport_error(error))
         {
             self.close_control_master().await;
             return self.request_once(&request).await;
@@ -642,6 +651,17 @@ fn is_docker_permission_error(error: &anyhow::Error) -> bool {
     let message = format!("{error:#}");
     message.contains("failed to ping the Docker daemon")
         && (message.contains("Permission denied") || message.contains("os error 13"))
+}
+
+/// True when an agent failure is the SSH transport coming up cold rather than a
+/// real agent error: ssh exited 0 but stdout was empty (the response failed to
+/// decode with an EOF), or the multiplexed channel dropped before the agent
+/// answered. Reopening the ControlMaster and retrying clears it.
+fn is_cold_transport_error(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}");
+    message.contains("failed to decode agent response")
+        && (message.contains("EOF while parsing")
+            || message.contains("line 1 column 0"))
 }
 
 /// Build a stable per-target SSH ControlPath under the temp dir. The target may
