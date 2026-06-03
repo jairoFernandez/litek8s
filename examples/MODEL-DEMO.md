@@ -81,13 +81,24 @@ The distributed inference equals a plain local forward. Verified two ways:
 | Distribute + infer | [`daemon.rs`](../src/daemon.rs) — `load_model`, `run_model` |
 | CLI | [`cli.rs`](../src/cli.rs) — `model inspect / load / list / run / rm` |
 
-## Wire format
+## Wire format and precision
 
 Weight uploads ship as a **raw binary blob** after the request line
-(`<json>\n<blob>`), not as JSON float text — 8 bytes/f64 instead of ~18 chars.
-On the 88 MB model across 7 nodes this cut cold distribution from ~250 s (JSON)
-to ~98 s, and removed the `Broken pipe` failures that large JSON payloads caused
-on weak nodes. Inference is unchanged (resident weights).
+(`<json>\n<blob>`), not as JSON float text. And weights keep their **native
+precision** on disk and over the wire: an f16/bf16 model stays 16-bit (2
+bytes/elem), dequantized to f64 only when read for compute.
+
+Measured across 7 nodes on the same 2048²×6 model:
+
+| Format | Source | Shard on node | Cold distribute |
+|--------|--------|---------------|-----------------|
+| f32, JSON wire | 88 MB | — | ~250 s |
+| f32, binary wire | 88 MB | 2.5 MB | ~98 s |
+| **f16, binary wire** | **44 MB** | **0.6 MB** | **~36 s** |
+
+~7× faster than where we started, ~6× less disk per node. Inference precision
+matches numpy at the same dtype (f16 weights give `5.314683`, f32 `5.314417` —
+the only difference is f16's rounding, verified against numpy).
 
 ## Limits / next steps
 

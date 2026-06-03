@@ -388,19 +388,26 @@ impl NodeClient {
         }
     }
 
-    /// Upload a weight matrix to this node's on-disk cache under `weight_id`.
-    pub async fn put_weights(&self, weight_id: &str, matrix: Vec<Vec<f64>>) -> Result<()> {
+    /// Upload a weight matrix to this node's on-disk cache under `weight_id`,
+    /// stored at `dtype` (e.g. F16 to keep native weight precision and a quarter
+    /// the bytes of f64).
+    pub async fn put_weights(
+        &self,
+        weight_id: &str,
+        matrix: Vec<Vec<f64>>,
+        dtype: crate::matrix::BinDtype,
+    ) -> Result<()> {
+        let blob = crate::matrix::encode_matrix_bin_dtype(&matrix, dtype)?;
         match self {
             Self::Local(_) => {
                 let path = local_weight_path(weight_id)?;
-                tokio::task::spawn_blocking(move || crate::matrix::write_matrix_bin(&path, &matrix))
+                tokio::task::spawn_blocking(move || crate::matrix::write_bin_blob(&path, &blob))
                     .await
                     .context("local weight write panicked")?
             }
             Self::Ssh(client) => {
-                // Encode the matrix to the compact bin format and ship it as a
-                // raw blob after the request — 8 bytes/f64, not ~18 chars JSON.
-                let blob = crate::matrix::encode_matrix_bin(&matrix)?;
+                // Ship the encoded blob raw after the request — native bytes, not
+                // JSON float text.
                 match client
                     .request_blob(
                         AgentRequest::PutWeights {
@@ -420,11 +427,16 @@ impl NodeClient {
 
     /// Upload the weight matrix only if the node does not already have it, then
     /// return whether it was already cached (true = cache hit, no transfer).
-    pub async fn ensure_weights(&self, weight_id: &str, matrix: &[Vec<f64>]) -> Result<bool> {
+    pub async fn ensure_weights(
+        &self,
+        weight_id: &str,
+        matrix: &[Vec<f64>],
+        dtype: crate::matrix::BinDtype,
+    ) -> Result<bool> {
         if self.has_weights(weight_id).await? {
             return Ok(true);
         }
-        self.put_weights(weight_id, matrix.to_vec()).await?;
+        self.put_weights(weight_id, matrix.to_vec(), dtype).await?;
         Ok(false)
     }
 

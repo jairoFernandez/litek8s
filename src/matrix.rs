@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail, ensure};
+use half::{bf16, f16};
 use std::path::Path;
 use std::thread;
 
@@ -7,6 +8,69 @@ pub type Matrix = Vec<Vec<f64>>;
 /// Magic prefix for the on-disk weight format, so a truncated or foreign file
 /// is rejected rather than read as garbage dimensions.
 const MATRIX_BIN_MAGIC: &[u8; 4] = b"LK8M";
+/// Format version. v2 added the dtype byte; v1 (f64-only, no version) is gone.
+const MATRIX_BIN_VERSION: u8 = 2;
+/// Header: magic(4) + version(1) + dtype(1) + rows(u64) + cols(u64).
+const MATRIX_BIN_HEADER: usize = 4 + 1 + 1 + 8 + 8;
+
+/// On-disk element type for a cached weight matrix. Weights keep their native
+/// 16-bit precision (f16/bf16) on disk and over the wire — a quarter the bytes
+/// of f64 — and are dequantized to f64 only when read for compute.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinDtype {
+    F64,
+    F32,
+    F16,
+    Bf16,
+}
+
+impl BinDtype {
+    fn code(self) -> u8 {
+        match self {
+            BinDtype::F64 => 0,
+            BinDtype::F32 => 1,
+            BinDtype::F16 => 2,
+            BinDtype::Bf16 => 3,
+        }
+    }
+
+    fn from_code(code: u8) -> Result<Self> {
+        Ok(match code {
+            0 => BinDtype::F64,
+            1 => BinDtype::F32,
+            2 => BinDtype::F16,
+            3 => BinDtype::Bf16,
+            other => bail!("unknown weight dtype code {other}"),
+        })
+    }
+
+    /// Bytes per element on disk.
+    pub fn size(self) -> usize {
+        match self {
+            BinDtype::F64 => 8,
+            BinDtype::F32 => 4,
+            BinDtype::F16 | BinDtype::Bf16 => 2,
+        }
+    }
+
+    fn encode(self, value: f64, out: &mut Vec<u8>) {
+        match self {
+            BinDtype::F64 => out.extend_from_slice(&value.to_le_bytes()),
+            BinDtype::F32 => out.extend_from_slice(&(value as f32).to_le_bytes()),
+            BinDtype::F16 => out.extend_from_slice(&f16::from_f64(value).to_le_bytes()),
+            BinDtype::Bf16 => out.extend_from_slice(&bf16::from_f64(value).to_le_bytes()),
+        }
+    }
+
+    fn decode(self, bytes: &[u8]) -> f64 {
+        match self {
+            BinDtype::F64 => f64::from_le_bytes(bytes.try_into().unwrap()),
+            BinDtype::F32 => f64::from(f32::from_le_bytes(bytes.try_into().unwrap())),
+            BinDtype::F16 => f64::from(f16::from_le_bytes(bytes.try_into().unwrap()).to_f32()),
+            BinDtype::Bf16 => f64::from(bf16::from_le_bytes(bytes.try_into().unwrap()).to_f32()),
+        }
+    }
+}
 
 pub fn multiply_sequential(left: &[Vec<f64>], right: &[Vec<f64>]) -> Result<Matrix> {
     let (rows, cols, shared) = validate_dimensions(left, right)?;
@@ -228,10 +292,10 @@ pub fn matrix_id(matrix: &[Vec<f64>]) -> String {
     format!("{hash:016x}")
 }
 
-/// Serialize a matrix to the compact binary format: magic + rows/cols (u64 LE)
-/// + row-major f64 LE values. Far cheaper than JSON for the large weight
-/// matrices the cache holds (8 bytes/f64 vs ~18 chars as JSON text).
-pub fn encode_matrix_bin(matrix: &[Vec<f64>]) -> Result<Vec<u8>> {
+/// Serialize a matrix to the compact binary format at the given dtype: magic +
+/// version + dtype + rows/cols (u64 LE) + row-major values at that dtype. Far
+/// cheaper than JSON; f16/bf16 also quarter the bytes vs f64.
+pub fn encode_matrix_bin_dtype(matrix: &[Vec<f64>], dtype: BinDtype) -> Result<Vec<u8>> {
     let rows = matrix.len();
     let cols = matrix.first().map(|r| r.len()).unwrap_or(0);
     ensure!(
@@ -239,41 +303,62 @@ pub fn encode_matrix_bin(matrix: &[Vec<f64>]) -> Result<Vec<u8>> {
         "cannot serialize a ragged matrix"
     );
 
-    let mut buf = Vec::with_capacity(20 + rows * cols * 8);
+    let mut buf = Vec::with_capacity(MATRIX_BIN_HEADER + rows * cols * dtype.size());
     buf.extend_from_slice(MATRIX_BIN_MAGIC);
+    buf.push(MATRIX_BIN_VERSION);
+    buf.push(dtype.code());
     buf.extend_from_slice(&(rows as u64).to_le_bytes());
     buf.extend_from_slice(&(cols as u64).to_le_bytes());
     for row in matrix {
         for value in row {
-            buf.extend_from_slice(&value.to_le_bytes());
+            dtype.encode(*value, &mut buf);
         }
     }
     Ok(buf)
 }
 
-/// Encode and write a matrix to disk atomically.
+/// Encode a matrix at full f64 precision (default for non-weight matrices).
+pub fn encode_matrix_bin(matrix: &[Vec<f64>]) -> Result<Vec<u8>> {
+    encode_matrix_bin_dtype(matrix, BinDtype::F64)
+}
+
+/// Encode and write a matrix to disk atomically (f64).
 pub fn write_matrix_bin(path: &Path, matrix: &[Vec<f64>]) -> Result<()> {
     let buf = encode_matrix_bin(matrix)?;
     write_bytes_atomic(path, &buf)
 }
 
-/// Write an already-encoded bin blob to disk, validating its header and that the
-/// declared dimensions match the payload length so a corrupt or truncated upload
-/// is rejected before it lands. Used on the agent side where the blob arrives
-/// raw over the wire.
-pub fn write_bin_blob(path: &Path, bytes: &[u8]) -> Result<()> {
-    ensure!(bytes.len() >= 20, "weight blob is truncated");
+/// Parse and validate a bin blob's header, returning (dtype, rows, cols) and the
+/// expected total length. Rejects bad magic, unknown version, or a length that
+/// does not match the declared dimensions.
+fn parse_bin_header(bytes: &[u8]) -> Result<(BinDtype, usize, usize, usize)> {
+    ensure!(bytes.len() >= MATRIX_BIN_HEADER, "weight blob is truncated");
     ensure!(
         &bytes[0..4] == MATRIX_BIN_MAGIC,
         "weight blob has an unrecognized format"
     );
-    let rows = u64::from_le_bytes(bytes[4..12].try_into().unwrap()) as usize;
-    let cols = u64::from_le_bytes(bytes[12..20].try_into().unwrap()) as usize;
     ensure!(
-        bytes.len() == 20 + rows * cols * 8,
-        "weight blob length {} does not match {rows}x{cols}",
-        bytes.len()
+        bytes[4] == MATRIX_BIN_VERSION,
+        "weight blob version {} is unsupported",
+        bytes[4]
     );
+    let dtype = BinDtype::from_code(bytes[5])?;
+    let rows = u64::from_le_bytes(bytes[6..14].try_into().unwrap()) as usize;
+    let cols = u64::from_le_bytes(bytes[14..22].try_into().unwrap()) as usize;
+    let expected = MATRIX_BIN_HEADER + rows * cols * dtype.size();
+    ensure!(
+        bytes.len() == expected,
+        "weight blob length {} does not match {rows}x{cols} {:?}",
+        bytes.len(),
+        dtype
+    );
+    Ok((dtype, rows, cols, expected))
+}
+
+/// Write an already-encoded bin blob to disk, validating its header. Used on the
+/// agent side where the blob arrives raw over the wire.
+pub fn write_bin_blob(path: &Path, bytes: &[u8]) -> Result<()> {
+    parse_bin_header(bytes)?;
     write_bytes_atomic(path, bytes)
 }
 
@@ -292,36 +377,22 @@ fn write_bytes_atomic(path: &Path, buf: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Read a matrix written by [`write_matrix_bin`], validating the magic and that
-/// the declared dimensions match the payload length.
+/// Read a matrix written by [`write_matrix_bin`] / [`write_bin_blob`],
+/// dequantizing whatever on-disk dtype it holds to f64 for compute.
 pub fn read_matrix_bin(path: &Path) -> Result<Matrix> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("failed to read weight file {}", path.display()))?;
-    ensure!(bytes.len() >= 20, "weight file {} is truncated", path.display());
-    ensure!(
-        &bytes[0..4] == MATRIX_BIN_MAGIC,
-        "weight file {} has an unrecognized format",
-        path.display()
-    );
+    let (dtype, rows, cols, _) = parse_bin_header(&bytes)
+        .with_context(|| format!("invalid weight file {}", path.display()))?;
 
-    let rows = u64::from_le_bytes(bytes[4..12].try_into().unwrap()) as usize;
-    let cols = u64::from_le_bytes(bytes[12..20].try_into().unwrap()) as usize;
-    let expected = 20 + rows * cols * 8;
-    ensure!(
-        bytes.len() == expected,
-        "weight file {} length {} does not match {rows}x{cols}",
-        path.display(),
-        bytes.len()
-    );
-
+    let size = dtype.size();
     let mut matrix = Vec::with_capacity(rows);
-    let mut offset = 20;
+    let mut offset = MATRIX_BIN_HEADER;
     for _ in 0..rows {
         let mut row = Vec::with_capacity(cols);
         for _ in 0..cols {
-            let value = f64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap());
-            row.push(value);
-            offset += 8;
+            row.push(dtype.decode(&bytes[offset..offset + size]));
+            offset += size;
         }
         matrix.push(row);
     }

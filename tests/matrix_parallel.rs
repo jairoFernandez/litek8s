@@ -1,7 +1,7 @@
 use litek8s::matrix::{
-    apply_relu, columns, deterministic_matrix, encode_matrix_bin, matrix_id, multiply_band,
-    multiply_column_shard, multiply_parallel, multiply_sequential, read_matrix_bin,
-    validate_weight_id, weighted_split, write_bin_blob, write_matrix_bin,
+    apply_relu, columns, deterministic_matrix, encode_matrix_bin, encode_matrix_bin_dtype,
+    matrix_id, multiply_band, multiply_column_shard, multiply_parallel, multiply_sequential,
+    read_matrix_bin, validate_weight_id, weighted_split, write_bin_blob, write_matrix_bin, BinDtype,
 };
 
 #[test]
@@ -103,6 +103,32 @@ fn encoded_blob_writes_and_reads_back() {
     // A truncated or foreign blob is rejected, not written as garbage.
     assert!(write_bin_blob(&path, b"too short").is_err());
     assert!(write_bin_blob(&path, &blob[..blob.len() - 8]).is_err());
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn f16_and_bf16_storage_roundtrip_within_tolerance() {
+    // Storing at 16-bit and reading back loses precision but stays close, and
+    // the byte size is a quarter of f64.
+    let matrix = deterministic_matrix(6, 5, 2);
+    let dir = std::env::temp_dir().join(format!("litek8s-f16-test-{}", std::process::id()));
+    for (dtype, tol, per_elem) in [
+        (BinDtype::F16, 1e-2, 2),
+        (BinDtype::Bf16, 5e-2, 2),
+        (BinDtype::F32, 1e-6, 4),
+    ] {
+        let blob = encode_matrix_bin_dtype(&matrix, dtype).unwrap();
+        // header(22) + rows*cols*per_elem
+        assert_eq!(blob.len(), 22 + 6 * 5 * per_elem);
+        let path = dir.join(format!("{per_elem}.bin"));
+        write_bin_blob(&path, &blob).unwrap();
+        let back = read_matrix_bin(&path).unwrap();
+        for (r0, r1) in matrix.iter().zip(back.iter()) {
+            for (a, b) in r0.iter().zip(r1.iter()) {
+                assert!((a - b).abs() <= tol, "{dtype:?}: {a} vs {b}");
+            }
+        }
+    }
     std::fs::remove_dir_all(&dir).ok();
 }
 

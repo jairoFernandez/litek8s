@@ -1244,7 +1244,10 @@ impl AppState {
                     Some(id) => {
                         // Upload `right` only if the node lacks it, then compute
                         // against the cached copy — no per-band transfer.
-                        match client.ensure_weights(id, &right).await {
+                        match client
+                            .ensure_weights(id, &right, crate::matrix::BinDtype::F64)
+                            .await
+                        {
                             Ok(cached) => {
                                 let result = client
                                     .compute_matmul_band_cached(band, id)
@@ -1405,7 +1408,9 @@ impl AppState {
                 tasks.push(tokio::spawn(async move {
                     let started = Instant::now();
                     let outcome = async {
-                        let cached = client.ensure_weights(&weight_id, &shard).await?;
+                        let cached = client
+                            .ensure_weights(&weight_id, &shard, crate::matrix::BinDtype::F64)
+                            .await?;
                         let out = client
                             .compute_layer_shard_cached((*act).clone(), &weight_id, relu)
                             .await?;
@@ -1541,6 +1546,10 @@ impl AppState {
             let weights: Vec<u32> = targets.iter().map(|(_, c)| *c).collect();
             let splits = crate::matrix::weighted_split(out_dim, &weights);
 
+            // Keep the weight's native precision on disk and over the wire.
+            let dtype = crate::model::storage_dtype(&info.dtype);
+            let bytes_per_elem = dtype.size() as u64;
+
             let mut shard_manifests = Vec::new();
             // Upload every shard of this layer concurrently — a t3.micro takes
             // seconds per multi-MB shard, so serial uploads of 7 nodes x 6
@@ -1563,16 +1572,19 @@ impl AppState {
                 // Content-addressed only: identical weights are cached once and
                 // shared across models/layers, so a re-load is a true cache hit.
                 let weight_id = crate::matrix::matrix_id(&shard);
-                let bytes = (cols_here as u64) * (in_dim as u64) * 8;
+                let bytes = (cols_here as u64) * (in_dim as u64) * bytes_per_elem;
                 let client = NodeClient::for_node(node, self.runtime.clone());
                 let node_name = node.name.clone();
                 let cores = *cores;
 
                 upload_tasks.push(tokio::spawn(async move {
                     let started = Instant::now();
-                    let result = client.ensure_weights(&weight_id, &shard).await.with_context(
-                        || format!("failed to upload layer {index} shard to `{node_name}`"),
-                    );
+                    let result = client
+                        .ensure_weights(&weight_id, &shard, dtype)
+                        .await
+                        .with_context(|| {
+                            format!("failed to upload layer {index} shard to `{node_name}`")
+                        });
                     let elapsed_ms = started.elapsed().as_millis() as u64;
                     (node_name, cores, col_start, cols_here, weight_id, bytes, elapsed_ms, result)
                 }));

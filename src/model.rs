@@ -112,6 +112,19 @@ pub fn load_tensor_2d(path: &Path, name: &str) -> Result<Matrix> {
         .collect())
 }
 
+/// Map a safetensors dtype string to the cache's storage dtype, so weights keep
+/// their native precision (f16/bf16) on disk and over the wire instead of being
+/// inflated to f64. f32/f64 stay as-is; quantized integer formats are not
+/// handled here (they reach this path already rejected by the decoder).
+pub fn storage_dtype(dtype: &str) -> crate::matrix::BinDtype {
+    match dtype {
+        "F16" => crate::matrix::BinDtype::F16,
+        "BF16" => crate::matrix::BinDtype::Bf16,
+        "F32" => crate::matrix::BinDtype::F32,
+        _ => crate::matrix::BinDtype::F64,
+    }
+}
+
 /// Read a column band of a named 2D weight tensor as column-major rows — i.e.
 /// `cols` vectors of length `in_dim`, ready to cache as a node's shard. Loads
 /// one layer's tensor at a time (never the whole model), then slices out just
