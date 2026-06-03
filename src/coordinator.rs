@@ -84,6 +84,47 @@ pub struct DistModel {
     pub layers: Vec<DistLayer>,
 }
 
+/// The persistable part of a distributed model: everything except the big
+/// embedding table. Small (KB-MB: config, norm/bias vectors, shard manifests),
+/// so writing/reading it is instant — the embedding is re-read from the model
+/// file's mmap at generate time (one tensor, not all 290). This lets `preload`
+/// pay the ~28s distribution once and later `generate` runs start cold in ~1s.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DistManifest {
+    pub cfg: LlmConfigDump,
+    pub final_norm: Vec<f64>,
+    pub layers: Vec<DistLayer>,
+}
+
+impl DistModel {
+    /// Split into a persistable manifest (drops the embedding) — paired with
+    /// `from_manifest` which re-attaches the embedding from the model file.
+    pub fn into_manifest(self) -> DistManifest {
+        DistManifest {
+            cfg: self.cfg,
+            final_norm: self.final_norm,
+            layers: self.layers,
+        }
+    }
+
+    /// Rebuild a runnable model from a manifest plus the embedding read fresh
+    /// from the model file (mmap, one tensor).
+    pub fn from_manifest(manifest: DistManifest, model_path: &std::path::Path) -> Result<Self> {
+        let file = crate::model::ModelFile::open(model_path)?;
+        let (vocab, hidden, f16_bytes) = file.tensor_2d_f16("model.embed_tokens.weight")?;
+        Ok(Self {
+            cfg: manifest.cfg,
+            embed: EmbedTable {
+                vocab,
+                hidden,
+                f16_bytes,
+            },
+            final_norm: manifest.final_norm,
+            layers: manifest.layers,
+        })
+    }
+}
+
 /// Plain-data copy of the bits of LlmConfig the coordinator forward needs
 /// (LlmConfig isn't Serialize; this is, so the whole DistModel can be persisted
 /// or shipped).

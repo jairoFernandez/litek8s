@@ -452,6 +452,22 @@ enum LlmCommand {
         prompt: String,
         #[arg(long, default_value_t = 8, help = "Max new tokens to generate")]
         max_new: usize,
+        #[arg(long, help = "Write a manifest here so later runs skip distribution")]
+        save_manifest: Option<PathBuf>,
+    },
+    #[command(
+        about = "Generate from a preloaded distributed model (skips the cold distribution)",
+        help_template = HELP_TEMPLATE
+    )]
+    Preloaded {
+        #[arg(long, help = "Model directory (for tokenizer + embedding)")]
+        model_dir: PathBuf,
+        #[arg(long, help = "Manifest written by `llm distributed --save-manifest`")]
+        manifest: PathBuf,
+        #[arg(help = "Prompt text")]
+        prompt: String,
+        #[arg(long, default_value_t = 8, help = "Max new tokens to generate")]
+        max_new: usize,
     },
 }
 
@@ -1415,7 +1431,17 @@ pub async fn run() -> Result<()> {
                 peers,
                 prompt,
                 max_new,
-            } => run_llm_distributed(&model_dir, &peers, &prompt, max_new).await,
+                save_manifest,
+            } => {
+                run_llm_distributed(&model_dir, &peers, &prompt, max_new, save_manifest.as_deref())
+                    .await
+            }
+            LlmCommand::Preloaded {
+                model_dir,
+                manifest,
+                prompt,
+                max_new,
+            } => run_llm_preloaded(&model_dir, &manifest, &prompt, max_new).await,
         },
         Command::Model { command } => match command {
             ModelCommand::Inspect { file } => run_model_inspect(&file),
@@ -1658,8 +1684,8 @@ async fn run_llm_distributed(
     peers: &[String],
     prompt: &str,
     max_new: usize,
+    save_manifest: Option<&Path>,
 ) -> Result<()> {
-    use std::io::Write;
     use std::time::Instant;
 
     ensure!(!peers.is_empty(), "need at least one --peers IP");
@@ -1687,11 +1713,56 @@ async fn run_llm_distributed(
         muted(&format!("{}ms", t0.elapsed().as_millis()))
     );
 
+    // Optionally persist the manifest so later `llm preloaded` runs skip the
+    // cold distribution entirely.
+    if let Some(path) = save_manifest {
+        let manifest = model.clone().into_manifest();
+        let json = serde_json::to_vec(&manifest).context("failed to serialize manifest")?;
+        std::fs::write(path, json)
+            .with_context(|| format!("failed to write manifest {}", path.display()))?;
+        println!("{} manifest saved to {}", ok("ok"), path.display());
+    }
+
+    generate_distributed(&model, &tokenizer, prompt, max_new).await
+}
+
+async fn run_llm_preloaded(
+    model_dir: &Path,
+    manifest_path: &Path,
+    prompt: &str,
+    max_new: usize,
+) -> Result<()> {
+    println!("{}", title("Preloaded Distributed LLM"));
+    println!("{} {}", label("manifest"), manifest_path.display());
+    println!("{} {}", label("prompt"), prompt);
+
+    let tokenizer = tokenizers::Tokenizer::from_file(model_dir.join("tokenizer.json"))
+        .map_err(|e| anyhow!("failed to load tokenizer: {e}"))?;
+    let raw = std::fs::read(manifest_path)
+        .with_context(|| format!("failed to read manifest {}", manifest_path.display()))?;
+    let manifest: crate::coordinator::DistManifest =
+        serde_json::from_slice(&raw).context("failed to parse manifest")?;
+    // Re-attach the embedding from the model file (mmap, one tensor) — no cold
+    // distribution; the peers already hold the sharded weights in RAM.
+    let model =
+        crate::coordinator::DistModel::from_manifest(manifest, &model_dir.join("model.safetensors"))?;
+
+    generate_distributed(&model, &tokenizer, prompt, max_new).await
+}
+
+/// Greedy autoregressive generation over a distributed model, streaming tokens.
+async fn generate_distributed(
+    model: &crate::coordinator::DistModel,
+    tokenizer: &tokenizers::Tokenizer,
+    prompt: &str,
+    max_new: usize,
+) -> Result<()> {
+    use std::io::Write;
+
     let enc = tokenizer
         .encode(prompt, false)
         .map_err(|e| anyhow!("tokenize failed: {e}"))?;
     let mut tokens: Vec<u32> = enc.get_ids().to_vec();
-    let start = tokens.len();
 
     print!("\n{prompt}");
     std::io::stdout().flush().ok();
@@ -1705,7 +1776,6 @@ async fn run_llm_distributed(
         }
     }
     println!();
-    let _ = start;
     Ok(())
 }
 
