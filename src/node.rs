@@ -826,6 +826,9 @@ fn is_transient_ssh_error(error: &anyhow::Error) -> bool {
         || message.contains("Connection closed")
         || message.contains("Connection timed out")
         || message.contains("kex_exchange_identification")
+        // ssh died mid-upload before reading all of stdin — common when many
+        // large PutWeights payloads hit one host at once and it drops a session.
+        || message.contains("Broken pipe")
 }
 
 /// Build a stable per-target SSH ControlPath. Unix domain sockets cap the path

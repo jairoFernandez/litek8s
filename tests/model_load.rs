@@ -1,4 +1,4 @@
-use litek8s::model::{inspect, load_tensor_2d};
+use litek8s::model::{inspect, load_layer_column_shard, load_tensor_2d};
 use safetensors::tensor::{serialize, Dtype, TensorView};
 use std::collections::HashMap;
 
@@ -72,5 +72,17 @@ fn loads_f16_tensor_upcast_to_f64() {
 fn rejects_missing_tensor() {
     let path = write_fixture("missing");
     assert!(load_tensor_2d(&path, "nope").is_err());
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn column_shard_extracts_correct_columns_column_major() {
+    // w32 is 2x3: [[1,-2,3.5],[0,-0.25,4]]. A shard of columns 1..3 returns
+    // column-major rows: column 1 then column 2.
+    let path = write_fixture("shard");
+    let shard = load_layer_column_shard(&path, "w32", 1, 2).unwrap();
+    assert_eq!(shard, vec![vec![-2.0, -0.25], vec![3.5, 4.0]]);
+    // Out-of-range band is rejected.
+    assert!(load_layer_column_shard(&path, "w32", 2, 2).is_err());
     std::fs::remove_file(&path).ok();
 }

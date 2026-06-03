@@ -71,6 +71,8 @@ pub struct StateFile {
     #[serde(default)]
     pub nodes: BTreeMap<String, ClusterNode>,
     #[serde(default)]
+    pub models: BTreeMap<String, crate::model::ModelManifest>,
+    #[serde(default)]
     pub events: Vec<StoredEvent>,
     #[serde(default)]
     pub next_event_id: u64,
@@ -336,6 +338,35 @@ impl Store {
     pub async fn list_nodes(&self) -> Vec<ClusterNode> {
         let guard = self.state.read().await;
         guard.nodes.values().cloned().collect()
+    }
+
+    pub async fn upsert_model(&self, model: crate::model::ModelManifest) -> Result<()> {
+        let mut guard = self.state.write().await;
+        guard.models.insert(model.name.clone(), model);
+        let snapshot = guard.clone();
+        drop(guard);
+        self.persist(&snapshot).await
+    }
+
+    pub async fn get_model(&self, name: &str) -> Option<crate::model::ModelManifest> {
+        let guard = self.state.read().await;
+        guard.models.get(name).cloned()
+    }
+
+    pub async fn list_models(&self) -> Vec<crate::model::ModelManifest> {
+        let guard = self.state.read().await;
+        guard.models.values().cloned().collect()
+    }
+
+    pub async fn delete_model(&self, name: &str) -> Result<bool> {
+        let mut guard = self.state.write().await;
+        if guard.models.remove(name).is_none() {
+            return Ok(false);
+        }
+        let snapshot = guard.clone();
+        drop(guard);
+        self.persist(&snapshot).await?;
+        Ok(true)
     }
 
     pub async fn set_node_vpn(

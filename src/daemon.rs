@@ -733,6 +733,51 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
         Request::DistributedPipeline { input, layers } => {
             state.distributed_pipeline(input, layers).await
         }
+        Request::LoadModel {
+            name,
+            file_path,
+            layers,
+        } => state.load_model(name, file_path, layers).await,
+        Request::ListModels => {
+            let models = state.store.list_models().await;
+            let items = models
+                .into_iter()
+                .map(|m| {
+                    let mut nodes: Vec<String> = m
+                        .layers
+                        .iter()
+                        .flat_map(|l| l.shards.iter().map(|s| s.node_name.clone()))
+                        .collect();
+                    nodes.sort();
+                    nodes.dedup();
+                    let total_params: u128 = m
+                        .layers
+                        .iter()
+                        .map(|l| l.in_dim as u128 * l.out_dim as u128)
+                        .sum();
+                    crate::protocol::ModelSummary {
+                        input_dim: m.layers.first().map(|l| l.in_dim).unwrap_or(0),
+                        output_dim: m.layers.last().map(|l| l.out_dim).unwrap_or(0),
+                        layers: m.layers.len(),
+                        total_params,
+                        nodes,
+                        name: m.name,
+                    }
+                })
+                .collect();
+            Ok(Response::Models { items })
+        }
+        Request::DeleteModel { name } => {
+            let removed = state.store.delete_model(&name).await?;
+            if removed {
+                Ok(Response::Ack {
+                    message: format!("model/{name} deleted"),
+                })
+            } else {
+                bail!("model `{name}` not found")
+            }
+        }
+        Request::RunModel { name, input } => state.run_model(name, input).await,
         Request::JoinCluster { node_id, addr } => {
             state.ha_node.add_member(node_id, addr).await?;
             Ok(Response::Ack {
@@ -1421,6 +1466,276 @@ impl AppState {
             output: activation,
             layers: layer_reports,
             wall_ms,
+        })
+    }
+
+    /// Reachable, schedulable nodes paired with their CPU-core weight, for
+    /// CPU-proportional sharding.
+    async fn ready_targets_with_cores(&self) -> Vec<(ClusterNode, u32)> {
+        let mut targets = Vec::new();
+        for node in self.store.list_nodes().await {
+            if node.unschedulable {
+                continue;
+            }
+            let (status, _) = self.node_health(&node).await;
+            if status != "Ready" {
+                continue;
+            }
+            let cores = self
+                .collect_node_resources(&node)
+                .await
+                .map(|r| r.cpu_cores.max(1))
+                .unwrap_or(1);
+            targets.push((node, cores));
+        }
+        targets
+    }
+
+    /// Distribute a safetensors model across the cluster. For each layer, read
+    /// its tensor's dimensions, split the columns across nodes by CPU weight,
+    /// read each node's column shard from the file (one layer at a time — the
+    /// whole model never lives in memory at once), upload it to the node's cache
+    /// (skipping nodes that already hold it), and record a manifest.
+    async fn load_model(
+        &self,
+        name: String,
+        file_path: String,
+        layers: Vec<crate::protocol::ModelLayerSpec>,
+    ) -> Result<Response> {
+        ensure!(!layers.is_empty(), "model needs at least one layer");
+        let path = std::path::PathBuf::from(&file_path);
+        let infos = crate::model::inspect(&path)?;
+
+        let targets = self.ready_targets_with_cores().await;
+        ensure!(
+            !targets.is_empty(),
+            "no schedulable, reachable node is available to hold the model"
+        );
+
+        let wall_started = Instant::now();
+        let mut layer_manifests = Vec::with_capacity(layers.len());
+        let mut layer_reports = Vec::with_capacity(layers.len());
+        let mut prev_out: Option<usize> = None;
+
+        for (index, spec) in layers.iter().enumerate() {
+            let info = infos
+                .iter()
+                .find(|i| i.name == spec.tensor)
+                .with_context(|| format!("tensor `{}` not found in model file", spec.tensor))?;
+            ensure!(
+                info.shape.len() == 2,
+                "tensor `{}` is not 2D",
+                spec.tensor
+            );
+            let in_dim = info.shape[0];
+            let out_dim = info.shape[1];
+            if let Some(prev) = prev_out {
+                ensure!(
+                    prev == in_dim,
+                    "layer {index} tensor `{}` in_dim {in_dim} does not match previous out_dim {prev}",
+                    spec.tensor
+                );
+            }
+            prev_out = Some(out_dim);
+
+            let weights: Vec<u32> = targets.iter().map(|(_, c)| *c).collect();
+            let splits = crate::matrix::weighted_split(out_dim, &weights);
+
+            let mut shard_manifests = Vec::new();
+            let mut shard_reports = Vec::new();
+            let mut col_cursor = 0;
+            for ((node, cores), cols_here) in targets.iter().zip(splits.iter().copied()) {
+                let col_start = col_cursor;
+                col_cursor += cols_here;
+                if cols_here == 0 {
+                    continue;
+                }
+                // Read just this node's columns from the file (column-major).
+                let shard = crate::model::load_layer_column_shard(
+                    &path,
+                    &spec.tensor,
+                    col_start,
+                    cols_here,
+                )?;
+                let weight_id = format!(
+                    "model-{name}-l{index}-{}",
+                    crate::matrix::matrix_id(&shard)
+                );
+                let bytes = (cols_here as u64) * (in_dim as u64) * 8;
+                let client = NodeClient::for_node(node, self.runtime.clone());
+                let started = Instant::now();
+                let already_cached = client
+                    .ensure_weights(&weight_id, &shard)
+                    .await
+                    .with_context(|| {
+                        format!("failed to upload layer {index} shard to `{}`", node.name)
+                    })?;
+                let elapsed_ms = started.elapsed().as_millis() as u64;
+
+                shard_manifests.push(crate::model::ShardManifest {
+                    node_name: node.name.clone(),
+                    weight_id,
+                    col_start,
+                    cols: cols_here,
+                });
+                shard_reports.push(crate::protocol::ModelShardReport {
+                    node_name: node.name.clone(),
+                    cpu_cores: *cores,
+                    col_start,
+                    cols: cols_here,
+                    bytes,
+                    already_cached,
+                    elapsed_ms,
+                });
+            }
+
+            layer_manifests.push(crate::model::LayerManifest {
+                index,
+                tensor: spec.tensor.clone(),
+                in_dim,
+                out_dim,
+                relu: spec.relu,
+                shards: shard_manifests,
+            });
+            layer_reports.push(crate::protocol::ModelLayerReport {
+                index,
+                tensor: spec.tensor.clone(),
+                in_dim,
+                out_dim,
+                shards: shard_reports,
+            });
+        }
+
+        let manifest = crate::model::ModelManifest {
+            name: name.clone(),
+            layers: layer_manifests,
+        };
+        self.store.upsert_model(manifest).await?;
+        self.record_event(NewEvent {
+            level: EventLevel::Normal,
+            reason: "ModelLoaded".to_string(),
+            object_kind: "model".to_string(),
+            object_name: name.clone(),
+            node_name: None,
+            message: format!("model distributed across {} nodes", targets.len()),
+        })
+        .await?;
+
+        Ok(Response::ModelLoaded {
+            name,
+            layers: layer_reports,
+            wall_ms: wall_started.elapsed().as_millis() as u64,
+        })
+    }
+
+    /// Run an input through a loaded model's resident weights: for each layer,
+    /// fan the activation out to the nodes holding that layer's column shards,
+    /// concatenate the results, apply ReLU, and feed the next layer. The weights
+    /// are already cached on the nodes — nothing is generated or re-uploaded.
+    async fn run_model(&self, name: String, input: Vec<Vec<f64>>) -> Result<Response> {
+        let manifest = self
+            .store
+            .get_model(&name)
+            .await
+            .with_context(|| format!("model `{name}` is not loaded"))?;
+        ensure!(!input.is_empty(), "input activation cannot be empty");
+        let in_width = input[0].len();
+        ensure!(
+            manifest.input_dim() == Some(in_width),
+            "input width ({in_width}) must match model input dim ({:?})",
+            manifest.input_dim()
+        );
+
+        // Resolve each shard's node client once, erroring clearly if a node that
+        // holds part of the model is gone.
+        let nodes = self.store.list_nodes().await;
+        let wall_started = Instant::now();
+        let mut activation = input;
+        let mut layer_reports = Vec::with_capacity(manifest.layers.len());
+
+        for layer in &manifest.layers {
+            let act = Arc::new(activation);
+            let rows = act.len();
+            let layer_started = Instant::now();
+            let mut tasks = Vec::new();
+            for shard in &layer.shards {
+                let node = nodes
+                    .iter()
+                    .find(|n| n.name == shard.node_name)
+                    .with_context(|| {
+                        format!(
+                            "node `{}` holding a shard of model `{name}` is no longer registered",
+                            shard.node_name
+                        )
+                    })?;
+                let client = NodeClient::for_node(node, self.runtime.clone());
+                let act = Arc::clone(&act);
+                let node_name = shard.node_name.clone();
+                let transport = node.transport_label().to_string();
+                let weight_id = shard.weight_id.clone();
+                let col_start = shard.col_start;
+                let cols = shard.cols;
+                let relu = layer.relu;
+                let cores = 0u32;
+                let index = layer.index;
+
+                tasks.push(tokio::spawn(async move {
+                    let started = Instant::now();
+                    let result = client
+                        .compute_layer_shard_cached((*act).clone(), &weight_id, relu)
+                        .await
+                        .with_context(|| {
+                            format!("node `{node_name}` failed model layer {index} shard")
+                        });
+                    let elapsed_ms = started.elapsed().as_millis() as u64;
+                    (
+                        node_name, transport, cores, col_start, cols, elapsed_ms, result,
+                    )
+                }));
+            }
+
+            let mut shards: Vec<(usize, Vec<Vec<f64>>)> = Vec::new();
+            let mut placements = Vec::new();
+            for task in tasks {
+                let (node_name, transport, cpu_cores, col_start, cols, elapsed_ms, result) =
+                    task.await.context("model shard task panicked")?;
+                let out = result?;
+                placements.push(crate::protocol::ShardPlacement {
+                    node_name,
+                    transport,
+                    cpu_cores,
+                    col_start,
+                    cols,
+                    weight_cached: true,
+                    elapsed_ms,
+                });
+                shards.push((col_start, out));
+            }
+            shards.sort_by_key(|(start, _)| *start);
+            placements.sort_by_key(|p| p.col_start);
+
+            let mut next = vec![Vec::with_capacity(layer.out_dim); rows];
+            for (_, shard_rows) in shards {
+                for (row_idx, shard_row) in shard_rows.into_iter().enumerate() {
+                    next[row_idx].extend(shard_row);
+                }
+            }
+
+            layer_reports.push(crate::protocol::LayerReport {
+                index: layer.index,
+                in_dim: layer.in_dim,
+                out_dim: layer.out_dim,
+                relu: layer.relu,
+                elapsed_ms: layer_started.elapsed().as_millis() as u64,
+                shards: placements,
+            });
+            activation = next;
+        }
+
+        Ok(Response::Pipeline {
+            output: activation,
+            layers: layer_reports,
+            wall_ms: wall_started.elapsed().as_millis() as u64,
         })
     }
 

@@ -92,6 +92,28 @@ pub enum Request {
         input: Vec<Vec<f64>>,
         layers: Vec<LayerSpec>,
     },
+    /// Distribute a safetensors model across the cluster: shard each named
+    /// tensor's columns over the nodes (weighted by CPU), stream each shard to
+    /// its node's cache, and persist a manifest. The daemon reads one layer at
+    /// a time — the whole model never lives in one place.
+    LoadModel {
+        name: String,
+        file_path: String,
+        /// Tensor names in layer order, each with whether ReLU follows it.
+        layers: Vec<ModelLayerSpec>,
+    },
+    /// List the models distributed across the cluster.
+    ListModels,
+    /// Forget a model's manifest (does not delete cached shards on nodes).
+    DeleteModel {
+        name: String,
+    },
+    /// Run an input activation through a previously loaded model's resident
+    /// weights.
+    RunModel {
+        name: String,
+        input: Vec<Vec<f64>>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -149,9 +171,57 @@ pub enum Response {
         layers: Vec<LayerReport>,
         wall_ms: u64,
     },
+    ModelLoaded {
+        name: String,
+        layers: Vec<ModelLayerReport>,
+        wall_ms: u64,
+    },
+    Models {
+        items: Vec<ModelSummary>,
+    },
     Error {
         message: String,
     },
+}
+
+/// Per-layer result of distributing a model: where each column shard landed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelLayerReport {
+    pub index: usize,
+    pub tensor: String,
+    pub in_dim: usize,
+    pub out_dim: usize,
+    pub shards: Vec<ModelShardReport>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelShardReport {
+    pub node_name: String,
+    pub cpu_cores: u32,
+    pub col_start: usize,
+    pub cols: usize,
+    pub bytes: u64,
+    pub already_cached: bool,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelSummary {
+    pub name: String,
+    pub layers: usize,
+    pub input_dim: usize,
+    pub output_dim: usize,
+    pub total_params: u128,
+    pub nodes: Vec<String>,
+}
+
+/// A model layer named by its tensor in the safetensors file, with whether a
+/// ReLU follows it. Dimensions are read from the file by the daemon.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelLayerSpec {
+    pub tensor: String,
+    #[serde(default)]
+    pub relu: bool,
 }
 
 /// One layer of a feed-forward pipeline. The weight is `in_dim x out_dim`,

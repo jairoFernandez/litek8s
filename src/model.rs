@@ -10,9 +10,45 @@
 use anyhow::{Context, Result, bail, ensure};
 use half::{bf16, f16};
 use safetensors::{Dtype, SafeTensors};
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use crate::matrix::Matrix;
+
+/// A model distributed across the cluster: an ordered list of layers, each
+/// sharded by columns across nodes. The full weights never live in one place —
+/// each node holds only its shards (cached on disk), and this manifest records
+/// who has what so inference can route activations without re-reading the file.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelManifest {
+    pub name: String,
+    pub layers: Vec<LayerManifest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LayerManifest {
+    pub index: usize,
+    pub tensor: String,
+    pub in_dim: usize,
+    pub out_dim: usize,
+    pub relu: bool,
+    pub shards: Vec<ShardManifest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ShardManifest {
+    pub node_name: String,
+    pub weight_id: String,
+    pub col_start: usize,
+    pub cols: usize,
+}
+
+impl ModelManifest {
+    /// Width the model expects its input activation to have (first layer in_dim).
+    pub fn input_dim(&self) -> Option<usize> {
+        self.layers.first().map(|l| l.in_dim)
+    }
+}
 
 /// One tensor's metadata as reported by a safetensors header.
 #[derive(Debug, Clone)]
@@ -73,6 +109,29 @@ pub fn load_tensor_2d(path: &Path, name: &str) -> Result<Matrix> {
     Ok(flat
         .chunks_exact(cols)
         .map(|chunk| chunk.to_vec())
+        .collect())
+}
+
+/// Read a column band of a named 2D weight tensor as column-major rows — i.e.
+/// `cols` vectors of length `in_dim`, ready to cache as a node's shard. Loads
+/// one layer's tensor at a time (never the whole model), then slices out just
+/// the requested columns.
+pub fn load_layer_column_shard(
+    path: &Path,
+    tensor: &str,
+    col_start: usize,
+    cols: usize,
+) -> Result<Matrix> {
+    let weight = load_tensor_2d(path, tensor)?;
+    let out_dim = weight.first().map(|r| r.len()).unwrap_or(0);
+    ensure!(
+        col_start + cols <= out_dim,
+        "column band {col_start}..{} exceeds tensor `{tensor}` width {out_dim}",
+        col_start + cols
+    );
+    // Transpose just the requested columns: result[j][i] = weight[i][col_start+j].
+    Ok((0..cols)
+        .map(|j| weight.iter().map(|row| row[col_start + j]).collect())
         .collect())
 }
 

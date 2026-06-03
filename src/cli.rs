@@ -418,6 +418,50 @@ enum ModelCommand {
         #[arg(help = "Path to a .safetensors file")]
         file: PathBuf,
     },
+    #[command(
+        about = "Distribute a safetensors model across the cluster nodes",
+        help_template = HELP_TEMPLATE
+    )]
+    Load {
+        #[arg(help = "Model name to register")]
+        name: String,
+        #[arg(short = 'f', long, help = "Path to a .safetensors file")]
+        file: PathBuf,
+        #[arg(
+            long,
+            help = "Tensor names in layer order (default: every 2D tensor, sorted)"
+        )]
+        tensors: Vec<String>,
+        #[arg(long, help = "Do not apply ReLU between layers")]
+        no_relu: bool,
+    },
+    #[command(
+        about = "List models distributed across the cluster",
+        help_template = HELP_TEMPLATE
+    )]
+    List,
+    #[command(
+        about = "Forget a model manifest (cached shards stay on nodes)",
+        help_template = HELP_TEMPLATE
+    )]
+    Rm {
+        #[arg(help = "Model name")]
+        name: String,
+    },
+    #[command(
+        about = "Run an input through a loaded model's resident weights",
+        help_template = HELP_TEMPLATE
+    )]
+    Run {
+        #[arg(help = "Model name")]
+        name: String,
+        #[arg(long, default_value_t = 1, help = "Batch size (rows of generated input)")]
+        batch: usize,
+        #[arg(long, default_value_t = 7, help = "Seed for the generated input")]
+        seed: u64,
+        #[arg(long, help = "Print the full output activation")]
+        show_output: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1309,7 +1353,237 @@ pub async fn run() -> Result<()> {
         },
         Command::Model { command } => match command {
             ModelCommand::Inspect { file } => run_model_inspect(&file),
+            ModelCommand::Load {
+                name,
+                file,
+                tensors,
+                no_relu,
+            } => run_model_load(&endpoint, &name, &file, tensors, !no_relu).await,
+            ModelCommand::List => run_model_list(&endpoint).await,
+            ModelCommand::Rm { name } => {
+                let response = endpoint.request(Request::DeleteModel { name }).await?;
+                print_response(response)
+            }
+            ModelCommand::Run {
+                name,
+                batch,
+                seed,
+                show_output,
+            } => run_model_run(&endpoint, &name, batch, seed, show_output).await,
         },
+    }
+}
+
+async fn run_model_load(
+    endpoint: &DaemonEndpoint,
+    name: &str,
+    file: &Path,
+    tensors: Vec<String>,
+    relu: bool,
+) -> Result<()> {
+    // Default layer order: every 2D tensor in the file, sorted by name.
+    let layers: Vec<protocol::ModelLayerSpec> = if tensors.is_empty() {
+        crate::model::inspect(file)?
+            .into_iter()
+            .filter(|t| t.shape.len() == 2)
+            .map(|t| protocol::ModelLayerSpec {
+                tensor: t.name,
+                relu,
+            })
+            .collect()
+    } else {
+        tensors
+            .into_iter()
+            .map(|tensor| protocol::ModelLayerSpec { tensor, relu })
+            .collect()
+    };
+    ensure!(!layers.is_empty(), "no 2D tensors to distribute");
+
+    // Resolve the path to absolute so the daemon (same host) can read it.
+    let abs = std::fs::canonicalize(file)
+        .with_context(|| format!("failed to resolve model path {}", file.display()))?;
+
+    println!("{}", title("Distribute Model"));
+    println!(
+        "{} {} {} {} layers",
+        label("model"),
+        name,
+        muted("—"),
+        layers.len()
+    );
+    println!();
+
+    let response = endpoint
+        .request(Request::LoadModel {
+            name: name.to_string(),
+            file_path: abs.to_string_lossy().into_owned(),
+            layers,
+        })
+        .await?;
+
+    match response {
+        Response::ModelLoaded {
+            name,
+            layers,
+            wall_ms,
+        } => {
+            for l in &layers {
+                println!(
+                    "{} {} {} {}x{}",
+                    label(&format!("layer {}", l.index)),
+                    muted(&l.tensor),
+                    muted("—"),
+                    l.in_dim,
+                    l.out_dim
+                );
+                for s in &l.shards {
+                    let tag = if s.already_cached {
+                        ok("[cached]")
+                    } else {
+                        muted("[uploaded]")
+                    };
+                    println!(
+                        "    {:<16} {:>2}c  cols {:>6}..{:<6} ({:>5})  {:>8} KB  {:>7}  {}",
+                        s.node_name,
+                        s.cpu_cores,
+                        s.col_start,
+                        s.col_start + s.cols,
+                        s.cols,
+                        s.bytes / 1024,
+                        muted(&format!("{}ms", s.elapsed_ms)),
+                        tag
+                    );
+                }
+            }
+            println!();
+            println!("{} model/{} distributed", ok("ok"), name);
+            println!("{} {}", label("wall"), ok(&format!("{wall_ms}ms")));
+            Ok(())
+        }
+        Response::Error { message } => bail!(message),
+        other => bail!("unexpected response to model load: {other:?}"),
+    }
+}
+
+async fn run_model_list(endpoint: &DaemonEndpoint) -> Result<()> {
+    let response = endpoint.request(Request::ListModels).await?;
+    match response {
+        Response::Models { items } => {
+            if items.is_empty() {
+                println!("{}", muted("no models loaded"));
+                return Ok(());
+            }
+            println!("{}", title(&format!("Models ({} total)", items.len())));
+            println!();
+            println!(
+                "{:<20} {:>6} {:>8} {:>8} {:>10}  {}",
+                "NAME", "LAYERS", "IN", "OUT", "PARAMS", "NODES"
+            );
+            for m in &items {
+                println!(
+                    "{:<20} {:>6} {:>8} {:>8} {:>9.1}M  {}",
+                    m.name,
+                    m.layers,
+                    m.input_dim,
+                    m.output_dim,
+                    m.total_params as f64 / 1_000_000.0,
+                    m.nodes.join(",")
+                );
+            }
+            Ok(())
+        }
+        Response::Error { message } => bail!(message),
+        other => bail!("unexpected response to model list: {other:?}"),
+    }
+}
+
+async fn run_model_run(
+    endpoint: &DaemonEndpoint,
+    name: &str,
+    batch: usize,
+    seed: u64,
+    show_output: bool,
+) -> Result<()> {
+    ensure!(batch > 0, "--batch must be greater than zero");
+    // Ask the daemon for the model's input dim by listing; generate input.
+    let models = match endpoint.request(Request::ListModels).await? {
+        Response::Models { items } => items,
+        other => bail!("unexpected response to model list: {other:?}"),
+    };
+    let model = models
+        .iter()
+        .find(|m| m.name == name)
+        .with_context(|| format!("model `{name}` is not loaded"))?;
+    let input = crate::matrix::deterministic_matrix(batch, model.input_dim, seed);
+
+    println!("{}", title("Run Model"));
+    println!(
+        "{} {} {} input {}x{}",
+        label("model"),
+        name,
+        muted("—"),
+        batch,
+        model.input_dim
+    );
+    println!();
+
+    let response = endpoint
+        .request(Request::RunModel {
+            name: name.to_string(),
+            input,
+        })
+        .await?;
+
+    match response {
+        Response::Pipeline {
+            output,
+            layers,
+            wall_ms,
+        } => {
+            for l in &layers {
+                let relu = if l.relu { " +relu" } else { "" };
+                println!(
+                    "{} {} {}x{}{} {} {}",
+                    label(&format!("layer {}", l.index)),
+                    muted("—"),
+                    l.in_dim,
+                    l.out_dim,
+                    relu,
+                    muted("took"),
+                    ok(&format!("{}ms", l.elapsed_ms))
+                );
+                for s in &l.shards {
+                    println!(
+                        "    {:<16} cols {:>6}..{:<6} ({:>5})  {}",
+                        s.node_name,
+                        s.col_start,
+                        s.col_start + s.cols,
+                        s.cols,
+                        muted(&format!("{}ms", s.elapsed_ms))
+                    );
+                }
+            }
+            println!();
+            let checksum: f64 = output.iter().flat_map(|r| r.iter()).sum();
+            println!(
+                "{} {}x{}",
+                label("output"),
+                output.len(),
+                output.first().map(|r| r.len()).unwrap_or(0)
+            );
+            println!("{} {:.6}", label("checksum (Σ)"), checksum);
+            println!("{} {}", label("wall"), ok(&format!("{wall_ms}ms")));
+            if show_output {
+                println!();
+                for row in &output {
+                    let cells: Vec<String> = row.iter().map(|v| format!("{v:8.3}")).collect();
+                    println!("  [{}]", cells.join(", "));
+                }
+            }
+            Ok(())
+        }
+        Response::Error { message } => bail!(message),
+        other => bail!("unexpected response to model run: {other:?}"),
     }
 }
 
@@ -2305,6 +2579,12 @@ fn print_response(response: Response) -> Result<()> {
         }
         Response::Pipeline { .. } => {
             bail!("pipeline results are rendered by `pipeline run`, not print_response")
+        }
+        Response::ModelLoaded { .. } => {
+            bail!("model load results are rendered by `model load`, not print_response")
+        }
+        Response::Models { .. } => {
+            bail!("model list results are rendered by `model list`, not print_response")
         }
         Response::Error { message } => Err(anyhow!(message)),
     }
