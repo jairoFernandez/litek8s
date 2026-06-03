@@ -18,6 +18,19 @@ output "ssh_ingress_cidr" {
   value       = local.ssh_ingress_cidr
 }
 
+output "hetero_nodes" {
+  description = "Heterogeneous nodes: name, type, arch, public + private IP"
+  value = {
+    for name, i in aws_instance.hetero : name => {
+      type       = i.instance_type
+      arch       = i.tags["Arch"]
+      public_ip  = i.public_ip
+      private_ip = i.private_ip
+      ssh        = "${var.ssh_user}@${i.public_ip}"
+    }
+  }
+}
+
 output "node_add_commands" {
   description = "Ready-to-run litek8s node registration commands"
   value = join("\n", [

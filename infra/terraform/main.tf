@@ -26,6 +26,30 @@ data "aws_ami" "ubuntu" {
   }
 }
 
+# --- Latest Ubuntu 24.04 LTS (Canonical) arm64, for Graviton nodes ---
+data "aws_ami" "ubuntu_arm64" {
+  most_recent = true
+  owners      = ["099720109477"]
+
+  filter {
+    name   = "name"
+    values = ["ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*"]
+  }
+
+  filter {
+    name   = "virtualization-type"
+    values = ["hvm"]
+  }
+}
+
+locals {
+  # AMI per architecture, so a heterogeneous node can pick the right one.
+  ami_for_arch = {
+    x86_64 = data.aws_ami.ubuntu.id
+    arm64  = data.aws_ami.ubuntu_arm64.id
+  }
+}
+
 locals {
   ssh_ingress_cidr = var.ssh_ingress_cidr != "" ? var.ssh_ingress_cidr : "${chomp(data.http.myip.response_body)}/32"
 }
@@ -127,7 +151,7 @@ resource "aws_key_pair" "litek8s" {
   }
 }
 
-# --- Worker nodes ---
+# --- Homogeneous worker nodes (node_count x instance_type) ---
 resource "aws_instance" "node" {
   count                  = var.node_count
   ami                    = data.aws_ami.ubuntu.id
@@ -139,5 +163,24 @@ resource "aws_instance" "node" {
 
   tags = {
     Name = "${var.project_prefix}-node-${count.index}"
+  }
+}
+
+# --- Heterogeneous worker nodes: a mix of instance types and architectures
+# (x86_64 + arm64), to mirror a household of varied machines. Each entry picks
+# its AMI by arch; the agent install cross-compiles per node's uname. ---
+resource "aws_instance" "hetero" {
+  for_each = { for n in var.hetero_nodes : n.name => n }
+
+  ami                    = local.ami_for_arch[each.value.arch]
+  instance_type          = each.value.type
+  subnet_id              = aws_subnet.litek8s.id
+  vpc_security_group_ids = [aws_security_group.litek8s.id]
+  key_name               = aws_key_pair.litek8s.key_name
+  user_data              = file("${path.module}/userdata.sh")
+
+  tags = {
+    Name = "${var.project_prefix}-${each.value.name}"
+    Arch = each.value.arch
   }
 }

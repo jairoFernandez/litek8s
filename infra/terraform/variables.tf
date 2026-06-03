@@ -17,9 +17,25 @@ variable "project_prefix" {
 }
 
 variable "node_count" {
-  description = "Number of EC2 worker nodes to provision"
+  description = "Number of homogeneous EC2 worker nodes (instance_type). Set 0 to use hetero_nodes only."
   type        = number
-  default     = 6
+  default     = 0
+}
+
+variable "hetero_nodes" {
+  description = "Heterogeneous nodes: a mix of instance types and architectures, like a household of varied machines."
+  type = list(object({
+    name = string
+    type = string
+    arch = string # x86_64 | arm64
+  }))
+  default = [
+    { name = "node-micro-0", type = "t3.micro", arch = "x86_64" },
+    { name = "node-micro-1", type = "t3.micro", arch = "x86_64" },
+    { name = "node-arm-0", type = "c6g.large", arch = "arm64" },
+    { name = "node-arm-1", type = "c6g.large", arch = "arm64" },
+    { name = "node-big-0", type = "c7i.xlarge", arch = "x86_64" },
+  ]
 }
 
 variable "instance_type" {
