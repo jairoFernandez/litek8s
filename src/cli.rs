@@ -404,6 +404,14 @@ enum Command {
         #[command(subcommand)]
         command: ModelCommand,
     },
+    #[command(
+        about = "Generate text with a local LLM (safetensors model dir)",
+        help_template = HELP_TEMPLATE
+    )]
+    Llm {
+        #[command(subcommand)]
+        command: LlmCommand,
+    },
     #[command(hide = true)]
     Agent {
         /// Run as the persistent agent daemon (listens on a Unix socket, keeps
@@ -411,6 +419,25 @@ enum Command {
         /// request to that daemon (starting it if needed).
         #[arg(long)]
         serve: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum LlmCommand {
+    #[command(
+        about = "Generate text from a prompt using a local model directory",
+        help_template = HELP_TEMPLATE
+    )]
+    Generate {
+        #[arg(
+            long,
+            help = "Model directory (config.json, model.safetensors, tokenizer.json)"
+        )]
+        model_dir: PathBuf,
+        #[arg(help = "Prompt text")]
+        prompt: String,
+        #[arg(long, default_value_t = 20, help = "Max new tokens to generate")]
+        max_new: usize,
     },
 }
 
@@ -1363,6 +1390,13 @@ pub async fn run() -> Result<()> {
                 .await
             }
         },
+        Command::Llm { command } => match command {
+            LlmCommand::Generate {
+                model_dir,
+                prompt,
+                max_new,
+            } => run_llm_generate(&model_dir, &prompt, max_new),
+        },
         Command::Model { command } => match command {
             ModelCommand::Inspect { file } => run_model_inspect(&file),
             ModelCommand::Load {
@@ -1597,6 +1631,23 @@ async fn run_model_run(
         Response::Error { message } => bail!(message),
         other => bail!("unexpected response to model run: {other:?}"),
     }
+}
+
+fn run_llm_generate(model_dir: &Path, prompt: &str, max_new: usize) -> Result<()> {
+    use std::io::Write;
+    println!("{}", title("LLM Generate"));
+    println!("{} {}", label("model"), model_dir.display());
+    println!("{} {}", label("prompt"), prompt);
+    print!("\n{prompt}");
+    std::io::stdout().flush().ok();
+
+    let runner = crate::llm::LlmRunner::load(model_dir)?;
+    runner.generate(prompt, max_new, |piece| {
+        print!("{piece}");
+        std::io::stdout().flush().ok();
+    })?;
+    println!();
+    Ok(())
 }
 
 fn run_model_inspect(file: &Path) -> Result<()> {

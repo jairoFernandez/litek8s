@@ -21,6 +21,7 @@ serde_yaml = "0.9.34"
 sha2 = "0.10.8"
 sysinfo = "0.33.1"
 terminal_size = "0.4"
+tokenizers = { version = "0.23.1", default-features = false, features = ["onig"] }
 tokio = { version = "1.44.1", features = ["full"] }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 

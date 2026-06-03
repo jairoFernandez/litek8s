@@ -204,3 +204,58 @@ pub fn argmax(logits: &[f64]) -> usize {
         })
         .0
 }
+
+/// A loaded tokenizer (HF `tokenizer.json`) plus the model, for text in / text
+/// out. Wraps the `tokenizers` crate.
+pub struct LlmRunner {
+    weights: LlmWeights,
+    tokenizer: tokenizers::Tokenizer,
+}
+
+impl LlmRunner {
+    /// Load a model directory containing `config.json`, `model.safetensors`, and
+    /// `tokenizer.json`.
+    pub fn load(dir: &Path) -> Result<Self> {
+        let cfg = LlmConfig::load(&dir.join("config.json"))?;
+        let weights = LlmWeights::load(&dir.join("model.safetensors"), cfg)?;
+        let tokenizer = tokenizers::Tokenizer::from_file(dir.join("tokenizer.json"))
+            .map_err(|e| anyhow::anyhow!("failed to load tokenizer: {e}"))?;
+        Ok(Self { weights, tokenizer })
+    }
+
+    pub fn weights(&self) -> &LlmWeights {
+        &self.weights
+    }
+
+    /// Greedy autoregressive generation: encode the prompt, then append the
+    /// argmax token `max_new` times (re-running the full sequence each step — no
+    /// KV cache yet, so cost grows with length). `on_token` is called with each
+    /// new token's decoded text for streaming. Returns the full decoded output.
+    pub fn generate(
+        &self,
+        prompt: &str,
+        max_new: usize,
+        mut on_token: impl FnMut(&str),
+    ) -> Result<String> {
+        let encoding = self
+            .tokenizer
+            .encode(prompt, false)
+            .map_err(|e| anyhow::anyhow!("tokenize failed: {e}"))?;
+        let mut tokens: Vec<u32> = encoding.get_ids().to_vec();
+        let start = tokens.len();
+
+        for _ in 0..max_new {
+            let logits = self.weights.forward_last_logits(&tokens)?;
+            let next = argmax(&logits) as u32;
+            tokens.push(next);
+            // Decode just the new token for streaming output.
+            if let Ok(piece) = self.tokenizer.decode(&[next], false) {
+                on_token(&piece);
+            }
+        }
+
+        self.tokenizer
+            .decode(&tokens[start..], false)
+            .map_err(|e| anyhow::anyhow!("decode failed: {e}"))
+    }
+}
