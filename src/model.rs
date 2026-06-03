@@ -168,71 +168,103 @@ fn decode_one(dtype: Dtype, b: &[u8]) -> f64 {
     }
 }
 
-/// A safetensors file mmap'd once. The OS pages tensor data in on demand, so a
-/// multi-GB model never has to be read into RAM in full — essential on a small
-/// coordinator node that distributes a model larger than its memory.
+/// One or more safetensors files mmap'd once. The OS pages tensor data in on
+/// demand, so a multi-GB model never lands in RAM in full — essential on a small
+/// coordinator that distributes a model larger than its memory. Supports both a
+/// single `model.safetensors` and a sharded model (`*.index.json` + multiple
+/// `model-0000N-of-...safetensors`).
 pub struct ModelFile {
-    mmap: memmap2::Mmap,
+    mmaps: Vec<memmap2::Mmap>,
 }
 
 impl ModelFile {
+    /// Open `path`. If a sibling `model.safetensors.index.json` exists, mmap all
+    /// the shards it references; otherwise mmap the single file.
     pub fn open(path: &Path) -> Result<Self> {
-        let file = std::fs::File::open(path)
-            .with_context(|| format!("failed to open model file {}", path.display()))?;
-        // SAFETY: the file is read-only for the process lifetime; safetensors
-        // only ever reads from the mapping.
-        let mmap = unsafe { memmap2::Mmap::map(&file) }
-            .with_context(|| format!("failed to mmap {}", path.display()))?;
-        Ok(Self { mmap })
+        let dir = path.parent().unwrap_or(Path::new("."));
+        let index = dir.join("model.safetensors.index.json");
+        let files: Vec<std::path::PathBuf> = if index.exists() {
+            let raw = std::fs::read_to_string(&index)
+                .with_context(|| format!("failed to read {}", index.display()))?;
+            let parsed: serde_json::Value =
+                serde_json::from_str(&raw).context("failed to parse safetensors index")?;
+            let weight_map = parsed
+                .get("weight_map")
+                .and_then(|m| m.as_object())
+                .context("index.json missing weight_map")?;
+            let mut names: Vec<String> = weight_map
+                .values()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+            names.sort();
+            names.dedup();
+            names.into_iter().map(|n| dir.join(n)).collect()
+        } else {
+            vec![path.to_path_buf()]
+        };
+
+        let mut mmaps = Vec::with_capacity(files.len());
+        for f in files {
+            let file = std::fs::File::open(&f)
+                .with_context(|| format!("failed to open model shard {}", f.display()))?;
+            // SAFETY: read-only for the process lifetime; safetensors only reads.
+            let mmap = unsafe { memmap2::Mmap::map(&file) }
+                .with_context(|| format!("failed to mmap {}", f.display()))?;
+            mmaps.push(mmap);
+        }
+        Ok(Self { mmaps })
     }
 
-    fn tensors(&self) -> Result<SafeTensors<'_>> {
-        SafeTensors::deserialize(&self.mmap).context("failed to parse safetensors header")
+    /// Run `f` with the TensorView for `name`, searching every shard.
+    fn with_view<T>(
+        &self,
+        name: &str,
+        f: impl FnOnce(safetensors::tensor::TensorView<'_>) -> Result<T>,
+    ) -> Result<T> {
+        for mmap in &self.mmaps {
+            let tensors = SafeTensors::deserialize(mmap)
+                .context("failed to parse safetensors header")?;
+            if let Ok(view) = tensors.tensor(name) {
+                return f(view);
+            }
+        }
+        anyhow::bail!("tensor `{name}` not found in any shard")
     }
 
-    /// Load a 2D tensor as a row-major f64 Matrix from the mapping.
+    /// Load a 2D tensor as a row-major f64 Matrix.
     pub fn tensor_2d(&self, name: &str) -> Result<Matrix> {
-        let tensors = self.tensors()?;
-        let view = tensors
-            .tensor(name)
-            .with_context(|| format!("tensor `{name}` not found"))?;
-        ensure!(view.shape().len() == 2, "tensor `{name}` is not 2D");
-        let cols = view.shape()[1];
-        let flat = decode_to_f64(view.dtype(), view.data())?;
-        Ok(flat.chunks_exact(cols).map(|c| c.to_vec()).collect())
+        self.with_view(name, |view| {
+            ensure!(view.shape().len() == 2, "tensor `{name}` is not 2D");
+            let cols = view.shape()[1];
+            let flat = decode_to_f64(view.dtype(), view.data())?;
+            Ok(flat.chunks_exact(cols).map(|c| c.to_vec()).collect())
+        })
     }
 
     /// Load a 1D tensor (norms, biases) as f64; empty vec if absent.
     pub fn tensor_1d(&self, name: &str) -> Vec<f64> {
-        let Ok(tensors) = self.tensors() else {
-            return Vec::new();
-        };
-        let Ok(view) = tensors.tensor(name) else {
-            return Vec::new();
-        };
-        if view.shape().len() != 1 {
-            return Vec::new();
-        }
-        decode_to_f64(view.dtype(), view.data()).unwrap_or_default()
+        self.with_view(name, |view| {
+            ensure!(view.shape().len() == 1, "not 1D");
+            decode_to_f64(view.dtype(), view.data())
+        })
+        .unwrap_or_default()
     }
 
-    /// Load a 2D tensor straight to row-major f16 bytes (no full f64 copy) —
-    /// for the embedding table on a memory-tight node. Returns (rows, cols, bytes).
+    /// Load a 2D tensor straight to row-major f16 bytes (no full f64 copy) — for
+    /// the embedding table on a memory-tight node. Returns (rows, cols, bytes).
     pub fn tensor_2d_f16(&self, name: &str) -> Result<(usize, usize, Vec<u8>)> {
-        let tensors = self.tensors()?;
-        let view = tensors
-            .tensor(name)
-            .with_context(|| format!("tensor `{name}` not found"))?;
-        ensure!(view.shape().len() == 2, "tensor `{name}` is not 2D");
-        let (rows, cols) = (view.shape()[0], view.shape()[1]);
-        let dtype = view.dtype();
-        let elem = dtype.size();
-        let data = view.data();
-        let mut out = Vec::with_capacity(rows * cols * 2);
-        for chunk in data.chunks_exact(elem) {
-            out.extend_from_slice(&half::f16::from_f64(decode_one(dtype, chunk)).to_le_bytes());
-        }
-        Ok((rows, cols, out))
+        self.with_view(name, |view| {
+            ensure!(view.shape().len() == 2, "tensor `{name}` is not 2D");
+            let (rows, cols) = (view.shape()[0], view.shape()[1]);
+            let dtype = view.dtype();
+            let elem = dtype.size();
+            let data = view.data();
+            let mut out = Vec::with_capacity(rows * cols * 2);
+            for chunk in data.chunks_exact(elem) {
+                out.extend_from_slice(&half::f16::from_f64(decode_one(dtype, chunk)).to_le_bytes());
+            }
+            Ok((rows, cols, out))
+        })
     }
 }
 

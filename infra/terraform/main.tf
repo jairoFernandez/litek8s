@@ -179,6 +179,12 @@ resource "aws_instance" "hetero" {
   key_name               = aws_key_pair.litek8s.key_name
   user_data              = file("${path.module}/userdata.sh")
 
+  # Optional larger root disk (the coordinator needs room for a multi-GB model).
+  root_block_device {
+    volume_size = try(each.value.disk_gb, 8)
+    volume_type = "gp3"
+  }
+
   tags = {
     Name = "${var.project_prefix}-${each.value.name}"
     Arch = each.value.arch
