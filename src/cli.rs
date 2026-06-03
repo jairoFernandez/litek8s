@@ -396,8 +396,28 @@ enum Command {
         #[command(subcommand)]
         command: PipelineCommand,
     },
+    #[command(
+        about = "Inspect and distribute model weights (safetensors)",
+        help_template = HELP_TEMPLATE
+    )]
+    Model {
+        #[command(subcommand)]
+        command: ModelCommand,
+    },
     #[command(hide = true)]
     Agent,
+}
+
+#[derive(Debug, Subcommand)]
+enum ModelCommand {
+    #[command(
+        about = "List the tensors in a safetensors file (name, dtype, shape)",
+        help_template = HELP_TEMPLATE
+    )]
+    Inspect {
+        #[arg(help = "Path to a .safetensors file")]
+        file: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1287,7 +1307,48 @@ pub async fn run() -> Result<()> {
                 .await
             }
         },
+        Command::Model { command } => match command {
+            ModelCommand::Inspect { file } => run_model_inspect(&file),
+        },
     }
+}
+
+fn run_model_inspect(file: &Path) -> Result<()> {
+    let infos = crate::model::inspect(file)?;
+    println!("{}", title("Model Tensors"));
+    println!(
+        "{} {} {} {} tensors",
+        label("file"),
+        file.display(),
+        muted("—"),
+        infos.len()
+    );
+    println!();
+    let mut total_params: u128 = 0;
+    for info in &infos {
+        let params: u128 = info.shape.iter().map(|&d| d as u128).product();
+        total_params += params;
+        let shape = info
+            .shape
+            .iter()
+            .map(|d| d.to_string())
+            .collect::<Vec<_>>()
+            .join("x");
+        println!(
+            "  {:<40} {:<6} {}",
+            info.name,
+            info.dtype,
+            muted(&shape)
+        );
+    }
+    println!();
+    println!(
+        "{} {} ({:.1}M)",
+        label("total params"),
+        total_params,
+        total_params as f64 / 1_000_000.0
+    );
+    Ok(())
 }
 
 #[derive(serde::Deserialize)]
