@@ -872,18 +872,45 @@ impl TcpAgentClient {
         request: AgentRequest,
         blob: &[u8],
     ) -> Result<AgentResponse> {
-        use tokio::net::TcpStream;
-
         let mut payload =
             serde_json::to_vec(&request).context("failed to serialize agent request")?;
         payload.push(b'\n');
         payload.extend_from_slice(blob);
 
+        // A peer under memory pressure (weak node computing a big shard) can drop
+        // the connection, surfacing as a connection error or an empty (EOF)
+        // response. Retry a few times with backoff — the worker recovers once the
+        // previous request's allocation is freed.
+        const MAX_ATTEMPTS: u32 = 4;
+        let mut last = self.request_once(&payload).await;
+        let mut attempt = 1;
+        while attempt < MAX_ATTEMPTS {
+            let Err(error) = &last else { break };
+            let msg = format!("{error:#}");
+            let transient = msg.contains("EOF while parsing")
+                || msg.contains("line 1 column 0")
+                || msg.contains("Connection reset")
+                || msg.contains("Connection refused")
+                || msg.contains("broken pipe")
+                || msg.contains("os error");
+            if !transient {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200 * u64::from(attempt))).await;
+            last = self.request_once(&payload).await;
+            attempt += 1;
+        }
+        last
+    }
+
+    async fn request_once(&self, payload: &[u8]) -> Result<AgentResponse> {
+        use tokio::net::TcpStream;
+
         let mut stream = TcpStream::connect(&self.addr)
             .await
             .with_context(|| format!("failed to connect to agent at {}", self.addr))?;
         stream
-            .write_all(&payload)
+            .write_all(payload)
             .await
             .with_context(|| format!("failed to send request to {}", self.addr))?;
         stream
@@ -1276,30 +1303,46 @@ async fn handle_buffer_in_process(buffer: &[u8]) -> Result<()> {
 #[derive(Clone, Default)]
 pub struct WeightCache {
     shards: std::sync::Arc<tokio::sync::Mutex<HashMap<String, std::sync::Arc<crate::matrix::WeightShard>>>>,
+    /// When true, never retain shards in RAM — read from disk per request and
+    /// drop. Lets a memory-tight node hold a large model on disk and only page
+    /// in one shard at a time (peak RAM = one shard, not the whole local slice).
+    /// Slower (disk read per matmul) but doesn't OOM. Set via
+    /// LITEK8S_AGENT_NO_CACHE.
+    no_cache: bool,
 }
 
 impl WeightCache {
     fn new() -> Self {
-        Self::default()
+        Self {
+            no_cache: std::env::var_os("LITEK8S_AGENT_NO_CACHE").is_some(),
+            ..Self::default()
+        }
     }
 
     /// Return the cached shard, loading it from `path` (native precision) on a
-    /// miss and inserting it for next time.
+    /// miss. In no_cache mode, read and return without retaining.
     async fn get_or_load(
         &self,
         weight_id: &str,
         path: &Path,
     ) -> Result<std::sync::Arc<crate::matrix::WeightShard>> {
-        let mut guard = self.shards.lock().await;
-        if let Some(shard) = guard.get(weight_id) {
-            return Ok(shard.clone());
+        if !self.no_cache {
+            let guard = self.shards.lock().await;
+            if let Some(shard) = guard.get(weight_id) {
+                return Ok(shard.clone());
+            }
         }
         let path = path.to_path_buf();
         let shard = tokio::task::spawn_blocking(move || crate::matrix::WeightShard::read(&path))
             .await
             .context("weight shard read panicked")??;
         let shard = std::sync::Arc::new(shard);
-        guard.insert(weight_id.to_string(), shard.clone());
+        if !self.no_cache {
+            self.shards
+                .lock()
+                .await
+                .insert(weight_id.to_string(), shard.clone());
+        }
         Ok(shard)
     }
 

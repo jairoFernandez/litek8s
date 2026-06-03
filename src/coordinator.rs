@@ -369,24 +369,24 @@ fn transpose(m: &[Vec<f64>]) -> Matrix {
 }
 
 /// Split a weight (already `in x out`) into column shards across `peers`,
-/// uploading each shard column-major to its peer's cache over TCP, and return
-/// the manifest. `dtype` keeps native precision on the wire/disk.
+/// weighted by `peer_weights` (e.g. each peer's RAM in GB) so a weak node gets
+/// fewer columns and doesn't run out of memory. Uploads each shard column-major
+/// to its peer's cache over TCP. `dtype` keeps native precision on the wire/disk.
 async fn distribute_tensor(
     weight_in_out: &Matrix,
     peers: &[String],
+    peer_weights: &[u32],
     dtype: BinDtype,
     tag: &str,
 ) -> Result<ShardedTensor> {
     let out_dim = weight_in_out.first().map(|r| r.len()).unwrap_or(0);
     let cols = matrix::columns(weight_in_out); // column-major: cols[j] = column j
-    let n = peers.len().min(out_dim.max(1));
-    let base = out_dim / n;
-    let rem = out_dim % n;
+    // Columns per peer proportional to capacity (RAM), exact sum.
+    let splits = matrix::weighted_split(out_dim, peer_weights);
 
     let mut tasks = Vec::new();
     let mut cursor = 0;
-    for (idx, peer) in peers.iter().take(n).enumerate() {
-        let here = base + if idx < rem { 1 } else { 0 };
+    for (peer, here) in peers.iter().zip(splits.iter().copied()) {
         let start = cursor;
         cursor += here;
         if here == 0 {
@@ -437,6 +437,21 @@ pub async fn distribute_qwen(
     peers: &[String],
     dtype: BinDtype,
 ) -> Result<DistModel> {
+    // Weight each peer by its RAM (GB), so a weak node gets fewer columns and
+    // doesn't OOM on a big model's shard. Query HostResources once; default to 1
+    // if a peer doesn't answer.
+    let mut peer_weights = Vec::with_capacity(peers.len());
+    for ip in peers {
+        let client = TcpAgentClient::new(ip);
+        let w = match client.request(AgentRequest::HostResources).await {
+            Ok(AgentResponse::HostResources { resources }) => {
+                ((resources.memory_total_bytes / 1_000_000_000).max(1)) as u32
+            }
+            _ => 1,
+        };
+        peer_weights.push(w);
+    }
+
     // mmap the file once — the OS pages tensors in on demand, so the whole
     // multi-GB model never lands in the coordinator's RAM at once.
     let file = crate::model::ModelFile::open(model_path)?;
@@ -465,25 +480,25 @@ pub async fn distribute_qwen(
         let bv = file.tensor_1d(&format!("{p}.self_attn.v_proj.bias"));
 
         let (wq_m, _) = big(format!("{p}.self_attn.q_proj.weight"), format!("l{i}-q"))?;
-        let wq = distribute_tensor(&wq_m, peers, dtype, &format!("l{i}-q")).await?;
+        let wq = distribute_tensor(&wq_m, peers, &peer_weights, dtype, &format!("l{i}-q")).await?;
         drop(wq_m);
         let (wk_m, _) = big(format!("{p}.self_attn.k_proj.weight"), format!("l{i}-k"))?;
-        let wk = distribute_tensor(&wk_m, peers, dtype, &format!("l{i}-k")).await?;
+        let wk = distribute_tensor(&wk_m, peers, &peer_weights, dtype, &format!("l{i}-k")).await?;
         drop(wk_m);
         let (wv_m, _) = big(format!("{p}.self_attn.v_proj.weight"), format!("l{i}-v"))?;
-        let wv = distribute_tensor(&wv_m, peers, dtype, &format!("l{i}-v")).await?;
+        let wv = distribute_tensor(&wv_m, peers, &peer_weights, dtype, &format!("l{i}-v")).await?;
         drop(wv_m);
         let (wo_m, _) = big(format!("{p}.self_attn.o_proj.weight"), format!("l{i}-o"))?;
-        let wo = distribute_tensor(&wo_m, peers, dtype, &format!("l{i}-o")).await?;
+        let wo = distribute_tensor(&wo_m, peers, &peer_weights, dtype, &format!("l{i}-o")).await?;
         drop(wo_m);
         let (wg_m, _) = big(format!("{p}.mlp.gate_proj.weight"), format!("l{i}-g"))?;
-        let w_gate = distribute_tensor(&wg_m, peers, dtype, &format!("l{i}-g")).await?;
+        let w_gate = distribute_tensor(&wg_m, peers, &peer_weights, dtype, &format!("l{i}-g")).await?;
         drop(wg_m);
         let (wu_m, _) = big(format!("{p}.mlp.up_proj.weight"), format!("l{i}-u"))?;
-        let w_up = distribute_tensor(&wu_m, peers, dtype, &format!("l{i}-u")).await?;
+        let w_up = distribute_tensor(&wu_m, peers, &peer_weights, dtype, &format!("l{i}-u")).await?;
         drop(wu_m);
         let (wd_m, _) = big(format!("{p}.mlp.down_proj.weight"), format!("l{i}-d"))?;
-        let w_down = distribute_tensor(&wd_m, peers, dtype, &format!("l{i}-d")).await?;
+        let w_down = distribute_tensor(&wd_m, peers, &peer_weights, dtype, &format!("l{i}-d")).await?;
         drop(wd_m);
 
         layers.push(DistLayer {
