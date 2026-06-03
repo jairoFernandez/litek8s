@@ -122,6 +122,14 @@ pub enum AgentRequest {
         weight_id: String,
         relu: bool,
     },
+    /// Compute several of this node's column shards against the SAME activation
+    /// in one call (e.g. Q+K+V, or gate+up, which share an input) — collapsing
+    /// several LAN round-trips into one. Returns one result matrix per weight_id,
+    /// in order.
+    ComputeShardsBatch {
+        activation: Vec<Vec<f64>>,
+        weight_ids: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -139,6 +147,7 @@ pub enum AgentResponse {
     },
     HostResources { resources: crate::protocol::HostResources },
     MatmulBand { rows: Vec<Vec<f64>> },
+    MatmulBatch { results: Vec<Vec<Vec<f64>>> },
     HasWeights { present: bool },
     /// Result of a coordinator-run distributed matmul: the product plus, per
     /// peer, how long its LAN round-trip took.
@@ -1491,6 +1500,27 @@ async fn handle_agent_request(
             .await
             .context("layer shard worker panicked")??;
             Ok(AgentResponse::MatmulBand { rows })
+        }
+        AgentRequest::ComputeShardsBatch {
+            activation,
+            weight_ids,
+        } => {
+            // Load every requested shard, then multiply the shared activation
+            // against each — one LAN round-trip for what were several.
+            let mut shards = Vec::with_capacity(weight_ids.len());
+            for id in &weight_ids {
+                let path = local_weight_path(id)?;
+                shards.push(cache.get_or_load(id, &path).await?);
+            }
+            let results = tokio::task::spawn_blocking(move || {
+                shards
+                    .iter()
+                    .map(|s| crate::matrix::multiply_weight_shard(&activation, s))
+                    .collect::<Result<Vec<_>>>()
+            })
+            .await
+            .context("batch shard worker panicked")??;
+            Ok(AgentResponse::MatmulBatch { results })
         }
     }
 }

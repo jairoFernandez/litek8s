@@ -230,6 +230,77 @@ async fn sharded_matmul(activation: &Matrix, tensor: &ShardedTensor) -> Result<M
     Ok(out)
 }
 
+/// Multiply the SAME activation against several column-sharded weights in one
+/// round-trip per peer. Each peer holds the matching shard of every tensor (they
+/// share the RAM-weighted split), so we send its weight_ids together and it
+/// returns one result per tensor. Collapses e.g. Q+K+V (3 round-trips) into 1.
+/// Returns one full output matrix per input tensor, in order.
+async fn sharded_matmul_grouped(
+    activation: &Matrix,
+    tensors: &[&ShardedTensor],
+) -> Result<Vec<Matrix>> {
+    // Group each peer's (col_start, weight_id) per tensor. All tensors share the
+    // peer set and column layout, so index by peer_ip.
+    use std::collections::BTreeMap;
+    let mut by_peer: BTreeMap<String, Vec<(usize, usize, String)>> = BTreeMap::new();
+    for (ti, t) in tensors.iter().enumerate() {
+        for shard in &t.shards {
+            by_peer.entry(shard.peer_ip.clone()).or_default().push((
+                ti,
+                shard.col_start,
+                shard.weight_id.clone(),
+            ));
+        }
+    }
+
+    let mut tasks = Vec::new();
+    for (peer_ip, mut entries) in by_peer {
+        // Keep a stable order (tensor index, then col_start) so results map back.
+        entries.sort_by_key(|(ti, cs, _)| (*ti, *cs));
+        let weight_ids: Vec<String> = entries.iter().map(|(_, _, id)| id.clone()).collect();
+        let meta: Vec<(usize, usize)> = entries.iter().map(|(ti, cs, _)| (*ti, *cs)).collect();
+        let client = TcpAgentClient::new(&peer_ip);
+        let act = activation.clone();
+        tasks.push(tokio::spawn(async move {
+            let resp = client
+                .request(AgentRequest::ComputeShardsBatch {
+                    activation: act,
+                    weight_ids,
+                })
+                .await;
+            (meta, resp)
+        }));
+    }
+
+    // out[tensor][col_start] = result band; reassemble each tensor's columns.
+    let rows = activation.len();
+    let mut bands: Vec<Vec<(usize, Matrix)>> = vec![Vec::new(); tensors.len()];
+    for task in tasks {
+        let (meta, resp) = task.await.context("grouped matmul task panicked")?;
+        match resp? {
+            AgentResponse::MatmulBatch { results } => {
+                for ((ti, cs), band) in meta.into_iter().zip(results.into_iter()) {
+                    bands[ti].push((cs, band));
+                }
+            }
+            other => anyhow::bail!("peer returned unexpected response: {other:?}"),
+        }
+    }
+
+    let mut outs = Vec::with_capacity(tensors.len());
+    for (ti, t) in tensors.iter().enumerate() {
+        bands[ti].sort_by_key(|(cs, _)| *cs);
+        let mut out = vec![Vec::with_capacity(t.out_dim); rows];
+        for (_, band) in std::mem::take(&mut bands[ti]) {
+            for (i, row) in band.into_iter().enumerate() {
+                out[i].extend(row);
+            }
+        }
+        outs.push(out);
+    }
+    Ok(outs)
+}
+
 /// Add a bias vector to every row (in place), no-op if empty.
 fn add_bias(m: &mut Matrix, bias: &[f64]) {
     if bias.is_empty() {
@@ -268,9 +339,11 @@ impl DistModel {
 
         for (li, layer) in self.layers.iter().enumerate() {
             let normed = rms_norm(&h, &layer.attn_norm, cfg.rms_norm_eps);
-            let mut q = sharded_matmul(&normed, &layer.wq).await?;
-            let mut k = sharded_matmul(&normed, &layer.wk).await?;
-            let mut v = sharded_matmul(&normed, &layer.wv).await?;
+            // Q, K, V share the same input — one round-trip per peer instead of 3.
+            let qkv = sharded_matmul_grouped(&normed, &[&layer.wq, &layer.wk, &layer.wv]).await?;
+            let mut q = qkv[0].clone();
+            let mut k = qkv[1].clone();
+            let mut v = qkv[2].clone();
             add_bias(&mut q, &layer.bq);
             add_bias(&mut k, &layer.bk);
             add_bias(&mut v, &layer.bv);
@@ -291,11 +364,11 @@ impl DistModel {
             h = add(&h, &attn_out);
 
             let ffn_in = rms_norm(&h, &layer.ffn_norm, cfg.rms_norm_eps);
-            let gate = sharded_matmul(&ffn_in, &layer.w_gate).await?;
-            let up = sharded_matmul(&ffn_in, &layer.w_up).await?;
-            let hidden: Matrix = gate
+            // gate + up share the same input — one round-trip per peer.
+            let gu = sharded_matmul_grouped(&ffn_in, &[&layer.w_gate, &layer.w_up]).await?;
+            let hidden: Matrix = gu[0]
                 .iter()
-                .zip(up.iter())
+                .zip(gu[1].iter())
                 .map(|(g, u)| {
                     g.iter()
                         .zip(u.iter())
