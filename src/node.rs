@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -927,47 +927,240 @@ pub async fn install_remote_agent(
     Err(last_error.unwrap_or_else(|| anyhow!("agent did not answer after install")))
 }
 
-pub async fn run_agent_stdio() -> Result<()> {
+
+/// Path of the persistent agent's Unix socket on the node.
+fn agent_socket_path() -> std::path::PathBuf {
+    let base = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("litek8s").join("agent.sock")
+}
+
+/// Run the persistent agent: listen on a Unix socket, serve framed requests, and
+/// keep weight shards resident in RAM across requests. Each connection carries
+/// one `<json>\n<blob>` request and gets one JSON response, but the in-RAM
+/// WeightCache persists for the daemon's lifetime — so a model is read from disk
+/// once and later inferences hit memory, and the costly DockerRuntime::connect
+/// is paid once instead of per request.
+pub async fn run_agent_serve() -> Result<()> {
+    use tokio::net::UnixListener;
+
     let runtime = DockerRuntime::connect()?;
     runtime.ping().await?;
 
+    let socket = agent_socket_path();
+    if let Some(parent) = socket.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+    if socket.exists() {
+        std::fs::remove_file(&socket).ok();
+    }
+    let listener = UnixListener::bind(&socket)
+        .with_context(|| format!("failed to bind agent socket {}", socket.display()))?;
+    eprintln!("litek8s agent serving on {}", socket.display());
+
+    let cache = WeightCache::new();
+    loop {
+        let (mut stream, _) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(error) => {
+                eprintln!("agent accept failed: {error}");
+                continue;
+            }
+        };
+        let runtime = runtime.clone();
+        let cache = cache.clone();
+        tokio::spawn(async move {
+            if let Err(error) = serve_one(&mut stream, runtime, &cache).await {
+                eprintln!("agent request failed: {error:#}");
+            }
+        });
+    }
+}
+
+/// Handle one connection on the persistent agent's socket: read a framed
+/// `<json>\n<blob>` request, dispatch it against the shared cache, write the
+/// JSON response.
+async fn serve_one(
+    stream: &mut tokio::net::UnixStream,
+    runtime: DockerRuntime,
+    cache: &WeightCache,
+) -> Result<()> {
+    let mut buffer = Vec::new();
+    stream
+        .read_to_end(&mut buffer)
+        .await
+        .context("failed to read agent request from socket")?;
+    let split = buffer.iter().position(|&b| b == b'\n');
+    let (json_bytes, blob): (&[u8], &[u8]) = match split {
+        Some(idx) => (&buffer[..idx], &buffer[idx + 1..]),
+        None => (&buffer[..], &[]),
+    };
+    let request: AgentRequest =
+        serde_json::from_slice(json_bytes).context("failed to parse agent request JSON")?;
+    let response = match handle_agent_request(runtime, request, blob, cache).await {
+        Ok(response) => response,
+        Err(error) => AgentResponse::Error {
+            message: format!("{error:#}"),
+        },
+    };
+    let payload =
+        serde_json::to_vec(&response).context("failed to serialize agent response JSON")?;
+    stream
+        .write_all(&payload)
+        .await
+        .context("failed to write agent response to socket")?;
+    stream.shutdown().await.ok();
+    Ok(())
+}
+
+/// One-shot proxy mode (`litek8s agent`, default): forward the stdin request to
+/// the node's persistent agent over its Unix socket, starting that daemon if it
+/// is not already running, and relay the response to stdout. This keeps the SSH
+/// contract (one request per invocation) while the heavy state lives in the
+/// resident daemon.
+pub async fn run_agent_proxy() -> Result<()> {
     let mut buffer = Vec::new();
     io::stdin()
         .read_to_end(&mut buffer)
         .await
         .context("failed to read agent request from stdin")?;
 
-    // The wire is `<json>\n<blob>`: split on the first newline. serde_json never
-    // emits a raw newline inside the request, so the first one always delimits
-    // the optional trailing binary blob (empty for most requests).
+    let socket = agent_socket_path();
+    let mut stream = match connect_or_start_daemon(&socket).await {
+        Ok(stream) => stream,
+        Err(error) => {
+            // If the daemon can't be reached or started, fall back to handling
+            // the request in-process so the node still works (no resident cache).
+            eprintln!("persistent agent unavailable ({error:#}); handling in-process");
+            return handle_buffer_in_process(&buffer).await;
+        }
+    };
+
+    stream
+        .write_all(&buffer)
+        .await
+        .context("failed to forward request to agent daemon")?;
+    stream.shutdown().await.ok();
+    let mut response = Vec::new();
+    stream
+        .read_to_end(&mut response)
+        .await
+        .context("failed to read response from agent daemon")?;
+    io::stdout()
+        .write_all(&response)
+        .await
+        .context("failed to relay agent response to stdout")?;
+    Ok(())
+}
+
+/// Connect to the daemon socket, launching `litek8s agent --serve` detached if
+/// nothing is listening yet, then retrying the connect briefly.
+async fn connect_or_start_daemon(socket: &Path) -> Result<tokio::net::UnixStream> {
+    use tokio::net::UnixStream;
+
+    if let Ok(stream) = UnixStream::connect(socket).await {
+        return Ok(stream);
+    }
+    // Launch the daemon detached so it outlives this short-lived proxy process.
+    let exe = std::env::current_exe().context("failed to find own binary to start agent daemon")?;
+    Command::new("setsid")
+        .arg(&exe)
+        .arg("agent")
+        .arg("--serve")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .or_else(|_| {
+            // setsid may be absent; fall back to a bare detached spawn.
+            Command::new(&exe)
+                .arg("agent")
+                .arg("--serve")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+        })
+        .context("failed to start persistent agent daemon")?;
+
+    for attempt in 0..20 {
+        tokio::time::sleep(Duration::from_millis(100 * (attempt + 1).min(5))).await;
+        if let Ok(stream) = UnixStream::connect(socket).await {
+            return Ok(stream);
+        }
+    }
+    bail!("agent daemon did not start listening on {}", socket.display());
+}
+
+/// Fallback: handle a buffered request in-process with an ephemeral cache.
+async fn handle_buffer_in_process(buffer: &[u8]) -> Result<()> {
+    let runtime = DockerRuntime::connect()?;
+    runtime.ping().await?;
     let split = buffer.iter().position(|&b| b == b'\n');
     let (json_bytes, blob): (&[u8], &[u8]) = match split {
         Some(idx) => (&buffer[..idx], &buffer[idx + 1..]),
-        None => (&buffer[..], &[]),
+        None => (buffer, &[]),
     };
-
     let request: AgentRequest =
         serde_json::from_slice(json_bytes).context("failed to parse agent request JSON")?;
-    let response = match handle_agent_request(runtime, request, blob).await {
+    let cache = WeightCache::new();
+    let response = match handle_agent_request(runtime, request, blob, &cache).await {
         Ok(response) => response,
         Err(error) => AgentResponse::Error {
             message: format!("{error:#}"),
         },
     };
-
-    let payload =
-        serde_json::to_vec(&response).context("failed to serialize agent response JSON")?;
-    io::stdout()
-        .write_all(&payload)
-        .await
-        .context("failed to write agent response to stdout")?;
+    let payload = serde_json::to_vec(&response)?;
+    io::stdout().write_all(&payload).await?;
     Ok(())
+}
+
+/// In-RAM cache of weight shards, keyed by weight_id. A persistent agent keeps
+/// shards resident across requests so a model is read from disk once and later
+/// inferences hit memory. A one-shot agent gets a fresh (empty) cache that dies
+/// with the process — correct, just not resident.
+#[derive(Clone, Default)]
+pub struct WeightCache {
+    shards: std::sync::Arc<tokio::sync::Mutex<HashMap<String, std::sync::Arc<crate::matrix::WeightShard>>>>,
+}
+
+impl WeightCache {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Return the cached shard, loading it from `path` (native precision) on a
+    /// miss and inserting it for next time.
+    async fn get_or_load(
+        &self,
+        weight_id: &str,
+        path: &Path,
+    ) -> Result<std::sync::Arc<crate::matrix::WeightShard>> {
+        let mut guard = self.shards.lock().await;
+        if let Some(shard) = guard.get(weight_id) {
+            return Ok(shard.clone());
+        }
+        let path = path.to_path_buf();
+        let shard = tokio::task::spawn_blocking(move || crate::matrix::WeightShard::read(&path))
+            .await
+            .context("weight shard read panicked")??;
+        let shard = std::sync::Arc::new(shard);
+        guard.insert(weight_id.to_string(), shard.clone());
+        Ok(shard)
+    }
+
+    /// Drop a cached shard (e.g. after its file is overwritten).
+    async fn invalidate(&self, weight_id: &str) {
+        self.shards.lock().await.remove(weight_id);
+    }
 }
 
 async fn handle_agent_request(
     runtime: DockerRuntime,
     request: AgentRequest,
     blob: &[u8],
+    cache: &WeightCache,
 ) -> Result<AgentResponse> {
     match request {
         AgentRequest::Ping => {
@@ -1061,6 +1254,8 @@ async fn handle_agent_request(
             tokio::task::spawn_blocking(move || crate::matrix::write_bin_blob(&path, &bytes))
                 .await
                 .context("weight write panicked")??;
+            // Drop any stale resident copy so the next compute reloads it.
+            cache.invalidate(&weight_id).await;
             Ok(AgentResponse::Ack)
         }
         AgentRequest::ComputeMatmulBandCached {
@@ -1082,11 +1277,10 @@ async fn handle_agent_request(
             relu,
         } => {
             let path = local_weight_path(&weight_id)?;
+            // Resolve the shard through the in-RAM cache: a persistent agent
+            // reads it from disk once, then serves later inferences from memory.
+            let shard = cache.get_or_load(&weight_id, &path).await?;
             let rows = tokio::task::spawn_blocking(move || {
-                // Keep the shard at native precision in RAM and dequantize inside
-                // the matmul — a 16-bit weight never inflates to an f64 Matrix,
-                // so the resident peak is a quarter for f16/bf16.
-                let shard = crate::matrix::WeightShard::read(&path)?;
                 let mut out = crate::matrix::multiply_weight_shard(&activation, &shard)?;
                 if relu {
                     crate::matrix::apply_relu(&mut out);

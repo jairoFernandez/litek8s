@@ -100,6 +100,20 @@ Measured across 7 nodes on the same 2048²×6 model:
 matches numpy at the same dtype (f16 weights give `5.314683`, f32 `5.314417` —
 the only difference is f16's rounding, verified against numpy).
 
+## Persistent agent
+
+Each node runs a long-lived `litek8s agent --serve` daemon listening on a local
+Unix socket. The per-request `litek8s agent` invocation over SSH is now a thin
+proxy that forwards to that daemon (starting it on first contact). The daemon
+keeps weight shards resident in a RAM cache across requests and pays the
+`DockerRuntime::connect` once — so a one-shot `ssh ... agent` no longer re-reads
+the shard from disk or reconnects Docker every call.
+
+Measured (m16, repeated inference): wall fell ~6.2s → ~4.4s → ~2.9s over the
+first three runs as the cache warmed, settling ~2–3.5s (vs ~7s with the old
+per-request agent — ~3× best case). The daemon's resident set is tiny (~14 MB
+holding f16 shards). No open ports — everything still flows over SSH.
+
 ## Limits / next steps
 
 - The daemon reads one **layer** fully while sharding it — fine for layers that

@@ -405,7 +405,13 @@ enum Command {
         command: ModelCommand,
     },
     #[command(hide = true)]
-    Agent,
+    Agent {
+        /// Run as the persistent agent daemon (listens on a Unix socket, keeps
+        /// weight shards resident in RAM). Without this flag, proxy one stdin
+        /// request to that daemon (starting it if needed).
+        #[arg(long)]
+        serve: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1281,7 +1287,13 @@ pub async fn run() -> Result<()> {
             ClusterCommand::Destroy { file } => run_cluster_destroy(&endpoint, &file).await,
             ClusterCommand::Export { name } => run_cluster_export(&endpoint, &name).await,
         },
-        Command::Agent => crate::node::run_agent_stdio().await,
+        Command::Agent { serve } => {
+            if serve {
+                crate::node::run_agent_serve().await
+            } else {
+                crate::node::run_agent_proxy().await
+            }
+        }
         Command::Vpn { command } => match command {
             VpnCommand::Init {
                 cidr,
