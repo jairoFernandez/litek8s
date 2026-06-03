@@ -125,6 +125,25 @@ pub fn storage_dtype(dtype: &str) -> crate::matrix::BinDtype {
     }
 }
 
+/// Load a named 1D tensor (norm weights, biases) as a flat f64 vector,
+/// upcasting f16/bf16/f32.
+pub fn load_tensor_1d(path: &Path, name: &str) -> Result<Vec<f64>> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("failed to read model file {}", path.display()))?;
+    let tensors = SafeTensors::deserialize(&bytes)
+        .with_context(|| format!("failed to parse safetensors file {}", path.display()))?;
+    let view = tensors
+        .tensor(name)
+        .with_context(|| format!("tensor `{name}` not found in {}", path.display()))?;
+    ensure!(
+        view.shape().len() == 1,
+        "tensor `{name}` is {}D; expected 1D",
+        view.shape().len()
+    );
+    decode_to_f64(view.dtype(), view.data())
+        .with_context(|| format!("failed to decode tensor `{name}`"))
+}
+
 /// Read a column band of a named 2D weight tensor as column-major rows — i.e.
 /// `cols` vectors of length `in_dim`, ready to cache as a node's shard. Loads
 /// one layer's tensor at a time (never the whole model), then slices out just

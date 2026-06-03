@@ -78,6 +78,71 @@ pub fn apply_rope(vec: &mut [f64], cos: &[f64], sin: &[f64]) {
     }
 }
 
+/// Grouped-query causal self-attention (batch = 1). `q` is
+/// `seq x (n_q_heads*head_dim)`, `k`/`v` are `seq x (n_kv_heads*head_dim)` with
+/// `n_q_heads` a multiple of `n_kv_heads` — each KV head is shared by
+/// `n_q_heads/n_kv_heads` query heads (GQA, as in Qwen/Llama/DeepSeek). RoPE is
+/// applied per head/position. Returns `seq x (n_q_heads*head_dim)`.
+pub fn grouped_query_attention(
+    q: &[Vec<f64>],
+    k: &[Vec<f64>],
+    v: &[Vec<f64>],
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    cos: &[Vec<f64>],
+    sin: &[Vec<f64>],
+) -> Matrix {
+    let seq = q.len();
+    let scale = 1.0 / (head_dim as f64).sqrt();
+    let group = n_q_heads / n_kv_heads;
+    let mut out = vec![vec![0.0; n_q_heads * head_dim]; seq];
+
+    for qh_idx in 0..n_q_heads {
+        let kv = qh_idx / group; // which KV head this query head reads
+        let q_base = qh_idx * head_dim;
+        let kv_base = kv * head_dim;
+
+        let mut qh: Vec<Vec<f64>> =
+            (0..seq).map(|t| q[t][q_base..q_base + head_dim].to_vec()).collect();
+        let mut kh: Vec<Vec<f64>> =
+            (0..seq).map(|t| k[t][kv_base..kv_base + head_dim].to_vec()).collect();
+        for t in 0..seq {
+            apply_rope(&mut qh[t], &cos[t], &sin[t]);
+            apply_rope(&mut kh[t], &cos[t], &sin[t]);
+        }
+
+        for t in 0..seq {
+            let mut scores = Vec::with_capacity(t + 1);
+            for s in 0..=t {
+                let dot: f64 = qh[t].iter().zip(kh[s].iter()).map(|(a, b)| a * b).sum();
+                scores.push(dot * scale);
+            }
+            let weights = softmax(&scores);
+            for (s, w) in weights.iter().enumerate() {
+                for d in 0..head_dim {
+                    out[t][q_base + d] += w * v[s][kv_base + d];
+                }
+            }
+        }
+    }
+    out
+}
+
+/// `x · w + bias` per row. `w` is `in_dim x out_dim`; `bias` length `out_dim`
+/// (empty for no bias).
+pub fn linear(x: &[Vec<f64>], w: &[Vec<f64>], bias: &[f64]) -> anyhow::Result<Matrix> {
+    let mut out = crate::matrix::multiply_parallel(x, w)?;
+    if !bias.is_empty() {
+        for row in &mut out {
+            for (v, b) in row.iter_mut().zip(bias.iter()) {
+                *v += b;
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Multi-head causal self-attention for a single sequence (batch = 1).
 ///
 /// `q`, `k`, `v` are `seq_len x (n_heads * head_dim)` (already projected). RoPE

@@ -5,6 +5,7 @@ pub mod cluster_orchestrator;
 pub mod config;
 pub mod control_plane;
 pub mod daemon;
+pub mod llm;
 pub mod manifest;
 pub mod matrix;
 pub mod model;
