@@ -1116,8 +1116,23 @@ fn agent_socket_path() -> std::path::PathBuf {
 /// restricts this to intra-cluster traffic.
 pub const AGENT_TCP_PORT: u16 = 6444;
 
+/// Bind a TCP listener on `0.0.0.0:port` with SO_REUSEADDR so a freshly-started
+/// agent can grab the port even while a just-killed predecessor lingers in
+/// TIME_WAIT. Returns a tokio listener.
+fn bind_reuse_tcp(port: u16) -> Result<tokio::net::TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let addr: std::net::SocketAddr = ([0, 0, 0, 0], port).into();
+    let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))?;
+    socket.set_reuse_address(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&addr.into())?;
+    socket.listen(1024)?;
+    let std_listener: std::net::TcpListener = socket.into();
+    Ok(tokio::net::TcpListener::from_std(std_listener)?)
+}
+
 pub async fn run_agent_serve() -> Result<()> {
-    use tokio::net::{TcpListener, UnixListener};
+    use tokio::net::UnixListener;
 
     let runtime = DockerRuntime::connect()?;
     runtime.ping().await?;
@@ -1132,9 +1147,25 @@ pub async fn run_agent_serve() -> Result<()> {
     let unix = UnixListener::bind(&socket)
         .with_context(|| format!("failed to bind agent socket {}", socket.display()))?;
     // Also listen on TCP so an in-cluster coordinator can drive this node over
-    // the LAN. Binding may fail if another agent already holds the port; that's
-    // fine (the Unix socket still works for local proxying).
-    let tcp = TcpListener::bind(("0.0.0.0", AGENT_TCP_PORT)).await.ok();
+    // the LAN. A just-killed previous agent can hold the port in TIME_WAIT for a
+    // few seconds, so retry the bind rather than silently giving up TCP (which
+    // would make the node unreachable to peers). SO_REUSEADDR avoids most of it;
+    // the retry covers the rest.
+    let mut tcp = None;
+    for attempt in 0..15 {
+        match bind_reuse_tcp(AGENT_TCP_PORT) {
+            Ok(l) => {
+                tcp = Some(l);
+                break;
+            }
+            Err(error) => {
+                if attempt == 14 {
+                    eprintln!("agent could not bind tcp/{AGENT_TCP_PORT}: {error}");
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+            }
+        }
+    }
     eprintln!(
         "litek8s agent serving on {} and tcp/{}",
         socket.display(),
