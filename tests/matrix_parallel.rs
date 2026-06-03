@@ -1,7 +1,8 @@
 use litek8s::matrix::{
     apply_relu, columns, deterministic_matrix, encode_matrix_bin, encode_matrix_bin_dtype,
     matrix_id, multiply_band, multiply_column_shard, multiply_parallel, multiply_sequential,
-    read_matrix_bin, validate_weight_id, weighted_split, write_bin_blob, write_matrix_bin, BinDtype,
+    multiply_weight_shard, read_matrix_bin, validate_weight_id, weighted_split, write_bin_blob,
+    write_matrix_bin, BinDtype, WeightShard,
 };
 
 #[test]
@@ -214,6 +215,34 @@ fn sharded_pipeline_matches_local_forward() {
     let a2 = forward(&a1, &w1, &weights);
 
     assert_eq!(a2, reference);
+}
+
+#[test]
+fn weight_shard_matmul_matches_dequantized_path() {
+    // multiply_weight_shard (dequantize-in-the-dot, f16 resident) must equal
+    // dequantizing the whole shard first, and use far fewer resident bytes.
+    let act = deterministic_matrix(4, 6, 1);
+    let weight = deterministic_matrix(6, 7, 2);
+    let cols = columns(&weight); // column-major, f64
+
+    // Reference via the f64 column path.
+    let reference = multiply_column_shard(&act, &cols).unwrap();
+
+    // f16 shard: encode column-major at f16, wrap, multiply with in-dot dequant.
+    let blob = encode_matrix_bin_dtype(&cols, BinDtype::F16).unwrap();
+    let shard = WeightShard::from_blob(blob).unwrap();
+    assert_eq!(shard.columns(), 7);
+    assert_eq!(shard.column_len(), 6);
+    // 16-bit: 22 header + 7*6*2 = 106 bytes, vs an f64 Matrix's 7*6*8 = 336.
+    assert_eq!(shard.byte_len(), 22 + 7 * 6 * 2);
+
+    let out = multiply_weight_shard(&act, &shard).unwrap();
+    for (r0, r1) in out.iter().zip(reference.iter()) {
+        for (a, b) in r0.iter().zip(r1.iter()) {
+            // Within f16 rounding of the reference.
+            assert!((a - b).abs() < 0.05, "{a} vs {b}");
+        }
+    }
 }
 
 #[test]

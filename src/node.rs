@@ -484,8 +484,8 @@ impl NodeClient {
             Self::Local(_) => {
                 let path = local_weight_path(weight_id)?;
                 tokio::task::spawn_blocking(move || {
-                    let cols = crate::matrix::read_matrix_bin(&path)?;
-                    let mut out = crate::matrix::multiply_column_shard(&activation, &cols)?;
+                    let shard = crate::matrix::WeightShard::read(&path)?;
+                    let mut out = crate::matrix::multiply_weight_shard(&activation, &shard)?;
                     if relu {
                         crate::matrix::apply_relu(&mut out);
                     }
@@ -1083,8 +1083,11 @@ async fn handle_agent_request(
         } => {
             let path = local_weight_path(&weight_id)?;
             let rows = tokio::task::spawn_blocking(move || {
-                let cols = crate::matrix::read_matrix_bin(&path)?;
-                let mut out = crate::matrix::multiply_column_shard(&activation, &cols)?;
+                // Keep the shard at native precision in RAM and dequantize inside
+                // the matmul — a 16-bit weight never inflates to an f64 Matrix,
+                // so the resident peak is a quarter for f16/bf16.
+                let shard = crate::matrix::WeightShard::read(&path)?;
+                let mut out = crate::matrix::multiply_weight_shard(&activation, &shard)?;
                 if relu {
                     crate::matrix::apply_relu(&mut out);
                 }

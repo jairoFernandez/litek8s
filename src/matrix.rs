@@ -193,6 +193,120 @@ pub fn multiply_column_shard(left: &[Vec<f64>], right_cols: &[Vec<f64>]) -> Resu
     Ok(chunks.into_iter().flatten().collect())
 }
 
+/// A weight shard kept in RAM at its native precision (f16/bf16/f32/f64), stored
+/// column-major as the raw `write_matrix_bin` blob. Values are dequantized to
+/// f64 on the fly inside the matmul, so a 16-bit weight uses half the resident
+/// memory of an f64 `Matrix` — the point: fit ~2x more model on the same node.
+pub struct WeightShard {
+    dtype: BinDtype,
+    rows: usize,
+    cols: usize,
+    /// The full bin blob (header + column-major data); data starts at the header.
+    blob: Vec<u8>,
+}
+
+impl WeightShard {
+    /// Wrap an encoded bin blob (validated header) without dequantizing it.
+    pub fn from_blob(blob: Vec<u8>) -> Result<Self> {
+        let (dtype, rows, cols, _) = parse_bin_header(&blob)?;
+        Ok(Self {
+            dtype,
+            rows,
+            cols,
+            blob,
+        })
+    }
+
+    /// Read a cached weight file into a shard, keeping its on-disk precision.
+    pub fn read(path: &Path) -> Result<Self> {
+        let blob = std::fs::read(path)
+            .with_context(|| format!("failed to read weight file {}", path.display()))?;
+        Self::from_blob(blob)
+    }
+
+    /// `rows` here is the stored dimension count; for a column-major shard this
+    /// is the number of columns (one cached "row" per weight column).
+    pub fn columns(&self) -> usize {
+        self.rows
+    }
+
+    /// Length of each column (the weight's input dim).
+    pub fn column_len(&self) -> usize {
+        self.cols
+    }
+
+    /// Resident byte size — half an equivalent f64 Matrix for 16-bit dtypes.
+    pub fn byte_len(&self) -> usize {
+        self.blob.len()
+    }
+
+    /// Dequantize one column-major value at (col, k).
+    #[inline]
+    fn at(&self, col: usize, k: usize) -> f64 {
+        let size = self.dtype.size();
+        let off = MATRIX_BIN_HEADER + (col * self.cols + k) * size;
+        self.dtype.decode(&self.blob[off..off + size])
+    }
+}
+
+/// Multiply an activation (`rows x shared`, f64) against a column shard kept at
+/// native precision: `out[i][j] = sum_k act[i][k] * shard.col(j)[k]`, with the
+/// weight value dequantized inside the dot. Output is this node's slice of the
+/// layer, `rows x shard.columns()`.
+pub fn multiply_weight_shard(left: &[Vec<f64>], shard: &WeightShard) -> Result<Matrix> {
+    ensure!(!left.is_empty(), "activation cannot be empty");
+    let shared = left[0].len();
+    ensure!(
+        left.iter().all(|row| row.len() == shared),
+        "activation must be rectangular"
+    );
+    if shard.columns() == 0 {
+        return Ok(left.iter().map(|_| Vec::new()).collect());
+    }
+    ensure!(
+        shard.column_len() == shared,
+        "weight column length ({}) must match activation width ({shared})",
+        shard.column_len()
+    );
+
+    let cols = shard.columns();
+    let workers = thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(left.len().max(1));
+    let chunk_size = left.len().div_ceil(workers);
+
+    let chunks = thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for start in (0..left.len()).step_by(chunk_size) {
+            let end = (start + chunk_size).min(left.len());
+            let rows = &left[start..end];
+            handles.push(scope.spawn(move || {
+                rows.iter()
+                    .map(|row| {
+                        (0..cols)
+                            .map(|j| {
+                                let mut acc = 0.0;
+                                for (k, &a) in row.iter().enumerate() {
+                                    acc += a * shard.at(j, k);
+                                }
+                                acc
+                            })
+                            .collect()
+                    })
+                    .collect::<Matrix>()
+            }));
+        }
+        let mut all = Vec::with_capacity(handles.len());
+        for handle in handles {
+            all.push(handle.join().map_err(|_| anyhow!("matrix worker panicked"))?);
+        }
+        Ok::<Vec<Matrix>, anyhow::Error>(all)
+    })?;
+
+    Ok(chunks.into_iter().flatten().collect())
+}
+
 /// Transpose a matrix into its columns: `columns(m)[j][i] == m[i][j]`. Weights
 /// are sharded and cached column-major so a node stores exactly the columns it
 /// owns, contiguous on disk.
