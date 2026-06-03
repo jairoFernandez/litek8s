@@ -504,9 +504,14 @@ fn write_bytes_atomic(path: &Path, buf: &[u8]) -> Result<()> {
 pub fn read_matrix_bin(path: &Path) -> Result<Matrix> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("failed to read weight file {}", path.display()))?;
-    let (dtype, rows, cols, _) = parse_bin_header(&bytes)
-        .with_context(|| format!("invalid weight file {}", path.display()))?;
+    decode_matrix_bin(&bytes).with_context(|| format!("invalid weight file {}", path.display()))
+}
 
+/// Decode a bin blob (the `encode_matrix_bin_dtype` format) to an f64 Matrix.
+/// Used to ship activations between coordinator and peers at native byte size
+/// instead of JSON float text.
+pub fn decode_matrix_bin(bytes: &[u8]) -> Result<Matrix> {
+    let (dtype, rows, cols, _) = parse_bin_header(bytes)?;
     let size = dtype.size();
     let mut matrix = Vec::with_capacity(rows);
     let mut offset = MATRIX_BIN_HEADER;

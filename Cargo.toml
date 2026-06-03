@@ -31,5 +31,5 @@ tempfile = "3.18.0"
 
 [profile.release]
 opt-level = 3
-lto = "thin"
-codegen-units = 1
+# lto/codegen-units=1 give a few % more but make the per-node cross-compile
+# install painfully slow to iterate on; opt-level 3 already autovectorizes.

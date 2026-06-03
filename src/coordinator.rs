@@ -253,6 +253,11 @@ async fn sharded_matmul_grouped(
         }
     }
 
+    // Encode the activation once to a binary blob (f32) — it's replicated to
+    // every peer, so native bytes instead of JSON float text is a big saving.
+    let act_blob = matrix::encode_matrix_bin_dtype(activation, BinDtype::F32)?;
+    let act_blob = std::sync::Arc::new(act_blob);
+
     let mut tasks = Vec::new();
     for (peer_ip, mut entries) in by_peer {
         // Keep a stable order (tensor index, then col_start) so results map back.
@@ -260,13 +265,10 @@ async fn sharded_matmul_grouped(
         let weight_ids: Vec<String> = entries.iter().map(|(_, _, id)| id.clone()).collect();
         let meta: Vec<(usize, usize)> = entries.iter().map(|(ti, cs, _)| (*ti, *cs)).collect();
         let client = TcpAgentClient::new(&peer_ip);
-        let act = activation.clone();
+        let blob = std::sync::Arc::clone(&act_blob);
         tasks.push(tokio::spawn(async move {
             let resp = client
-                .request(AgentRequest::ComputeShardsBatch {
-                    activation: act,
-                    weight_ids,
-                })
+                .request_blob(AgentRequest::ComputeShardsBatch { weight_ids }, &blob)
                 .await;
             (meta, resp)
         }));

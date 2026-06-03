@@ -124,10 +124,11 @@ pub enum AgentRequest {
     },
     /// Compute several of this node's column shards against the SAME activation
     /// in one call (e.g. Q+K+V, or gate+up, which share an input) — collapsing
-    /// several LAN round-trips into one. Returns one result matrix per weight_id,
-    /// in order.
+    /// several LAN round-trips into one. The activation is NOT in this JSON: it
+    /// follows as a binary blob (the encode_matrix_bin format), so the (often
+    /// large) activation ships at native byte size instead of JSON float text.
+    /// Returns one result matrix per weight_id, in order.
     ComputeShardsBatch {
-        activation: Vec<Vec<f64>>,
         weight_ids: Vec<String>,
     },
 }
@@ -1501,10 +1502,10 @@ async fn handle_agent_request(
             .context("layer shard worker panicked")??;
             Ok(AgentResponse::MatmulBand { rows })
         }
-        AgentRequest::ComputeShardsBatch {
-            activation,
-            weight_ids,
-        } => {
+        AgentRequest::ComputeShardsBatch { weight_ids } => {
+            // The activation arrived as a binary blob (native bytes, not JSON).
+            let activation = crate::matrix::decode_matrix_bin(blob)
+                .context("failed to decode activation blob")?;
             // Load every requested shard, then multiply the shared activation
             // against each — one LAN round-trip for what were several.
             let mut shards = Vec::with_capacity(weight_ids.len());
