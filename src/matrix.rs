@@ -193,66 +193,77 @@ pub fn multiply_column_shard(left: &[Vec<f64>], right_cols: &[Vec<f64>]) -> Resu
     Ok(chunks.into_iter().flatten().collect())
 }
 
-/// A weight shard kept in RAM at its native precision (f16/bf16/f32/f64), stored
-/// column-major as the raw `write_matrix_bin` blob. Values are dequantized to
-/// f64 on the fly inside the matmul, so a 16-bit weight uses half the resident
-/// memory of an f64 `Matrix` — the point: fit ~2x more model on the same node.
+/// A weight shard kept in RAM, dequantized once to **f32** and stored
+/// column-major as a flat contiguous buffer: `data[col*col_len + k]`. f32 (not
+/// f64) halves the bytes moved and lets the dot product autovectorize — the hot
+/// loop is a contiguous f32 slice, which LLVM turns into SIMD. Dequantizing up
+/// front (instead of per-element in the matmul) keeps the inner loop tight.
 pub struct WeightShard {
-    dtype: BinDtype,
-    rows: usize,
     cols: usize,
-    /// The full bin blob (header + column-major data); data starts at the header.
-    blob: Vec<u8>,
+    col_len: usize,
+    /// Column-major f32 weights: column `j` is data[j*col_len .. (j+1)*col_len].
+    data: Vec<f32>,
 }
 
 impl WeightShard {
-    /// Wrap an encoded bin blob (validated header) without dequantizing it.
+    /// Wrap an encoded bin blob (validated header), dequantizing to f32.
     pub fn from_blob(blob: Vec<u8>) -> Result<Self> {
-        let (dtype, rows, cols, _) = parse_bin_header(&blob)?;
+        let (dtype, rows, col_len, _) = parse_bin_header(&blob)?;
+        let size = dtype.size();
+        let n = rows * col_len;
+        let mut data = Vec::with_capacity(n);
+        let mut off = MATRIX_BIN_HEADER;
+        for _ in 0..n {
+            data.push(dtype.decode(&blob[off..off + size]) as f32);
+            off += size;
+        }
         Ok(Self {
-            dtype,
-            rows,
-            cols,
-            blob,
+            cols: rows,
+            col_len,
+            data,
         })
     }
 
-    /// Read a cached weight file into a shard, keeping its on-disk precision.
+    /// Read a cached weight file into a shard.
     pub fn read(path: &Path) -> Result<Self> {
         let blob = std::fs::read(path)
             .with_context(|| format!("failed to read weight file {}", path.display()))?;
         Self::from_blob(blob)
     }
 
-    /// `rows` here is the stored dimension count; for a column-major shard this
-    /// is the number of columns (one cached "row" per weight column).
+    /// Number of weight columns this shard owns.
     pub fn columns(&self) -> usize {
-        self.rows
+        self.cols
     }
 
     /// Length of each column (the weight's input dim).
     pub fn column_len(&self) -> usize {
-        self.cols
+        self.col_len
     }
 
-    /// Resident byte size — half an equivalent f64 Matrix for 16-bit dtypes.
+    /// Resident byte size (f32: 4 bytes/elem).
     pub fn byte_len(&self) -> usize {
-        self.blob.len()
+        self.data.len() * 4
     }
 
-    /// Dequantize one column-major value at (col, k).
+    /// Column `j` as a contiguous f32 slice.
     #[inline]
-    fn at(&self, col: usize, k: usize) -> f64 {
-        let size = self.dtype.size();
-        let off = MATRIX_BIN_HEADER + (col * self.cols + k) * size;
-        self.dtype.decode(&self.blob[off..off + size])
+    fn col(&self, j: usize) -> &[f32] {
+        &self.data[j * self.col_len..(j + 1) * self.col_len]
     }
 }
 
-/// Multiply an activation (`rows x shared`, f64) against a column shard kept at
-/// native precision: `out[i][j] = sum_k act[i][k] * shard.col(j)[k]`, with the
-/// weight value dequantized inside the dot. Output is this node's slice of the
-/// layer, `rows x shard.columns()`.
+/// f32 dot product over two contiguous slices — written so LLVM autovectorizes
+/// it (no bounds checks in the loop, plain zip-fold).
+#[inline]
+fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b.iter()).map(|(x, y)| x * y).sum()
+}
+
+/// Multiply an activation (`rows x shared`, f64) against a column shard:
+/// `out[i][j] = sum_k act[i][k] * shard.col(j)[k]`. The activation row is cast to
+/// f32 once per row, then dotted against each f32 column (autovectorized).
+/// Output is `rows x shard.columns()`.
 pub fn multiply_weight_shard(left: &[Vec<f64>], shard: &WeightShard) -> Result<Matrix> {
     ensure!(!left.is_empty(), "activation cannot be empty");
     let shared = left[0].len();
@@ -284,14 +295,11 @@ pub fn multiply_weight_shard(left: &[Vec<f64>], shard: &WeightShard) -> Result<M
             handles.push(scope.spawn(move || {
                 rows.iter()
                     .map(|row| {
+                        // Cast the activation row to f32 once, reuse across all
+                        // columns.
+                        let row_f32: Vec<f32> = row.iter().map(|&x| x as f32).collect();
                         (0..cols)
-                            .map(|j| {
-                                let mut acc = 0.0;
-                                for (k, &a) in row.iter().enumerate() {
-                                    acc += a * shard.at(j, k);
-                                }
-                                acc
-                            })
+                            .map(|j| dot_f32(&row_f32, shard.col(j)) as f64)
                             .collect()
                     })
                     .collect::<Matrix>()

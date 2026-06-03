@@ -72,6 +72,50 @@ impl EmbedTable {
             })
             .collect()
     }
+
+    /// Tied lm_head: logits[t] = embed_row(t) · last_hidden, over the whole
+    /// vocab. The dominant cost per token (151936 dots). Cast the hidden vector
+    /// to f32 once, then dot each embedding row in f32 directly from the f16
+    /// bytes — no per-row Vec allocation, autovectorizable inner loop. Parallel
+    /// over the vocab.
+    fn logits(&self, last: &[f64]) -> Vec<f64> {
+        let last_f32: Vec<f32> = last.iter().map(|&x| x as f32).collect();
+        let hidden = self.hidden;
+        let vocab = self.vocab;
+        let bytes = &self.f16_bytes;
+
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .min(vocab.max(1));
+        let chunk = vocab.div_ceil(workers);
+
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for start in (0..vocab).step_by(chunk) {
+                let end = (start + chunk).min(vocab);
+                let last_f32 = &last_f32;
+                handles.push(scope.spawn(move || {
+                    (start..end)
+                        .map(|t| {
+                            let off = t * hidden * 2;
+                            let mut acc = 0.0f32;
+                            for j in 0..hidden {
+                                let b = off + j * 2;
+                                let w = half::f16::from_le_bytes([bytes[b], bytes[b + 1]]).to_f32();
+                                acc += w * last_f32[j];
+                            }
+                            acc as f64
+                        })
+                        .collect::<Vec<f64>>()
+                }));
+            }
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().unwrap())
+                .collect()
+        })
+    }
 }
 
 /// A Qwen2 model distributed across peers: small weights local, big ones
@@ -264,17 +308,7 @@ impl DistModel {
         }
 
         let normed = rms_norm(&h, &self.final_norm, cfg.rms_norm_eps);
-        let last = &normed[0];
-        Ok((0..cfg.vocab_size)
-            .map(|t| {
-                self.embed
-                    .row(t)
-                    .iter()
-                    .zip(last.iter())
-                    .map(|(w, x)| w * x)
-                    .sum()
-            })
-            .collect())
+        Ok(self.embed.logits(&normed[0]))
     }
 
     /// Fresh per-layer KV caches for a new generation.
@@ -333,18 +367,8 @@ impl DistModel {
         }
 
         let normed = rms_norm(&h, &self.final_norm, cfg.rms_norm_eps);
-        let last = &normed[seq - 1];
-        // Tied lm_head: logits[t] = embed_row(t) . last_hidden.
-        Ok((0..cfg.vocab_size)
-            .map(|t| {
-                self.embed
-                    .row(t)
-                    .iter()
-                    .zip(last.iter())
-                    .map(|(w, x)| w * x)
-                    .sum()
-            })
-            .collect())
+        // Tied lm_head over the whole vocab (the dominant per-token cost).
+        Ok(self.embed.logits(&normed[seq - 1]))
     }
 }
 

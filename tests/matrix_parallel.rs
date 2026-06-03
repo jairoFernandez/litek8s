@@ -233,8 +233,8 @@ fn weight_shard_matmul_matches_dequantized_path() {
     let shard = WeightShard::from_blob(blob).unwrap();
     assert_eq!(shard.columns(), 7);
     assert_eq!(shard.column_len(), 6);
-    // 16-bit: 22 header + 7*6*2 = 106 bytes, vs an f64 Matrix's 7*6*8 = 336.
-    assert_eq!(shard.byte_len(), 22 + 7 * 6 * 2);
+    // Dequantized to f32 in RAM: 7*6*4 bytes, vs an f64 Matrix's 7*6*8.
+    assert_eq!(shard.byte_len(), 7 * 6 * 4);
 
     let out = multiply_weight_shard(&act, &shard).unwrap();
     for (r0, r1) in out.iter().zip(reference.iter()) {
