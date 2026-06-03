@@ -112,6 +112,130 @@ pub fn load_tensor_2d(path: &Path, name: &str) -> Result<Matrix> {
         .collect())
 }
 
+/// Read a 2D tensor and emit it as row-major f16 little-endian bytes, without
+/// ever materializing the full f64 matrix — for the embedding table, which is
+/// large (vocab x hidden) and would blow a small node's RAM at f64. Returns
+/// (rows, cols, f16_bytes).
+pub fn load_tensor_2d_f16(path: &Path, name: &str) -> Result<(usize, usize, Vec<u8>)> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("failed to read model file {}", path.display()))?;
+    let tensors = SafeTensors::deserialize(&bytes)
+        .with_context(|| format!("failed to parse safetensors file {}", path.display()))?;
+    let view = tensors
+        .tensor(name)
+        .with_context(|| format!("tensor `{name}` not found in {}", path.display()))?;
+    ensure!(view.shape().len() == 2, "tensor `{name}` is not 2D");
+    let rows = view.shape()[0];
+    let cols = view.shape()[1];
+
+    // Convert element-by-element straight to f16 — never hold the full f64
+    // matrix (1GB for a vocab x hidden embedding would blow a small node's RAM).
+    let data = view.data();
+    let dtype = view.dtype();
+    let elem = dtype.size();
+    ensure!(data.len() == rows * cols * elem, "tensor `{name}` shape mismatch");
+    let mut out = Vec::with_capacity(rows * cols * 2);
+    for chunk in data.chunks_exact(elem) {
+        let v = decode_one(dtype, chunk);
+        out.extend_from_slice(&half::f16::from_f64(v).to_le_bytes());
+    }
+    Ok((rows, cols, out))
+}
+
+/// Bytes-per-element for a safetensors float dtype (supported set).
+trait DtypeSize {
+    fn size(&self) -> usize;
+}
+impl DtypeSize for Dtype {
+    fn size(&self) -> usize {
+        match self {
+            Dtype::F64 => 8,
+            Dtype::F32 => 4,
+            Dtype::F16 | Dtype::BF16 => 2,
+            _ => 0,
+        }
+    }
+}
+
+/// Decode one little-endian element of a supported float dtype to f64.
+fn decode_one(dtype: Dtype, b: &[u8]) -> f64 {
+    match dtype {
+        Dtype::F64 => f64::from_le_bytes(b.try_into().unwrap()),
+        Dtype::F32 => f64::from(f32::from_le_bytes(b.try_into().unwrap())),
+        Dtype::F16 => f64::from(f16::from_le_bytes(b.try_into().unwrap()).to_f32()),
+        Dtype::BF16 => f64::from(bf16::from_le_bytes(b.try_into().unwrap()).to_f32()),
+        _ => 0.0,
+    }
+}
+
+/// A safetensors file mmap'd once. The OS pages tensor data in on demand, so a
+/// multi-GB model never has to be read into RAM in full — essential on a small
+/// coordinator node that distributes a model larger than its memory.
+pub struct ModelFile {
+    mmap: memmap2::Mmap,
+}
+
+impl ModelFile {
+    pub fn open(path: &Path) -> Result<Self> {
+        let file = std::fs::File::open(path)
+            .with_context(|| format!("failed to open model file {}", path.display()))?;
+        // SAFETY: the file is read-only for the process lifetime; safetensors
+        // only ever reads from the mapping.
+        let mmap = unsafe { memmap2::Mmap::map(&file) }
+            .with_context(|| format!("failed to mmap {}", path.display()))?;
+        Ok(Self { mmap })
+    }
+
+    fn tensors(&self) -> Result<SafeTensors<'_>> {
+        SafeTensors::deserialize(&self.mmap).context("failed to parse safetensors header")
+    }
+
+    /// Load a 2D tensor as a row-major f64 Matrix from the mapping.
+    pub fn tensor_2d(&self, name: &str) -> Result<Matrix> {
+        let tensors = self.tensors()?;
+        let view = tensors
+            .tensor(name)
+            .with_context(|| format!("tensor `{name}` not found"))?;
+        ensure!(view.shape().len() == 2, "tensor `{name}` is not 2D");
+        let cols = view.shape()[1];
+        let flat = decode_to_f64(view.dtype(), view.data())?;
+        Ok(flat.chunks_exact(cols).map(|c| c.to_vec()).collect())
+    }
+
+    /// Load a 1D tensor (norms, biases) as f64; empty vec if absent.
+    pub fn tensor_1d(&self, name: &str) -> Vec<f64> {
+        let Ok(tensors) = self.tensors() else {
+            return Vec::new();
+        };
+        let Ok(view) = tensors.tensor(name) else {
+            return Vec::new();
+        };
+        if view.shape().len() != 1 {
+            return Vec::new();
+        }
+        decode_to_f64(view.dtype(), view.data()).unwrap_or_default()
+    }
+
+    /// Load a 2D tensor straight to row-major f16 bytes (no full f64 copy) —
+    /// for the embedding table on a memory-tight node. Returns (rows, cols, bytes).
+    pub fn tensor_2d_f16(&self, name: &str) -> Result<(usize, usize, Vec<u8>)> {
+        let tensors = self.tensors()?;
+        let view = tensors
+            .tensor(name)
+            .with_context(|| format!("tensor `{name}` not found"))?;
+        ensure!(view.shape().len() == 2, "tensor `{name}` is not 2D");
+        let (rows, cols) = (view.shape()[0], view.shape()[1]);
+        let dtype = view.dtype();
+        let elem = dtype.size();
+        let data = view.data();
+        let mut out = Vec::with_capacity(rows * cols * 2);
+        for chunk in data.chunks_exact(elem) {
+            out.extend_from_slice(&half::f16::from_f64(decode_one(dtype, chunk)).to_le_bytes());
+        }
+        Ok((rows, cols, out))
+    }
+}
+
 /// Map a safetensors dtype string to the cache's storage dtype, so weights keep
 /// their native precision (f16/bf16) on disk and over the wire instead of being
 /// inflated to f64. f32/f64 stay as-is; quantized integer formats are not

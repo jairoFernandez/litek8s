@@ -439,6 +439,20 @@ enum LlmCommand {
         #[arg(long, default_value_t = 20, help = "Max new tokens to generate")]
         max_new: usize,
     },
+    #[command(
+        about = "Run a model distributed across peer agents over the LAN (run on a coordinator node)",
+        help_template = HELP_TEMPLATE
+    )]
+    Distributed {
+        #[arg(long, help = "Model directory (config.json, model.safetensors, tokenizer.json)")]
+        model_dir: PathBuf,
+        #[arg(long, help = "Peer private IPs to shard weights across", value_delimiter = ',')]
+        peers: Vec<String>,
+        #[arg(help = "Prompt text")]
+        prompt: String,
+        #[arg(long, default_value_t = 8, help = "Max new tokens to generate")]
+        max_new: usize,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1396,6 +1410,12 @@ pub async fn run() -> Result<()> {
                 prompt,
                 max_new,
             } => run_llm_generate(&model_dir, &prompt, max_new),
+            LlmCommand::Distributed {
+                model_dir,
+                peers,
+                prompt,
+                max_new,
+            } => run_llm_distributed(&model_dir, &peers, &prompt, max_new).await,
         },
         Command::Model { command } => match command {
             ModelCommand::Inspect { file } => run_model_inspect(&file),
@@ -1631,6 +1651,62 @@ async fn run_model_run(
         Response::Error { message } => bail!(message),
         other => bail!("unexpected response to model run: {other:?}"),
     }
+}
+
+async fn run_llm_distributed(
+    model_dir: &Path,
+    peers: &[String],
+    prompt: &str,
+    max_new: usize,
+) -> Result<()> {
+    use std::io::Write;
+    use std::time::Instant;
+
+    ensure!(!peers.is_empty(), "need at least one --peers IP");
+    println!("{}", title("Distributed LLM"));
+    println!("{} {}", label("model"), model_dir.display());
+    println!("{} {}", label("peers"), peers.join(", "));
+    println!("{} {}", label("prompt"), prompt);
+
+    let cfg = crate::llm::LlmConfig::load(&model_dir.join("config.json"))?;
+    let tokenizer = tokenizers::Tokenizer::from_file(model_dir.join("tokenizer.json"))
+        .map_err(|e| anyhow!("failed to load tokenizer: {e}"))?;
+
+    println!("\n{} distributing weights to peers...", muted("·"));
+    let t0 = Instant::now();
+    let model = crate::coordinator::distribute_qwen(
+        &model_dir.join("model.safetensors"),
+        &cfg,
+        peers,
+        crate::matrix::BinDtype::F16,
+    )
+    .await?;
+    println!(
+        "{} model distributed in {}",
+        ok("ok"),
+        muted(&format!("{}ms", t0.elapsed().as_millis()))
+    );
+
+    let enc = tokenizer
+        .encode(prompt, false)
+        .map_err(|e| anyhow!("tokenize failed: {e}"))?;
+    let mut tokens: Vec<u32> = enc.get_ids().to_vec();
+    let start = tokens.len();
+
+    print!("\n{prompt}");
+    std::io::stdout().flush().ok();
+    for _ in 0..max_new {
+        let logits = model.forward_last_logits(&tokens).await?;
+        let next = crate::coordinator::argmax(&logits) as u32;
+        tokens.push(next);
+        if let Ok(piece) = tokenizer.decode(&[next], false) {
+            print!("{piece}");
+            std::io::stdout().flush().ok();
+        }
+    }
+    println!();
+    let _ = start;
+    Ok(())
 }
 
 fn run_llm_generate(model_dir: &Path, prompt: &str, max_new: usize) -> Result<()> {
