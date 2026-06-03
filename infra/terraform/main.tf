@@ -92,6 +92,18 @@ resource "aws_security_group" "litek8s" {
     cidr_blocks = [local.ssh_ingress_cidr]
   }
 
+  # Intra-cluster traffic: nodes talk to each other over the private subnet so
+  # the in-cluster coordinator can drive a distributed forward at LAN latency
+  # (~ms) instead of routing every matmul back through the control plane over
+  # the internet (~600ms). Private range only — not internet-exposed.
+  ingress {
+    description = "All traffic within the cluster subnet"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = [var.subnet_cidr]
+  }
+
   egress {
     description = "All outbound (apt, docker pull)"
     from_port   = 0

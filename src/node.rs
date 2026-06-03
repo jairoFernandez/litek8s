@@ -942,8 +942,13 @@ fn agent_socket_path() -> std::path::PathBuf {
 /// WeightCache persists for the daemon's lifetime — so a model is read from disk
 /// once and later inferences hit memory, and the costly DockerRuntime::connect
 /// is paid once instead of per request.
+/// TCP port the persistent agent listens on (in addition to its Unix socket) so
+/// other cluster nodes can reach it over the private subnet. The security group
+/// restricts this to intra-cluster traffic.
+pub const AGENT_TCP_PORT: u16 = 6444;
+
 pub async fn run_agent_serve() -> Result<()> {
-    use tokio::net::UnixListener;
+    use tokio::net::{TcpListener, UnixListener};
 
     let runtime = DockerRuntime::connect()?;
     runtime.ping().await?;
@@ -955,37 +960,53 @@ pub async fn run_agent_serve() -> Result<()> {
     if socket.exists() {
         std::fs::remove_file(&socket).ok();
     }
-    let listener = UnixListener::bind(&socket)
+    let unix = UnixListener::bind(&socket)
         .with_context(|| format!("failed to bind agent socket {}", socket.display()))?;
-    eprintln!("litek8s agent serving on {}", socket.display());
+    // Also listen on TCP so an in-cluster coordinator can drive this node over
+    // the LAN. Binding may fail if another agent already holds the port; that's
+    // fine (the Unix socket still works for local proxying).
+    let tcp = TcpListener::bind(("0.0.0.0", AGENT_TCP_PORT)).await.ok();
+    eprintln!(
+        "litek8s agent serving on {} and tcp/{}",
+        socket.display(),
+        if tcp.is_some() { AGENT_TCP_PORT } else { 0 }
+    );
 
     let cache = WeightCache::new();
     loop {
-        let (mut stream, _) = match listener.accept().await {
-            Ok(pair) => pair,
-            Err(error) => {
-                eprintln!("agent accept failed: {error}");
-                continue;
+        tokio::select! {
+            accepted = unix.accept() => {
+                if let Ok((mut stream, _)) = accepted {
+                    let (runtime, cache) = (runtime.clone(), cache.clone());
+                    tokio::spawn(async move {
+                        if let Err(error) = serve_one(&mut stream, runtime, &cache).await {
+                            eprintln!("agent request failed: {error:#}");
+                        }
+                    });
+                }
             }
-        };
-        let runtime = runtime.clone();
-        let cache = cache.clone();
-        tokio::spawn(async move {
-            if let Err(error) = serve_one(&mut stream, runtime, &cache).await {
-                eprintln!("agent request failed: {error:#}");
+            accepted = async { match &tcp { Some(l) => l.accept().await.map(|(s, _)| s), None => std::future::pending().await } } => {
+                if let Ok(mut stream) = accepted {
+                    let (runtime, cache) = (runtime.clone(), cache.clone());
+                    tokio::spawn(async move {
+                        if let Err(error) = serve_one(&mut stream, runtime, &cache).await {
+                            eprintln!("agent request failed: {error:#}");
+                        }
+                    });
+                }
             }
-        });
+        }
     }
 }
 
 /// Handle one connection on the persistent agent's socket: read a framed
 /// `<json>\n<blob>` request, dispatch it against the shared cache, write the
-/// JSON response.
-async fn serve_one(
-    stream: &mut tokio::net::UnixStream,
-    runtime: DockerRuntime,
-    cache: &WeightCache,
-) -> Result<()> {
+/// JSON response. Generic over the stream type so it serves both the local Unix
+/// socket and TCP from other cluster nodes.
+async fn serve_one<S>(stream: &mut S, runtime: DockerRuntime, cache: &WeightCache) -> Result<()>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin,
+{
     let mut buffer = Vec::new();
     stream
         .read_to_end(&mut buffer)
