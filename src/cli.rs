@@ -1750,7 +1750,10 @@ async fn run_llm_preloaded(
     generate_distributed(&model, &tokenizer, prompt, max_new).await
 }
 
-/// Greedy autoregressive generation over a distributed model, streaming tokens.
+/// Greedy autoregressive generation with a KV cache, streaming tokens. The
+/// prompt is prefilled token-by-token into the caches, then each new token is a
+/// single decode step (one row through the sharded matmuls, attending over the
+/// cache) — so per-token cost no longer grows with the prefix length.
 async fn generate_distributed(
     model: &crate::coordinator::DistModel,
     tokenizer: &tokenizers::Tokenizer,
@@ -1758,24 +1761,51 @@ async fn generate_distributed(
     max_new: usize,
 ) -> Result<()> {
     use std::io::Write;
+    use std::time::Instant;
 
     let enc = tokenizer
         .encode(prompt, false)
         .map_err(|e| anyhow!("tokenize failed: {e}"))?;
-    let mut tokens: Vec<u32> = enc.get_ids().to_vec();
+    let prompt_ids: Vec<u32> = enc.get_ids().to_vec();
+    ensure!(!prompt_ids.is_empty(), "empty prompt");
 
     print!("\n{prompt}");
     std::io::stdout().flush().ok();
+
+    let mut caches = model.new_caches();
+    let mut pos = 0usize;
+    let t0 = Instant::now();
+
+    // Prefill: feed every prompt token, keeping the last logits to sample from.
+    let mut logits = Vec::new();
+    for &tok in &prompt_ids {
+        logits = model.decode_step(tok, pos, &mut caches).await?;
+        pos += 1;
+    }
+    let prefill_ms = t0.elapsed().as_millis();
+
+    // Decode: sample, feed back, repeat.
+    let t1 = Instant::now();
     for _ in 0..max_new {
-        let logits = model.forward_last_logits(&tokens).await?;
         let next = crate::coordinator::argmax(&logits) as u32;
-        tokens.push(next);
         if let Ok(piece) = tokenizer.decode(&[next], false) {
             print!("{piece}");
             std::io::stdout().flush().ok();
         }
+        logits = model.decode_step(next, pos, &mut caches).await?;
+        pos += 1;
     }
+    let decode_ms = t1.elapsed().as_millis();
     println!();
+    println!(
+        "{} prefill {} tok {}ms, decode {} tok {}ms ({}ms/tok)",
+        muted("·"),
+        prompt_ids.len(),
+        prefill_ms,
+        max_new,
+        decode_ms,
+        if max_new > 0 { decode_ms / max_new as u128 } else { 0 }
+    );
     Ok(())
 }
 

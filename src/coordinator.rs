@@ -199,6 +199,89 @@ fn add_bias(m: &mut Matrix, bias: &[f64]) {
 }
 
 impl DistModel {
+    /// One incremental decode step with a per-layer KV cache: process a SINGLE
+    /// token (its embedding row), reusing cached keys/values for all prior
+    /// positions. Every sharded matmul runs on one row instead of the whole
+    /// prefix, so the per-token cost stops growing with sequence length. Returns
+    /// the vocab logits for this position. `pos` is the 0-based position of this
+    /// token in the sequence; `caches` has one KvCache per layer.
+    pub async fn decode_step(
+        &self,
+        token: u32,
+        pos: usize,
+        caches: &mut [crate::transformer::KvCache],
+    ) -> Result<Vec<f64>> {
+        let cfg = &self.cfg;
+        let head_dim = cfg.head_dim();
+        // RoPE angles for this single position.
+        let (cos_t, sin_t) = {
+            let (c, s) = rope_tables(pos + 1, head_dim, cfg.rope_theta);
+            (c[pos].clone(), s[pos].clone())
+        };
+
+        // Single-row hidden state.
+        let mut h: Matrix = vec![self.embed.row(token as usize)];
+
+        for (li, layer) in self.layers.iter().enumerate() {
+            let normed = rms_norm(&h, &layer.attn_norm, cfg.rms_norm_eps);
+            let mut q = sharded_matmul(&normed, &layer.wq).await?;
+            let mut k = sharded_matmul(&normed, &layer.wk).await?;
+            let mut v = sharded_matmul(&normed, &layer.wv).await?;
+            add_bias(&mut q, &layer.bq);
+            add_bias(&mut k, &layer.bk);
+            add_bias(&mut v, &layer.bv);
+
+            let context = crate::transformer::gqa_step(
+                &q[0],
+                &k[0],
+                &v[0],
+                &mut caches[li],
+                cfg.num_attention_heads,
+                cfg.num_key_value_heads,
+                head_dim,
+                pos,
+                &cos_t,
+                &sin_t,
+            );
+            let attn_out = sharded_matmul(&vec![context], &layer.wo).await?;
+            h = add(&h, &attn_out);
+
+            let ffn_in = rms_norm(&h, &layer.ffn_norm, cfg.rms_norm_eps);
+            let gate = sharded_matmul(&ffn_in, &layer.w_gate).await?;
+            let up = sharded_matmul(&ffn_in, &layer.w_up).await?;
+            let hidden: Matrix = gate
+                .iter()
+                .zip(up.iter())
+                .map(|(g, u)| {
+                    g.iter()
+                        .zip(u.iter())
+                        .map(|(gv, uv)| silu(*gv) * uv)
+                        .collect()
+                })
+                .collect();
+            let ffn_out = sharded_matmul(&hidden, &layer.w_down).await?;
+            h = add(&h, &ffn_out);
+        }
+
+        let normed = rms_norm(&h, &self.final_norm, cfg.rms_norm_eps);
+        let last = &normed[0];
+        Ok((0..cfg.vocab_size)
+            .map(|t| {
+                self.embed
+                    .row(t)
+                    .iter()
+                    .zip(last.iter())
+                    .map(|(w, x)| w * x)
+                    .sum()
+            })
+            .collect())
+    }
+
+    /// Fresh per-layer KV caches for a new generation.
+    pub fn new_caches(&self) -> Vec<crate::transformer::KvCache> {
+        vec![crate::transformer::KvCache::default(); self.layers.len()]
+    }
+
     /// Run the distributed forward for a token sequence and return the last
     /// position's vocab logits. Same math as the local `forward_last_logits`,
     /// but every big matmul is sharded across peers over the LAN.

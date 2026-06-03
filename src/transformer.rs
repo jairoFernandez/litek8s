@@ -129,6 +129,77 @@ pub fn grouped_query_attention(
     out
 }
 
+/// Per-layer K/V cache for incremental decoding: each entry holds the rotated
+/// key and the value for one past position, so a new token only computes its own
+/// row and attends over the cache instead of recomputing the whole prefix.
+#[derive(Default, Clone)]
+pub struct KvCache {
+    /// keys[pos] = rotated key vector (n_kv_heads * head_dim) at that position.
+    pub keys: Vec<Vec<f64>>,
+    pub values: Vec<Vec<f64>>,
+}
+
+/// One incremental GQA step: `q_new`/`k_new`/`v_new` are the single new token's
+/// projections (length n_q_heads*head_dim and n_kv_heads*head_dim). Applies RoPE
+/// at position `pos`, appends k/v to the cache, and returns the new token's
+/// context vector (n_q_heads*head_dim) attending over the whole cache. The cache
+/// grows by one row per call — turning the O(seq) per-token attention into O(1)
+/// new work plus a scan over the cache.
+pub fn gqa_step(
+    q_new: &[f64],
+    k_new: &[f64],
+    v_new: &[f64],
+    cache: &mut KvCache,
+    n_q_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    pos: usize,
+    cos: &[f64],
+    sin: &[f64],
+) -> Vec<f64> {
+    let scale = 1.0 / (head_dim as f64).sqrt();
+    let group = n_q_heads / n_kv_heads;
+
+    // Rotate the new key per KV head and append k/v to the cache.
+    let mut k_rot = k_new.to_vec();
+    for kv in 0..n_kv_heads {
+        let b = kv * head_dim;
+        apply_rope(&mut k_rot[b..b + head_dim], cos, sin);
+    }
+    cache.keys.push(k_rot);
+    cache.values.push(v_new.to_vec());
+    let t = cache.keys.len() - 1; // index of this position
+
+    // Rotate the new query per Q head.
+    let mut q_rot = q_new.to_vec();
+    for qh in 0..n_q_heads {
+        let b = qh * head_dim;
+        apply_rope(&mut q_rot[b..b + head_dim], cos, sin);
+    }
+
+    let mut out = vec![0.0; n_q_heads * head_dim];
+    for qh in 0..n_q_heads {
+        let kv = qh / group;
+        let q_base = qh * head_dim;
+        let kv_base = kv * head_dim;
+        // Scores against every cached key up to and including this position.
+        let mut scores = Vec::with_capacity(t + 1);
+        for s in 0..=t {
+            let dot: f64 = (0..head_dim)
+                .map(|d| q_rot[q_base + d] * cache.keys[s][kv_base + d])
+                .sum();
+            scores.push(dot * scale);
+        }
+        let weights = softmax(&scores);
+        for (s, w) in weights.iter().enumerate() {
+            for d in 0..head_dim {
+                out[q_base + d] += w * cache.values[s][kv_base + d];
+            }
+        }
+    }
+    out
+}
+
 /// `x · w + bias` per row. `w` is `in_dim x out_dim`; `bias` length `out_dim`
 /// (empty for no bias).
 pub fn linear(x: &[Vec<f64>], w: &[Vec<f64>], bias: &[f64]) -> anyhow::Result<Matrix> {
