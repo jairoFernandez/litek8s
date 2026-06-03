@@ -81,6 +81,14 @@ The distributed inference equals a plain local forward. Verified two ways:
 | Distribute + infer | [`daemon.rs`](../src/daemon.rs) — `load_model`, `run_model` |
 | CLI | [`cli.rs`](../src/cli.rs) — `model inspect / load / list / run / rm` |
 
+## Wire format
+
+Weight uploads ship as a **raw binary blob** after the request line
+(`<json>\n<blob>`), not as JSON float text — 8 bytes/f64 instead of ~18 chars.
+On the 88 MB model across 7 nodes this cut cold distribution from ~250 s (JSON)
+to ~98 s, and removed the `Broken pipe` failures that large JSON payloads caused
+on weak nodes. Inference is unchanged (resident weights).
+
 ## Limits / next steps
 
 - The daemon reads one **layer** fully while sharding it — fine for layers that

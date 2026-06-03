@@ -89,9 +89,13 @@ pub enum AgentRequest {
         weight_id: String,
     },
     /// Upload a weight matrix to the node's on-disk cache under `weight_id`.
+    /// The matrix itself is NOT in this JSON — it follows the request line as a
+    /// raw binary blob (the `write_matrix_bin` format), so a multi-MB weight
+    /// ships at 8 bytes/f64 instead of ~18 chars/f64 as JSON text. `byte_len`
+    /// lets the agent read exactly the blob.
     PutWeights {
         weight_id: String,
-        matrix: Vec<Vec<f64>>,
+        byte_len: u64,
     },
     /// Multiply a row band against a weight matrix already cached on the node,
     /// avoiding re-transfer of the (large) right-hand matrix.
@@ -393,16 +397,24 @@ impl NodeClient {
                     .await
                     .context("local weight write panicked")?
             }
-            Self::Ssh(client) => match client
-                .request(AgentRequest::PutWeights {
-                    weight_id: weight_id.to_string(),
-                    matrix,
-                })
-                .await?
-            {
-                AgentResponse::Ack => Ok(()),
-                other => bail!("unexpected agent response while uploading weights: {other:?}"),
-            },
+            Self::Ssh(client) => {
+                // Encode the matrix to the compact bin format and ship it as a
+                // raw blob after the request — 8 bytes/f64, not ~18 chars JSON.
+                let blob = crate::matrix::encode_matrix_bin(&matrix)?;
+                match client
+                    .request_blob(
+                        AgentRequest::PutWeights {
+                            weight_id: weight_id.to_string(),
+                            byte_len: blob.len() as u64,
+                        },
+                        &blob,
+                    )
+                    .await?
+                {
+                    AgentResponse::Ack => Ok(()),
+                    other => bail!("unexpected agent response while uploading weights: {other:?}"),
+                }
+            }
         }
     }
 
@@ -673,6 +685,13 @@ impl SshNodeClient {
     }
 
     async fn request(&self, request: AgentRequest) -> Result<AgentResponse> {
+        self.request_blob(request, &[]).await
+    }
+
+    /// Like `request`, but appends a raw binary blob after the JSON request line
+    /// on stdin — used to ship weight matrices at native byte size instead of as
+    /// JSON float text.
+    async fn request_blob(&self, request: AgentRequest, blob: &[u8]) -> Result<AgentResponse> {
         // Transient SSH transport failures warrant dropping the ControlMaster
         // and retrying with a short backoff:
         //
@@ -688,7 +707,7 @@ impl SshNodeClient {
         // All three clear by reopening the connection, so retry a few times,
         // backing off so the master has a moment to settle.
         const MAX_ATTEMPTS: u32 = 4;
-        let mut last = self.request_once(&request).await;
+        let mut last = self.request_once(&request, blob).await;
         let mut attempt = 1;
         while attempt < MAX_ATTEMPTS {
             let Err(error) = &last else { break };
@@ -700,16 +719,21 @@ impl SshNodeClient {
             }
             self.close_control_master().await;
             tokio::time::sleep(Duration::from_millis(150 * u64::from(attempt))).await;
-            last = self.request_once(&request).await;
+            last = self.request_once(&request, blob).await;
             attempt += 1;
         }
         last
     }
 
-    /// Issue a single agent request over the (possibly multiplexed) SSH connection.
-    async fn request_once(&self, request: &AgentRequest) -> Result<AgentResponse> {
-        let payload =
+    /// Issue a single agent request over the (possibly multiplexed) SSH
+    /// connection. The wire is `<compact-json>\n<blob>`: serde_json emits no raw
+    /// newlines, so the first `\n` cleanly delimits the request from the binary
+    /// blob that follows (empty for most requests).
+    async fn request_once(&self, request: &AgentRequest, blob: &[u8]) -> Result<AgentResponse> {
+        let mut payload =
             serde_json::to_vec(request).context("failed to serialize remote agent request")?;
+        payload.push(b'\n');
+        payload.extend_from_slice(blob);
 
         // Reuse a persistent SSH connection per target via ControlMaster so that
         // only the first request pays the full handshake cost; subsequent pings
@@ -901,9 +925,18 @@ pub async fn run_agent_stdio() -> Result<()> {
         .await
         .context("failed to read agent request from stdin")?;
 
+    // The wire is `<json>\n<blob>`: split on the first newline. serde_json never
+    // emits a raw newline inside the request, so the first one always delimits
+    // the optional trailing binary blob (empty for most requests).
+    let split = buffer.iter().position(|&b| b == b'\n');
+    let (json_bytes, blob): (&[u8], &[u8]) = match split {
+        Some(idx) => (&buffer[..idx], &buffer[idx + 1..]),
+        None => (&buffer[..], &[]),
+    };
+
     let request: AgentRequest =
-        serde_json::from_slice(&buffer).context("failed to parse agent request JSON")?;
-    let response = match handle_agent_request(runtime, request).await {
+        serde_json::from_slice(json_bytes).context("failed to parse agent request JSON")?;
+    let response = match handle_agent_request(runtime, request, blob).await {
         Ok(response) => response,
         Err(error) => AgentResponse::Error {
             message: format!("{error:#}"),
@@ -922,6 +955,7 @@ pub async fn run_agent_stdio() -> Result<()> {
 async fn handle_agent_request(
     runtime: DockerRuntime,
     request: AgentRequest,
+    blob: &[u8],
 ) -> Result<AgentResponse> {
     match request {
         AgentRequest::Ping => {
@@ -999,9 +1033,20 @@ async fn handle_agent_request(
                 present: path.exists(),
             })
         }
-        AgentRequest::PutWeights { weight_id, matrix } => {
+        AgentRequest::PutWeights {
+            weight_id,
+            byte_len,
+        } => {
+            ensure!(
+                blob.len() as u64 == byte_len,
+                "weight blob length {} does not match declared {byte_len}",
+                blob.len()
+            );
             let path = local_weight_path(&weight_id)?;
-            tokio::task::spawn_blocking(move || crate::matrix::write_matrix_bin(&path, &matrix))
+            let bytes = blob.to_vec();
+            // The blob is already the on-disk bin format — validate its header
+            // and write it atomically without re-encoding.
+            tokio::task::spawn_blocking(move || crate::matrix::write_bin_blob(&path, &bytes))
                 .await
                 .context("weight write panicked")??;
             Ok(AgentResponse::Ack)

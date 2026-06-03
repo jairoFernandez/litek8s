@@ -1,7 +1,7 @@
 use litek8s::matrix::{
-    apply_relu, columns, deterministic_matrix, matrix_id, multiply_band, multiply_column_shard,
-    multiply_parallel, multiply_sequential, read_matrix_bin, validate_weight_id, weighted_split,
-    write_matrix_bin,
+    apply_relu, columns, deterministic_matrix, encode_matrix_bin, matrix_id, multiply_band,
+    multiply_column_shard, multiply_parallel, multiply_sequential, read_matrix_bin,
+    validate_weight_id, weighted_split, write_bin_blob, write_matrix_bin,
 };
 
 #[test]
@@ -87,6 +87,22 @@ fn matrix_bin_roundtrips_through_disk() {
     write_matrix_bin(&path, &matrix).expect("write");
     let read = read_matrix_bin(&path).expect("read");
     assert_eq!(read, matrix);
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn encoded_blob_writes_and_reads_back() {
+    // The blob produced by encode_matrix_bin (shipped raw over the wire) must
+    // land via write_bin_blob and read back identical.
+    let matrix = deterministic_matrix(11, 9, 3);
+    let blob = encode_matrix_bin(&matrix).unwrap();
+    let dir = std::env::temp_dir().join(format!("litek8s-blob-test-{}", std::process::id()));
+    let path = dir.join("w.bin");
+    write_bin_blob(&path, &blob).unwrap();
+    assert_eq!(read_matrix_bin(&path).unwrap(), matrix);
+    // A truncated or foreign blob is rejected, not written as garbage.
+    assert!(write_bin_blob(&path, b"too short").is_err());
+    assert!(write_bin_blob(&path, &blob[..blob.len() - 8]).is_err());
     std::fs::remove_dir_all(&dir).ok();
 }
 

@@ -228,10 +228,10 @@ pub fn matrix_id(matrix: &[Vec<f64>]) -> String {
     format!("{hash:016x}")
 }
 
-/// Serialize a matrix to a compact binary blob: magic + rows/cols (u64 LE) +
-/// row-major f64 LE values. Far cheaper to write/read than JSON for the large
-/// weight matrices the cache holds.
-pub fn write_matrix_bin(path: &Path, matrix: &[Vec<f64>]) -> Result<()> {
+/// Serialize a matrix to the compact binary format: magic + rows/cols (u64 LE)
+/// + row-major f64 LE values. Far cheaper than JSON for the large weight
+/// matrices the cache holds (8 bytes/f64 vs ~18 chars as JSON text).
+pub fn encode_matrix_bin(matrix: &[Vec<f64>]) -> Result<Vec<u8>> {
     let rows = matrix.len();
     let cols = matrix.first().map(|r| r.len()).unwrap_or(0);
     ensure!(
@@ -248,15 +248,44 @@ pub fn write_matrix_bin(path: &Path, matrix: &[Vec<f64>]) -> Result<()> {
             buf.extend_from_slice(&value.to_le_bytes());
         }
     }
+    Ok(buf)
+}
 
+/// Encode and write a matrix to disk atomically.
+pub fn write_matrix_bin(path: &Path, matrix: &[Vec<f64>]) -> Result<()> {
+    let buf = encode_matrix_bin(matrix)?;
+    write_bytes_atomic(path, &buf)
+}
+
+/// Write an already-encoded bin blob to disk, validating its header and that the
+/// declared dimensions match the payload length so a corrupt or truncated upload
+/// is rejected before it lands. Used on the agent side where the blob arrives
+/// raw over the wire.
+pub fn write_bin_blob(path: &Path, bytes: &[u8]) -> Result<()> {
+    ensure!(bytes.len() >= 20, "weight blob is truncated");
+    ensure!(
+        &bytes[0..4] == MATRIX_BIN_MAGIC,
+        "weight blob has an unrecognized format"
+    );
+    let rows = u64::from_le_bytes(bytes[4..12].try_into().unwrap()) as usize;
+    let cols = u64::from_le_bytes(bytes[12..20].try_into().unwrap()) as usize;
+    ensure!(
+        bytes.len() == 20 + rows * cols * 8,
+        "weight blob length {} does not match {rows}x{cols}",
+        bytes.len()
+    );
+    write_bytes_atomic(path, bytes)
+}
+
+/// Write bytes to `path` atomically: stage to a sibling file then rename, so a
+/// reader never sees a partial file if two uploads of the same id race.
+fn write_bytes_atomic(path: &Path, buf: &[u8]) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create weights dir {}", parent.display()))?;
     }
-    // Write to a sibling temp path then rename so a reader never sees a partial
-    // file if two uploads of the same id race.
     let staging = path.with_extension("partial");
-    std::fs::write(&staging, &buf)
+    std::fs::write(&staging, buf)
         .with_context(|| format!("failed to write weight file {}", staging.display()))?;
     std::fs::rename(&staging, path)
         .with_context(|| format!("failed to finalize weight file {}", path.display()))?;

@@ -1542,7 +1542,10 @@ impl AppState {
             let splits = crate::matrix::weighted_split(out_dim, &weights);
 
             let mut shard_manifests = Vec::new();
-            let mut shard_reports = Vec::new();
+            // Upload every shard of this layer concurrently — a t3.micro takes
+            // seconds per multi-MB shard, so serial uploads of 7 nodes x 6
+            // layers dominate wall time. Each node still gets only its columns.
+            let mut upload_tasks = Vec::new();
             let mut col_cursor = 0;
             for ((node, cores), cols_here) in targets.iter().zip(splits.iter().copied()) {
                 let col_start = col_cursor;
@@ -1557,37 +1560,47 @@ impl AppState {
                     col_start,
                     cols_here,
                 )?;
-                let weight_id = format!(
-                    "model-{name}-l{index}-{}",
-                    crate::matrix::matrix_id(&shard)
-                );
+                // Content-addressed only: identical weights are cached once and
+                // shared across models/layers, so a re-load is a true cache hit.
+                let weight_id = crate::matrix::matrix_id(&shard);
                 let bytes = (cols_here as u64) * (in_dim as u64) * 8;
                 let client = NodeClient::for_node(node, self.runtime.clone());
-                let started = Instant::now();
-                let already_cached = client
-                    .ensure_weights(&weight_id, &shard)
-                    .await
-                    .with_context(|| {
-                        format!("failed to upload layer {index} shard to `{}`", node.name)
-                    })?;
-                let elapsed_ms = started.elapsed().as_millis() as u64;
+                let node_name = node.name.clone();
+                let cores = *cores;
 
+                upload_tasks.push(tokio::spawn(async move {
+                    let started = Instant::now();
+                    let result = client.ensure_weights(&weight_id, &shard).await.with_context(
+                        || format!("failed to upload layer {index} shard to `{node_name}`"),
+                    );
+                    let elapsed_ms = started.elapsed().as_millis() as u64;
+                    (node_name, cores, col_start, cols_here, weight_id, bytes, elapsed_ms, result)
+                }));
+            }
+
+            let mut shard_reports = Vec::new();
+            for task in upload_tasks {
+                let (node_name, cores, col_start, cols, weight_id, bytes, elapsed_ms, result) =
+                    task.await.context("model upload task panicked")?;
+                let already_cached = result?;
                 shard_manifests.push(crate::model::ShardManifest {
-                    node_name: node.name.clone(),
+                    node_name: node_name.clone(),
                     weight_id,
                     col_start,
-                    cols: cols_here,
+                    cols,
                 });
                 shard_reports.push(crate::protocol::ModelShardReport {
-                    node_name: node.name.clone(),
-                    cpu_cores: *cores,
+                    node_name,
+                    cpu_cores: cores,
                     col_start,
-                    cols: cols_here,
+                    cols,
                     bytes,
                     already_cached,
                     elapsed_ms,
                 });
             }
+            shard_manifests.sort_by_key(|s| s.col_start);
+            shard_reports.sort_by_key(|s| s.col_start);
 
             layer_manifests.push(crate::model::LayerManifest {
                 index,
