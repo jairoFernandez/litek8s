@@ -1,5 +1,6 @@
 use litek8s::transformer::{
-    add, causal_self_attention, rms_norm, rope_tables, silu, softmax, swiglu_ffn,
+    add, causal_self_attention, rms_norm, rope_tables, silu, softmax, swiglu_ffn, transformer_block,
+    BlockConfig, BlockWeights,
 };
 
 fn close(a: f64, b: f64) -> bool {
@@ -92,6 +93,46 @@ fn swiglu_runs_and_shapes_match() {
     assert_eq!(out[0].len(), 3);
     // Both token rows identical (identical input rows) — determinism.
     assert_eq!(out[0], out[1]);
+}
+
+#[test]
+fn full_block_matches_torch() {
+    // dim = n_heads * head_dim = 4, seq = 3, hidden = 6.
+    let dim = 4;
+    let seq = 3;
+    let hidden = 6;
+    let mat = |r: usize, c: usize, sc: f64| -> Vec<Vec<f64>> {
+        (0..r)
+            .map(|i| (0..c).map(|j| (i * c + j) as f64 * sc).collect())
+            .collect()
+    };
+    let x = mat(seq, dim, 0.1);
+    let w = BlockWeights {
+        attn_norm: vec![1.0; dim],
+        wq: mat(dim, dim, 0.01),
+        wk: mat(dim, dim, 0.02),
+        wv: mat(dim, dim, 0.03),
+        wo: mat(dim, dim, 0.04),
+        ffn_norm: vec![1.0; dim],
+        w_gate: mat(dim, hidden, 0.01),
+        w_up: mat(dim, hidden, 0.02),
+        w_down: mat(hidden, dim, 0.03),
+    };
+    let cfg = BlockConfig {
+        n_heads: 2,
+        head_dim: 2,
+        rope_theta: 10000.0,
+        eps: 1e-6,
+    };
+    let out = flat(&transformer_block(&x, &w, cfg).unwrap());
+    let expect = [
+        1.774958, 2.100108, 2.425258, 2.750409, 2.136479, 2.455212, 2.773944, 3.092677, 2.502667,
+        2.816264, 3.12986, 3.443456,
+    ];
+    assert_eq!(out.len(), expect.len());
+    for (a, b) in out.iter().zip(expect.iter()) {
+        assert!(close(*a, *b), "{a} vs {b}");
+    }
 }
 
 #[test]

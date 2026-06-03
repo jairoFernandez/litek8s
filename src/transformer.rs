@@ -159,3 +159,53 @@ pub fn add(a: &[Vec<f64>], b: &[Vec<f64>]) -> Matrix {
         .map(|(ra, rb)| ra.iter().zip(rb.iter()).map(|(x, y)| x + y).collect())
         .collect()
 }
+
+/// The weights of one Llama/DeepSeek transformer block. Projection weights are
+/// stored as `in_dim x out_dim` (so `x · w` works directly). Norm weights are
+/// per-channel scales.
+pub struct BlockWeights {
+    pub attn_norm: Vec<f64>,
+    pub wq: Matrix,
+    pub wk: Matrix,
+    pub wv: Matrix,
+    pub wo: Matrix,
+    pub ffn_norm: Vec<f64>,
+    pub w_gate: Matrix,
+    pub w_up: Matrix,
+    pub w_down: Matrix,
+}
+
+/// Hyper-parameters of a transformer block.
+#[derive(Clone, Copy)]
+pub struct BlockConfig {
+    pub n_heads: usize,
+    pub head_dim: usize,
+    pub rope_theta: f64,
+    pub eps: f64,
+}
+
+/// Run one transformer block over a sequence (batch = 1):
+///   h = x + Wo · attention(RoPE(Q,K), V)         where Q,K,V = norm(x)·Wq,k,v
+///   out = h + SwiGLU(norm(h))
+/// This is the unit a real model stacks N times. Pre-norm, residual, RoPE,
+/// SwiGLU — the Llama/DeepSeek recipe.
+pub fn transformer_block(
+    x: &[Vec<f64>],
+    w: &BlockWeights,
+    cfg: BlockConfig,
+) -> anyhow::Result<Matrix> {
+    let seq = x.len();
+    let normed = rms_norm(x, &w.attn_norm, cfg.eps);
+    let q = crate::matrix::multiply_parallel(&normed, &w.wq)?;
+    let k = crate::matrix::multiply_parallel(&normed, &w.wk)?;
+    let v = crate::matrix::multiply_parallel(&normed, &w.wv)?;
+
+    let (cos, sin) = rope_tables(seq, cfg.head_dim, cfg.rope_theta);
+    let context = causal_self_attention(&q, &k, &v, cfg.n_heads, cfg.head_dim, &cos, &sin);
+    let attn_out = crate::matrix::multiply_parallel(&context, &w.wo)?;
+    let h = add(x, &attn_out);
+
+    let ffn_in = rms_norm(&h, &w.ffn_norm, cfg.eps);
+    let ffn_out = swiglu_ffn(&ffn_in, &w.w_gate, &w.w_up, &w.w_down)?;
+    Ok(add(&h, &ffn_out))
+}
