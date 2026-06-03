@@ -83,6 +83,16 @@ pub enum AgentRequest {
         left_band: Vec<Vec<f64>>,
         right: Vec<Vec<f64>>,
     },
+    /// Coordinator op: run a distributed matmul from inside the cluster. The
+    /// receiving node splits `left`'s rows across the peer agents (by private
+    /// IP) over TCP-LAN, stitches the result, and returns it with per-peer
+    /// timing — so the round-trips happen at LAN latency instead of routing
+    /// each one back through the control plane over the internet.
+    CoordinateMatmul {
+        left: Vec<Vec<f64>>,
+        right: Vec<Vec<f64>>,
+        peer_ips: Vec<String>,
+    },
     /// Ask whether the node already has a weight matrix cached on disk, so the
     /// caller can skip re-uploading it.
     HasWeights {
@@ -130,6 +140,12 @@ pub enum AgentResponse {
     HostResources { resources: crate::protocol::HostResources },
     MatmulBand { rows: Vec<Vec<f64>> },
     HasWeights { present: bool },
+    /// Result of a coordinator-run distributed matmul: the product plus, per
+    /// peer, how long its LAN round-trip took.
+    CoordinatedMatmul {
+        result: Vec<Vec<f64>>,
+        peer_ms: Vec<(String, u64)>,
+    },
     Error { message: String },
 }
 
@@ -830,6 +846,122 @@ impl SshNodeClient {
     }
 }
 
+/// Client that reaches a worker's persistent agent over TCP on the private
+/// subnet (port `AGENT_TCP_PORT`). Used by an in-cluster coordinator to drive
+/// peers at LAN latency (~0.27ms) instead of routing through SSH from the
+/// control plane (~600ms). One request per connection: `<json>\n<blob>` in, one
+/// JSON response out.
+#[derive(Clone)]
+pub struct TcpAgentClient {
+    addr: String,
+}
+
+impl TcpAgentClient {
+    pub fn new(ip: &str) -> Self {
+        Self {
+            addr: format!("{ip}:{AGENT_TCP_PORT}"),
+        }
+    }
+
+    pub async fn request(&self, request: AgentRequest) -> Result<AgentResponse> {
+        self.request_blob(request, &[]).await
+    }
+
+    pub async fn request_blob(
+        &self,
+        request: AgentRequest,
+        blob: &[u8],
+    ) -> Result<AgentResponse> {
+        use tokio::net::TcpStream;
+
+        let mut payload =
+            serde_json::to_vec(&request).context("failed to serialize agent request")?;
+        payload.push(b'\n');
+        payload.extend_from_slice(blob);
+
+        let mut stream = TcpStream::connect(&self.addr)
+            .await
+            .with_context(|| format!("failed to connect to agent at {}", self.addr))?;
+        stream
+            .write_all(&payload)
+            .await
+            .with_context(|| format!("failed to send request to {}", self.addr))?;
+        stream
+            .shutdown()
+            .await
+            .with_context(|| format!("failed to half-close to {}", self.addr))?;
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .with_context(|| format!("failed to read response from {}", self.addr))?;
+        match serde_json::from_slice::<AgentResponse>(&response)
+            .with_context(|| format!("failed to decode response from {}", self.addr))?
+        {
+            AgentResponse::Error { message } => Err(anyhow!(message)),
+            other => Ok(other),
+        }
+    }
+}
+
+/// Coordinator: split `left`'s rows across the peer agents (by private IP) over
+/// TCP-LAN, run each band as a `ComputeMatmulBand`, stitch in order, and report
+/// per-peer round-trip time. This is the in-cluster equivalent of the daemon's
+/// `distributed_matmul`, but the round-trips stay on the LAN.
+async fn coordinate_matmul(
+    left: Vec<Vec<f64>>,
+    right: Vec<Vec<f64>>,
+    peer_ips: Vec<String>,
+) -> Result<AgentResponse> {
+    ensure!(!left.is_empty(), "left matrix cannot be empty");
+    ensure!(!peer_ips.is_empty(), "need at least one peer");
+
+    let total = left.len();
+    let n = peer_ips.len().min(total);
+    let base = total / n;
+    let rem = total % n;
+    let right = std::sync::Arc::new(right);
+
+    let mut tasks = Vec::new();
+    let mut cursor = 0;
+    for (idx, ip) in peer_ips.iter().take(n).enumerate() {
+        let rows_here = base + if idx < rem { 1 } else { 0 };
+        let start = cursor;
+        cursor += rows_here;
+        let band = left[start..cursor].to_vec();
+        let right = std::sync::Arc::clone(&right);
+        let client = TcpAgentClient::new(ip);
+        let ip = ip.clone();
+        tasks.push(tokio::spawn(async move {
+            let t0 = std::time::Instant::now();
+            let resp = client
+                .request(AgentRequest::ComputeMatmulBand {
+                    left_band: band,
+                    right: (*right).clone(),
+                })
+                .await;
+            let ms = t0.elapsed().as_millis() as u64;
+            (start, ip, ms, resp)
+        }));
+    }
+
+    let mut bands: Vec<(usize, Vec<Vec<f64>>)> = Vec::new();
+    let mut peer_ms = Vec::new();
+    for task in tasks {
+        let (start, ip, ms, resp) = task.await.context("coordinate task panicked")?;
+        match resp? {
+            AgentResponse::MatmulBand { rows } => {
+                bands.push((start, rows));
+                peer_ms.push((ip, ms));
+            }
+            other => bail!("peer {ip} returned unexpected response: {other:?}"),
+        }
+    }
+    bands.sort_by_key(|(s, _)| *s);
+    let result = bands.into_iter().flat_map(|(_, r)| r).collect();
+    Ok(AgentResponse::CoordinatedMatmul { result, peer_ms })
+}
+
 /// True when an agent failure is the remote Docker daemon rejecting us for lack
 /// of permission — the signature of a multiplexed SSH session that opened before
 /// `docker` group membership activated on a freshly-provisioned node.
@@ -1253,6 +1385,11 @@ async fn handle_agent_request(
             .context("matmul worker panicked")??;
             Ok(AgentResponse::MatmulBand { rows })
         }
+        AgentRequest::CoordinateMatmul {
+            left,
+            right,
+            peer_ips,
+        } => coordinate_matmul(left, right, peer_ips).await,
         AgentRequest::HasWeights { weight_id } => {
             let path = local_weight_path(&weight_id)?;
             Ok(AgentResponse::HasWeights {
