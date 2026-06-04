@@ -195,7 +195,7 @@ pub async fn reconcile_deployment(
             .wait_until_deployment_cleared(name, RECREATE_WAIT_TIMEOUT)
             .await?;
         let new_id = runtime
-            .create_and_start(&deployment.manifest, &deployment.spec_hash)
+            .create_and_start(&deployment.manifest, &deployment.spec_hash, 0)
             .await?;
         let result = ha_node
             .propose(ClusterCommand::SetDeploymentStatus {
@@ -351,7 +351,7 @@ pub async fn reconcile_deployment(
         };
 
         let new_id = runtime
-            .create_and_start(&deployment.manifest, &deployment.spec_hash)
+            .create_and_start(&deployment.manifest, &deployment.spec_hash, 0)
             .await?;
 
         let result = ha_node
@@ -388,7 +388,7 @@ pub async fn reconcile_deployment(
     }
 
     let new_id = runtime
-        .create_and_start(&deployment.manifest, &deployment.spec_hash)
+        .create_and_start(&deployment.manifest, &deployment.spec_hash, 0)
         .await?;
     let retried_after_backoff = deployment.next_retry_at.is_some();
     let status = if deployment.container_id.is_some() || retried_after_backoff {

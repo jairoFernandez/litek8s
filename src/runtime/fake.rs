@@ -135,6 +135,7 @@ impl ContainerRuntime for FakeRuntime {
         &self,
         manifest: &DeploymentManifest,
         spec_hash: &str,
+        ordinal: u32,
     ) -> Result<String> {
         let mut state = self.state.lock().unwrap();
         state.next_id += 1;
@@ -143,12 +144,14 @@ impl ContainerRuntime for FakeRuntime {
         let deployment = manifest.deployment_name().to_string();
         let managed = ManagedContainer {
             id: id.clone(),
-            name: format!("litek8s-{deployment}"),
+            name: format!("litek8s-{deployment}-{ordinal}"),
             deployment: deployment.clone(),
             state: Some("running".to_string()),
             status: Some("Up".to_string()),
             running: true,
             spec_hash: Some(spec_hash.to_string()),
+            ordinal: Some(ordinal),
+            container_ip: None,
         };
         state
             .containers
@@ -358,7 +361,7 @@ spec:
         let manifest = sample_manifest("demo");
 
         let id = runtime
-            .create_and_start(&manifest, "hash1")
+            .create_and_start(&manifest, "hash1", 0)
             .await
             .expect("create");
         assert_eq!(runtime.create_calls(), 1);
@@ -387,7 +390,7 @@ spec:
         let runtime = FakeRuntime::new();
         let manifest = sample_manifest("api");
         let id = runtime
-            .create_and_start(&manifest, "hash")
+            .create_and_start(&manifest, "hash", 0)
             .await
             .expect("create");
 
@@ -403,11 +406,11 @@ spec:
     async fn remove_orphans_drops_undesired() {
         let runtime = FakeRuntime::new();
         runtime
-            .create_and_start(&sample_manifest("keep"), "h")
+            .create_and_start(&sample_manifest("keep"), "h", 0)
             .await
             .expect("create");
         runtime
-            .create_and_start(&sample_manifest("drop"), "h")
+            .create_and_start(&sample_manifest("drop"), "h", 0)
             .await
             .expect("create");
 

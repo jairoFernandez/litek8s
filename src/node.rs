@@ -53,6 +53,8 @@ pub enum AgentRequest {
     CreateAndStart {
         manifest: DeploymentManifest,
         spec_hash: String,
+        #[serde(default)]
+        ordinal: u32,
     },
     RemoveContainer {
         container_id: String,
@@ -570,13 +572,15 @@ impl NodeClient {
         &self,
         manifest: &DeploymentManifest,
         spec_hash: &str,
+        ordinal: u32,
     ) -> Result<String> {
         match self {
-            Self::Local(runtime) => runtime.create_and_start(manifest, spec_hash).await,
+            Self::Local(runtime) => runtime.create_and_start(manifest, spec_hash, ordinal).await,
             Self::Ssh(client) => match client
                 .request(AgentRequest::CreateAndStart {
                     manifest: manifest.clone(),
                     spec_hash: spec_hash.to_string(),
+                    ordinal,
                 })
                 .await?
             {
@@ -1415,8 +1419,9 @@ async fn handle_agent_request(
         AgentRequest::CreateAndStart {
             manifest,
             spec_hash,
+            ordinal,
         } => Ok(AgentResponse::ContainerCreated {
-            id: runtime.create_and_start(&manifest, &spec_hash).await?,
+            id: runtime.create_and_start(&manifest, &spec_hash, ordinal).await?,
         }),
         AgentRequest::RemoveContainer { container_id } => {
             runtime.remove_container(&container_id).await?;
@@ -2051,7 +2056,7 @@ spec:
         .expect("manifest should parse");
 
         let id = client
-            .create_and_start(&manifest, "hash1")
+            .create_and_start(&manifest, "hash1", 0)
             .await
             .expect("create");
         assert_eq!(fake.create_calls(), 1);

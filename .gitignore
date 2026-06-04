@@ -10,3 +10,4 @@ state.json
 *.pid
 *.log
 .claude/settings.local.json
+.claude/scheduled_tasks.lock

@@ -35,6 +35,7 @@ pub trait ContainerRuntime {
         &self,
         manifest: &DeploymentManifest,
         spec_hash: &str,
+        ordinal: u32,
     ) -> Result<String>;
 
     async fn remove_deployment(&self, name: &str) -> Result<()>;
@@ -123,11 +124,12 @@ impl ContainerRuntime for LocalRuntime {
         &self,
         manifest: &DeploymentManifest,
         spec_hash: &str,
+        ordinal: u32,
     ) -> Result<String> {
         match self {
-            Self::Docker(runtime) => runtime.create_and_start(manifest, spec_hash).await,
+            Self::Docker(runtime) => runtime.create_and_start(manifest, spec_hash, ordinal).await,
             #[cfg(test)]
-            Self::Fake(runtime) => runtime.create_and_start(manifest, spec_hash).await,
+            Self::Fake(runtime) => runtime.create_and_start(manifest, spec_hash, ordinal).await,
         }
     }
 

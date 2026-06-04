@@ -26,6 +26,7 @@ use crate::runtime::ContainerRuntime;
 const LABEL_MANAGED: &str = "litek8s.managed";
 const LABEL_DEPLOYMENT: &str = "litek8s.deployment";
 const LABEL_HASH: &str = "litek8s.spec-hash";
+const LABEL_ORDINAL: &str = "litek8s.ordinal";
 
 #[derive(Clone)]
 pub struct DockerRuntime {
@@ -41,6 +42,14 @@ pub struct ManagedContainer {
     pub status: Option<String>,
     pub running: bool,
     pub spec_hash: Option<String>,
+    /// Replica ordinal from the `litek8s.ordinal` label. `None` for
+    /// pre-multi-replica containers (treated as ordinal 0 by the reconciler).
+    #[serde(default)]
+    pub ordinal: Option<u32>,
+    /// Bridge IP of the container. Not populated by list calls (would cost an
+    /// inspect per container); filled on demand by the service-resolve path.
+    #[serde(default)]
+    pub container_ip: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,11 +150,16 @@ impl DockerRuntime {
         &self,
         manifest: &DeploymentManifest,
         spec_hash: &str,
+        ordinal: u32,
     ) -> Result<String> {
         self.ensure_image(&manifest.container().image).await?;
 
-        let container_name = deployment_container_name(manifest.deployment_name());
-        let config = build_container_config(manifest, spec_hash)?;
+        let container_name = replica_container_name(manifest.deployment_name(), ordinal);
+        // Replicas (>1) must not publish host ports — N containers can't share
+        // one hostPort on a node. They are reachable only via the Service,
+        // which connects to each container's IP:containerPort.
+        let suppress_host_ports = manifest.desired_replicas() > 1;
+        let config = build_container_config(manifest, spec_hash, ordinal, suppress_host_ports)?;
 
         let create_result = self
             .docker
@@ -342,18 +356,16 @@ impl DockerRuntime {
         Ok(snapshot_from_stats(&stats))
     }
 
-    pub async fn probe_container_tcp(
-        &self,
-        container_id: &str,
-        port: u16,
-        timeout: Duration,
-    ) -> Result<()> {
+    /// Inspect a container and return its bridge IPv4, if any. Shared by the
+    /// readiness probe and the service-resolve path (which needs the IP to
+    /// reach a replica that publishes no host port).
+    pub async fn inspect_container_ip(&self, container_id: &str) -> Result<Option<String>> {
         let details = self
             .docker
             .inspect_container(container_id, None::<InspectContainerOptions>)
             .await
             .with_context(|| format!("failed to inspect container {container_id}"))?;
-        let ip_address = details
+        Ok(details
             .network_settings
             .as_ref()
             .and_then(|settings| settings.networks.as_ref())
@@ -363,7 +375,18 @@ impl DockerRuntime {
                     .find_map(|network| network.ip_address.as_deref())
             })
             .filter(|value| !value.is_empty())
-            .map(str::to_string)
+            .map(str::to_string))
+    }
+
+    pub async fn probe_container_tcp(
+        &self,
+        container_id: &str,
+        port: u16,
+        timeout: Duration,
+    ) -> Result<()> {
+        let ip_address = self
+            .inspect_container_ip(container_id)
+            .await?
             .context("container has no IPv4 address to probe")?;
 
         tokio::time::timeout(timeout, TcpStream::connect((ip_address.as_str(), port)))
@@ -425,6 +448,8 @@ impl DockerRuntime {
                 .map(|value| value.trim_start_matches('/').to_string())
                 .unwrap_or_else(|| deployment_container_name(&deployment));
 
+            let ordinal = labels.get(LABEL_ORDINAL).and_then(|value| value.parse().ok());
+
             items.push(ManagedContainer {
                 id: container.id.unwrap_or_default(),
                 name,
@@ -433,6 +458,8 @@ impl DockerRuntime {
                 status: container.status.clone(),
                 running: container.state.as_deref() == Some("running"),
                 spec_hash: labels.get(LABEL_HASH).cloned(),
+                ordinal,
+                container_ip: None,
             });
         }
 
@@ -444,6 +471,8 @@ impl DockerRuntime {
 pub(crate) fn build_container_config(
     manifest: &DeploymentManifest,
     spec_hash: &str,
+    ordinal: u32,
+    suppress_host_ports: bool,
 ) -> Result<Config<String>> {
     let container = manifest.container();
     let resource_limits = container.normalized_resource_limits()?;
@@ -460,7 +489,13 @@ pub(crate) fn build_container_config(
         )
     };
 
-    let port_bindings = build_port_bindings(&container.ports);
+    // Replica mode publishes no host ports; the Service reaches each container
+    // by its bridge IP instead.
+    let port_bindings = if suppress_host_ports {
+        HashMap::new()
+    } else {
+        build_port_bindings(&container.ports)
+    };
     let host_config = build_host_config(port_bindings, resource_limits);
 
     let labels = HashMap::from([
@@ -470,6 +505,7 @@ pub(crate) fn build_container_config(
             manifest.deployment_name().to_string(),
         ),
         (LABEL_HASH.to_string(), spec_hash.to_string()),
+        (LABEL_ORDINAL.to_string(), ordinal.to_string()),
     ]);
 
     Ok(Config {
@@ -602,8 +638,9 @@ impl ContainerRuntime for DockerRuntime {
         &self,
         manifest: &DeploymentManifest,
         spec_hash: &str,
+        ordinal: u32,
     ) -> Result<String> {
-        DockerRuntime::create_and_start(self, manifest, spec_hash).await
+        DockerRuntime::create_and_start(self, manifest, spec_hash, ordinal).await
     }
 
     async fn remove_deployment(&self, name: &str) -> Result<()> {
@@ -711,6 +748,11 @@ pub fn deployment_container_name(name: &str) -> String {
         })
         .collect::<String>();
     format!("litek8s-{sanitized}")
+}
+
+/// Container name for a specific replica ordinal, e.g. `litek8s-api-0`.
+pub fn replica_container_name(name: &str, ordinal: u32) -> String {
+    format!("{}-{ordinal}", deployment_container_name(name))
 }
 
 fn snapshot_from_stats(stats: &Stats) -> ContainerStatsSnapshot {
@@ -842,7 +884,8 @@ spec:
         ))
         .expect("manifest should parse");
 
-        let config = build_container_config(&manifest, "hash123").expect("config should build");
+        let config =
+            build_container_config(&manifest, "hash123", 0, false).expect("config should build");
         assert_eq!(config.image.as_deref(), Some("nginx:alpine"));
         assert_eq!(
             config.entrypoint.as_ref().expect("entrypoint missing"),
@@ -895,7 +938,8 @@ spec:
         ))
         .expect("manifest should parse");
 
-        let config = build_container_config(&manifest, "hash123").expect("config should build");
+        let config =
+            build_container_config(&manifest, "hash123", 0, false).expect("config should build");
         let host_config = config.host_config.expect("host config missing");
         assert_eq!(host_config.nano_cpus, Some(500_000_000));
         assert_eq!(host_config.memory, Some(134_217_728));
