@@ -281,6 +281,14 @@ impl ContainerRuntime for FakeRuntime {
             bail!("fake probe failure for container {container_id}")
         }
     }
+
+    async fn inspect_container_ip(&self, container_id: &str) -> Result<Option<String>> {
+        let state = self.state.lock().unwrap();
+        Ok(state
+            .containers
+            .get(container_id)
+            .map(|_| "10.0.0.1".to_string()))
+    }
 }
 
 impl Default for ContainerExitState {

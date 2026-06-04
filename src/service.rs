@@ -1,15 +1,17 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Context, Result, bail};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tokio::task::JoinHandle;
 
-use crate::node::NodeTransport;
+use crate::node::{ClusterNode, NodeClient, NodeTransport};
 use crate::protocol::ProxyTarget;
 use crate::proxy;
-use crate::store::{DeploymentStatus, Store, StoredDeployment, StoredService};
+use crate::runtime::docker::DockerRuntime;
+use crate::store::{DeploymentStatus, ReplicaState, Store, StoredDeployment, StoredService};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceStatusSnapshot {
@@ -23,6 +25,10 @@ struct RunningService {
     task: JoinHandle<()>,
 }
 
+/// Round-robin cursor over a service's backend replicas. Re-resolved per
+/// connection, so it just indexes into whatever the current backend set is.
+type RoundRobin = Arc<AtomicUsize>;
+
 #[derive(Default)]
 pub struct ServiceManager {
     running: HashMap<String, RunningService>,
@@ -33,7 +39,7 @@ impl ServiceManager {
         Self::default()
     }
 
-    pub async fn sync(&mut self, store: Arc<Store>) -> Result<()> {
+    pub async fn sync(&mut self, store: Arc<Store>, runtime: DockerRuntime) -> Result<()> {
         let services = store.list_services().await;
         let desired_names: HashSet<String> = services
             .iter()
@@ -68,7 +74,12 @@ impl ServiceManager {
                 status: "Starting".to_string(),
                 message: Some("binding service listener".to_string()),
             }));
-            let task = spawn_service_task(service.clone(), store.clone(), status.clone());
+            let task = spawn_service_task(
+                service.clone(),
+                store.clone(),
+                runtime.clone(),
+                status.clone(),
+            );
             self.running.insert(
                 service.name.clone(),
                 RunningService {
@@ -99,6 +110,7 @@ impl ServiceManager {
 fn spawn_service_task(
     service: StoredService,
     store: Arc<Store>,
+    runtime: DockerRuntime,
     status: Arc<RwLock<ServiceStatusSnapshot>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
@@ -119,14 +131,23 @@ fn spawn_service_task(
             }
         };
 
+        let round_robin: RoundRobin = Arc::new(AtomicUsize::new(0));
+
         loop {
             match listener.accept().await {
                 Ok((socket, _)) => {
                     let store = store.clone();
+                    let runtime = runtime.clone();
                     let service = service.clone();
+                    let round_robin = round_robin.clone();
                     tokio::spawn(async move {
-                        match resolve_service_target(&store, &service).await {
-                            Ok(target) => {
+                        match resolve_service_targets(&store, &runtime, &service).await {
+                            Ok(targets) if !targets.is_empty() => {
+                                // Round-robin across the ready replicas. Re-resolved
+                                // per connection, so a changing backend set is fine.
+                                let idx =
+                                    round_robin.fetch_add(1, Ordering::Relaxed) % targets.len();
+                                let target = targets[idx].clone();
                                 if let Err(error) = proxy::forward_connection(socket, target).await
                                 {
                                     eprintln!(
@@ -134,6 +155,12 @@ fn spawn_service_task(
                                         service.name
                                     );
                                 }
+                            }
+                            Ok(_) => {
+                                eprintln!(
+                                    "service `{}` has no ready backend for this connection",
+                                    service.name
+                                );
                             }
                             Err(error) => {
                                 eprintln!(
@@ -156,52 +183,68 @@ fn spawn_service_task(
     })
 }
 
-pub async fn resolve_service_target(store: &Store, service: &StoredService) -> Result<ProxyTarget> {
+/// Resolve all ready replica backends for a service into proxy targets.
+/// Single-replica deployments (publishing a host port) keep the legacy
+/// host-port path; multi-replica deployments resolve each ready replica's
+/// container IP and are load-balanced across.
+pub async fn resolve_service_targets(
+    store: &Store,
+    runtime: &DockerRuntime,
+    service: &StoredService,
+) -> Result<Vec<ProxyTarget>> {
     let deployment = resolve_backing_deployment(store, service).await?;
-    let backend_ready = if deployment.manifest.container().readiness_probe().is_some() {
-        deployment.ready
-    } else {
-        deployment.status == DeploymentStatus::Running && deployment.container_id.is_some()
-    };
-    if !backend_ready {
-        bail!(
-            "backend deployment `{}` is {}",
-            deployment.manifest.deployment_name(),
-            if deployment.manifest.container().readiness_probe().is_some() && deployment.ready {
-                "Ready".to_string()
-            } else {
-                deployment.status.to_string()
-            }
-        );
-    }
-    if deployment.container_id.is_none() {
-        bail!(
-            "backend deployment `{}` has no running container",
-            deployment.manifest.deployment_name()
-        );
-    }
+    let has_probe = deployment.manifest.container().readiness_probe().is_some();
     let selected_port = deployment.manifest.proxy_port(service.target_port)?;
-    let host_port = selected_port
-        .host_port
-        .context("selected service target is missing hostPort")?;
-    let node = store
-        .get_node(&deployment.assigned_node)
-        .await
-        .with_context(|| format!("node `{}` was not found", deployment.assigned_node))?;
-    let (transport, ssh_target) = match node.transport {
-        NodeTransport::Local => ("local".to_string(), None),
-        NodeTransport::Ssh { target, .. } => ("ssh".to_string(), Some(target)),
-    };
+    let container_port = selected_port.container_port;
+    let protocol = selected_port.protocol.as_printable().to_string();
+    let deployment_name = deployment.manifest.deployment_name().to_string();
 
-    Ok(ProxyTarget {
-        deployment_name: deployment.manifest.deployment_name().to_string(),
-        node_name: deployment.assigned_node,
-        transport,
-        ssh_target,
-        container_port: selected_port.container_port,
-        host_port,
-        protocol: selected_port.protocol.as_printable().to_string(),
-    })
+    let mut targets = Vec::new();
+    for replica in &deployment.replicas {
+        if !replica_ready(replica, has_probe) {
+            continue;
+        }
+        let Some(container_id) = replica.container_id.as_deref() else {
+            continue;
+        };
+        let Some(node) = store.get_node(&replica.assigned_node).await else {
+            continue;
+        };
+        let (transport, ssh_target) = transport_of(&node);
+        // Reach the replica by its container IP (replicas publish no host port).
+        let client = NodeClient::for_node(&node, runtime.clone());
+        let container_ip = client.container_ip(container_id).await.ok().flatten();
+        targets.push(ProxyTarget {
+            deployment_name: deployment_name.clone(),
+            node_name: replica.assigned_node.clone(),
+            transport,
+            ssh_target,
+            container_port,
+            host_port: selected_port.host_port,
+            container_ip,
+            protocol: protocol.clone(),
+        });
+    }
+
+    if targets.is_empty() {
+        bail!("backend deployment `{deployment_name}` has no ready replica");
+    }
+    Ok(targets)
+}
+
+fn replica_ready(replica: &ReplicaState, has_probe: bool) -> bool {
+    if has_probe {
+        replica.ready
+    } else {
+        replica.status == DeploymentStatus::Running && replica.container_id.is_some()
+    }
+}
+
+fn transport_of(node: &ClusterNode) -> (String, Option<String>) {
+    match &node.transport {
+        NodeTransport::Local => ("local".to_string(), None),
+        NodeTransport::Ssh { target, .. } => ("ssh".to_string(), Some(target.clone())),
+    }
 }
 
 pub async fn resolve_backing_deployment(

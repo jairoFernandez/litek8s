@@ -33,17 +33,27 @@ pub async fn serve_listener(listener: TcpListener, target: ProxyTarget) -> Resul
     }
 }
 
+/// Resolve the upstream `(host, port)` a connection should be forwarded to.
+/// Replica backends carry a `container_ip` and are reached directly at
+/// `container_ip:container_port`; the legacy single-container / `litek8s proxy`
+/// path carries a published `host_port` and is reached at `127.0.0.1:host_port`.
+fn upstream_endpoint(target: &ProxyTarget) -> Result<(String, u16)> {
+    if let Some(ip) = target.container_ip.as_deref() {
+        return Ok((ip.to_string(), target.container_port));
+    }
+    let host_port = target
+        .host_port
+        .context("proxy target has neither a container IP nor a published host port")?;
+    Ok(("127.0.0.1".to_string(), host_port))
+}
+
 pub async fn forward_connection(mut inbound: TcpStream, target: ProxyTarget) -> Result<()> {
     match target.transport.as_str() {
         "local" => {
-            let mut upstream = TcpStream::connect(("127.0.0.1", target.host_port))
+            let (host, port) = upstream_endpoint(&target)?;
+            let mut upstream = TcpStream::connect((host.as_str(), port))
                 .await
-                .with_context(|| {
-                    format!(
-                        "failed to connect to local upstream 127.0.0.1:{}",
-                        target.host_port
-                    )
-                })?;
+                .with_context(|| format!("failed to connect to local upstream {host}:{port}"))?;
             tokio::io::copy_bidirectional(&mut inbound, &mut upstream)
                 .await
                 .context("failed to proxy TCP stream")?;
@@ -64,6 +74,7 @@ async fn proxy_over_ssh(inbound: TcpStream, target: &ProxyTarget) -> Result<()> 
         .as_deref()
         .context("ssh proxy target is missing the ssh endpoint")?;
 
+    let (host, port) = upstream_endpoint(target)?;
     let mut child = Command::new("ssh")
         .arg("-o")
         .arg("BatchMode=yes")
@@ -71,7 +82,7 @@ async fn proxy_over_ssh(inbound: TcpStream, target: &ProxyTarget) -> Result<()> 
         .arg("ConnectTimeout=5")
         .arg(ssh_target)
         .arg("-W")
-        .arg(format!("127.0.0.1:{}", target.host_port))
+        .arg(format!("{host}:{port}"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -177,7 +188,8 @@ mod tests {
             transport: "local".to_string(),
             ssh_target: None,
             container_port: 5678,
-            host_port: upstream_addr.port(),
+            host_port: Some(upstream_addr.port()),
+            container_ip: None,
             protocol: "TCP".to_string(),
         };
 

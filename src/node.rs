@@ -74,6 +74,9 @@ pub enum AgentRequest {
         port: u16,
         timeout_ms: u64,
     },
+    ContainerIp {
+        container_id: String,
+    },
     VpnAttach {
         node_name: String,
         spoke_pubkey: PublicKey,
@@ -144,6 +147,7 @@ pub enum AgentResponse {
     Logs { content: String },
     ExitState { state: ContainerExitState },
     StatsSnapshot { snapshot: ContainerStatsSnapshot },
+    ContainerIp { ip: Option<String> },
     VpnAssignment {
         membership: VpnMembership,
         token: JoinToken,
@@ -791,6 +795,23 @@ impl NodeClient {
             {
                 AgentResponse::Ack => Ok(()),
                 other => bail!("unexpected agent response while probing container TCP: {other:?}"),
+            },
+        }
+    }
+
+    /// Fetch a container's bridge IP from the node that hosts it. Used by the
+    /// service load-balancer to reach a replica that publishes no host port.
+    pub async fn container_ip(&self, container_id: &str) -> Result<Option<String>> {
+        match self {
+            Self::Local(runtime) => runtime.inspect_container_ip(container_id).await,
+            Self::Ssh(client) => match client
+                .request(AgentRequest::ContainerIp {
+                    container_id: container_id.to_string(),
+                })
+                .await?
+            {
+                AgentResponse::ContainerIp { ip } => Ok(ip),
+                other => bail!("unexpected agent response while fetching container IP: {other:?}"),
             },
         }
     }
@@ -1529,6 +1550,9 @@ async fn handle_agent_request(
                 .await?;
             Ok(AgentResponse::Ack)
         }
+        AgentRequest::ContainerIp { container_id } => Ok(AgentResponse::ContainerIp {
+            ip: runtime.inspect_container_ip(&container_id).await?,
+        }),
         AgentRequest::VpnAttach {
             node_name,
             spoke_pubkey,

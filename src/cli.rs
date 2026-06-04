@@ -2792,7 +2792,12 @@ fn print_response(response: Response) -> Result<()> {
             print_detail("node", &item.node_name);
             print_detail("transport", &item.transport);
             print_detail("container port", &item.container_port.to_string());
-            print_detail("host port", &item.host_port.to_string());
+            if let Some(host_port) = item.host_port {
+                print_detail("host port", &host_port.to_string());
+            }
+            if let Some(ip) = &item.container_ip {
+                print_detail("container ip", ip);
+            }
             Ok(())
         }
         Response::Top {
@@ -3640,10 +3645,16 @@ async fn run_proxy(
     print_detail("node", &item.node_name);
     print_detail("transport", &item.transport);
     print_detail("listen", &bound_addr.to_string());
-    print_detail(
-        "upstream",
-        &format!("127.0.0.1:{} ({})", item.host_port, item.protocol),
-    );
+    let upstream = if let Some(ip) = &item.container_ip {
+        format!("{}:{} ({})", ip, item.container_port, item.protocol)
+    } else {
+        format!(
+            "127.0.0.1:{} ({})",
+            item.host_port.map(|p| p.to_string()).unwrap_or_default(),
+            item.protocol
+        )
+    };
+    print_detail("upstream", &upstream);
     if let Some(ssh_target) = item.ssh_target.as_deref() {
         print_detail("ssh target", ssh_target);
     }

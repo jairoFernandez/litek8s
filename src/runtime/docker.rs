@@ -696,6 +696,10 @@ impl ContainerRuntime for DockerRuntime {
     ) -> Result<()> {
         DockerRuntime::probe_container_tcp(self, container_id, port, timeout).await
     }
+
+    async fn inspect_container_ip(&self, container_id: &str) -> Result<Option<String>> {
+        DockerRuntime::inspect_container_ip(self, container_id).await
+    }
 }
 
 fn connect_docker() -> Result<Docker> {

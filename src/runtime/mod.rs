@@ -68,6 +68,8 @@ pub trait ContainerRuntime {
         port: u16,
         timeout: Duration,
     ) -> Result<()>;
+
+    async fn inspect_container_ip(&self, container_id: &str) -> Result<Option<String>>;
 }
 
 /// Holder for the runtime backing a local node.
@@ -225,6 +227,14 @@ impl ContainerRuntime for LocalRuntime {
             Self::Fake(runtime) => {
                 runtime.probe_container_tcp(container_id, port, timeout).await
             }
+        }
+    }
+
+    async fn inspect_container_ip(&self, container_id: &str) -> Result<Option<String>> {
+        match self {
+            Self::Docker(runtime) => runtime.inspect_container_ip(container_id).await,
+            #[cfg(test)]
+            Self::Fake(runtime) => runtime.inspect_container_ip(container_id).await,
         }
     }
 }

@@ -687,7 +687,8 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                     transport,
                     ssh_target,
                     container_port: selected_port.container_port,
-                    host_port,
+                    host_port: Some(host_port),
+                    container_ip: None,
                     protocol: selected_port.protocol.as_printable().to_string(),
                 },
             })
@@ -1811,7 +1812,7 @@ impl AppState {
         self.service_manager
             .lock()
             .await
-            .sync(self.store.clone())
+            .sync(self.store.clone(), self.runtime.clone())
             .await
     }
 

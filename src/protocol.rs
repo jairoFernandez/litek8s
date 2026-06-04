@@ -446,7 +446,14 @@ pub struct ProxyTarget {
     pub transport: String,
     pub ssh_target: Option<String>,
     pub container_port: u16,
-    pub host_port: u16,
+    /// Published host port for the legacy single-container / `litek8s proxy`
+    /// path. `None` for replica backends, which are reached by container IP.
+    #[serde(default)]
+    pub host_port: Option<u16>,
+    /// Container bridge IP for replica backends (no host port). When set, the
+    /// proxy connects to `container_ip:container_port` instead of the host port.
+    #[serde(default)]
+    pub container_ip: Option<String>,
     pub protocol: String,
 }
 
