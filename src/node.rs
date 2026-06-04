@@ -683,6 +683,19 @@ impl NodeClient {
         Ok(())
     }
 
+    /// Remove the container(s) for one replica ordinal of a deployment. Matches
+    /// by the ordinal label, treating an unlabeled (pre-multi-replica) container
+    /// as ordinal 0.
+    pub async fn remove_replica_container(&self, name: &str, ordinal: u32) -> Result<()> {
+        let containers = self.list_containers_for_deployment(name).await?;
+        for container in containers {
+            if container.ordinal == Some(ordinal) || (ordinal == 0 && container.ordinal.is_none()) {
+                self.remove_container(&container.id).await?;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn wait_until_deployment_cleared(&self, name: &str, timeout: Duration) -> Result<()> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {

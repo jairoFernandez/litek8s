@@ -5,10 +5,10 @@ use anyhow::Result;
 
 use crate::control_plane::raft::ControlPlaneNode;
 use crate::control_plane::{ClusterCommand, CommandResult};
-use crate::node::{ClusterNode, NodeClient, select_node_for_manifest};
+use crate::node::{ClusterNode, NodeClient, select_nodes_for_manifest};
 use crate::runtime::LocalRuntime;
-use crate::runtime::docker::summarize_exit_state;
-use crate::store::{DeploymentStatus, EventLevel, Store, StoredDeployment};
+use crate::runtime::docker::{replica_container_name, summarize_exit_state};
+use crate::store::{DeploymentStatus, EventLevel, ReplicaState, Store, StoredDeployment};
 
 const RECREATE_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const MAX_RESTART_BACKOFF_SECS: u64 = 15;
@@ -27,15 +27,29 @@ pub async fn reconcile_all(
         .map(|node| (node.name.clone(), node))
         .collect();
 
+    // Plan node placement for every replica ordinal of every deployment, and
+    // record the desired CONTAINER names per node so orphan cleanup can remove
+    // scaled-down ordinals (and whole deleted deployments).
+    let mut planned: HashMap<String, Vec<String>> = HashMap::new();
     let mut desired_names_by_node: HashMap<String, HashSet<String>> = HashMap::new();
     for deployment in &deployments {
-        if let Ok(target_node) =
-            select_node_for_manifest(&deployment.manifest, nodes, Some(&deployment.assigned_node))
-        {
-            desired_names_by_node
-                .entry(target_node)
-                .or_default()
-                .insert(deployment.manifest.deployment_name().to_string());
+        let name = deployment.manifest.deployment_name();
+        let desired = deployment.manifest.desired_replicas();
+        let current = current_nodes_by_ordinal(deployment, desired);
+        match select_nodes_for_manifest(&deployment.manifest, nodes, &current, desired) {
+            Ok(target_nodes) => {
+                for (ordinal, node) in target_nodes.iter().enumerate() {
+                    let cname = replica_container_name(name, ordinal as u32);
+                    desired_names_by_node
+                        .entry(node.clone())
+                        .or_default()
+                        .insert(cname);
+                }
+                planned.insert(name.to_string(), target_nodes);
+            }
+            Err(_) => {
+                // Scheduling failure is surfaced per-deployment in the loop below.
+            }
         }
     }
 
@@ -55,17 +69,88 @@ pub async fn reconcile_all(
         }
     }
 
-    for mut deployment in deployments {
-        let target_node = match select_node_for_manifest(
-            &deployment.manifest,
-            nodes,
-            Some(&deployment.assigned_node),
-        ) {
-            Ok(target_node) => target_node,
-            Err(error) => {
+    for deployment in deployments {
+        let name = deployment.manifest.deployment_name().to_string();
+        let desired = deployment.manifest.desired_replicas();
+
+        let target_nodes = match planned.get(&name) {
+            Some(target_nodes) => target_nodes.clone(),
+            None => {
+                // Scheduling failed; mark every replica failed and stop.
+                let current = current_nodes_by_ordinal(&deployment, desired);
+                let error = select_nodes_for_manifest(&deployment.manifest, nodes, &current, desired)
+                    .err()
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "no schedulable node".to_string());
+                for ordinal in 0..desired {
+                    let _ = ha_node
+                        .propose(ClusterCommand::SetReplicaStatus {
+                            name: name.clone(),
+                            ordinal,
+                            status: DeploymentStatus::Failed,
+                            ready: false,
+                            container_id: None,
+                            message: Some(error.clone()),
+                            last_exit: None,
+                            increment_restart_count: false,
+                            increment_restart_streak: false,
+                            next_retry_at: None,
+                        })
+                        .await?;
+                }
+                record_deployment_event(
+                    ha_node,
+                    EventLevel::Warning,
+                    "FailedScheduling",
+                    &name,
+                    None,
+                    error,
+                )
+                .await?;
+                continue;
+            }
+        };
+
+        // Scale down: remove any container/replica with ordinal >= desired,
+        // highest first so survivors never get renumbered.
+        scale_down_extras(ha_node, local_runtime, &nodes_by_name, &deployment, desired).await?;
+
+        // Reconcile each desired ordinal on its target node.
+        for ordinal in 0..desired {
+            let target_node = &target_nodes[ordinal as usize];
+            let replica = replica_for_ordinal(&deployment, ordinal);
+
+            // Reschedule: if the replica moved nodes, clean it off the old one.
+            if let Some(replica) = &replica {
+                if !replica.assigned_node.is_empty() && &replica.assigned_node != target_node {
+                    if let Some(previous) = nodes_by_name.get(&replica.assigned_node) {
+                        let previous_runtime =
+                            NodeClient::for_node(previous, local_runtime.clone());
+                        let _ = previous_runtime
+                            .remove_replica_container(&name, ordinal)
+                            .await;
+                    }
+                }
+            }
+            let _ = ha_node
+                .propose(ClusterCommand::SetReplicaAssignment {
+                    name: name.clone(),
+                    ordinal,
+                    assigned_node: target_node.clone(),
+                })
+                .await?;
+
+            let Some(node) = nodes_by_name.get(target_node) else {
+                continue;
+            };
+            let runtime = NodeClient::for_node(node, local_runtime.clone());
+            if let Err(error) =
+                reconcile_replica(ha_node, &runtime, &deployment, ordinal, replica.as_ref()).await
+            {
                 let result = ha_node
-                    .propose(ClusterCommand::SetDeploymentStatus {
-                        name: deployment.manifest.deployment_name().to_string(),
+                    .propose(ClusterCommand::SetReplicaStatus {
+                        name: name.clone(),
+                        ordinal,
                         status: DeploymentStatus::Failed,
                         ready: false,
                         container_id: None,
@@ -80,100 +165,13 @@ pub async fn reconcile_all(
                     record_deployment_event(
                         ha_node,
                         EventLevel::Warning,
-                        "FailedScheduling",
-                        deployment.manifest.deployment_name(),
-                        Some(deployment.assigned_node.clone()),
+                        "Failed",
+                        &name,
+                        Some(target_node.clone()),
                         error.to_string(),
                     )
                     .await?;
                 }
-                if let Some(previous_node) = nodes_by_name.get(&deployment.assigned_node) {
-                    let runtime = NodeClient::for_node(previous_node, local_runtime.clone());
-                    let _ = runtime
-                        .remove_deployment(deployment.manifest.deployment_name())
-                        .await;
-                }
-                continue;
-            }
-        };
-
-        if deployment.assigned_node != target_node {
-            if let Some(previous_node) = nodes_by_name.get(&deployment.assigned_node) {
-                let previous_runtime = NodeClient::for_node(previous_node, local_runtime.clone());
-                if let Err(error) = previous_runtime
-                    .remove_deployment(deployment.manifest.deployment_name())
-                    .await
-                {
-                    eprintln!(
-                        "failed to clean deployment `{}` off previous node `{}` during reschedule: {error}",
-                        deployment.manifest.deployment_name(),
-                        deployment.assigned_node
-                    );
-                }
-            }
-            let assign_result = ha_node
-                .propose(ClusterCommand::SetDeploymentAssignment {
-                    name: deployment.manifest.deployment_name().to_string(),
-                    assigned_node: target_node.clone(),
-                })
-                .await?;
-            if matches!(assign_result, CommandResult::Changed { changed: true }) {
-                record_deployment_event(
-                    ha_node,
-                    EventLevel::Normal,
-                    "Scheduled",
-                    deployment.manifest.deployment_name(),
-                    Some(target_node.clone()),
-                    format!("deployment assigned to node `{target_node}`"),
-                )
-                .await?;
-            }
-            let _ = ha_node
-                .propose(ClusterCommand::SetDeploymentStatus {
-                    name: deployment.manifest.deployment_name().to_string(),
-                    status: DeploymentStatus::Pending,
-                    ready: false,
-                    container_id: None,
-                    message: Some(format!("scheduled on node `{target_node}`")),
-                    last_exit: Some("rescheduled".to_string()),
-                    increment_restart_count: false,
-                    increment_restart_streak: false,
-                    next_retry_at: None,
-                })
-                .await?;
-            deployment.assigned_node = target_node.clone();
-            deployment.container_id = None;
-        }
-
-        let Some(node) = nodes_by_name.get(&target_node) else {
-            continue;
-        };
-
-        let runtime = NodeClient::for_node(node, local_runtime.clone());
-        if let Err(error) = reconcile_deployment(ha_node, &runtime, &deployment).await {
-            let result = ha_node
-                .propose(ClusterCommand::SetDeploymentStatus {
-                    name: deployment.manifest.deployment_name().to_string(),
-                    status: DeploymentStatus::Failed,
-                    ready: false,
-                    container_id: None,
-                    message: Some(error.to_string()),
-                    last_exit: None,
-                    increment_restart_count: false,
-                    increment_restart_streak: false,
-                    next_retry_at: None,
-                })
-                .await?;
-            if matches!(result, CommandResult::Changed { changed: true }) {
-                record_deployment_event(
-                    ha_node,
-                    EventLevel::Warning,
-                    "Failed",
-                    deployment.manifest.deployment_name(),
-                    Some(deployment.assigned_node.clone()),
-                    error.to_string(),
-                )
-                .await?;
             }
         }
     }
@@ -181,49 +179,98 @@ pub async fn reconcile_all(
     Ok(())
 }
 
-pub async fn reconcile_deployment(
+/// The node each ordinal currently runs on, as a Vec indexed by ordinal (for
+/// scheduler stickiness). Missing ordinals get an empty string.
+fn current_nodes_by_ordinal(deployment: &StoredDeployment, desired: u32) -> Vec<String> {
+    (0..desired)
+        .map(|ordinal| {
+            deployment
+                .replicas
+                .iter()
+                .find(|r| r.ordinal == ordinal)
+                .map(|r| r.assigned_node.clone())
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+fn replica_for_ordinal(deployment: &StoredDeployment, ordinal: u32) -> Option<ReplicaState> {
+    deployment
+        .replicas
+        .iter()
+        .find(|r| r.ordinal == ordinal)
+        .cloned()
+}
+
+/// Remove containers and replica records whose ordinal is >= the desired count.
+/// Highest ordinal first, so identities below `desired` are never disturbed.
+async fn scale_down_extras(
+    ha_node: &ControlPlaneNode,
+    local_runtime: &LocalRuntime,
+    nodes_by_name: &HashMap<String, ClusterNode>,
+    deployment: &StoredDeployment,
+    desired: u32,
+) -> Result<()> {
+    let name = deployment.manifest.deployment_name();
+    let mut extras: Vec<&ReplicaState> = deployment
+        .replicas
+        .iter()
+        .filter(|r| r.ordinal >= desired)
+        .collect();
+    extras.sort_by(|a, b| b.ordinal.cmp(&a.ordinal));
+    for replica in extras {
+        if let Some(node) = nodes_by_name.get(&replica.assigned_node) {
+            let runtime = NodeClient::for_node(node, local_runtime.clone());
+            let _ = runtime
+                .remove_replica_container(name, replica.ordinal)
+                .await;
+        }
+        let _ = ha_node
+            .propose(ClusterCommand::RemoveReplica {
+                name: name.to_string(),
+                ordinal: replica.ordinal,
+            })
+            .await?;
+        record_deployment_event(
+            ha_node,
+            EventLevel::Normal,
+            "ScaledDown",
+            name,
+            Some(replica.assigned_node.clone()),
+            format!("removed replica {}", replica.ordinal),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Reconcile a single replica (ordinal) on its assigned node's runtime.
+pub async fn reconcile_replica(
     ha_node: &ControlPlaneNode,
     runtime: &NodeClient,
     deployment: &StoredDeployment,
+    ordinal: u32,
+    replica: Option<&ReplicaState>,
 ) -> Result<()> {
     let name = deployment.manifest.deployment_name();
-    let containers = runtime.list_containers_for_deployment(name).await?;
+    let cname = replica_container_name(name, ordinal);
 
+    // Find this ordinal's container(s). Pre-upgrade containers (ordinal label
+    // absent) are adopted as ordinal 0.
+    let mut containers: Vec<_> = runtime
+        .list_containers_for_deployment(name)
+        .await?
+        .into_iter()
+        .filter(|c| c.ordinal == Some(ordinal) || (ordinal == 0 && c.ordinal.is_none()))
+        .collect();
+
+    // Collapse duplicates for the same ordinal down to one.
     if containers.len() > 1 {
-        runtime.remove_deployment(name).await?;
-        runtime
-            .wait_until_deployment_cleared(name, RECREATE_WAIT_TIMEOUT)
-            .await?;
-        let new_id = runtime
-            .create_and_start(&deployment.manifest, &deployment.spec_hash, 0)
-            .await?;
-        let result = ha_node
-            .propose(ClusterCommand::SetDeploymentStatus {
-                name: name.to_string(),
-                status: DeploymentStatus::Restarting,
-                ready: false,
-                container_id: Some(new_id),
-                message: Some(
-                    "recreated after duplicate managed containers were found".to_string(),
-                ),
-                last_exit: Some("duplicate containers".to_string()),
-                increment_restart_count: true,
-                increment_restart_streak: false,
-                next_retry_at: None,
-            })
-            .await?;
-        if matches!(result, CommandResult::Changed { changed: true }) {
-            record_deployment_event(
-                ha_node,
-                EventLevel::Warning,
-                "Recreated",
-                name,
-                Some(deployment.assigned_node.clone()),
-                "duplicate managed containers were removed and recreated".to_string(),
-            )
-            .await?;
+        containers.sort_by(|a, b| a.id.cmp(&b.id));
+        for extra in &containers[1..] {
+            runtime.remove_container(&extra.id).await?;
         }
-        return Ok(());
+        containers.truncate(1);
     }
 
     if let Some(container) = containers.into_iter().next() {
@@ -232,7 +279,9 @@ pub async fn reconcile_deployment(
             let (ready, message, event_reason) =
                 if let Some(probe) = deployment.manifest.container().readiness_probe() {
                     let probe_target = format!("tcpSocket:{}", probe.tcp_socket.port);
-                    let started_at = deployment.container_started_at.unwrap_or_else(now_unix);
+                    let started_at = replica
+                        .and_then(|r| r.container_started_at)
+                        .unwrap_or_else(now_unix);
                     let initial_delay = probe.initial_delay_seconds();
                     if initial_delay > 0 && now_unix().saturating_sub(started_at) < initial_delay {
                         (
@@ -268,8 +317,9 @@ pub async fn reconcile_deployment(
                     (true, "container is healthy".to_string(), Some("Running"))
                 };
             let result = ha_node
-                .propose(ClusterCommand::SetDeploymentStatus {
+                .propose(ClusterCommand::SetReplicaStatus {
                     name: name.to_string(),
+                    ordinal,
                     status: DeploymentStatus::Running,
                     ready,
                     container_id: Some(container.id),
@@ -287,7 +337,7 @@ pub async fn reconcile_deployment(
                     event_reason.unwrap_or("Running"),
                     name,
                     Some(deployment.assigned_node.clone()),
-                    message,
+                    format!("replica {ordinal}: {message}"),
                 )
                 .await?;
             }
@@ -308,19 +358,19 @@ pub async fn reconcile_deployment(
         };
 
         runtime.remove_container(&container.id).await?;
-        runtime
-            .wait_until_deployment_cleared(name, RECREATE_WAIT_TIMEOUT)
-            .await?;
+        wait_until_container_gone(runtime, name, &cname, ordinal).await?;
 
-        let message = if hash_matches {
-            let backoff = restart_backoff_for_streak(deployment.restart_streak.saturating_add(1));
+        if hash_matches {
+            let streak = replica.map(|r| r.restart_streak).unwrap_or(0);
+            let backoff = restart_backoff_for_streak(streak.saturating_add(1));
             let next_retry_at = now_unix().saturating_add(backoff.as_secs());
             let reason = last_exit
                 .clone()
                 .unwrap_or_else(|| "container exited".to_string());
             let result = ha_node
-                .propose(ClusterCommand::SetDeploymentStatus {
+                .propose(ClusterCommand::SetReplicaStatus {
                     name: name.to_string(),
+                    ordinal,
                     status: DeploymentStatus::Restarting,
                     ready: false,
                     container_id: None,
@@ -341,26 +391,25 @@ pub async fn reconcile_deployment(
                     "Backoff",
                     name,
                     Some(deployment.assigned_node.clone()),
-                    format!("backing off {}s after {reason}", backoff.as_secs()),
+                    format!("replica {ordinal}: backing off {}s after {reason}", backoff.as_secs()),
                 )
                 .await?;
             }
             return Ok(());
-        } else {
-            "container was recreated after the manifest changed"
-        };
+        }
 
+        // Spec changed: recreate immediately.
         let new_id = runtime
-            .create_and_start(&deployment.manifest, &deployment.spec_hash, 0)
+            .create_and_start(&deployment.manifest, &deployment.spec_hash, ordinal)
             .await?;
-
         let result = ha_node
-            .propose(ClusterCommand::SetDeploymentStatus {
+            .propose(ClusterCommand::SetReplicaStatus {
                 name: name.to_string(),
+                ordinal,
                 status: DeploymentStatus::Restarting,
                 ready: false,
                 container_id: Some(new_id),
-                message: Some(message.to_string()),
+                message: Some("container was recreated after the manifest changed".to_string()),
                 last_exit,
                 increment_restart_count: true,
                 increment_restart_streak: false,
@@ -374,54 +423,52 @@ pub async fn reconcile_deployment(
                 "Recreated",
                 name,
                 Some(deployment.assigned_node.clone()),
-                message.to_string(),
+                format!("replica {ordinal} recreated after the manifest changed"),
             )
             .await?;
         }
         return Ok(());
     }
 
-    if let Some(next_retry_at) = deployment.next_retry_at {
+    // No container for this ordinal: respect this replica's backoff.
+    if let Some(next_retry_at) = replica.and_then(|r| r.next_retry_at) {
         if now_unix() < next_retry_at {
             return Ok(());
         }
     }
 
+    let had_container = replica.and_then(|r| r.container_id.clone()).is_some();
+    let retried_after_backoff = replica.and_then(|r| r.next_retry_at).is_some();
     let new_id = runtime
-        .create_and_start(&deployment.manifest, &deployment.spec_hash, 0)
+        .create_and_start(&deployment.manifest, &deployment.spec_hash, ordinal)
         .await?;
-    let retried_after_backoff = deployment.next_retry_at.is_some();
-    let status = if deployment.container_id.is_some() || retried_after_backoff {
+    let status = if had_container || retried_after_backoff {
         DeploymentStatus::Restarting
     } else {
         DeploymentStatus::Running
     };
     let message = if retried_after_backoff {
         "container restarted after backoff"
-    } else if deployment.container_id.is_some() {
+    } else if had_container {
         "container was recreated after disappearing"
     } else {
         "container was created"
     };
 
     let result = ha_node
-        .propose(ClusterCommand::SetDeploymentStatus {
+        .propose(ClusterCommand::SetReplicaStatus {
             name: name.to_string(),
+            ordinal,
             status,
             ready: false,
             container_id: Some(new_id),
             message: Some(message.to_string()),
-            last_exit: if deployment.status == DeploymentStatus::Restarting
-                && deployment.last_exit.is_some()
-            {
-                deployment.last_exit.clone()
+            last_exit: if had_container {
+                Some("container disappeared".to_string())
             } else {
-                deployment
-                    .container_id
-                    .as_ref()
-                    .map(|_| "container disappeared".to_string())
+                None
             },
-            increment_restart_count: deployment.container_id.is_some(),
+            increment_restart_count: had_container,
             increment_restart_streak: false,
             next_retry_at: None,
         })
@@ -432,18 +479,44 @@ pub async fn reconcile_deployment(
             EventLevel::Normal,
             if retried_after_backoff {
                 "Restarted"
-            } else if deployment.container_id.is_some() {
+            } else if had_container {
                 "Recreated"
             } else {
                 "Started"
             },
             name,
             Some(deployment.assigned_node.clone()),
-            message.to_string(),
+            format!("replica {ordinal}: {message}"),
         )
         .await?;
     }
     Ok(())
+}
+
+/// Wait until no container with the given replica name remains on the node.
+async fn wait_until_container_gone(
+    runtime: &NodeClient,
+    deployment: &str,
+    cname: &str,
+    ordinal: u32,
+) -> Result<()> {
+    let deadline = tokio::time::Instant::now() + RECREATE_WAIT_TIMEOUT;
+    loop {
+        let still_present = runtime
+            .list_containers_for_deployment(deployment)
+            .await?
+            .into_iter()
+            .any(|c| {
+                c.name == cname || c.ordinal == Some(ordinal) || (ordinal == 0 && c.ordinal.is_none())
+            });
+        if !still_present {
+            return Ok(());
+        }
+        if tokio::time::Instant::now() > deadline {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 fn restart_backoff_for_streak(streak: u32) -> Duration {
