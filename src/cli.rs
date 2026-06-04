@@ -2493,19 +2493,21 @@ fn print_response(response: Response) -> Result<()> {
             );
             println!();
             println!(
-                "{} {} {} {} {}",
+                "{} {} {} {} {} {}",
                 header_left("NAME", 24),
                 header_left("NODE", 14),
                 header_left("STATUS", 12),
+                header_left("READY", 7),
                 header_left("IMAGE", 24),
                 label("CONTAINER")
             );
             for item in items {
                 println!(
-                    "{} {} {} {} {}",
+                    "{} {} {} {} {} {}",
                     left_cell(&item.name, 24),
                     left_cell(&truncate(&item.node_name, 14), 14),
                     status_cell(&item.status, 12),
+                    left_cell(&format!("{}/{}", item.ready_replicas, item.desired_replicas), 7),
                     left_cell(&truncate(&item.image, 24), 24),
                     item.container_id.unwrap_or_else(|| "-".to_string())
                 );
@@ -2635,12 +2637,35 @@ fn print_response(response: Response) -> Result<()> {
             print_detail("node selector", &node_selector);
             print_detail("status", &color_status(&item.status));
             print_detail("ready", if item.ready { "true" } else { "false" });
+            print_detail(
+                "replicas",
+                &format!("{}/{} ready", item.ready_replicas, item.desired_replicas),
+            );
             print_detail("image", &item.image);
             print_detail("container", &item.container_name);
             print_detail(
                 "container id",
                 &item.container_id.unwrap_or_else(|| "-".to_string()),
             );
+            // Per-replica breakdown when there's more than one.
+            if item.replicas.len() > 1 {
+                for replica in &item.replicas {
+                    print_detail(
+                        &format!("  replica {}", replica.ordinal),
+                        &format!(
+                            "{} on {} ({}){}",
+                            color_status(&replica.status),
+                            replica.node_name,
+                            if replica.ready { "ready" } else { "not ready" },
+                            replica
+                                .container_id
+                                .as_deref()
+                                .map(|id| format!(" {}", &id[..id.len().min(12)]))
+                                .unwrap_or_default(),
+                        ),
+                    );
+                }
+            }
             if let Some(message) = item.message {
                 print_detail("message", &message);
             }
@@ -2792,7 +2817,12 @@ fn print_response(response: Response) -> Result<()> {
             print_detail("node", &item.node_name);
             print_detail("transport", &item.transport);
             print_detail("container port", &item.container_port.to_string());
-            print_detail("host port", &item.host_port.to_string());
+            if let Some(host_port) = item.host_port {
+                print_detail("host port", &host_port.to_string());
+            }
+            if let Some(ip) = &item.container_ip {
+                print_detail("container ip", ip);
+            }
             Ok(())
         }
         Response::Top {
@@ -3640,10 +3670,16 @@ async fn run_proxy(
     print_detail("node", &item.node_name);
     print_detail("transport", &item.transport);
     print_detail("listen", &bound_addr.to_string());
-    print_detail(
-        "upstream",
-        &format!("127.0.0.1:{} ({})", item.host_port, item.protocol),
-    );
+    let upstream = if let Some(ip) = &item.container_ip {
+        format!("{}:{} ({})", ip, item.container_port, item.protocol)
+    } else {
+        format!(
+            "127.0.0.1:{} ({})",
+            item.host_port.map(|p| p.to_string()).unwrap_or_default(),
+            item.protocol
+        )
+    };
+    print_detail("upstream", &upstream);
     if let Some(ssh_target) = item.ssh_target.as_deref() {
         print_detail("ssh target", ssh_target);
     }
@@ -4072,6 +4108,8 @@ mod tests {
             restart_streak: 1,
             last_exit: Some("spec changed".to_string()),
             next_retry_in_secs: None,
+            ready_replicas: 1,
+            desired_replicas: 1,
             cpu_percent: Some(1.5),
             memory_usage_bytes: Some(20 * 1024 * 1024),
             memory_limit_bytes: None,
@@ -4259,6 +4297,8 @@ mod tests {
                     restart_streak: 0,
                     last_exit: None,
                     next_retry_in_secs: None,
+                    ready_replicas: 1,
+                    desired_replicas: 1,
                     cpu_percent: Some(0.0),
                     memory_usage_bytes: None,
                     memory_limit_bytes: None,
@@ -4277,6 +4317,8 @@ mod tests {
                     restart_streak: 0,
                     last_exit: Some("spec changed".to_string()),
                     next_retry_in_secs: None,
+                    ready_replicas: 1,
+                    desired_replicas: 1,
                     cpu_percent: Some(0.0),
                     memory_usage_bytes: None,
                     memory_limit_bytes: None,

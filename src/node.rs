@@ -53,6 +53,8 @@ pub enum AgentRequest {
     CreateAndStart {
         manifest: DeploymentManifest,
         spec_hash: String,
+        #[serde(default)]
+        ordinal: u32,
     },
     RemoveContainer {
         container_id: String,
@@ -71,6 +73,9 @@ pub enum AgentRequest {
         container_id: String,
         port: u16,
         timeout_ms: u64,
+    },
+    ContainerIp {
+        container_id: String,
     },
     VpnAttach {
         node_name: String,
@@ -142,6 +147,7 @@ pub enum AgentResponse {
     Logs { content: String },
     ExitState { state: ContainerExitState },
     StatsSnapshot { snapshot: ContainerStatsSnapshot },
+    ContainerIp { ip: Option<String> },
     VpnAssignment {
         membership: VpnMembership,
         token: JoinToken,
@@ -332,6 +338,88 @@ pub fn select_node_for_manifest(
                 format_selector(manifest.node_selector())
             )
         })
+}
+
+/// Pick a node for each replica ordinal `0..desired`. Returns a Vec indexed by
+/// ordinal. Replicas spread across distinct matching nodes when there are
+/// enough, and pack (multiple per node) when `desired` exceeds the candidate
+/// count — packing is safe because replicas publish no host ports.
+///
+/// `current[ordinal]` (if present) is the node a replica currently runs on;
+/// each ordinal sticks to its current node when that node is still a valid
+/// candidate, so a single node going unschedulable only re-homes its own
+/// ordinals rather than reshuffling everything.
+pub fn select_nodes_for_manifest(
+    manifest: &DeploymentManifest,
+    nodes: &[ClusterNode],
+    current: &[String],
+    desired: u32,
+) -> Result<Vec<String>> {
+    // An explicit nodeName pins every replica to that one node.
+    if let Some(explicit) = manifest.explicit_node_name() {
+        let node = nodes
+            .iter()
+            .find(|node| node.name == explicit)
+            .with_context(|| format!("target node `{explicit}` is not registered"))?;
+        ensure!(
+            node.matches_selector(manifest.node_selector()),
+            "target node `{explicit}` does not satisfy nodeSelector"
+        );
+        return Ok(vec![explicit.to_string(); desired as usize]);
+    }
+
+    // Placement candidates: SCHEDULABLE nodes matching the selector, sorted.
+    let mut candidates: Vec<String> = nodes
+        .iter()
+        .filter(|node| !node.unschedulable && node.matches_selector(manifest.node_selector()))
+        .map(|node| node.name.clone())
+        .collect();
+    candidates.sort();
+
+    // Nodes that match the selector regardless of cordon status. A replica may
+    // STAY on its current node even when that node is cordoned (cordon only
+    // blocks NEW placement), mirroring the single-node scheduler's behavior.
+    let stickable: std::collections::HashSet<&str> = nodes
+        .iter()
+        .filter(|node| node.matches_selector(manifest.node_selector()))
+        .map(|node| node.name.as_str())
+        .collect();
+
+    if desired == 1
+        && manifest.node_selector().is_empty()
+        && candidates.iter().any(|n| n == LOCAL_NODE_NAME)
+        && current.first().map(String::as_str) != Some(LOCAL_NODE_NAME)
+    {
+        // Preserve single-replica default: prefer the local node.
+        return Ok(vec![LOCAL_NODE_NAME.to_string()]);
+    }
+
+    let mut assignment = Vec::with_capacity(desired as usize);
+    for ordinal in 0..desired as usize {
+        // Stick to the current node if it still matches (even if cordoned).
+        let sticky = current
+            .get(ordinal)
+            .filter(|node| !node.is_empty() && stickable.contains(node.as_str()))
+            .cloned();
+        let node = match sticky {
+            Some(node) => node,
+            None => {
+                // New placement needs a schedulable candidate.
+                let Some(candidate) = candidates.get(ordinal % candidates.len().max(1)) else {
+                    if manifest.node_selector().is_empty() {
+                        bail!("no schedulable node is available");
+                    }
+                    bail!(
+                        "no schedulable node matches nodeSelector `{}`",
+                        format_selector(manifest.node_selector())
+                    );
+                };
+                candidate.clone()
+            }
+        };
+        assignment.push(node);
+    }
+    Ok(assignment)
 }
 
 impl NodeClient {
@@ -570,13 +658,15 @@ impl NodeClient {
         &self,
         manifest: &DeploymentManifest,
         spec_hash: &str,
+        ordinal: u32,
     ) -> Result<String> {
         match self {
-            Self::Local(runtime) => runtime.create_and_start(manifest, spec_hash).await,
+            Self::Local(runtime) => runtime.create_and_start(manifest, spec_hash, ordinal).await,
             Self::Ssh(client) => match client
                 .request(AgentRequest::CreateAndStart {
                     manifest: manifest.clone(),
                     spec_hash: spec_hash.to_string(),
+                    ordinal,
                 })
                 .await?
             {
@@ -609,6 +699,19 @@ impl NodeClient {
         Ok(())
     }
 
+    /// Remove the container(s) for one replica ordinal of a deployment. Matches
+    /// by the ordinal label, treating an unlabeled (pre-multi-replica) container
+    /// as ordinal 0.
+    pub async fn remove_replica_container(&self, name: &str, ordinal: u32) -> Result<()> {
+        let containers = self.list_containers_for_deployment(name).await?;
+        for container in containers {
+            if container.ordinal == Some(ordinal) || (ordinal == 0 && container.ordinal.is_none()) {
+                self.remove_container(&container.id).await?;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn wait_until_deployment_cleared(&self, name: &str, timeout: Duration) -> Result<()> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
@@ -624,9 +727,18 @@ impl NodeClient {
         }
     }
 
-    pub async fn remove_orphans(&self, desired_names: &HashSet<String>) -> Result<()> {
+    /// Remove containers of KNOWN deployments whose name is not desired (scaled-
+    /// down ordinals). Containers of deployments this daemon doesn't own are left
+    /// untouched. `desired_names` holds per-replica container names.
+    pub async fn remove_orphans(
+        &self,
+        desired_names: &HashSet<String>,
+        known_deployments: &HashSet<String>,
+    ) -> Result<()> {
         for container in self.list_managed_containers().await? {
-            if !desired_names.contains(&container.deployment) {
+            if known_deployments.contains(&container.deployment)
+                && !desired_names.contains(&container.name)
+            {
                 self.remove_container(&container.id).await?;
             }
         }
@@ -704,6 +816,23 @@ impl NodeClient {
             {
                 AgentResponse::Ack => Ok(()),
                 other => bail!("unexpected agent response while probing container TCP: {other:?}"),
+            },
+        }
+    }
+
+    /// Fetch a container's bridge IP from the node that hosts it. Used by the
+    /// service load-balancer to reach a replica that publishes no host port.
+    pub async fn container_ip(&self, container_id: &str) -> Result<Option<String>> {
+        match self {
+            Self::Local(runtime) => runtime.inspect_container_ip(container_id).await,
+            Self::Ssh(client) => match client
+                .request(AgentRequest::ContainerIp {
+                    container_id: container_id.to_string(),
+                })
+                .await?
+            {
+                AgentResponse::ContainerIp { ip } => Ok(ip),
+                other => bail!("unexpected agent response while fetching container IP: {other:?}"),
             },
         }
     }
@@ -1415,8 +1544,9 @@ async fn handle_agent_request(
         AgentRequest::CreateAndStart {
             manifest,
             spec_hash,
+            ordinal,
         } => Ok(AgentResponse::ContainerCreated {
-            id: runtime.create_and_start(&manifest, &spec_hash).await?,
+            id: runtime.create_and_start(&manifest, &spec_hash, ordinal).await?,
         }),
         AgentRequest::RemoveContainer { container_id } => {
             runtime.remove_container(&container_id).await?;
@@ -1441,6 +1571,9 @@ async fn handle_agent_request(
                 .await?;
             Ok(AgentResponse::Ack)
         }
+        AgentRequest::ContainerIp { container_id } => Ok(AgentResponse::ContainerIp {
+            ip: runtime.inspect_container_ip(&container_id).await?,
+        }),
         AgentRequest::VpnAttach {
             node_name,
             spoke_pubkey,
@@ -1965,8 +2098,8 @@ fn format_selector(selector: &BTreeMap<String, String>) -> String {
 mod tests {
     use super::{
         ClusterNode, DEFAULT_REMOTE_BINARY, LOCAL_NODE_NAME, parse_remote_build_spec,
-        remote_parent_dir, select_node_for_manifest, validate_label_key, validate_label_value,
-        validate_node_name,
+        remote_parent_dir, select_node_for_manifest, select_nodes_for_manifest, validate_label_key,
+        validate_label_value, validate_node_name,
     };
     use crate::manifest::{API_VERSION, DeploymentManifest};
     use std::collections::BTreeMap;
@@ -2051,7 +2184,7 @@ spec:
         .expect("manifest should parse");
 
         let id = client
-            .create_and_start(&manifest, "hash1")
+            .create_and_start(&manifest, "hash1", 0)
             .await
             .expect("create");
         assert_eq!(fake.create_calls(), 1);
@@ -2201,5 +2334,86 @@ spec:
         let preferred = select_node_for_manifest(&manifest, &nodes, Some("server77"))
             .expect("current assignment should be preserved on a cordoned node");
         assert_eq!(preferred, "server77");
+    }
+
+    fn edge_manifest(replicas: u32) -> DeploymentManifest {
+        DeploymentManifest::parse(&format!(
+            r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: demo
+spec:
+  replicas: {replicas}
+  template:
+    spec:
+      restartPolicy: Always
+      nodeSelector:
+        role: edge
+      containers:
+        - name: web
+          image: nginx:alpine
+"#
+        ))
+        .expect("manifest should parse")
+    }
+
+    fn edge_node(name: &str) -> ClusterNode {
+        ClusterNode::ssh(
+            name.to_string(),
+            name.to_string(),
+            DEFAULT_REMOTE_BINARY.to_string(),
+            None,
+            BTreeMap::from([("role".to_string(), "edge".to_string())]),
+        )
+        .expect("ssh node should build")
+    }
+
+    #[test]
+    fn spreads_replicas_across_distinct_nodes() {
+        let manifest = edge_manifest(3);
+        let nodes = vec![edge_node("a"), edge_node("b"), edge_node("c")];
+        let assignment = select_nodes_for_manifest(&manifest, &nodes, &[], 3).expect("schedules");
+        // Deterministic sort => a, b, c for ordinals 0, 1, 2.
+        assert_eq!(assignment, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn packs_replicas_when_more_than_nodes() {
+        let manifest = edge_manifest(5);
+        let nodes = vec![edge_node("a"), edge_node("b")];
+        let assignment = select_nodes_for_manifest(&manifest, &nodes, &[], 5).expect("schedules");
+        // Round-robin over [a, b]: ordinals 0..4 -> a,b,a,b,a.
+        assert_eq!(assignment, vec!["a", "b", "a", "b", "a"]);
+    }
+
+    #[test]
+    fn keeps_replicas_on_their_current_node_when_still_valid() {
+        let manifest = edge_manifest(2);
+        let nodes = vec![edge_node("a"), edge_node("b")];
+        // Currently ordinal 0 on b, ordinal 1 on a (opposite of fresh round-robin).
+        let current = vec!["b".to_string(), "a".to_string()];
+        let assignment =
+            select_nodes_for_manifest(&manifest, &nodes, &current, 2).expect("schedules");
+        assert_eq!(assignment, vec!["b", "a"]);
+    }
+
+    #[test]
+    fn rehomes_only_ordinals_whose_node_is_gone() {
+        let manifest = edge_manifest(2);
+        // Node "b" is gone; only "a" and "c" remain.
+        let nodes = vec![edge_node("a"), edge_node("c")];
+        let current = vec!["b".to_string(), "c".to_string()];
+        let assignment =
+            select_nodes_for_manifest(&manifest, &nodes, &current, 2).expect("schedules");
+        // ordinal 0 lost its node -> round-robin candidate[0]=a; ordinal 1 sticks to c.
+        assert_eq!(assignment, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn errors_when_no_node_matches_selector() {
+        let manifest = edge_manifest(2);
+        let nodes = vec![ClusterNode::local()];
+        assert!(select_nodes_for_manifest(&manifest, &nodes, &[], 2).is_err());
     }
 }

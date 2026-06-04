@@ -35,13 +35,18 @@ pub trait ContainerRuntime {
         &self,
         manifest: &DeploymentManifest,
         spec_hash: &str,
+        ordinal: u32,
     ) -> Result<String>;
 
     async fn remove_deployment(&self, name: &str) -> Result<()>;
 
     async fn wait_until_deployment_cleared(&self, name: &str, timeout: Duration) -> Result<()>;
 
-    async fn remove_orphans(&self, desired_names: &HashSet<String>) -> Result<()>;
+    async fn remove_orphans(
+        &self,
+        desired_names: &HashSet<String>,
+        known_deployments: &HashSet<String>,
+    ) -> Result<()>;
 
     async fn remove_container(&self, container_id: &str) -> Result<()>;
 
@@ -67,6 +72,8 @@ pub trait ContainerRuntime {
         port: u16,
         timeout: Duration,
     ) -> Result<()>;
+
+    async fn inspect_container_ip(&self, container_id: &str) -> Result<Option<String>>;
 }
 
 /// Holder for the runtime backing a local node.
@@ -123,11 +130,12 @@ impl ContainerRuntime for LocalRuntime {
         &self,
         manifest: &DeploymentManifest,
         spec_hash: &str,
+        ordinal: u32,
     ) -> Result<String> {
         match self {
-            Self::Docker(runtime) => runtime.create_and_start(manifest, spec_hash).await,
+            Self::Docker(runtime) => runtime.create_and_start(manifest, spec_hash, ordinal).await,
             #[cfg(test)]
-            Self::Fake(runtime) => runtime.create_and_start(manifest, spec_hash).await,
+            Self::Fake(runtime) => runtime.create_and_start(manifest, spec_hash, ordinal).await,
         }
     }
 
@@ -147,11 +155,17 @@ impl ContainerRuntime for LocalRuntime {
         }
     }
 
-    async fn remove_orphans(&self, desired_names: &HashSet<String>) -> Result<()> {
+    async fn remove_orphans(
+        &self,
+        desired_names: &HashSet<String>,
+        known_deployments: &HashSet<String>,
+    ) -> Result<()> {
         match self {
-            Self::Docker(runtime) => runtime.remove_orphans(desired_names).await,
+            Self::Docker(runtime) => {
+                runtime.remove_orphans(desired_names, known_deployments).await
+            }
             #[cfg(test)]
-            Self::Fake(runtime) => runtime.remove_orphans(desired_names).await,
+            Self::Fake(runtime) => runtime.remove_orphans(desired_names, known_deployments).await,
         }
     }
 
@@ -223,6 +237,14 @@ impl ContainerRuntime for LocalRuntime {
             Self::Fake(runtime) => {
                 runtime.probe_container_tcp(container_id, port, timeout).await
             }
+        }
+    }
+
+    async fn inspect_container_ip(&self, container_id: &str) -> Result<Option<String>> {
+        match self {
+            Self::Docker(runtime) => runtime.inspect_container_ip(container_id).await,
+            #[cfg(test)]
+            Self::Fake(runtime) => runtime.inspect_container_ip(container_id).await,
         }
     }
 }

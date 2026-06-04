@@ -282,6 +282,23 @@ pub struct DeploymentSummary {
     pub status: String,
     pub image: String,
     pub container_id: Option<String>,
+    #[serde(default)]
+    pub ready_replicas: u32,
+    #[serde(default = "one")]
+    pub desired_replicas: u32,
+}
+
+fn one() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplicaInfo {
+    pub ordinal: u32,
+    pub node_name: String,
+    pub status: String,
+    pub ready: bool,
+    pub container_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -309,6 +326,12 @@ pub struct DeploymentDescription {
     pub next_retry_in_secs: Option<u64>,
     #[serde(default)]
     pub conditions: Vec<DeploymentCondition>,
+    #[serde(default)]
+    pub ready_replicas: u32,
+    #[serde(default = "one")]
+    pub desired_replicas: u32,
+    #[serde(default)]
+    pub replicas: Vec<ReplicaInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -325,6 +348,10 @@ pub struct DeploymentTopRow {
     pub restart_streak: u32,
     pub last_exit: Option<String>,
     pub next_retry_in_secs: Option<u64>,
+    #[serde(default)]
+    pub ready_replicas: u32,
+    #[serde(default = "one")]
+    pub desired_replicas: u32,
     pub cpu_percent: Option<f64>,
     pub memory_usage_bytes: Option<u64>,
     pub memory_limit_bytes: Option<u64>,
@@ -446,7 +473,14 @@ pub struct ProxyTarget {
     pub transport: String,
     pub ssh_target: Option<String>,
     pub container_port: u16,
-    pub host_port: u16,
+    /// Published host port for the legacy single-container / `litek8s proxy`
+    /// path. `None` for replica backends, which are reached by container IP.
+    #[serde(default)]
+    pub host_port: Option<u16>,
+    /// Container bridge IP for replica backends (no host port). When set, the
+    /// proxy connects to `container_ip:container_port` instead of the host port.
+    #[serde(default)]
+    pub container_ip: Option<String>,
     pub protocol: String,
 }
 

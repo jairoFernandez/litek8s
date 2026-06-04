@@ -135,6 +135,7 @@ impl ContainerRuntime for FakeRuntime {
         &self,
         manifest: &DeploymentManifest,
         spec_hash: &str,
+        ordinal: u32,
     ) -> Result<String> {
         let mut state = self.state.lock().unwrap();
         state.next_id += 1;
@@ -143,12 +144,14 @@ impl ContainerRuntime for FakeRuntime {
         let deployment = manifest.deployment_name().to_string();
         let managed = ManagedContainer {
             id: id.clone(),
-            name: format!("litek8s-{deployment}"),
+            name: format!("litek8s-{deployment}-{ordinal}"),
             deployment: deployment.clone(),
             state: Some("running".to_string()),
             status: Some("Up".to_string()),
             running: true,
             spec_hash: Some(spec_hash.to_string()),
+            ordinal: Some(ordinal),
+            container_ip: None,
         };
         state
             .containers
@@ -184,12 +187,19 @@ impl ContainerRuntime for FakeRuntime {
         }
     }
 
-    async fn remove_orphans(&self, desired_names: &HashSet<String>) -> Result<()> {
+    async fn remove_orphans(
+        &self,
+        desired_names: &HashSet<String>,
+        known_deployments: &HashSet<String>,
+    ) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         let ids: Vec<String> = state
             .containers
             .iter()
-            .filter(|(_, (managed, _))| !desired_names.contains(&managed.deployment))
+            .filter(|(_, (managed, _))| {
+                known_deployments.contains(&managed.deployment)
+                    && !desired_names.contains(&managed.name)
+            })
             .map(|(id, _)| id.clone())
             .collect();
         for id in ids {
@@ -278,6 +288,14 @@ impl ContainerRuntime for FakeRuntime {
             bail!("fake probe failure for container {container_id}")
         }
     }
+
+    async fn inspect_container_ip(&self, container_id: &str) -> Result<Option<String>> {
+        let state = self.state.lock().unwrap();
+        Ok(state
+            .containers
+            .get(container_id)
+            .map(|_| "10.0.0.1".to_string()))
+    }
 }
 
 impl Default for ContainerExitState {
@@ -358,7 +376,7 @@ spec:
         let manifest = sample_manifest("demo");
 
         let id = runtime
-            .create_and_start(&manifest, "hash1")
+            .create_and_start(&manifest, "hash1", 0)
             .await
             .expect("create");
         assert_eq!(runtime.create_calls(), 1);
@@ -387,7 +405,7 @@ spec:
         let runtime = FakeRuntime::new();
         let manifest = sample_manifest("api");
         let id = runtime
-            .create_and_start(&manifest, "hash")
+            .create_and_start(&manifest, "hash", 0)
             .await
             .expect("create");
 
@@ -403,17 +421,23 @@ spec:
     async fn remove_orphans_drops_undesired() {
         let runtime = FakeRuntime::new();
         runtime
-            .create_and_start(&sample_manifest("keep"), "h")
+            .create_and_start(&sample_manifest("keep"), "h", 0)
             .await
             .expect("create");
         runtime
-            .create_and_start(&sample_manifest("drop"), "h")
+            .create_and_start(&sample_manifest("drop"), "h", 0)
             .await
             .expect("create");
 
+        // Orphan cleanup keys on container NAME now (litek8s-<dep>-<ordinal>),
+        // scoped to known deployments.
         let mut desired = HashSet::new();
-        desired.insert("keep".to_string());
-        runtime.remove_orphans(&desired).await.expect("orphans");
+        desired.insert("litek8s-keep-0".to_string());
+        let known: HashSet<String> = ["keep", "drop"].iter().map(|s| s.to_string()).collect();
+        runtime
+            .remove_orphans(&desired, &known)
+            .await
+            .expect("orphans");
 
         let all = runtime.list_managed_containers().await.expect("list");
         assert_eq!(all.len(), 1);

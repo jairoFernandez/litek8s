@@ -530,6 +530,8 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                     status: deployment_display_status(&entry),
                     image: entry.manifest.container().image.clone(),
                     container_id: entry.container_id.clone(),
+                    ready_replicas: ready_replica_count(&entry),
+                    desired_replicas: entry.manifest.desired_replicas(),
                 })
                 .collect();
             Ok(Response::Deployments { items })
@@ -584,6 +586,9 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 last_exit: entry.last_exit.clone(),
                 next_retry_in_secs: retry_in_secs(entry.next_retry_at),
                 conditions: deployment_conditions(&entry),
+                ready_replicas: ready_replica_count(&entry),
+                desired_replicas: entry.manifest.desired_replicas(),
+                replicas: replica_infos(&entry),
             };
 
             Ok(Response::Description { item })
@@ -687,7 +692,8 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                     transport,
                     ssh_target,
                     container_port: selected_port.container_port,
-                    host_port,
+                    host_port: Some(host_port),
+                    container_ip: None,
                     protocol: selected_port.protocol.as_printable().to_string(),
                 },
             })
@@ -802,11 +808,19 @@ async fn delete_deployment(state: Arc<AppState>, name: &str) -> Result<Response>
     if !matches!(result, CommandResult::Changed { changed: true }) {
         bail!("deployment `{name}` was not found");
     }
-    state
-        .client_for_node_name(&deployment.assigned_node)
-        .await?
-        .remove_deployment(name)
-        .await?;
+    // Remove containers on every node a replica was placed on (replicas can be
+    // spread across nodes), plus the aggregate assigned_node as a fallback.
+    let mut nodes: std::collections::HashSet<String> = deployment
+        .replicas
+        .iter()
+        .map(|r| r.assigned_node.clone())
+        .collect();
+    nodes.insert(deployment.assigned_node.clone());
+    for node_name in nodes {
+        if let Ok(client) = state.client_for_node_name(&node_name).await {
+            let _ = client.remove_deployment(name).await;
+        }
+    }
     state
         .record_event(NewEvent {
             level: EventLevel::Normal,
@@ -1811,7 +1825,7 @@ impl AppState {
         self.service_manager
             .lock()
             .await
-            .sync(self.store.clone())
+            .sync(self.store.clone(), self.runtime.clone())
             .await
     }
 
@@ -1989,6 +2003,8 @@ impl AppState {
                 restart_streak: entry.restart_streak,
                 last_exit: entry.last_exit.clone(),
                 next_retry_in_secs: retry_in_secs(entry.next_retry_at),
+                ready_replicas: ready_replica_count(entry),
+                desired_replicas: entry.manifest.desired_replicas(),
                 cpu_percent: None,
                 memory_usage_bytes: None,
                 memory_limit_bytes: None,
@@ -2120,6 +2136,25 @@ fn deployment_display_status(entry: &crate::store::StoredDeployment) -> String {
     } else {
         entry.status.to_string()
     }
+}
+
+fn ready_replica_count(entry: &crate::store::StoredDeployment) -> u32 {
+    entry.replicas.iter().filter(|r| r.ready).count() as u32
+}
+
+fn replica_infos(entry: &crate::store::StoredDeployment) -> Vec<crate::protocol::ReplicaInfo> {
+    let mut replicas: Vec<_> = entry.replicas.clone();
+    replicas.sort_by_key(|r| r.ordinal);
+    replicas
+        .into_iter()
+        .map(|r| crate::protocol::ReplicaInfo {
+            ordinal: r.ordinal,
+            node_name: r.assigned_node,
+            status: r.status.to_string(),
+            ready: r.ready,
+            container_id: r.container_id,
+        })
+        .collect()
 }
 
 fn format_readiness_probe(probe: &crate::manifest::ReadinessProbe) -> String {
@@ -2721,6 +2756,7 @@ spec:
             container_started_at: None,
             ready_since: None,
             updated_at: 0,
+            replicas: Vec::new(),
         }
     }
 
