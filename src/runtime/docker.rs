@@ -214,9 +214,12 @@ impl DockerRuntime {
         }
     }
 
+    /// Remove managed containers whose NAME is not in the desired set. The set
+    /// contains per-replica container names (`litek8s-<dep>-<ordinal>`), so this
+    /// reaps both whole deleted deployments and scaled-down ordinals.
     pub async fn remove_orphans(&self, desired_names: &HashSet<String>) -> Result<()> {
         for container in self.list_managed_containers().await? {
-            if !desired_names.contains(&container.deployment) {
+            if !desired_names.contains(&container.name) {
                 self.remove_container(&container.id).await?;
             }
         }

@@ -192,7 +192,7 @@ impl ContainerRuntime for FakeRuntime {
         let ids: Vec<String> = state
             .containers
             .iter()
-            .filter(|(_, (managed, _))| !desired_names.contains(&managed.deployment))
+            .filter(|(_, (managed, _))| !desired_names.contains(&managed.name))
             .map(|(id, _)| id.clone())
             .collect();
         for id in ids {
@@ -414,8 +414,9 @@ spec:
             .await
             .expect("create");
 
+        // Orphan cleanup keys on container NAME now (litek8s-<dep>-<ordinal>).
         let mut desired = HashSet::new();
-        desired.insert("keep".to_string());
+        desired.insert("litek8s-keep-0".to_string());
         runtime.remove_orphans(&desired).await.expect("orphans");
 
         let all = runtime.list_managed_containers().await.expect("list");

@@ -39,11 +39,15 @@ pub async fn reconcile_all(
         match select_nodes_for_manifest(&deployment.manifest, nodes, &current, desired) {
             Ok(target_nodes) => {
                 for (ordinal, node) in target_nodes.iter().enumerate() {
-                    let cname = replica_container_name(name, ordinal as u32);
-                    desired_names_by_node
-                        .entry(node.clone())
-                        .or_default()
-                        .insert(cname);
+                    let entry = desired_names_by_node.entry(node.clone()).or_default();
+                    entry.insert(replica_container_name(name, ordinal as u32));
+                    // Pre-multi-replica containers are named `litek8s-<dep>`
+                    // (no ordinal). Keep the bare name desired for ordinal 0 so
+                    // an upgraded daemon doesn't orphan the adopted container
+                    // before it's recreated with the new name.
+                    if ordinal == 0 {
+                        entry.insert(crate::runtime::docker::deployment_container_name(name));
+                    }
                 }
                 planned.insert(name.to_string(), target_nodes);
             }
