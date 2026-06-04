@@ -2721,6 +2721,7 @@ spec:
             container_started_at: None,
             ready_since: None,
             updated_at: 0,
+            replicas: Vec::new(),
         }
     }
 

@@ -11,8 +11,9 @@ use crate::config;
 use crate::manifest::DeploymentManifest;
 use crate::node::{ClusterNode, LOCAL_NODE_NAME};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum DeploymentStatus {
+    #[default]
     Pending,
     Running,
     Restarting,
@@ -22,6 +23,40 @@ pub enum DeploymentStatus {
 
 const HEALTHY_RESET_AFTER_SECS: u64 = 10;
 const MAX_EVENT_HISTORY: usize = 250;
+
+/// State of one replica (one ordinal) of a deployment. The reconciler drives
+/// these; the flat fields on `StoredDeployment` are an aggregate mirror derived
+/// from this list (so display code that predates multi-replica still works).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicaState {
+    pub ordinal: u32,
+    #[serde(default = "default_assigned_node")]
+    pub assigned_node: String,
+    #[serde(default)]
+    pub status: DeploymentStatus,
+    #[serde(default)]
+    pub ready: bool,
+    #[serde(default)]
+    pub container_id: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub restart_count: u64,
+    #[serde(default)]
+    pub last_exit: Option<String>,
+    #[serde(default)]
+    pub restart_streak: u32,
+    #[serde(default)]
+    pub next_retry_at: Option<u64>,
+    #[serde(default)]
+    pub healthy_since: Option<u64>,
+    #[serde(default)]
+    pub container_started_at: Option<u64>,
+    #[serde(default)]
+    pub ready_since: Option<u64>,
+    #[serde(default)]
+    pub updated_at: u64,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StoredDeployment {
@@ -49,6 +84,11 @@ pub struct StoredDeployment {
     #[serde(default)]
     pub ready_since: Option<u64>,
     pub updated_at: u64,
+    /// Per-replica state, ordinal 0..desired. Empty on records written before
+    /// multi-replica support; `Store::load` synthesizes ordinal 0 from the flat
+    /// fields above so the existing container is adopted, not recreated.
+    #[serde(default)]
+    pub replicas: Vec<ReplicaState>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -165,6 +205,26 @@ impl Store {
                     entry.assigned_node = explicit_node.to_string();
                 }
             }
+            // Migrate pre-multi-replica records: synthesize ordinal 0 from the
+            // flat fields so the existing container is adopted, not recreated.
+            if entry.replicas.is_empty() {
+                entry.replicas.push(ReplicaState {
+                    ordinal: 0,
+                    assigned_node: entry.assigned_node.clone(),
+                    status: entry.status.clone(),
+                    ready: entry.ready,
+                    container_id: entry.container_id.clone(),
+                    message: entry.message.clone(),
+                    restart_count: entry.restart_count,
+                    last_exit: entry.last_exit.clone(),
+                    restart_streak: entry.restart_streak,
+                    next_retry_at: entry.next_retry_at,
+                    healthy_since: entry.healthy_since,
+                    container_started_at: entry.container_started_at,
+                    ready_since: entry.ready_since,
+                    updated_at: entry.updated_at,
+                });
+            }
         }
         state
             .nodes
@@ -194,7 +254,9 @@ impl Store {
 
     pub async fn upsert(&self, manifest: DeploymentManifest) -> Result<ApplyOutcome> {
         let name = manifest.deployment_name().to_string();
-        let spec_hash = manifest.desired_hash()?;
+        // Identity hash is the pod template only — scaling the replica count
+        // must not invalidate running containers.
+        let spec_hash = manifest.pod_template_hash()?;
 
         let mut guard = self.state.write().await;
         let existing = guard.deployments.get(&name).cloned();
@@ -203,6 +265,13 @@ impl Store {
         } else {
             ApplyOutcome::Created
         };
+
+        // Preserve live per-replica state across re-apply; the reconciler scales
+        // the Vec up/down to match the new desired replica count.
+        let replicas = existing
+            .as_ref()
+            .map(|entry| entry.replicas.clone())
+            .unwrap_or_default();
 
         guard.deployments.insert(
             name,
@@ -228,6 +297,7 @@ impl Store {
                 container_started_at: None,
                 ready_since: None,
                 updated_at: now_unix(),
+                replicas,
             },
         );
 
@@ -500,82 +570,128 @@ impl Store {
         increment_restart_streak: bool,
         next_retry_at: Option<u64>,
     ) -> Result<bool> {
+        let update = StatusUpdate {
+            status,
+            ready,
+            container_id,
+            message,
+            last_exit,
+            increment_restart_count,
+            increment_restart_streak,
+            next_retry_at,
+        };
         let mut guard = self.state.write().await;
         let mut changed = false;
         if let Some(entry) = guard.deployments.get_mut(name) {
-            let now = now_unix();
-            let before = entry.clone();
-
-            let previous_container_id = entry.container_id.clone();
-            let previous_ready = entry.ready;
-
-            entry.status = status;
-            entry.ready = ready;
-            entry.container_id = container_id;
-            entry.message = message;
-            if let Some(last_exit) = last_exit {
-                entry.last_exit = Some(last_exit);
-            }
-            if increment_restart_count {
-                entry.restart_count = entry.restart_count.saturating_add(1);
-            }
-            if increment_restart_streak {
-                entry.restart_streak = entry.restart_streak.saturating_add(1);
-            }
-            entry.next_retry_at = next_retry_at;
-
-            if previous_container_id != entry.container_id {
-                entry.container_started_at = entry.container_id.as_ref().map(|_| now);
-                entry.ready_since = None;
-            } else if entry.container_id.is_none() {
-                entry.container_started_at = None;
-                entry.ready_since = None;
-            }
-
-            if entry.ready {
-                if !previous_ready {
-                    entry.ready_since = Some(now);
-                }
-            } else {
-                entry.ready_since = None;
-            }
-
-            let counts_as_healthy = if entry.ready {
-                true
-            } else {
-                entry.status == DeploymentStatus::Running
-                    && entry.container_id.is_some()
-                    && entry.manifest.container().readiness_probe().is_none()
-            };
-
-            if counts_as_healthy {
-                if entry.healthy_since.is_none() || previous_container_id != entry.container_id {
-                    entry.healthy_since = Some(now);
-                }
-
-                if entry
-                    .healthy_since
-                    .map(|healthy_since| {
-                        now.saturating_sub(healthy_since) >= HEALTHY_RESET_AFTER_SECS
-                    })
-                    .unwrap_or(false)
-                {
-                    entry.restart_streak = 0;
-                    entry.next_retry_at = None;
-                }
-            } else {
-                entry.healthy_since = None;
-            }
-
-            changed = *entry != before;
-            if changed {
-                entry.updated_at = now;
+            let probe = entry.manifest.container().readiness_probe().is_some();
+            let mut fields = StatusFields::from_deployment(entry);
+            if apply_status_transition(&mut fields, update, probe) {
+                fields.write_back_deployment(entry);
+                // Mirror onto ordinal 0 so the per-replica view stays consistent
+                // when the legacy aggregate path is used (single-replica path).
+                mirror_aggregate_to_replica0(entry);
+                changed = true;
             }
         }
         if !changed {
             return Ok(false);
         }
 
+        let snapshot = guard.clone();
+        drop(guard);
+        self.persist(&snapshot).await?;
+        Ok(true)
+    }
+
+    /// Assign a single replica (ordinal) of a deployment to a node, creating the
+    /// replica record if absent.
+    pub async fn set_replica_assignment(
+        &self,
+        name: &str,
+        ordinal: u32,
+        assigned_node: String,
+    ) -> Result<bool> {
+        let mut guard = self.state.write().await;
+        let mut changed = false;
+        if let Some(entry) = guard.deployments.get_mut(name) {
+            let replica = ensure_replica(entry, ordinal);
+            if replica.assigned_node != assigned_node {
+                replica.assigned_node = assigned_node;
+                replica.updated_at = now_unix();
+                recompute_aggregate(entry);
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(false);
+        }
+        let snapshot = guard.clone();
+        drop(guard);
+        self.persist(&snapshot).await?;
+        Ok(true)
+    }
+
+    /// Apply a status transition to one replica (ordinal), creating it if absent.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn set_replica_status(
+        &self,
+        name: &str,
+        ordinal: u32,
+        status: DeploymentStatus,
+        ready: bool,
+        container_id: Option<String>,
+        message: Option<String>,
+        last_exit: Option<String>,
+        increment_restart_count: bool,
+        increment_restart_streak: bool,
+        next_retry_at: Option<u64>,
+    ) -> Result<bool> {
+        let update = StatusUpdate {
+            status,
+            ready,
+            container_id,
+            message,
+            last_exit,
+            increment_restart_count,
+            increment_restart_streak,
+            next_retry_at,
+        };
+        let mut guard = self.state.write().await;
+        let mut changed = false;
+        if let Some(entry) = guard.deployments.get_mut(name) {
+            let probe = entry.manifest.container().readiness_probe().is_some();
+            let replica = ensure_replica(entry, ordinal);
+            let mut fields = StatusFields::from_replica(replica);
+            if apply_status_transition(&mut fields, update, probe) {
+                fields.write_back_replica(replica);
+                recompute_aggregate(entry);
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(false);
+        }
+        let snapshot = guard.clone();
+        drop(guard);
+        self.persist(&snapshot).await?;
+        Ok(true)
+    }
+
+    /// Remove a single replica (used for scale-down). Returns true if removed.
+    pub async fn remove_replica(&self, name: &str, ordinal: u32) -> Result<bool> {
+        let mut guard = self.state.write().await;
+        let mut changed = false;
+        if let Some(entry) = guard.deployments.get_mut(name) {
+            let before = entry.replicas.len();
+            entry.replicas.retain(|replica| replica.ordinal != ordinal);
+            if entry.replicas.len() != before {
+                recompute_aggregate(entry);
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(false);
+        }
         let snapshot = guard.clone();
         drop(guard);
         self.persist(&snapshot).await?;
@@ -626,6 +742,266 @@ impl Display for EventLevel {
         };
         write!(f, "{text}")
     }
+}
+
+/// The inputs of a status transition, shared by the aggregate (`set_status`)
+/// and per-replica (`set_replica_status`) paths.
+struct StatusUpdate {
+    status: DeploymentStatus,
+    ready: bool,
+    container_id: Option<String>,
+    message: Option<String>,
+    last_exit: Option<String>,
+    increment_restart_count: bool,
+    increment_restart_streak: bool,
+    next_retry_at: Option<u64>,
+}
+
+/// The subset of fields a status transition reads/writes. Both `StoredDeployment`
+/// (aggregate mirror) and `ReplicaState` carry these same fields; this lets the
+/// transition logic live in one place.
+struct StatusFields {
+    status: DeploymentStatus,
+    ready: bool,
+    container_id: Option<String>,
+    message: Option<String>,
+    last_exit: Option<String>,
+    restart_count: u64,
+    restart_streak: u32,
+    next_retry_at: Option<u64>,
+    healthy_since: Option<u64>,
+    container_started_at: Option<u64>,
+    ready_since: Option<u64>,
+    updated_at: u64,
+}
+
+impl StatusFields {
+    fn from_deployment(dep: &StoredDeployment) -> Self {
+        Self {
+            status: dep.status.clone(),
+            ready: dep.ready,
+            container_id: dep.container_id.clone(),
+            message: dep.message.clone(),
+            last_exit: dep.last_exit.clone(),
+            restart_count: dep.restart_count,
+            restart_streak: dep.restart_streak,
+            next_retry_at: dep.next_retry_at,
+            healthy_since: dep.healthy_since,
+            container_started_at: dep.container_started_at,
+            ready_since: dep.ready_since,
+            updated_at: dep.updated_at,
+        }
+    }
+
+    fn write_back_deployment(self, dep: &mut StoredDeployment) {
+        dep.status = self.status;
+        dep.ready = self.ready;
+        dep.container_id = self.container_id;
+        dep.message = self.message;
+        dep.last_exit = self.last_exit;
+        dep.restart_count = self.restart_count;
+        dep.restart_streak = self.restart_streak;
+        dep.next_retry_at = self.next_retry_at;
+        dep.healthy_since = self.healthy_since;
+        dep.container_started_at = self.container_started_at;
+        dep.ready_since = self.ready_since;
+        dep.updated_at = self.updated_at;
+    }
+
+    fn from_replica(replica: &ReplicaState) -> Self {
+        Self {
+            status: replica.status.clone(),
+            ready: replica.ready,
+            container_id: replica.container_id.clone(),
+            message: replica.message.clone(),
+            last_exit: replica.last_exit.clone(),
+            restart_count: replica.restart_count,
+            restart_streak: replica.restart_streak,
+            next_retry_at: replica.next_retry_at,
+            healthy_since: replica.healthy_since,
+            container_started_at: replica.container_started_at,
+            ready_since: replica.ready_since,
+            updated_at: replica.updated_at,
+        }
+    }
+
+    fn write_back_replica(self, replica: &mut ReplicaState) {
+        replica.status = self.status;
+        replica.ready = self.ready;
+        replica.container_id = self.container_id;
+        replica.message = self.message;
+        replica.last_exit = self.last_exit;
+        replica.restart_count = self.restart_count;
+        replica.restart_streak = self.restart_streak;
+        replica.next_retry_at = self.next_retry_at;
+        replica.healthy_since = self.healthy_since;
+        replica.container_started_at = self.container_started_at;
+        replica.ready_since = self.ready_since;
+        replica.updated_at = self.updated_at;
+    }
+}
+
+/// Apply a status transition to a set of fields. Returns true if anything
+/// changed (the caller persists only then). `has_probe` is whether the
+/// container declares a readiness probe (affects the healthy-without-probe path).
+fn apply_status_transition(fields: &mut StatusFields, update: StatusUpdate, has_probe: bool) -> bool {
+    let now = now_unix();
+    let previous_container_id = fields.container_id.clone();
+    let previous_ready = fields.ready;
+    let snapshot = (
+        fields.status.clone(),
+        fields.ready,
+        fields.container_id.clone(),
+        fields.message.clone(),
+        fields.last_exit.clone(),
+        fields.restart_count,
+        fields.restart_streak,
+        fields.next_retry_at,
+        fields.healthy_since,
+        fields.container_started_at,
+        fields.ready_since,
+    );
+
+    fields.status = update.status;
+    fields.ready = update.ready;
+    fields.container_id = update.container_id;
+    fields.message = update.message;
+    if let Some(last_exit) = update.last_exit {
+        fields.last_exit = Some(last_exit);
+    }
+    if update.increment_restart_count {
+        fields.restart_count = fields.restart_count.saturating_add(1);
+    }
+    if update.increment_restart_streak {
+        fields.restart_streak = fields.restart_streak.saturating_add(1);
+    }
+    fields.next_retry_at = update.next_retry_at;
+
+    if previous_container_id != fields.container_id {
+        fields.container_started_at = fields.container_id.as_ref().map(|_| now);
+        fields.ready_since = None;
+    } else if fields.container_id.is_none() {
+        fields.container_started_at = None;
+        fields.ready_since = None;
+    }
+
+    if fields.ready {
+        if !previous_ready {
+            fields.ready_since = Some(now);
+        }
+    } else {
+        fields.ready_since = None;
+    }
+
+    let counts_as_healthy = if fields.ready {
+        true
+    } else {
+        fields.status == DeploymentStatus::Running && fields.container_id.is_some() && !has_probe
+    };
+
+    if counts_as_healthy {
+        if fields.healthy_since.is_none() || previous_container_id != fields.container_id {
+            fields.healthy_since = Some(now);
+        }
+        if fields
+            .healthy_since
+            .map(|healthy_since| now.saturating_sub(healthy_since) >= HEALTHY_RESET_AFTER_SECS)
+            .unwrap_or(false)
+        {
+            fields.restart_streak = 0;
+            fields.next_retry_at = None;
+        }
+    } else {
+        fields.healthy_since = None;
+    }
+
+    let after = (
+        fields.status.clone(),
+        fields.ready,
+        fields.container_id.clone(),
+        fields.message.clone(),
+        fields.last_exit.clone(),
+        fields.restart_count,
+        fields.restart_streak,
+        fields.next_retry_at,
+        fields.healthy_since,
+        fields.container_started_at,
+        fields.ready_since,
+    );
+    let changed = snapshot != after;
+    if changed {
+        fields.updated_at = now;
+    }
+    changed
+}
+
+/// Find a replica by ordinal, creating a fresh one if it doesn't exist yet.
+fn ensure_replica(dep: &mut StoredDeployment, ordinal: u32) -> &mut ReplicaState {
+    if let Some(index) = dep.replicas.iter().position(|r| r.ordinal == ordinal) {
+        &mut dep.replicas[index]
+    } else {
+        dep.replicas.push(ReplicaState {
+            ordinal,
+            assigned_node: dep.assigned_node.clone(),
+            ..ReplicaState::default()
+        });
+        dep.replicas.sort_by_key(|r| r.ordinal);
+        let index = dep
+            .replicas
+            .iter()
+            .position(|r| r.ordinal == ordinal)
+            .expect("just inserted");
+        &mut dep.replicas[index]
+    }
+}
+
+/// Recompute the flat aggregate fields on `StoredDeployment` from its replicas,
+/// so display code that reads the flat fields stays consistent.
+fn recompute_aggregate(dep: &mut StoredDeployment) {
+    if dep.replicas.is_empty() {
+        return;
+    }
+    let all_ready = dep.replicas.iter().all(|r| r.ready);
+    let any_failed = dep
+        .replicas
+        .iter()
+        .any(|r| r.status == DeploymentStatus::Failed);
+    let any_restarting = dep
+        .replicas
+        .iter()
+        .any(|r| r.status == DeploymentStatus::Restarting);
+    let any_pending = dep
+        .replicas
+        .iter()
+        .any(|r| r.status == DeploymentStatus::Pending);
+    // Worst-of aggregation: a single bad replica downgrades the whole deployment.
+    dep.status = if any_failed {
+        DeploymentStatus::Failed
+    } else if any_restarting {
+        DeploymentStatus::Restarting
+    } else if any_pending {
+        DeploymentStatus::Pending
+    } else {
+        DeploymentStatus::Running
+    };
+    dep.ready = all_ready;
+    dep.restart_count = dep.replicas.iter().map(|r| r.restart_count).sum();
+    let ordinal0 = dep.replicas.iter().find(|r| r.ordinal == 0);
+    dep.container_id = ordinal0.and_then(|r| r.container_id.clone());
+    dep.assigned_node = ordinal0
+        .map(|r| r.assigned_node.clone())
+        .unwrap_or_else(|| dep.assigned_node.clone());
+    dep.updated_at = now_unix();
+}
+
+/// Mirror the aggregate (flat) fields onto the ordinal-0 replica. Used by the
+/// legacy single-replica `set_status` path so the replica view doesn't diverge.
+fn mirror_aggregate_to_replica0(dep: &mut StoredDeployment) {
+    let fields = StatusFields::from_deployment(dep);
+    let assigned_node = dep.assigned_node.clone();
+    let replica = ensure_replica(dep, 0);
+    replica.assigned_node = assigned_node;
+    fields.write_back_replica(replica);
 }
 
 fn now_unix() -> u64 {

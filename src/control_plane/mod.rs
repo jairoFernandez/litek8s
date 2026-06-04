@@ -68,6 +68,27 @@ pub enum ClusterCommand {
         increment_restart_streak: bool,
         next_retry_at: Option<u64>,
     },
+    SetReplicaAssignment {
+        name: String,
+        ordinal: u32,
+        assigned_node: String,
+    },
+    SetReplicaStatus {
+        name: String,
+        ordinal: u32,
+        status: DeploymentStatus,
+        ready: bool,
+        container_id: Option<String>,
+        message: Option<String>,
+        last_exit: Option<String>,
+        increment_restart_count: bool,
+        increment_restart_streak: bool,
+        next_retry_at: Option<u64>,
+    },
+    RemoveReplica {
+        name: String,
+        ordinal: u32,
+    },
     AppendEvent {
         level: EventLevel,
         reason: String,

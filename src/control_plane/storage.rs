@@ -295,6 +295,56 @@ impl StateMachineStore {
                     Err(_) => CommandResult::Changed { changed: false },
                 }
             }
+            ClusterCommand::SetReplicaAssignment {
+                name,
+                ordinal,
+                assigned_node,
+            } => match self
+                .store
+                .set_replica_assignment(&name, ordinal, assigned_node)
+                .await
+            {
+                Ok(changed) => CommandResult::Changed { changed },
+                Err(_) => CommandResult::Changed { changed: false },
+            },
+            ClusterCommand::SetReplicaStatus {
+                name,
+                ordinal,
+                status,
+                ready,
+                container_id,
+                message,
+                last_exit,
+                increment_restart_count,
+                increment_restart_streak,
+                next_retry_at,
+            } => {
+                match self
+                    .store
+                    .set_replica_status(
+                        &name,
+                        ordinal,
+                        status,
+                        ready,
+                        container_id,
+                        message,
+                        last_exit,
+                        increment_restart_count,
+                        increment_restart_streak,
+                        next_retry_at,
+                    )
+                    .await
+                {
+                    Ok(changed) => CommandResult::Changed { changed },
+                    Err(_) => CommandResult::Changed { changed: false },
+                }
+            }
+            ClusterCommand::RemoveReplica { name, ordinal } => {
+                match self.store.remove_replica(&name, ordinal).await {
+                    Ok(changed) => CommandResult::Changed { changed },
+                    Err(_) => CommandResult::Changed { changed: false },
+                }
+            }
             ClusterCommand::AppendEvent {
                 level,
                 reason,
