@@ -282,6 +282,23 @@ pub struct DeploymentSummary {
     pub status: String,
     pub image: String,
     pub container_id: Option<String>,
+    #[serde(default)]
+    pub ready_replicas: u32,
+    #[serde(default = "one")]
+    pub desired_replicas: u32,
+}
+
+fn one() -> u32 {
+    1
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplicaInfo {
+    pub ordinal: u32,
+    pub node_name: String,
+    pub status: String,
+    pub ready: bool,
+    pub container_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -309,6 +326,12 @@ pub struct DeploymentDescription {
     pub next_retry_in_secs: Option<u64>,
     #[serde(default)]
     pub conditions: Vec<DeploymentCondition>,
+    #[serde(default)]
+    pub ready_replicas: u32,
+    #[serde(default = "one")]
+    pub desired_replicas: u32,
+    #[serde(default)]
+    pub replicas: Vec<ReplicaInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -325,6 +348,10 @@ pub struct DeploymentTopRow {
     pub restart_streak: u32,
     pub last_exit: Option<String>,
     pub next_retry_in_secs: Option<u64>,
+    #[serde(default)]
+    pub ready_replicas: u32,
+    #[serde(default = "one")]
+    pub desired_replicas: u32,
     pub cpu_percent: Option<f64>,
     pub memory_usage_bytes: Option<u64>,
     pub memory_limit_bytes: Option<u64>,

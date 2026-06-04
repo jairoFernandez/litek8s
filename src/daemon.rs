@@ -530,6 +530,8 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                     status: deployment_display_status(&entry),
                     image: entry.manifest.container().image.clone(),
                     container_id: entry.container_id.clone(),
+                    ready_replicas: ready_replica_count(&entry),
+                    desired_replicas: entry.manifest.desired_replicas(),
                 })
                 .collect();
             Ok(Response::Deployments { items })
@@ -584,6 +586,9 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 last_exit: entry.last_exit.clone(),
                 next_retry_in_secs: retry_in_secs(entry.next_retry_at),
                 conditions: deployment_conditions(&entry),
+                ready_replicas: ready_replica_count(&entry),
+                desired_replicas: entry.manifest.desired_replicas(),
+                replicas: replica_infos(&entry),
             };
 
             Ok(Response::Description { item })
@@ -1990,6 +1995,8 @@ impl AppState {
                 restart_streak: entry.restart_streak,
                 last_exit: entry.last_exit.clone(),
                 next_retry_in_secs: retry_in_secs(entry.next_retry_at),
+                ready_replicas: ready_replica_count(entry),
+                desired_replicas: entry.manifest.desired_replicas(),
                 cpu_percent: None,
                 memory_usage_bytes: None,
                 memory_limit_bytes: None,
@@ -2121,6 +2128,25 @@ fn deployment_display_status(entry: &crate::store::StoredDeployment) -> String {
     } else {
         entry.status.to_string()
     }
+}
+
+fn ready_replica_count(entry: &crate::store::StoredDeployment) -> u32 {
+    entry.replicas.iter().filter(|r| r.ready).count() as u32
+}
+
+fn replica_infos(entry: &crate::store::StoredDeployment) -> Vec<crate::protocol::ReplicaInfo> {
+    let mut replicas: Vec<_> = entry.replicas.clone();
+    replicas.sort_by_key(|r| r.ordinal);
+    replicas
+        .into_iter()
+        .map(|r| crate::protocol::ReplicaInfo {
+            ordinal: r.ordinal,
+            node_name: r.assigned_node,
+            status: r.status.to_string(),
+            ready: r.ready,
+            container_id: r.container_id,
+        })
+        .collect()
 }
 
 fn format_readiness_probe(probe: &crate::manifest::ReadinessProbe) -> String {
