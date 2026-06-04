@@ -808,11 +808,19 @@ async fn delete_deployment(state: Arc<AppState>, name: &str) -> Result<Response>
     if !matches!(result, CommandResult::Changed { changed: true }) {
         bail!("deployment `{name}` was not found");
     }
-    state
-        .client_for_node_name(&deployment.assigned_node)
-        .await?
-        .remove_deployment(name)
-        .await?;
+    // Remove containers on every node a replica was placed on (replicas can be
+    // spread across nodes), plus the aggregate assigned_node as a fallback.
+    let mut nodes: std::collections::HashSet<String> = deployment
+        .replicas
+        .iter()
+        .map(|r| r.assigned_node.clone())
+        .collect();
+    nodes.insert(deployment.assigned_node.clone());
+    for node_name in nodes {
+        if let Ok(client) = state.client_for_node_name(&node_name).await {
+            let _ = client.remove_deployment(name).await;
+        }
+    }
     state
         .record_event(NewEvent {
             level: EventLevel::Normal,

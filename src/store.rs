@@ -986,11 +986,20 @@ fn recompute_aggregate(dep: &mut StoredDeployment) {
     };
     dep.ready = all_ready;
     dep.restart_count = dep.replicas.iter().map(|r| r.restart_count).sum();
-    let ordinal0 = dep.replicas.iter().find(|r| r.ordinal == 0);
-    dep.container_id = ordinal0.and_then(|r| r.container_id.clone());
-    dep.assigned_node = ordinal0
-        .map(|r| r.assigned_node.clone())
-        .unwrap_or_else(|| dep.assigned_node.clone());
+    let ordinal0 = dep.replicas.iter().find(|r| r.ordinal == 0).cloned();
+    if let Some(r0) = ordinal0 {
+        dep.container_id = r0.container_id.clone();
+        dep.assigned_node = r0.assigned_node.clone();
+        // Surface ordinal 0's diagnostics through the flat fields that display
+        // and the single-replica tests read.
+        dep.message = r0.message.clone();
+        dep.last_exit = r0.last_exit.clone();
+        dep.restart_streak = r0.restart_streak;
+        dep.next_retry_at = r0.next_retry_at;
+        dep.healthy_since = r0.healthy_since;
+        dep.container_started_at = r0.container_started_at;
+        dep.ready_since = r0.ready_since;
+    }
     dep.updated_at = now_unix();
 }
 

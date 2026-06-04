@@ -155,6 +155,25 @@ impl DockerRuntime {
         self.ensure_image(&manifest.container().image).await?;
 
         let container_name = replica_container_name(manifest.deployment_name(), ordinal);
+
+        // Idempotency: if a container with this exact name already exists, adopt
+        // it when it's still running with the right spec (a redundant create
+        // triggered by the event-driven reconcile storm), else remove the stale
+        // one so the name is free. Without this, an event flood can race two
+        // creates into duplicate containers whose collapse churns the replica's
+        // container ID.
+        if let Some(existing) = self
+            .list_containers_for_deployment(manifest.deployment_name())
+            .await?
+            .into_iter()
+            .find(|c| c.name == container_name)
+        {
+            if existing.running && existing.spec_hash.as_deref() == Some(spec_hash) {
+                return Ok(existing.id);
+            }
+            self.remove_container(&existing.id).await?;
+        }
+
         // Replicas (>1) must not publish host ports — N containers can't share
         // one hostPort on a node. They are reachable only via the Service,
         // which connects to each container's IP:containerPort.
@@ -214,12 +233,22 @@ impl DockerRuntime {
         }
     }
 
-    /// Remove managed containers whose NAME is not in the desired set. The set
-    /// contains per-replica container names (`litek8s-<dep>-<ordinal>`), so this
-    /// reaps both whole deleted deployments and scaled-down ordinals.
-    pub async fn remove_orphans(&self, desired_names: &HashSet<String>) -> Result<()> {
+    /// Remove managed containers that belong to a KNOWN deployment but whose
+    /// name is not desired (scaled-down ordinals). The set contains per-replica
+    /// container names (`litek8s-<dep>-<ordinal>`); `known_deployments` scopes
+    /// cleanup to deployments this daemon owns, so a managed container belonging
+    /// to another deployment (e.g. a separate daemon sharing the Docker host) is
+    /// left alone. Whole-deployment deletion is handled by the explicit delete
+    /// path, not here.
+    pub async fn remove_orphans(
+        &self,
+        desired_names: &HashSet<String>,
+        known_deployments: &HashSet<String>,
+    ) -> Result<()> {
         for container in self.list_managed_containers().await? {
-            if !desired_names.contains(&container.name) {
+            if known_deployments.contains(&container.deployment)
+                && !desired_names.contains(&container.name)
+            {
                 self.remove_container(&container.id).await?;
             }
         }
@@ -654,8 +683,12 @@ impl ContainerRuntime for DockerRuntime {
         DockerRuntime::wait_until_deployment_cleared(self, name, timeout).await
     }
 
-    async fn remove_orphans(&self, desired_names: &HashSet<String>) -> Result<()> {
-        DockerRuntime::remove_orphans(self, desired_names).await
+    async fn remove_orphans(
+        &self,
+        desired_names: &HashSet<String>,
+        known_deployments: &HashSet<String>,
+    ) -> Result<()> {
+        DockerRuntime::remove_orphans(self, desired_names, known_deployments).await
     }
 
     async fn remove_container(&self, container_id: &str) -> Result<()> {

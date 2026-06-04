@@ -57,6 +57,14 @@ pub async fn reconcile_all(
         }
     }
 
+    // Only deployments this daemon owns are eligible for orphan cleanup, so a
+    // container belonging to another deployment (e.g. another daemon sharing the
+    // Docker host) is never reaped here.
+    let known_deployments: HashSet<String> = deployments
+        .iter()
+        .map(|d| d.manifest.deployment_name().to_string())
+        .collect();
+
     if cleanup_orphans {
         for node in nodes {
             let runtime = NodeClient::for_node(node, local_runtime.clone());
@@ -64,7 +72,10 @@ pub async fn reconcile_all(
                 .get(&node.name)
                 .cloned()
                 .unwrap_or_default();
-            if let Err(error) = runtime.remove_orphans(&desired_names).await {
+            if let Err(error) = runtime
+                .remove_orphans(&desired_names, &known_deployments)
+                .await
+            {
                 eprintln!(
                     "skipping orphan cleanup on node `{}` because it is unavailable: {error}",
                     node.name

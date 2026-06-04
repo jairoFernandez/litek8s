@@ -187,12 +187,19 @@ impl ContainerRuntime for FakeRuntime {
         }
     }
 
-    async fn remove_orphans(&self, desired_names: &HashSet<String>) -> Result<()> {
+    async fn remove_orphans(
+        &self,
+        desired_names: &HashSet<String>,
+        known_deployments: &HashSet<String>,
+    ) -> Result<()> {
         let mut state = self.state.lock().unwrap();
         let ids: Vec<String> = state
             .containers
             .iter()
-            .filter(|(_, (managed, _))| !desired_names.contains(&managed.name))
+            .filter(|(_, (managed, _))| {
+                known_deployments.contains(&managed.deployment)
+                    && !desired_names.contains(&managed.name)
+            })
             .map(|(id, _)| id.clone())
             .collect();
         for id in ids {
@@ -422,10 +429,15 @@ spec:
             .await
             .expect("create");
 
-        // Orphan cleanup keys on container NAME now (litek8s-<dep>-<ordinal>).
+        // Orphan cleanup keys on container NAME now (litek8s-<dep>-<ordinal>),
+        // scoped to known deployments.
         let mut desired = HashSet::new();
         desired.insert("litek8s-keep-0".to_string());
-        runtime.remove_orphans(&desired).await.expect("orphans");
+        let known: HashSet<String> = ["keep", "drop"].iter().map(|s| s.to_string()).collect();
+        runtime
+            .remove_orphans(&desired, &known)
+            .await
+            .expect("orphans");
 
         let all = runtime.list_managed_containers().await.expect("list");
         assert_eq!(all.len(), 1);

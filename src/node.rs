@@ -368,43 +368,55 @@ pub fn select_nodes_for_manifest(
         return Ok(vec![explicit.to_string(); desired as usize]);
     }
 
-    // Candidate set: schedulable nodes matching the selector, deterministically
-    // ordered. For the no-selector single-replica case, keep the historical
-    // local-node preference so behavior is unchanged.
+    // Placement candidates: SCHEDULABLE nodes matching the selector, sorted.
     let mut candidates: Vec<String> = nodes
         .iter()
         .filter(|node| !node.unschedulable && node.matches_selector(manifest.node_selector()))
         .map(|node| node.name.clone())
         .collect();
     candidates.sort();
-    if candidates.is_empty() {
-        if manifest.node_selector().is_empty() {
-            bail!("no schedulable node is available");
-        }
-        bail!(
-            "no schedulable node matches nodeSelector `{}`",
-            format_selector(manifest.node_selector())
-        );
-    }
-    if desired == 1 && manifest.node_selector().is_empty() && candidates.iter().any(|n| n == LOCAL_NODE_NAME)
+
+    // Nodes that match the selector regardless of cordon status. A replica may
+    // STAY on its current node even when that node is cordoned (cordon only
+    // blocks NEW placement), mirroring the single-node scheduler's behavior.
+    let stickable: std::collections::HashSet<&str> = nodes
+        .iter()
+        .filter(|node| node.matches_selector(manifest.node_selector()))
+        .map(|node| node.name.as_str())
+        .collect();
+
+    if desired == 1
+        && manifest.node_selector().is_empty()
+        && candidates.iter().any(|n| n == LOCAL_NODE_NAME)
+        && current.first().map(String::as_str) != Some(LOCAL_NODE_NAME)
     {
         // Preserve single-replica default: prefer the local node.
-        if current.first().map(String::as_str) != Some(LOCAL_NODE_NAME) {
-            return Ok(vec![LOCAL_NODE_NAME.to_string()]);
-        }
+        return Ok(vec![LOCAL_NODE_NAME.to_string()]);
     }
-
-    let candidate_set: std::collections::HashSet<&str> =
-        candidates.iter().map(String::as_str).collect();
 
     let mut assignment = Vec::with_capacity(desired as usize);
     for ordinal in 0..desired as usize {
-        // Stick to the current node if it's still a valid candidate.
+        // Stick to the current node if it still matches (even if cordoned).
         let sticky = current
             .get(ordinal)
-            .filter(|node| candidate_set.contains(node.as_str()))
+            .filter(|node| !node.is_empty() && stickable.contains(node.as_str()))
             .cloned();
-        let node = sticky.unwrap_or_else(|| candidates[ordinal % candidates.len()].clone());
+        let node = match sticky {
+            Some(node) => node,
+            None => {
+                // New placement needs a schedulable candidate.
+                let Some(candidate) = candidates.get(ordinal % candidates.len().max(1)) else {
+                    if manifest.node_selector().is_empty() {
+                        bail!("no schedulable node is available");
+                    }
+                    bail!(
+                        "no schedulable node matches nodeSelector `{}`",
+                        format_selector(manifest.node_selector())
+                    );
+                };
+                candidate.clone()
+            }
+        };
         assignment.push(node);
     }
     Ok(assignment)
@@ -715,9 +727,18 @@ impl NodeClient {
         }
     }
 
-    pub async fn remove_orphans(&self, desired_names: &HashSet<String>) -> Result<()> {
+    /// Remove containers of KNOWN deployments whose name is not desired (scaled-
+    /// down ordinals). Containers of deployments this daemon doesn't own are left
+    /// untouched. `desired_names` holds per-replica container names.
+    pub async fn remove_orphans(
+        &self,
+        desired_names: &HashSet<String>,
+        known_deployments: &HashSet<String>,
+    ) -> Result<()> {
         for container in self.list_managed_containers().await? {
-            if !desired_names.contains(&container.deployment) {
+            if known_deployments.contains(&container.deployment)
+                && !desired_names.contains(&container.name)
+            {
                 self.remove_container(&container.id).await?;
             }
         }

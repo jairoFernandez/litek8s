@@ -42,7 +42,11 @@ pub trait ContainerRuntime {
 
     async fn wait_until_deployment_cleared(&self, name: &str, timeout: Duration) -> Result<()>;
 
-    async fn remove_orphans(&self, desired_names: &HashSet<String>) -> Result<()>;
+    async fn remove_orphans(
+        &self,
+        desired_names: &HashSet<String>,
+        known_deployments: &HashSet<String>,
+    ) -> Result<()>;
 
     async fn remove_container(&self, container_id: &str) -> Result<()>;
 
@@ -151,11 +155,17 @@ impl ContainerRuntime for LocalRuntime {
         }
     }
 
-    async fn remove_orphans(&self, desired_names: &HashSet<String>) -> Result<()> {
+    async fn remove_orphans(
+        &self,
+        desired_names: &HashSet<String>,
+        known_deployments: &HashSet<String>,
+    ) -> Result<()> {
         match self {
-            Self::Docker(runtime) => runtime.remove_orphans(desired_names).await,
+            Self::Docker(runtime) => {
+                runtime.remove_orphans(desired_names, known_deployments).await
+            }
             #[cfg(test)]
-            Self::Fake(runtime) => runtime.remove_orphans(desired_names).await,
+            Self::Fake(runtime) => runtime.remove_orphans(desired_names, known_deployments).await,
         }
     }
 
