@@ -75,11 +75,23 @@ async fn proxy_over_ssh(inbound: TcpStream, target: &ProxyTarget) -> Result<()> 
         .context("ssh proxy target is missing the ssh endpoint")?;
 
     let (host, port) = upstream_endpoint(target)?;
-    let mut child = Command::new("ssh")
+    let mut command = Command::new("ssh");
+    command
         .arg("-o")
         .arg("BatchMode=yes")
         .arg("-o")
-        .arg("ConnectTimeout=5")
+        .arg("ConnectTimeout=5");
+    // Use the node's registered key, matching how the agent connects. Without
+    // this the tunnel falls back to default keys and fails on hosts that only
+    // accept a specific identity.
+    if let Some(identity) = target.ssh_identity_file.as_deref() {
+        command
+            .arg("-o")
+            .arg("IdentitiesOnly=yes")
+            .arg("-i")
+            .arg(identity);
+    }
+    let mut child = command
         .arg(ssh_target)
         .arg("-W")
         .arg(format!("{host}:{port}"))
@@ -187,6 +199,7 @@ mod tests {
             node_name: "local".to_string(),
             transport: "local".to_string(),
             ssh_target: None,
+            ssh_identity_file: None,
             container_port: 5678,
             host_port: Some(upstream_addr.port()),
             container_ip: None,

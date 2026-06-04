@@ -681,9 +681,13 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                 .get_node(&entry.assigned_node)
                 .await
                 .with_context(|| format!("node `{}` was not found", entry.assigned_node))?;
-            let (transport, ssh_target) = match node.transport {
-                NodeTransport::Local => ("local".to_string(), None),
-                NodeTransport::Ssh { target, .. } => ("ssh".to_string(), Some(target)),
+            let (transport, ssh_target, ssh_identity_file) = match node.transport {
+                NodeTransport::Local => ("local".to_string(), None, None),
+                NodeTransport::Ssh {
+                    target,
+                    identity_file,
+                    ..
+                } => ("ssh".to_string(), Some(target), identity_file),
             };
             Ok(Response::ProxyTarget {
                 item: ProxyTargetInfo {
@@ -691,6 +695,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
                     node_name: entry.assigned_node,
                     transport,
                     ssh_target,
+                    ssh_identity_file,
                     container_port: selected_port.container_port,
                     host_port: Some(host_port),
                     container_ip: None,
@@ -913,7 +918,7 @@ async fn apply_service_manifest(
         updated_at: 0,
     };
     let deployment = resolve_backing_deployment(&state.store, &service_for_resolution).await?;
-    let _ = deployment.manifest.proxy_port(target_port)?;
+    let _ = deployment.manifest.service_port(target_port)?;
 
     let existing = state.store.get_service(&name).await;
     let needs_bind_probe = existing
@@ -1883,7 +1888,7 @@ impl AppState {
             };
         }
 
-        let selected_port = match deployment.manifest.proxy_port(service.target_port) {
+        let selected_port = match deployment.manifest.service_port(service.target_port) {
             Ok(selected_port) => selected_port,
             Err(error) => {
                 return ServiceBackendState {
@@ -1896,17 +1901,12 @@ impl AppState {
             }
         };
 
+        // Single-container deployments publish a hostPort (legacy proxy path);
+        // replica deployments expose only a containerPort and are reached by
+        // container IP via the Service LB. Show the appropriate upstream.
         let current_upstream = match selected_port.host_port {
             Some(host_port) => format!("127.0.0.1:{host_port}"),
-            None => {
-                return ServiceBackendState {
-                    deployment_name,
-                    current_node_name,
-                    current_upstream: None,
-                    health: ServiceBackendHealth::Degraded,
-                    message: Some("selected service target is missing hostPort".to_string()),
-                };
-            }
+            None => format!("container:{}", selected_port.container_port),
         };
 
         let node_status = match node_statuses.and_then(|items| items.get(&deployment.assigned_node))

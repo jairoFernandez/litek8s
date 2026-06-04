@@ -194,7 +194,7 @@ pub async fn resolve_service_targets(
 ) -> Result<Vec<ProxyTarget>> {
     let deployment = resolve_backing_deployment(store, service).await?;
     let has_probe = deployment.manifest.container().readiness_probe().is_some();
-    let selected_port = deployment.manifest.proxy_port(service.target_port)?;
+    let selected_port = deployment.manifest.service_port(service.target_port)?;
     let container_port = selected_port.container_port;
     let protocol = selected_port.protocol.as_printable().to_string();
     let deployment_name = deployment.manifest.deployment_name().to_string();
@@ -210,7 +210,7 @@ pub async fn resolve_service_targets(
         let Some(node) = store.get_node(&replica.assigned_node).await else {
             continue;
         };
-        let (transport, ssh_target) = transport_of(&node);
+        let (transport, ssh_target, ssh_identity_file) = transport_of(&node);
         // Reach the replica by its container IP (replicas publish no host port).
         let client = NodeClient::for_node(&node, runtime.clone());
         let container_ip = client.container_ip(container_id).await.ok().flatten();
@@ -219,6 +219,7 @@ pub async fn resolve_service_targets(
             node_name: replica.assigned_node.clone(),
             transport,
             ssh_target,
+            ssh_identity_file,
             container_port,
             host_port: selected_port.host_port,
             container_ip,
@@ -240,10 +241,18 @@ fn replica_ready(replica: &ReplicaState, has_probe: bool) -> bool {
     }
 }
 
-fn transport_of(node: &ClusterNode) -> (String, Option<String>) {
+fn transport_of(node: &ClusterNode) -> (String, Option<String>, Option<String>) {
     match &node.transport {
-        NodeTransport::Local => ("local".to_string(), None),
-        NodeTransport::Ssh { target, .. } => ("ssh".to_string(), Some(target.clone())),
+        NodeTransport::Local => ("local".to_string(), None, None),
+        NodeTransport::Ssh {
+            target,
+            identity_file,
+            ..
+        } => (
+            "ssh".to_string(),
+            Some(target.clone()),
+            identity_file.clone(),
+        ),
     }
 }
 

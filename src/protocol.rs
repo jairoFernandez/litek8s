@@ -472,6 +472,11 @@ pub struct ProxyTarget {
     pub node_name: String,
     pub transport: String,
     pub ssh_target: Option<String>,
+    /// SSH private key for the tunnel (sets `-i ... -o IdentitiesOnly=yes`),
+    /// taken from the node's registration. Without it the proxy's ssh falls
+    /// back to default keys and can fail auth on key-restricted hosts.
+    #[serde(default)]
+    pub ssh_identity_file: Option<String>,
     pub container_port: u16,
     /// Published host port for the legacy single-container / `litek8s proxy`
     /// path. `None` for replica backends, which are reached by container IP.

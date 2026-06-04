@@ -361,6 +361,45 @@ impl DeploymentManifest {
         );
         Ok(tcp_ports[0])
     }
+
+    /// Select a container port for a Service backend. Unlike `proxy_port`, this
+    /// does NOT require a published hostPort — replica backends expose only a
+    /// containerPort and are reached by container IP. `requested` matches a
+    /// containerPort (or hostPort, if present).
+    pub fn service_port(&self, requested: Option<u16>) -> Result<&ContainerPort> {
+        let tcp_ports: Vec<&ContainerPort> = self
+            .container()
+            .ports
+            .iter()
+            .filter(|port| port.protocol == PortProtocol::Tcp)
+            .collect();
+        ensure!(
+            !tcp_ports.is_empty(),
+            "deployment `{}` does not declare a TCP containerPort",
+            self.deployment_name()
+        );
+
+        if let Some(requested) = requested {
+            return tcp_ports
+                .into_iter()
+                .find(|port| {
+                    port.container_port == requested || port.host_port == Some(requested)
+                })
+                .with_context(|| {
+                    format!(
+                        "deployment `{}` does not expose TCP port `{requested}`",
+                        self.deployment_name()
+                    )
+                });
+        }
+
+        ensure!(
+            tcp_ports.len() == 1,
+            "deployment `{}` exposes multiple TCP ports; set the Service targetPort",
+            self.deployment_name()
+        );
+        Ok(tcp_ports[0])
+    }
 }
 
 impl ServiceManifest {
