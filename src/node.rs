@@ -336,6 +336,76 @@ pub fn select_node_for_manifest(
         })
 }
 
+/// Pick a node for each replica ordinal `0..desired`. Returns a Vec indexed by
+/// ordinal. Replicas spread across distinct matching nodes when there are
+/// enough, and pack (multiple per node) when `desired` exceeds the candidate
+/// count — packing is safe because replicas publish no host ports.
+///
+/// `current[ordinal]` (if present) is the node a replica currently runs on;
+/// each ordinal sticks to its current node when that node is still a valid
+/// candidate, so a single node going unschedulable only re-homes its own
+/// ordinals rather than reshuffling everything.
+pub fn select_nodes_for_manifest(
+    manifest: &DeploymentManifest,
+    nodes: &[ClusterNode],
+    current: &[String],
+    desired: u32,
+) -> Result<Vec<String>> {
+    // An explicit nodeName pins every replica to that one node.
+    if let Some(explicit) = manifest.explicit_node_name() {
+        let node = nodes
+            .iter()
+            .find(|node| node.name == explicit)
+            .with_context(|| format!("target node `{explicit}` is not registered"))?;
+        ensure!(
+            node.matches_selector(manifest.node_selector()),
+            "target node `{explicit}` does not satisfy nodeSelector"
+        );
+        return Ok(vec![explicit.to_string(); desired as usize]);
+    }
+
+    // Candidate set: schedulable nodes matching the selector, deterministically
+    // ordered. For the no-selector single-replica case, keep the historical
+    // local-node preference so behavior is unchanged.
+    let mut candidates: Vec<String> = nodes
+        .iter()
+        .filter(|node| !node.unschedulable && node.matches_selector(manifest.node_selector()))
+        .map(|node| node.name.clone())
+        .collect();
+    candidates.sort();
+    if candidates.is_empty() {
+        if manifest.node_selector().is_empty() {
+            bail!("no schedulable node is available");
+        }
+        bail!(
+            "no schedulable node matches nodeSelector `{}`",
+            format_selector(manifest.node_selector())
+        );
+    }
+    if desired == 1 && manifest.node_selector().is_empty() && candidates.iter().any(|n| n == LOCAL_NODE_NAME)
+    {
+        // Preserve single-replica default: prefer the local node.
+        if current.first().map(String::as_str) != Some(LOCAL_NODE_NAME) {
+            return Ok(vec![LOCAL_NODE_NAME.to_string()]);
+        }
+    }
+
+    let candidate_set: std::collections::HashSet<&str> =
+        candidates.iter().map(String::as_str).collect();
+
+    let mut assignment = Vec::with_capacity(desired as usize);
+    for ordinal in 0..desired as usize {
+        // Stick to the current node if it's still a valid candidate.
+        let sticky = current
+            .get(ordinal)
+            .filter(|node| candidate_set.contains(node.as_str()))
+            .cloned();
+        let node = sticky.unwrap_or_else(|| candidates[ordinal % candidates.len()].clone());
+        assignment.push(node);
+    }
+    Ok(assignment)
+}
+
 impl NodeClient {
     pub fn for_node(node: &ClusterNode, local_runtime: impl Into<LocalRuntime>) -> Self {
         match &node.transport {
@@ -1970,8 +2040,8 @@ fn format_selector(selector: &BTreeMap<String, String>) -> String {
 mod tests {
     use super::{
         ClusterNode, DEFAULT_REMOTE_BINARY, LOCAL_NODE_NAME, parse_remote_build_spec,
-        remote_parent_dir, select_node_for_manifest, validate_label_key, validate_label_value,
-        validate_node_name,
+        remote_parent_dir, select_node_for_manifest, select_nodes_for_manifest, validate_label_key,
+        validate_label_value, validate_node_name,
     };
     use crate::manifest::{API_VERSION, DeploymentManifest};
     use std::collections::BTreeMap;
@@ -2206,5 +2276,86 @@ spec:
         let preferred = select_node_for_manifest(&manifest, &nodes, Some("server77"))
             .expect("current assignment should be preserved on a cordoned node");
         assert_eq!(preferred, "server77");
+    }
+
+    fn edge_manifest(replicas: u32) -> DeploymentManifest {
+        DeploymentManifest::parse(&format!(
+            r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: demo
+spec:
+  replicas: {replicas}
+  template:
+    spec:
+      restartPolicy: Always
+      nodeSelector:
+        role: edge
+      containers:
+        - name: web
+          image: nginx:alpine
+"#
+        ))
+        .expect("manifest should parse")
+    }
+
+    fn edge_node(name: &str) -> ClusterNode {
+        ClusterNode::ssh(
+            name.to_string(),
+            name.to_string(),
+            DEFAULT_REMOTE_BINARY.to_string(),
+            None,
+            BTreeMap::from([("role".to_string(), "edge".to_string())]),
+        )
+        .expect("ssh node should build")
+    }
+
+    #[test]
+    fn spreads_replicas_across_distinct_nodes() {
+        let manifest = edge_manifest(3);
+        let nodes = vec![edge_node("a"), edge_node("b"), edge_node("c")];
+        let assignment = select_nodes_for_manifest(&manifest, &nodes, &[], 3).expect("schedules");
+        // Deterministic sort => a, b, c for ordinals 0, 1, 2.
+        assert_eq!(assignment, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn packs_replicas_when_more_than_nodes() {
+        let manifest = edge_manifest(5);
+        let nodes = vec![edge_node("a"), edge_node("b")];
+        let assignment = select_nodes_for_manifest(&manifest, &nodes, &[], 5).expect("schedules");
+        // Round-robin over [a, b]: ordinals 0..4 -> a,b,a,b,a.
+        assert_eq!(assignment, vec!["a", "b", "a", "b", "a"]);
+    }
+
+    #[test]
+    fn keeps_replicas_on_their_current_node_when_still_valid() {
+        let manifest = edge_manifest(2);
+        let nodes = vec![edge_node("a"), edge_node("b")];
+        // Currently ordinal 0 on b, ordinal 1 on a (opposite of fresh round-robin).
+        let current = vec!["b".to_string(), "a".to_string()];
+        let assignment =
+            select_nodes_for_manifest(&manifest, &nodes, &current, 2).expect("schedules");
+        assert_eq!(assignment, vec!["b", "a"]);
+    }
+
+    #[test]
+    fn rehomes_only_ordinals_whose_node_is_gone() {
+        let manifest = edge_manifest(2);
+        // Node "b" is gone; only "a" and "c" remain.
+        let nodes = vec![edge_node("a"), edge_node("c")];
+        let current = vec!["b".to_string(), "c".to_string()];
+        let assignment =
+            select_nodes_for_manifest(&manifest, &nodes, &current, 2).expect("schedules");
+        // ordinal 0 lost its node -> round-robin candidate[0]=a; ordinal 1 sticks to c.
+        assert_eq!(assignment, vec!["a", "c"]);
+    }
+
+    #[test]
+    fn errors_when_no_node_matches_selector() {
+        let manifest = edge_manifest(2);
+        let nodes = vec![ClusterNode::local()];
+        assert!(select_nodes_for_manifest(&manifest, &nodes, &[], 2).is_err());
     }
 }
