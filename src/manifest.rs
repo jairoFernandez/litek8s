@@ -195,8 +195,8 @@ impl DeploymentManifest {
         }
 
         let replicas = self.spec.replicas.unwrap_or(1);
-        ensure!(replicas == 1, "spec.replicas must be set to 1 in v1");
-        self.spec.replicas = Some(1);
+        ensure!(replicas >= 1, "spec.replicas must be at least 1");
+        self.spec.replicas = Some(replicas);
 
         let pod_spec = &mut self.spec.template.spec;
         if let Some(node_name) = pod_spec.node_name.as_deref() {
@@ -293,6 +293,24 @@ impl DeploymentManifest {
 
     pub fn desired_hash(&self) -> Result<String> {
         let canonical = serde_json::to_vec(self).context("failed to canonicalize manifest")?;
+        let mut hasher = Sha256::new();
+        hasher.update(canonical);
+        Ok(hex::encode(hasher.finalize()))
+    }
+
+    /// Desired replica count for this deployment (defaults to 1).
+    pub fn desired_replicas(&self) -> u32 {
+        self.spec.replicas.unwrap_or(1)
+    }
+
+    /// Hash of the pod template ONLY (not the replica count). This is the
+    /// per-container identity used to decide whether a running container
+    /// matches the desired spec. Scaling the replica count up or down must NOT
+    /// change this hash, otherwise every existing container would be seen as
+    /// stale and torn down on the next reconcile (a recreation storm).
+    pub fn pod_template_hash(&self) -> Result<String> {
+        let canonical = serde_json::to_vec(&self.spec.template)
+            .context("failed to canonicalize pod template")?;
         let mut hasher = Sha256::new();
         hasher.update(canonical);
         Ok(hex::encode(hasher.finalize()))
@@ -787,16 +805,15 @@ spec:
         );
     }
 
-    #[test]
-    fn rejects_non_default_replicas() {
-        let yaml = format!(
+    fn replicas_yaml(replicas: u32) -> String {
+        format!(
             r#"
 apiVersion: {API_VERSION}
 kind: Deployment
 metadata:
   name: demo
 spec:
-  replicas: 2
+  replicas: {replicas}
   template:
     spec:
       restartPolicy: Always
@@ -804,10 +821,34 @@ spec:
         - name: web
           image: nginx:alpine
 "#
-        );
+        )
+    }
 
-        let error = DeploymentManifest::parse(&yaml).expect_err("manifest should be rejected");
+    #[test]
+    fn accepts_multiple_replicas() {
+        let manifest = DeploymentManifest::parse(&replicas_yaml(3)).expect("replicas: 3 is valid");
+        assert_eq!(manifest.desired_replicas(), 3);
+    }
+
+    #[test]
+    fn rejects_zero_replicas() {
+        let error = DeploymentManifest::parse(&replicas_yaml(0))
+            .expect_err("replicas: 0 should be rejected");
         assert!(error.to_string().contains("spec.replicas"));
+    }
+
+    #[test]
+    fn pod_template_hash_ignores_replica_count() {
+        // The per-container identity hash must be invariant under scaling, so
+        // changing the replica count never recreates existing containers.
+        let one = DeploymentManifest::parse(&replicas_yaml(1)).unwrap();
+        let five = DeploymentManifest::parse(&replicas_yaml(5)).unwrap();
+        assert_eq!(
+            one.pod_template_hash().unwrap(),
+            five.pod_template_hash().unwrap()
+        );
+        // ...while the whole-manifest hash does differ.
+        assert_ne!(one.desired_hash().unwrap(), five.desired_hash().unwrap());
     }
 
     #[test]
