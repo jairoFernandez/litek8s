@@ -327,6 +327,14 @@ enum Command {
         command: NodeCommand,
     },
     #[command(
+        about = "Scaffold Terraform + deploy projects for provisioning litek8s nodes",
+        help_template = HELP_TEMPLATE
+    )]
+    Infra {
+        #[command(subcommand)]
+        command: InfraCommand,
+    },
+    #[command(
         about = "Manage stable local service listeners backed by deployments",
         help_template = HELP_TEMPLATE,
         after_help = SERVICE_AFTER_HELP
@@ -751,6 +759,19 @@ enum NodeCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum InfraCommand {
+    #[command(about = "Scaffold a Terraform + deploy project for provisioning litek8s nodes")]
+    Init {
+        #[arg(long, default_value = ".", help = "Directory to scaffold into (created if missing)")]
+        dir: PathBuf,
+        #[arg(long, help = "Project name/prefix used in generated files", default_value = "litek8s-app")]
+        name: String,
+        #[arg(long, help = "Overwrite existing files instead of skipping them")]
+        force: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum ControlPlaneCommand {
     #[command(about = "Install litek8s on a remote host and join it to the HA cluster")]
     Join {
@@ -898,6 +919,11 @@ pub async fn run() -> Result<()> {
     };
 
     match cli.command {
+        // `infra init` is purely local filesystem work — it never talks to the
+        // daemon, so it is handled here without using `endpoint`.
+        Command::Infra { command } => match command {
+            InfraCommand::Init { dir, name, force } => crate::infra::scaffold(&dir, &name, force),
+        },
         Command::Serve {
             state_file,
             poll_interval_secs,

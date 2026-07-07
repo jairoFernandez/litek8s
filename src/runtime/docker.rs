@@ -20,7 +20,9 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio::sync::Notify;
 
-use crate::manifest::{ContainerPort, DeploymentManifest, NormalizedResourceLimits};
+use crate::manifest::{
+    ContainerPort, ContainerSpec, DeploymentManifest, NormalizedResourceLimits, Volume,
+};
 use crate::runtime::ContainerRuntime;
 
 const LABEL_MANAGED: &str = "litek8s.managed";
@@ -528,7 +530,8 @@ pub(crate) fn build_container_config(
     } else {
         build_port_bindings(&container.ports)
     };
-    let host_config = build_host_config(port_bindings, resource_limits);
+    let binds = build_binds(container, manifest.volumes());
+    let host_config = build_host_config(port_bindings, resource_limits, binds);
 
     let labels = HashMap::from([
         (LABEL_MANAGED.to_string(), "true".to_string()),
@@ -575,15 +578,36 @@ fn build_port_bindings(ports: &[ContainerPort]) -> HashMap<String, Option<Vec<Po
         .collect()
 }
 
+fn build_binds(container: &ContainerSpec, volumes: &[Volume]) -> Vec<String> {
+    container
+        .volume_mounts
+        .iter()
+        .filter_map(|mount| {
+            let volume = volumes.iter().find(|volume| volume.name == mount.name)?;
+            let mut bind = format!("{}:{}", volume.host_path, mount.mount_path);
+            if mount.read_only {
+                bind.push_str(":ro");
+            }
+            Some(bind)
+        })
+        .collect()
+}
+
 fn build_host_config(
     port_bindings: HashMap<String, Option<Vec<PortBinding>>>,
     resource_limits: Option<NormalizedResourceLimits>,
+    binds: Vec<String>,
 ) -> Option<HostConfig> {
     let mut host_config = HostConfig::default();
     let mut configured = false;
 
     if !port_bindings.is_empty() {
         host_config.port_bindings = Some(port_bindings);
+        configured = true;
+    }
+
+    if !binds.is_empty() {
+        host_config.binds = Some(binds);
         configured = true;
     }
 
@@ -985,6 +1009,79 @@ spec:
         assert_eq!(host_config.memory, Some(134_217_728));
         let bindings = host_config.port_bindings.expect("port bindings missing");
         assert!(bindings.contains_key("80/tcp"));
+    }
+
+    #[test]
+    fn maps_volume_mounts_into_host_config_binds() {
+        let manifest = DeploymentManifest::parse(&format!(
+            r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: demo
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: data
+          hostPath: /host
+      containers:
+        - name: web
+          image: nginx:alpine
+          volumeMounts:
+            - name: data
+              mountPath: /container
+"#
+        ))
+        .expect("manifest should parse");
+
+        let config =
+            build_container_config(&manifest, "hash123", 0, false).expect("config should build");
+        let binds = config
+            .host_config
+            .expect("host config missing")
+            .binds
+            .expect("binds missing");
+        assert!(binds.contains(&"/host:/container".to_string()));
+    }
+
+    #[test]
+    fn appends_ro_suffix_for_read_only_volume_mounts() {
+        let manifest = DeploymentManifest::parse(&format!(
+            r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: demo
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: data
+          hostPath: /host
+      containers:
+        - name: web
+          image: nginx:alpine
+          volumeMounts:
+            - name: data
+              mountPath: /container
+              readOnly: true
+"#
+        ))
+        .expect("manifest should parse");
+
+        let config =
+            build_container_config(&manifest, "hash123", 0, false).expect("config should build");
+        let binds = config
+            .host_config
+            .expect("host config missing")
+            .binds
+            .expect("binds missing");
+        assert!(binds.contains(&"/host:/container:ro".to_string()));
     }
 
     #[test]

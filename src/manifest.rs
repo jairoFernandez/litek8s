@@ -85,6 +85,8 @@ pub struct PodSpec {
     #[serde(default)]
     pub node_selector: BTreeMap<String, String>,
     #[serde(default)]
+    pub volumes: Vec<Volume>,
+    #[serde(default)]
     pub containers: Vec<ContainerSpec>,
 }
 
@@ -103,6 +105,8 @@ pub struct ContainerSpec {
     pub ports: Vec<ContainerPort>,
     pub resources: Option<ResourceRequirements>,
     pub readiness_probe: Option<ReadinessProbe>,
+    #[serde(default)]
+    pub volume_mounts: Vec<VolumeMount>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -152,6 +156,22 @@ pub struct ContainerPort {
     pub host_port: Option<u16>,
     #[serde(default)]
     pub protocol: PortProtocol,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Volume {
+    pub name: String,
+    pub host_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VolumeMount {
+    pub name: String,
+    pub mount_path: String,
+    #[serde(default)]
+    pub read_only: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -216,6 +236,25 @@ impl DeploymentManifest {
         );
         pod_spec.restart_policy = Some(RestartPolicy::Always);
 
+        let mut volume_names = std::collections::BTreeSet::new();
+        for volume in &pod_spec.volumes {
+            ensure!(!volume.name.trim().is_empty(), "volume.name must not be empty");
+            ensure!(
+                !volume.host_path.trim().is_empty(),
+                "volume.hostPath must not be empty"
+            );
+            ensure!(
+                volume.host_path.starts_with('/'),
+                "volume.hostPath `{}` must be an absolute path",
+                volume.host_path
+            );
+            ensure!(
+                volume_names.insert(volume.name.clone()),
+                "volume name `{}` is duplicated within the pod",
+                volume.name
+            );
+        }
+
         ensure!(
             pod_spec.containers.len() == 1,
             "spec.template.spec.containers must contain exactly one container"
@@ -262,6 +301,27 @@ impl DeploymentManifest {
             }
         }
 
+        for volume_mount in &container.volume_mounts {
+            ensure!(
+                !volume_mount.name.trim().is_empty(),
+                "volumeMount.name must not be empty"
+            );
+            ensure!(
+                volume_names.contains(&volume_mount.name),
+                "volumeMount references unknown volume `{}`",
+                volume_mount.name
+            );
+            ensure!(
+                !volume_mount.mount_path.trim().is_empty(),
+                "volumeMount.mountPath must not be empty"
+            );
+            ensure!(
+                volume_mount.mount_path.starts_with('/'),
+                "volumeMount.mountPath `{}` must be an absolute path",
+                volume_mount.mount_path
+            );
+        }
+
         Ok(self)
     }
 
@@ -275,6 +335,10 @@ impl DeploymentManifest {
 
     pub fn container(&self) -> &ContainerSpec {
         &self.spec.template.spec.containers[0]
+    }
+
+    pub fn volumes(&self) -> &[Volume] {
+        &self.spec.template.spec.volumes
     }
 
     pub fn explicit_node_name(&self) -> Option<&str> {
@@ -1149,5 +1213,137 @@ spec:
         ))
         .expect("service should parse");
         assert!(matches!(service, ParsedManifest::Service(_)));
+    }
+
+    #[test]
+    fn parses_manifest_with_volume_and_mount() {
+        let yaml = format!(
+            r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: demo
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: data
+          hostPath: /srv/data
+      containers:
+        - name: web
+          image: nginx:alpine
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/data
+              readOnly: true
+"#
+        );
+
+        let manifest = DeploymentManifest::parse(&yaml).expect("manifest should parse");
+        let volumes = manifest.volumes();
+        assert_eq!(volumes.len(), 1);
+        assert_eq!(volumes[0].name, "data");
+        assert_eq!(volumes[0].host_path, "/srv/data");
+        let mounts = &manifest.container().volume_mounts;
+        assert_eq!(mounts.len(), 1);
+        assert_eq!(mounts[0].name, "data");
+        assert_eq!(mounts[0].mount_path, "/var/lib/data");
+        assert!(mounts[0].read_only);
+    }
+
+    #[test]
+    fn rejects_volume_mount_referencing_unknown_volume() {
+        let yaml = format!(
+            r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: demo
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: data
+          hostPath: /srv/data
+      containers:
+        - name: web
+          image: nginx:alpine
+          volumeMounts:
+            - name: missing
+              mountPath: /var/lib/data
+"#
+        );
+
+        let error = DeploymentManifest::parse(&yaml).expect_err("manifest should be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("volumeMount references unknown volume `missing`"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_relative_host_path() {
+        let yaml = format!(
+            r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: demo
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: data
+          hostPath: srv/data
+      containers:
+        - name: web
+          image: nginx:alpine
+"#
+        );
+
+        let error = DeploymentManifest::parse(&yaml).expect_err("manifest should be rejected");
+        assert!(
+            error.to_string().contains("must be an absolute path"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_volume_names() {
+        let yaml = format!(
+            r#"
+apiVersion: {API_VERSION}
+kind: Deployment
+metadata:
+  name: demo
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      volumes:
+        - name: data
+          hostPath: /srv/data
+        - name: data
+          hostPath: /srv/other
+      containers:
+        - name: web
+          image: nginx:alpine
+"#
+        );
+
+        let error = DeploymentManifest::parse(&yaml).expect_err("manifest should be rejected");
+        assert!(
+            error.to_string().contains("is duplicated within the pod"),
+            "unexpected error: {error}"
+        );
     }
 }

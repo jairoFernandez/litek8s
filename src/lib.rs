@@ -6,6 +6,7 @@ pub mod config;
 pub mod control_plane;
 pub mod coordinator;
 pub mod daemon;
+pub mod infra;
 pub mod llm;
 pub mod manifest;
 pub mod matrix;
