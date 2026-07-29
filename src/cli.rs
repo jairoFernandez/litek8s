@@ -446,6 +446,8 @@ enum LlmCommand {
         prompt: String,
         #[arg(long, default_value_t = 20, help = "Max new tokens to generate")]
         max_new: usize,
+        #[arg(long, help = "Stream native weights from mmap instead of loading all weights as f64")]
+        mmap: bool,
     },
     #[command(
         about = "Run a model distributed across peer agents over the LAN (run on a coordinator node)",
@@ -1451,7 +1453,8 @@ pub async fn run() -> Result<()> {
                 model_dir,
                 prompt,
                 max_new,
-            } => run_llm_generate(&model_dir, &prompt, max_new),
+                mmap,
+            } => run_llm_generate(&model_dir, &prompt, max_new, mmap),
             LlmCommand::Distributed {
                 model_dir,
                 peers,
@@ -1835,19 +1838,28 @@ async fn generate_distributed(
     Ok(())
 }
 
-fn run_llm_generate(model_dir: &Path, prompt: &str, max_new: usize) -> Result<()> {
+fn run_llm_generate(model_dir: &Path, prompt: &str, max_new: usize, mmap: bool) -> Result<()> {
     use std::io::Write;
     println!("{}", title("LLM Generate"));
     println!("{} {}", label("model"), model_dir.display());
+    println!("{} {}", label("backend"), if mmap { "mmap" } else { "resident" });
     println!("{} {}", label("prompt"), prompt);
     print!("\n{prompt}");
     std::io::stdout().flush().ok();
 
-    let runner = crate::llm::LlmRunner::load(model_dir)?;
-    runner.generate(prompt, max_new, |piece| {
-        print!("{piece}");
-        std::io::stdout().flush().ok();
-    })?;
+    if mmap {
+        let runner = crate::llm::MappedLlmRunner::load(model_dir)?;
+        runner.generate(prompt, max_new, |piece| {
+            print!("{piece}");
+            std::io::stdout().flush().ok();
+        })?;
+    } else {
+        let runner = crate::llm::LlmRunner::load(model_dir)?;
+        runner.generate(prompt, max_new, |piece| {
+            print!("{piece}");
+            std::io::stdout().flush().ok();
+        })?;
+    }
     println!();
     Ok(())
 }

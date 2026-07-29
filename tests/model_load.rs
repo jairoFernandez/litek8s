@@ -1,5 +1,5 @@
-use litek8s::model::{inspect, load_layer_column_shard, load_tensor_2d};
-use safetensors::tensor::{serialize, Dtype, TensorView};
+use litek8s::model::{ModelFile, inspect, load_layer_column_shard, load_tensor_2d};
+use safetensors::tensor::{Dtype, TensorView, serialize};
 use std::collections::HashMap;
 
 /// Build a safetensors blob with one F32 and one F16 tensor, write it to a
@@ -84,5 +84,20 @@ fn column_shard_extracts_correct_columns_column_major() {
     assert_eq!(shard, vec![vec![-2.0, -0.25], vec![3.5, 4.0]]);
     // Out-of-range band is rejected.
     assert!(load_layer_column_shard(&path, "w32", 2, 2).is_err());
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn mmap_backend_reads_rows_and_multiplies_without_materializing_weight() {
+    let path = write_fixture("mmap-linear");
+    let model = ModelFile::open(&path).unwrap();
+    let rows = model.tensor_rows("w32", &[1]).unwrap();
+    assert_eq!(rows, vec![vec![0.0, -0.25, 4.0]]);
+
+    let input = vec![vec![2.0, 1.0, -1.0]];
+    let output = model.linear_mapped("w32", &input).unwrap();
+    assert_eq!(output, vec![vec![-3.5, -4.25]]);
+    let logits = model.row_logits("w32", &input[0]).unwrap();
+    assert_eq!(logits, vec![-3.5, -4.25]);
     std::fs::remove_file(&path).ok();
 }

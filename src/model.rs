@@ -132,8 +132,11 @@ pub fn load_tensor_2d_f16(path: &Path, name: &str) -> Result<(usize, usize, Vec<
     // matrix (1GB for a vocab x hidden embedding would blow a small node's RAM).
     let data = view.data();
     let dtype = view.dtype();
-    let elem = dtype.size();
-    ensure!(data.len() == rows * cols * elem, "tensor `{name}` shape mismatch");
+    let elem = dtype_size(dtype);
+    ensure!(
+        data.len() == rows * cols * elem,
+        "tensor `{name}` shape mismatch"
+    );
     let mut out = Vec::with_capacity(rows * cols * 2);
     for chunk in data.chunks_exact(elem) {
         let v = decode_one(dtype, chunk);
@@ -142,18 +145,13 @@ pub fn load_tensor_2d_f16(path: &Path, name: &str) -> Result<(usize, usize, Vec<
     Ok((rows, cols, out))
 }
 
-/// Bytes-per-element for a safetensors float dtype (supported set).
-trait DtypeSize {
-    fn size(&self) -> usize;
-}
-impl DtypeSize for Dtype {
-    fn size(&self) -> usize {
-        match self {
-            Dtype::F64 => 8,
-            Dtype::F32 => 4,
-            Dtype::F16 | Dtype::BF16 => 2,
-            _ => 0,
-        }
+/// Bytes-per-element for the floating-point dtypes supported by this module.
+fn dtype_size(dtype: Dtype) -> usize {
+    match dtype {
+        Dtype::F64 => 8,
+        Dtype::F32 => 4,
+        Dtype::F16 | Dtype::BF16 => 2,
+        _ => 0,
     }
 }
 
@@ -222,8 +220,8 @@ impl ModelFile {
         f: impl FnOnce(safetensors::tensor::TensorView<'_>) -> Result<T>,
     ) -> Result<T> {
         for mmap in &self.mmaps {
-            let tensors = SafeTensors::deserialize(mmap)
-                .context("failed to parse safetensors header")?;
+            let tensors =
+                SafeTensors::deserialize(mmap).context("failed to parse safetensors header")?;
             if let Ok(view) = tensors.tensor(name) {
                 return f(view);
             }
@@ -238,6 +236,109 @@ impl ModelFile {
             let cols = view.shape()[1];
             let flat = decode_to_f64(view.dtype(), view.data())?;
             Ok(flat.chunks_exact(cols).map(|c| c.to_vec()).collect())
+        })
+    }
+
+    /// Decode only the requested rows of a 2D tensor. This is used for token
+    /// embedding lookup so the full vocabulary table never becomes resident as
+    /// an f64 matrix.
+    pub fn tensor_rows(&self, name: &str, rows: &[usize]) -> Result<Matrix> {
+        self.with_view(name, |view| {
+            ensure!(view.shape().len() == 2, "tensor `{name}` is not 2D");
+            let source_rows = view.shape()[0];
+            let cols = view.shape()[1];
+            let dtype = view.dtype();
+            let element_size = dtype_size(dtype);
+            ensure!(element_size > 0, "unsupported tensor dtype {dtype:?}");
+            let row_bytes = cols * element_size;
+            let data = view.data();
+            let mut output = Vec::with_capacity(rows.len());
+            for &row in rows {
+                ensure!(
+                    row < source_rows,
+                    "row {row} is outside tensor `{name}` with {source_rows} rows"
+                );
+                let start = row * row_bytes;
+                let end = start + row_bytes;
+                output.push(
+                    data[start..end]
+                        .chunks_exact(element_size)
+                        .map(|chunk| decode_one(dtype, chunk))
+                        .collect(),
+                );
+            }
+            Ok(output)
+        })
+    }
+
+    /// Multiply `input` by a HuggingFace linear weight stored as `[out, in]`
+    /// directly inside the mmap. A weight is decoded once and reused across all
+    /// input rows; no transposed f64 copy of the tensor is allocated.
+    pub fn linear_mapped(&self, name: &str, input: &[Vec<f64>]) -> Result<Matrix> {
+        ensure!(!input.is_empty(), "linear input cannot be empty");
+        let input_cols = input[0].len();
+        ensure!(
+            input.iter().all(|row| row.len() == input_cols),
+            "linear input must be rectangular"
+        );
+        self.with_view(name, |view| {
+            ensure!(view.shape().len() == 2, "tensor `{name}` is not 2D");
+            let output_cols = view.shape()[0];
+            let weight_input_cols = view.shape()[1];
+            ensure!(
+                input_cols == weight_input_cols,
+                "tensor `{name}` expects {weight_input_cols} inputs, got {input_cols}"
+            );
+            let dtype = view.dtype();
+            let element_size = dtype_size(dtype);
+            ensure!(element_size > 0, "unsupported tensor dtype {dtype:?}");
+            let data = view.data();
+            let mut output = vec![vec![0.0; output_cols]; input.len()];
+            for output_col in 0..output_cols {
+                let weight_row = output_col * weight_input_cols * element_size;
+                for input_col in 0..weight_input_cols {
+                    let start = weight_row + input_col * element_size;
+                    let weight = decode_one(dtype, &data[start..start + element_size]);
+                    for (input_row, output_row) in input.iter().zip(output.iter_mut()) {
+                        output_row[output_col] += input_row[input_col] * weight;
+                    }
+                }
+            }
+            Ok(output)
+        })
+    }
+
+    /// Dot every row of a 2D tensor with one vector, streaming the tensor from
+    /// its mmap. This implements a tied embedding/lm_head without loading the
+    /// vocabulary matrix into RAM.
+    pub fn row_logits(&self, name: &str, vector: &[f64]) -> Result<Vec<f64>> {
+        self.with_view(name, |view| {
+            ensure!(view.shape().len() == 2, "tensor `{name}` is not 2D");
+            let rows = view.shape()[0];
+            let cols = view.shape()[1];
+            ensure!(
+                vector.len() == cols,
+                "tensor `{name}` has width {cols}, vector has {}",
+                vector.len()
+            );
+            let dtype = view.dtype();
+            let element_size = dtype_size(dtype);
+            ensure!(element_size > 0, "unsupported tensor dtype {dtype:?}");
+            let row_bytes = cols * element_size;
+            let data = view.data();
+            let mut logits = Vec::with_capacity(rows);
+            for row in 0..rows {
+                let start = row * row_bytes;
+                let mut dot = 0.0;
+                for (chunk, value) in data[start..start + row_bytes]
+                    .chunks_exact(element_size)
+                    .zip(vector)
+                {
+                    dot += decode_one(dtype, chunk) * value;
+                }
+                logits.push(dot);
+            }
+            Ok(logits)
         })
     }
 
@@ -257,7 +358,7 @@ impl ModelFile {
             ensure!(view.shape().len() == 2, "tensor `{name}` is not 2D");
             let (rows, cols) = (view.shape()[0], view.shape()[1]);
             let dtype = view.dtype();
-            let elem = dtype.size();
+            let elem = dtype_size(dtype);
             let data = view.data();
             let mut out = Vec::with_capacity(rows * cols * 2);
             for chunk in data.chunks_exact(elem) {
