@@ -34,6 +34,39 @@ cargo run -- delete deployment demo-nginx
 The same service can also be declared as YAML with a small selector-based `Service` manifest and applied with `litek8s apply -f ...`.
 `tree` gives you a real relationship view from the control plane down to nodes, deployments, published ports, and services, so you do not have to reconstruct topology mentally from separate tables.
 
+## Local LLM mmap backend
+
+Local Qwen inference has two interchangeable weight readers:
+
+- the default `resident` backend loads and transposes every projection as
+  `f64`;
+- `--mmap` keeps large tensors in their native SafeTensors dtype and streams
+  them directly from the read-only mapping.
+
+```bash
+cargo run --release -- llm generate \
+  --model-dir /path/to/Qwen2.5-0.5B \
+  --mmap \
+  --max-new 1 \
+  "The capital of France is"
+```
+
+The mmap backend loads only requested embedding rows, decodes each projection
+weight once per input batch, reuses it across the batch rows, and computes tied
+embedding logits without materializing the vocabulary matrix. The original
+backend remains the default so both paths can be compared.
+
+Measured on Qwen2.5-0.5B for one generated token:
+
+| backend | wall | maximum RSS | output |
+|:---|---:|---:|:---|
+| resident `f64` | 90.31 s | 4,750.7 MB | `Paris` |
+| native mmap | 4.86 s | 1,071.4 MB | `Paris` |
+
+RSS includes pages from the 942 MiB checkpoint mapping. The mapped backend is
+exact at the checkpoint dtype; it does not yet consume the approximate
+Q+SwiGLU cache format.
+
 ## Firepack
 
 If you want a busier demo, these examples are designed to run together:
