@@ -36,17 +36,30 @@ The same service can also be declared as YAML with a small selector-based `Servi
 
 ## Local LLM mmap backend
 
-Local Qwen inference has two interchangeable weight readers:
+Local Qwen inference has three interchangeable weight readers:
 
 - the default `resident` backend loads and transposes every projection as
   `f64`;
 - `--mmap` keeps large tensors in their native SafeTensors dtype and streams
-  them directly from the read-only mapping.
+  them directly from the read-only mapping;
+- `--gguf FILE` reads the mixed-quantized GGUF format used by Ollama directly
+  through mmap. Q4_K_M is a recipe mixing Q4_K, Q5_0, Q6_K, Q8_0 and F32
+  tensors; every supported block is dequantized inside the dot product.
 
 ```bash
 cargo run --release -- llm generate \
   --model-dir /path/to/Qwen2.5-0.5B \
   --mmap \
+  --max-new 1 \
+  "The capital of France is"
+```
+
+The same Ollama blob can be tested without copying or converting it:
+
+```bash
+cargo run --release -- llm generate \
+  --model-dir /path/to/Qwen2.5-0.5B \
+  --gguf ~/.ollama/models/blobs/sha256-... \
   --max-new 1 \
   "The capital of France is"
 ```
@@ -64,8 +77,20 @@ Measured on Qwen2.5-0.5B for one generated token:
 | native mmap | 4.86 s | 1,071.4 MB | `Paris` |
 
 RSS includes pages from the 942 MiB checkpoint mapping. The mapped backend is
-exact at the checkpoint dtype; it does not yet consume the approximate
-Q+SwiGLU cache format.
+exact at the checkpoint dtype. The GGUF backend instead accepts the model's
+Q4_K_M quantization error in exchange for its smaller working set.
+
+An alternating, page-cache-warm comparison isolates the two mmap readers:
+
+| mmap backend | file size | wall (1 token) | maximum RSS | output |
+|:---|---:|---:|---:|:---|
+| SafeTensors BF16 | 988,097,824 B | 2.86 s | 1,073.5 MB | `Paris` |
+| Ollama GGUF Q4_K_M | 397,807,936 B | 2.35 s | 476.3 MB | `Paris` |
+
+The quantized file is 2.484x smaller, reduces measured RSS by about 55.6%, and
+is about 1.22x faster in the current scalar CPU kernel. GGUF startup alone is
+about 0.40 s versus 0.20 s for SafeTensors; generation still reruns the full
+sequence because neither local backend has a KV cache yet.
 
 ## Firepack
 

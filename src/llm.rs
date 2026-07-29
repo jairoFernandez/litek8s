@@ -341,6 +341,124 @@ impl MappedLlmWeights {
     }
 }
 
+/// Qwen backend for the mixed quantization used by Q4_K_M GGUF files.
+///
+/// Tensor payloads remain mmap-backed. F32, F16, Q5_0, Q8_0, Q4_K and Q6_K
+/// rows are decoded inside each matrix-vector product.
+pub struct GgufLlmWeights {
+    cfg: LlmConfig,
+    model: crate::gguf::GgufModel,
+    layers: Vec<GgufLayerWeights>,
+    final_norm: Vec<f64>,
+}
+
+struct GgufLayerWeights {
+    prefix: String,
+    attn_norm: Vec<f64>,
+    bq: Vec<f64>,
+    bk: Vec<f64>,
+    bv: Vec<f64>,
+    ffn_norm: Vec<f64>,
+}
+
+impl GgufLlmWeights {
+    pub fn load(model_path: &Path, cfg: LlmConfig) -> Result<Self> {
+        let model = crate::gguf::GgufModel::open(model_path)?;
+        let final_norm = model.tensor_1d("output_norm.weight")?;
+        let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
+        for index in 0..cfg.num_hidden_layers {
+            let prefix = format!("blk.{index}");
+            layers.push(GgufLayerWeights {
+                attn_norm: model.tensor_1d(&format!("{prefix}.attn_norm.weight"))?,
+                bq: model.tensor_1d(&format!("{prefix}.attn_q.bias"))?,
+                bk: model.tensor_1d(&format!("{prefix}.attn_k.bias"))?,
+                bv: model.tensor_1d(&format!("{prefix}.attn_v.bias"))?,
+                ffn_norm: model.tensor_1d(&format!("{prefix}.ffn_norm.weight"))?,
+                prefix,
+            });
+        }
+        Ok(Self {
+            cfg,
+            model,
+            layers,
+            final_norm,
+        })
+    }
+
+    pub fn config(&self) -> &LlmConfig {
+        &self.cfg
+    }
+
+    pub fn forward_last_logits(&self, tokens: &[u32]) -> Result<Vec<f64>> {
+        ensure!(!tokens.is_empty(), "token sequence cannot be empty");
+        let cfg = &self.cfg;
+        let head_dim = cfg.head_dim();
+        let seq = tokens.len();
+        let rows = tokens
+            .iter()
+            .map(|&token| token as usize)
+            .collect::<Vec<_>>();
+        let mut h = self.model.tensor_rows("token_embd.weight", &rows)?;
+        let (cos, sin) = rope_tables(seq, head_dim, cfg.rope_theta);
+
+        for layer in &self.layers {
+            let normed = rms_norm(&h, &layer.attn_norm, cfg.rms_norm_eps);
+            let mut q = self
+                .model
+                .linear_mapped(&format!("{}.attn_q.weight", layer.prefix), &normed)?;
+            let mut k = self
+                .model
+                .linear_mapped(&format!("{}.attn_k.weight", layer.prefix), &normed)?;
+            let mut v = self
+                .model
+                .linear_mapped(&format!("{}.attn_v.weight", layer.prefix), &normed)?;
+            add_bias(&mut q, &layer.bq)?;
+            add_bias(&mut k, &layer.bk)?;
+            add_bias(&mut v, &layer.bv)?;
+            let context = grouped_query_attention(
+                &q,
+                &k,
+                &v,
+                cfg.num_attention_heads,
+                cfg.num_key_value_heads,
+                head_dim,
+                &cos,
+                &sin,
+            );
+            let attn_out = self
+                .model
+                .linear_mapped(&format!("{}.attn_output.weight", layer.prefix), &context)?;
+            h = add(&h, &attn_out);
+
+            let ffn_in = rms_norm(&h, &layer.ffn_norm, cfg.rms_norm_eps);
+            let gate = self
+                .model
+                .linear_mapped(&format!("{}.ffn_gate.weight", layer.prefix), &ffn_in)?;
+            let up = self
+                .model
+                .linear_mapped(&format!("{}.ffn_up.weight", layer.prefix), &ffn_in)?;
+            let hidden: Matrix = gate
+                .iter()
+                .zip(up.iter())
+                .map(|(gate_row, up_row)| {
+                    gate_row
+                        .iter()
+                        .zip(up_row)
+                        .map(|(gate_value, up_value)| silu(*gate_value) * up_value)
+                        .collect()
+                })
+                .collect();
+            let ffn_out = self
+                .model
+                .linear_mapped(&format!("{}.ffn_down.weight", layer.prefix), &hidden)?;
+            h = add(&h, &ffn_out);
+        }
+
+        let normed = rms_norm(&h, &self.final_norm, cfg.rms_norm_eps);
+        self.model.row_logits("token_embd.weight", &normed[seq - 1])
+    }
+}
+
 /// Index of the largest logit (greedy next-token).
 pub fn argmax(logits: &[f64]) -> usize {
     logits
@@ -423,6 +541,51 @@ impl MappedLlmRunner {
     }
 
     pub fn weights(&self) -> &MappedLlmWeights {
+        &self.weights
+    }
+
+    pub fn generate(
+        &self,
+        prompt: &str,
+        max_new: usize,
+        mut on_token: impl FnMut(&str),
+    ) -> Result<String> {
+        let encoding = self
+            .tokenizer
+            .encode(prompt, false)
+            .map_err(|error| anyhow::anyhow!("tokenize failed: {error}"))?;
+        let mut tokens = encoding.get_ids().to_vec();
+        let start = tokens.len();
+        for _ in 0..max_new {
+            let logits = self.weights.forward_last_logits(&tokens)?;
+            let next = argmax(&logits) as u32;
+            tokens.push(next);
+            if let Ok(piece) = self.tokenizer.decode(&[next], false) {
+                on_token(&piece);
+            }
+        }
+        self.tokenizer
+            .decode(&tokens[start..], false)
+            .map_err(|error| anyhow::anyhow!("decode failed: {error}"))
+    }
+}
+
+/// Tokenizer plus the mmap-backed mixed-quantized GGUF backend.
+pub struct GgufLlmRunner {
+    weights: GgufLlmWeights,
+    tokenizer: tokenizers::Tokenizer,
+}
+
+impl GgufLlmRunner {
+    pub fn load(model_dir: &Path, gguf_path: &Path) -> Result<Self> {
+        let cfg = LlmConfig::load(&model_dir.join("config.json"))?;
+        let weights = GgufLlmWeights::load(gguf_path, cfg)?;
+        let tokenizer = tokenizers::Tokenizer::from_file(model_dir.join("tokenizer.json"))
+            .map_err(|error| anyhow::anyhow!("failed to load tokenizer: {error}"))?;
+        Ok(Self { weights, tokenizer })
+    }
+
+    pub fn weights(&self) -> &GgufLlmWeights {
         &self.weights
     }
 

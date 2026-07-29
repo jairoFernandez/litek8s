@@ -433,13 +433,13 @@ enum Command {
 #[derive(Debug, Subcommand)]
 enum LlmCommand {
     #[command(
-        about = "Generate text from a prompt using a local model directory",
+        about = "Generate text from a prompt using SafeTensors or GGUF weights",
         help_template = HELP_TEMPLATE
     )]
     Generate {
         #[arg(
             long,
-            help = "Model directory (config.json, model.safetensors, tokenizer.json)"
+            help = "Model directory containing config.json and tokenizer.json"
         )]
         model_dir: PathBuf,
         #[arg(help = "Prompt text")]
@@ -448,6 +448,13 @@ enum LlmCommand {
         max_new: usize,
         #[arg(long, help = "Stream native weights from mmap instead of loading all weights as f64")]
         mmap: bool,
+        #[arg(
+            long,
+            value_name = "FILE",
+            conflicts_with = "mmap",
+            help = "Use a mixed-quantized GGUF file through mmap (Q4_K_M recipe)"
+        )]
+        gguf: Option<PathBuf>,
     },
     #[command(
         about = "Run a model distributed across peer agents over the LAN (run on a coordinator node)",
@@ -1454,7 +1461,8 @@ pub async fn run() -> Result<()> {
                 prompt,
                 max_new,
                 mmap,
-            } => run_llm_generate(&model_dir, &prompt, max_new, mmap),
+                gguf,
+            } => run_llm_generate(&model_dir, &prompt, max_new, mmap, gguf.as_deref()),
             LlmCommand::Distributed {
                 model_dir,
                 peers,
@@ -1838,16 +1846,35 @@ async fn generate_distributed(
     Ok(())
 }
 
-fn run_llm_generate(model_dir: &Path, prompt: &str, max_new: usize, mmap: bool) -> Result<()> {
+fn run_llm_generate(
+    model_dir: &Path,
+    prompt: &str,
+    max_new: usize,
+    mmap: bool,
+    gguf: Option<&Path>,
+) -> Result<()> {
     use std::io::Write;
     println!("{}", title("LLM Generate"));
     println!("{} {}", label("model"), model_dir.display());
-    println!("{} {}", label("backend"), if mmap { "mmap" } else { "resident" });
+    let backend = if gguf.is_some() {
+        "gguf-mmap"
+    } else if mmap {
+        "mmap"
+    } else {
+        "resident"
+    };
+    println!("{} {backend}", label("backend"));
     println!("{} {}", label("prompt"), prompt);
     print!("\n{prompt}");
     std::io::stdout().flush().ok();
 
-    if mmap {
+    if let Some(gguf_path) = gguf {
+        let runner = crate::llm::GgufLlmRunner::load(model_dir, gguf_path)?;
+        runner.generate(prompt, max_new, |piece| {
+            print!("{piece}");
+            std::io::stdout().flush().ok();
+        })?;
+    } else if mmap {
         let runner = crate::llm::MappedLlmRunner::load(model_dir)?;
         runner.generate(prompt, max_new, |piece| {
             print!("{piece}");
