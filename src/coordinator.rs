@@ -68,7 +68,9 @@ impl EmbedTable {
         (0..self.hidden)
             .map(|j| {
                 let b = off + j * 2;
-                f64::from(half::f16::from_le_bytes([self.f16_bytes[b], self.f16_bytes[b + 1]]).to_f32())
+                f64::from(
+                    half::f16::from_le_bytes([self.f16_bytes[b], self.f16_bytes[b + 1]]).to_f32(),
+                )
             })
             .collect()
     }
@@ -358,7 +360,6 @@ impl DistModel {
                 cfg.num_attention_heads,
                 cfg.num_key_value_heads,
                 head_dim,
-                pos,
                 &cos_t,
                 &sin_t,
             );
@@ -591,13 +592,16 @@ pub async fn distribute_qwen(
         let wo = distribute_tensor(&wo_m, peers, &peer_weights, dtype, &format!("l{i}-o")).await?;
         drop(wo_m);
         let (wg_m, _) = big(format!("{p}.mlp.gate_proj.weight"), format!("l{i}-g"))?;
-        let w_gate = distribute_tensor(&wg_m, peers, &peer_weights, dtype, &format!("l{i}-g")).await?;
+        let w_gate =
+            distribute_tensor(&wg_m, peers, &peer_weights, dtype, &format!("l{i}-g")).await?;
         drop(wg_m);
         let (wu_m, _) = big(format!("{p}.mlp.up_proj.weight"), format!("l{i}-u"))?;
-        let w_up = distribute_tensor(&wu_m, peers, &peer_weights, dtype, &format!("l{i}-u")).await?;
+        let w_up =
+            distribute_tensor(&wu_m, peers, &peer_weights, dtype, &format!("l{i}-u")).await?;
         drop(wu_m);
         let (wd_m, _) = big(format!("{p}.mlp.down_proj.weight"), format!("l{i}-d"))?;
-        let w_down = distribute_tensor(&wd_m, peers, &peer_weights, dtype, &format!("l{i}-d")).await?;
+        let w_down =
+            distribute_tensor(&wd_m, peers, &peer_weights, dtype, &format!("l{i}-d")).await?;
         drop(wd_m);
 
         layers.push(DistLayer {

@@ -446,7 +446,10 @@ enum LlmCommand {
         prompt: String,
         #[arg(long, default_value_t = 20, help = "Max new tokens to generate")]
         max_new: usize,
-        #[arg(long, help = "Stream native weights from mmap instead of loading all weights as f64")]
+        #[arg(
+            long,
+            help = "Stream native weights from mmap instead of loading all weights as f64"
+        )]
         mmap: bool,
         #[arg(
             long,
@@ -455,15 +458,46 @@ enum LlmCommand {
             help = "Use a mixed-quantized GGUF file through mmap (Q4_K_M recipe)"
         )]
         gguf: Option<PathBuf>,
+        #[arg(
+            long,
+            value_name = "DIR",
+            value_delimiter = ',',
+            help = "Enable disk-backed KV cache; repeat or comma-separate directories to stripe layers"
+        )]
+        kv_cache_dir: Vec<PathBuf>,
+        #[arg(
+            long,
+            default_value_t = 32768,
+            help = "Maximum token capacity of the grow-on-demand disk KV cache"
+        )]
+        kv_max_tokens: usize,
+        #[arg(
+            long,
+            default_value_t = 16,
+            help = "RAM tile buffer used while scanning the disk KV cache"
+        )]
+        kv_buffer_mb: usize,
+        #[arg(
+            long,
+            help = "Keep KV cache files after generation instead of deleting them"
+        )]
+        keep_kv_cache: bool,
     },
     #[command(
         about = "Run a model distributed across peer agents over the LAN (run on a coordinator node)",
         help_template = HELP_TEMPLATE
     )]
     Distributed {
-        #[arg(long, help = "Model directory (config.json, model.safetensors, tokenizer.json)")]
+        #[arg(
+            long,
+            help = "Model directory (config.json, model.safetensors, tokenizer.json)"
+        )]
         model_dir: PathBuf,
-        #[arg(long, help = "Peer private IPs to shard weights across", value_delimiter = ',')]
+        #[arg(
+            long,
+            help = "Peer private IPs to shard weights across",
+            value_delimiter = ','
+        )]
         peers: Vec<String>,
         #[arg(help = "Prompt text")]
         prompt: String,
@@ -535,7 +569,11 @@ enum ModelCommand {
     Run {
         #[arg(help = "Model name")]
         name: String,
-        #[arg(long, default_value_t = 1, help = "Batch size (rows of generated input)")]
+        #[arg(
+            long,
+            default_value_t = 1,
+            help = "Batch size (rows of generated input)"
+        )]
         batch: usize,
         #[arg(long, default_value_t = 7, help = "Seed for the generated input")]
         seed: u64,
@@ -771,9 +809,17 @@ enum NodeCommand {
 enum InfraCommand {
     #[command(about = "Scaffold a Terraform + deploy project for provisioning litek8s nodes")]
     Init {
-        #[arg(long, default_value = ".", help = "Directory to scaffold into (created if missing)")]
+        #[arg(
+            long,
+            default_value = ".",
+            help = "Directory to scaffold into (created if missing)"
+        )]
         dir: PathBuf,
-        #[arg(long, help = "Project name/prefix used in generated files", default_value = "litek8s-app")]
+        #[arg(
+            long,
+            help = "Project name/prefix used in generated files",
+            default_value = "litek8s-app"
+        )]
         name: String,
         #[arg(long, help = "Overwrite existing files instead of skipping them")]
         force: bool,
@@ -1404,15 +1450,7 @@ pub async fn run() -> Result<()> {
                 ssh_hub,
                 node_name,
                 remote_binary,
-            } => {
-                run_vpn_join(
-                    &token,
-                    ssh_hub.as_deref(),
-                    &node_name,
-                    &remote_binary,
-                )
-                .await
-            }
+            } => run_vpn_join(&token, ssh_hub.as_deref(), &node_name, &remote_binary).await,
             VpnCommand::Complete { ip } => run_vpn_complete(&ip),
         },
         Command::Tensor { command } => match command {
@@ -1462,7 +1500,21 @@ pub async fn run() -> Result<()> {
                 max_new,
                 mmap,
                 gguf,
-            } => run_llm_generate(&model_dir, &prompt, max_new, mmap, gguf.as_deref()),
+                kv_cache_dir,
+                kv_max_tokens,
+                kv_buffer_mb,
+                keep_kv_cache,
+            } => run_llm_generate(
+                &model_dir,
+                &prompt,
+                max_new,
+                mmap,
+                gguf.as_deref(),
+                &kv_cache_dir,
+                kv_max_tokens,
+                kv_buffer_mb,
+                keep_kv_cache,
+            ),
             LlmCommand::Distributed {
                 model_dir,
                 peers,
@@ -1470,8 +1522,14 @@ pub async fn run() -> Result<()> {
                 max_new,
                 save_manifest,
             } => {
-                run_llm_distributed(&model_dir, &peers, &prompt, max_new, save_manifest.as_deref())
-                    .await
+                run_llm_distributed(
+                    &model_dir,
+                    &peers,
+                    &prompt,
+                    max_new,
+                    save_manifest.as_deref(),
+                )
+                .await
             }
             LlmCommand::Preloaded {
                 model_dir,
@@ -1781,8 +1839,10 @@ async fn run_llm_preloaded(
         serde_json::from_slice(&raw).context("failed to parse manifest")?;
     // Re-attach the embedding from the model file (mmap, one tensor) — no cold
     // distribution; the peers already hold the sharded weights in RAM.
-    let model =
-        crate::coordinator::DistModel::from_manifest(manifest, &model_dir.join("model.safetensors"))?;
+    let model = crate::coordinator::DistModel::from_manifest(
+        manifest,
+        &model_dir.join("model.safetensors"),
+    )?;
 
     generate_distributed(&model, &tokenizer, prompt, max_new).await
 }
@@ -1841,7 +1901,11 @@ async fn generate_distributed(
         prefill_ms,
         max_new,
         decode_ms,
-        if max_new > 0 { decode_ms / max_new as u128 } else { 0 }
+        if max_new > 0 {
+            decode_ms / max_new as u128
+        } else {
+            0
+        }
     );
     Ok(())
 }
@@ -1852,11 +1916,27 @@ fn run_llm_generate(
     max_new: usize,
     mmap: bool,
     gguf: Option<&Path>,
+    kv_cache_dirs: &[PathBuf],
+    kv_max_tokens: usize,
+    kv_buffer_mb: usize,
+    keep_kv_cache: bool,
 ) -> Result<()> {
     use std::io::Write;
+    ensure!(
+        kv_cache_dirs.is_empty() || gguf.is_some(),
+        "--kv-cache-dir currently requires --gguf"
+    );
+    ensure!(
+        !keep_kv_cache || !kv_cache_dirs.is_empty(),
+        "--keep-kv-cache requires --kv-cache-dir"
+    );
+    ensure!(kv_max_tokens > 0, "--kv-max-tokens must be positive");
+    ensure!(kv_buffer_mb > 0, "--kv-buffer-mb must be positive");
     println!("{}", title("LLM Generate"));
     println!("{} {}", label("model"), model_dir.display());
-    let backend = if gguf.is_some() {
+    let backend = if gguf.is_some() && !kv_cache_dirs.is_empty() {
+        "gguf-mmap+kv-disk"
+    } else if gguf.is_some() {
         "gguf-mmap"
     } else if mmap {
         "mmap"
@@ -1870,10 +1950,56 @@ fn run_llm_generate(
 
     if let Some(gguf_path) = gguf {
         let runner = crate::llm::GgufLlmRunner::load(model_dir, gguf_path)?;
-        runner.generate(prompt, max_new, |piece| {
-            print!("{piece}");
-            std::io::stdout().flush().ok();
-        })?;
+        if kv_cache_dirs.is_empty() {
+            runner.generate(prompt, max_new, |piece| {
+                print!("{piece}");
+                std::io::stdout().flush().ok();
+            })?;
+        } else {
+            let cfg = runner.weights().config();
+            let buffer_bytes = kv_buffer_mb
+                .checked_mul(1024 * 1024)
+                .context("KV buffer size overflow")?;
+            let result = runner.generate_with_disk_cache(
+                prompt,
+                max_new,
+                crate::kv_cache::DiskKvConfig {
+                    directories: kv_cache_dirs.to_vec(),
+                    num_layers: cfg.num_hidden_layers,
+                    num_kv_heads: cfg.num_key_value_heads,
+                    head_dim: cfg.head_dim(),
+                    max_tokens: kv_max_tokens,
+                    buffer_bytes,
+                    keep_files: keep_kv_cache,
+                },
+                |piece| {
+                    print!("{piece}");
+                    std::io::stdout().flush().ok();
+                },
+            )?;
+            println!();
+            println!(
+                "{} prefill {:.3}s, decode {:.3}s, KV {} tok / {:.2} MiB used, \
+                 {:.2} MiB mapped now / {:.2} MiB max across {} file(s), {} dir(s), \
+                 {} MiB buffer",
+                muted("·"),
+                result.prefill.as_secs_f64(),
+                result.decode.as_secs_f64(),
+                result.cache.tokens,
+                result.cache.used_bytes as f64 / (1024.0 * 1024.0),
+                result.cache.mapped_bytes as f64 / (1024.0 * 1024.0),
+                result.cache.logical_capacity_bytes as f64 / (1024.0 * 1024.0),
+                result.cache.files,
+                result.cache.directories,
+                kv_buffer_mb,
+            );
+            if keep_kv_cache {
+                for path in result.cache.paths {
+                    println!("{} {}", muted("· KV"), path.display());
+                }
+            }
+            return Ok(());
+        }
     } else if mmap {
         let runner = crate::llm::MappedLlmRunner::load(model_dir)?;
         runner.generate(prompt, max_new, |piece| {
@@ -1912,12 +2038,7 @@ fn run_model_inspect(file: &Path) -> Result<()> {
             .map(|d| d.to_string())
             .collect::<Vec<_>>()
             .join("x");
-        println!(
-            "  {:<40} {:<6} {}",
-            info.name,
-            info.dtype,
-            muted(&shape)
-        );
+        println!("  {:<40} {:<6} {}", info.name, info.dtype, muted(&shape));
     }
     println!();
     println!(
@@ -2192,7 +2313,10 @@ fn run_vpn_init(cidr: &str, public_endpoint: &str) -> Result<()> {
     println!("  hub pubkey   : {}", network.hub_pubkey.as_str());
     println!("  hub IP       : {}", network.hub_ip());
     println!("  hub endpoint : {}", network.hub_endpoint);
-    println!("  CIDR         : {}/{}", network.cidr_base, network.cidr_prefix);
+    println!(
+        "  CIDR         : {}/{}",
+        network.cidr_base, network.cidr_prefix
+    );
     println!("  state file   : {}", state_path.display());
     println!("  private key  : {} (chmod 0600)", key_path.display());
     println!();
@@ -2272,8 +2396,10 @@ fn run_vpn_remove_peer(name: &str) -> Result<()> {
 }
 
 fn run_vpn_show_config(role: &str, listen_port: u16, output: Option<&Path>) -> Result<()> {
-    use crate::vpn::{HubState, SpokeState, load_or_generate_keypair, write_wg_quick_config,
-        write_wg_quick_hub_config};
+    use crate::vpn::{
+        HubState, SpokeState, load_or_generate_keypair, write_wg_quick_config,
+        write_wg_quick_hub_config,
+    };
 
     let keypair = load_or_generate_keypair()?;
     match role {
@@ -2367,7 +2493,10 @@ async fn run_cluster_apply(endpoint: &DaemonEndpoint, file: &Path) -> Result<()>
 
     let manifest = ClusterManifest::parse_file(file)
         .with_context(|| format!("failed to parse {}", file.display()))?;
-    println!("{}", title(&format!("Cluster Apply ({})", manifest.metadata.name)));
+    println!(
+        "{}",
+        title(&format!("Cluster Apply ({})", manifest.metadata.name))
+    );
 
     let report = crate::cluster_orchestrator::apply(&manifest, endpoint).await?;
     if let Some(message) = report.vpn_initialized.as_deref() {
@@ -2397,7 +2526,10 @@ async fn run_cluster_diff(endpoint: &DaemonEndpoint, file: &Path) -> Result<()> 
 
     let manifest = ClusterManifest::parse_file(file)
         .with_context(|| format!("failed to parse {}", file.display()))?;
-    println!("{}", title(&format!("Cluster Diff ({})", manifest.metadata.name)));
+    println!(
+        "{}",
+        title(&format!("Cluster Diff ({})", manifest.metadata.name))
+    );
 
     let report = crate::cluster_orchestrator::diff(&manifest, endpoint).await?;
     if let Some(action) = report.vpn_to_initialize.as_deref() {
@@ -2487,7 +2619,6 @@ fn run_vpn_complete(ip: &str) -> Result<()> {
     Ok(())
 }
 
-
 fn parse_cidr(value: &str) -> Result<(std::net::Ipv4Addr, u8)> {
     let (base, prefix) = value
         .split_once('/')
@@ -2572,7 +2703,10 @@ fn print_response(response: Response) -> Result<()> {
                     left_cell(&item.name, 24),
                     left_cell(&truncate(&item.node_name, 14), 14),
                     status_cell(&item.status, 12),
-                    left_cell(&format!("{}/{}", item.ready_replicas, item.desired_replicas), 7),
+                    left_cell(
+                        &format!("{}/{}", item.ready_replicas, item.desired_replicas),
+                        7
+                    ),
                     left_cell(&truncate(&item.image, 24), 24),
                     item.container_id.unwrap_or_else(|| "-".to_string())
                 );
@@ -3243,7 +3377,10 @@ fn format_top_body_for_width(
             align: TopAlign::Right,
             priority: 0,
             cell: |item, w| {
-                right_cell(&format_memory(item.memory_usage_bytes, item.memory_limit_bytes), w)
+                right_cell(
+                    &format_memory(item.memory_usage_bytes, item.memory_limit_bytes),
+                    w,
+                )
             },
         },
         TopColumn {
@@ -3251,7 +3388,12 @@ fn format_top_body_for_width(
             width: 18,
             align: TopAlign::Right,
             priority: 2,
-            cell: |item, w| right_cell(&format_net_io(item.network_rx_bytes, item.network_tx_bytes), w),
+            cell: |item, w| {
+                right_cell(
+                    &format_net_io(item.network_rx_bytes, item.network_tx_bytes),
+                    w,
+                )
+            },
         },
         TopColumn {
             header: "CONTAINER ID",
@@ -4225,8 +4367,18 @@ mod tests {
         // Wide terminal keeps every column.
         let wide = format_top_body_for_width(&daemon, &rows, &[], 200);
         for header in [
-            "NAME", "NODE", "STATUS", "RESTARTS", "STREAK", "NEXT RETRY", "LAST EXIT", "CPU",
-            "MEMORY", "NET I/O", "CONTAINER ID", "IMAGE",
+            "NAME",
+            "NODE",
+            "STATUS",
+            "RESTARTS",
+            "STREAK",
+            "NEXT RETRY",
+            "LAST EXIT",
+            "CPU",
+            "MEMORY",
+            "NET I/O",
+            "CONTAINER ID",
+            "IMAGE",
         ] {
             assert!(wide.contains(header), "wide layout should keep `{header}`");
         }
@@ -4234,7 +4386,10 @@ mod tests {
         // Narrow terminal keeps the essentials and sheds the lowest-priority columns.
         let narrow = format_top_body_for_width(&daemon, &rows, &[], 60);
         for header in ["NAME", "STATUS", "CPU", "MEMORY"] {
-            assert!(narrow.contains(header), "narrow layout must keep `{header}`");
+            assert!(
+                narrow.contains(header),
+                "narrow layout must keep `{header}`"
+            );
         }
         for header in ["CONTAINER ID", "LAST EXIT", "STREAK"] {
             assert!(
@@ -4248,7 +4403,10 @@ mod tests {
     fn top_renders_node_resources_and_degrades_when_absent() {
         let daemon = sample_daemon();
         let rows = vec![sample_top_row()];
-        let nodes = vec![sample_node("litek8s-node-0", true), sample_node("offline", false)];
+        let nodes = vec![
+            sample_node("litek8s-node-0", true),
+            sample_node("offline", false),
+        ];
 
         let body = format_top_body_for_width(&daemon, &rows, &nodes, 200);
 

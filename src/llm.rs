@@ -4,13 +4,16 @@
 //! ops the cluster already runs, so distribution slots in afterward.
 
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
 use serde::Deserialize;
 
 use crate::matrix::Matrix;
 use crate::model;
-use crate::transformer::{add, grouped_query_attention, linear, rms_norm, rope_tables, silu};
+use crate::transformer::{
+    add, grouped_query_attention, linear, rms_norm, rope_at, rope_tables, silu,
+};
 
 /// Qwen2 config (subset we need), parsed from the model's `config.json`.
 #[derive(Debug, Clone, Deserialize)]
@@ -457,6 +460,169 @@ impl GgufLlmWeights {
         let normed = rms_norm(&h, &self.final_norm, cfg.rms_norm_eps);
         self.model.row_logits("token_embd.weight", &normed[seq - 1])
     }
+
+    /// Process a prompt as one matrix batch while filling the disk-backed KV
+    /// cache. Weight blocks are decoded once per projection, not once per
+    /// prompt token.
+    pub fn prefill_last_logits(
+        &self,
+        tokens: &[u32],
+        cache: &mut crate::kv_cache::DiskKvCache,
+    ) -> Result<Vec<f64>> {
+        ensure!(!tokens.is_empty(), "token sequence cannot be empty");
+        ensure!(
+            tokens.len() <= cache.max_tokens(),
+            "prompt has {} tokens but KV cache capacity is {}",
+            tokens.len(),
+            cache.max_tokens()
+        );
+        let cfg = &self.cfg;
+        let head_dim = cfg.head_dim();
+        let rows = tokens
+            .iter()
+            .map(|&token| token as usize)
+            .collect::<Vec<_>>();
+        let mut hidden = self.model.tensor_rows("token_embd.weight", &rows)?;
+
+        for (layer_index, layer) in self.layers.iter().enumerate() {
+            let normed = rms_norm(&hidden, &layer.attn_norm, cfg.rms_norm_eps);
+            let mut query = self
+                .model
+                .linear_mapped(&format!("{}.attn_q.weight", layer.prefix), &normed)?;
+            let mut key = self
+                .model
+                .linear_mapped(&format!("{}.attn_k.weight", layer.prefix), &normed)?;
+            let mut value = self
+                .model
+                .linear_mapped(&format!("{}.attn_v.weight", layer.prefix), &normed)?;
+            add_bias(&mut query, &layer.bq)?;
+            add_bias(&mut key, &layer.bk)?;
+            add_bias(&mut value, &layer.bv)?;
+
+            let mut context = Vec::with_capacity(tokens.len());
+            for position in 0..tokens.len() {
+                let (cos, sin) = rope_at(position, head_dim, cfg.rope_theta);
+                context.push(cache.attention_step(
+                    layer_index,
+                    &query[position],
+                    &key[position],
+                    &value[position],
+                    cfg.num_attention_heads,
+                    position,
+                    &cos,
+                    &sin,
+                )?);
+            }
+            let attention = self
+                .model
+                .linear_mapped(&format!("{}.attn_output.weight", layer.prefix), &context)?;
+            hidden = add(&hidden, &attention);
+
+            let ffn_input = rms_norm(&hidden, &layer.ffn_norm, cfg.rms_norm_eps);
+            let gate = self
+                .model
+                .linear_mapped(&format!("{}.ffn_gate.weight", layer.prefix), &ffn_input)?;
+            let up = self
+                .model
+                .linear_mapped(&format!("{}.ffn_up.weight", layer.prefix), &ffn_input)?;
+            let activated: Matrix = gate
+                .iter()
+                .zip(up.iter())
+                .map(|(gate_row, up_row)| {
+                    gate_row
+                        .iter()
+                        .zip(up_row)
+                        .map(|(gate_value, up_value)| silu(*gate_value) * up_value)
+                        .collect()
+                })
+                .collect();
+            let ffn = self
+                .model
+                .linear_mapped(&format!("{}.ffn_down.weight", layer.prefix), &activated)?;
+            hidden = add(&hidden, &ffn);
+        }
+
+        let normed = rms_norm(&hidden, &self.final_norm, cfg.rms_norm_eps);
+        self.model
+            .row_logits("token_embd.weight", &normed[tokens.len() - 1])
+    }
+
+    /// Decode one new token using K/V rows already stored on disk.
+    pub fn decode_step(
+        &self,
+        token: u32,
+        position: usize,
+        cache: &mut crate::kv_cache::DiskKvCache,
+    ) -> Result<Vec<f64>> {
+        ensure!(
+            position < cache.max_tokens(),
+            "position {position} exceeds KV cache capacity {}",
+            cache.max_tokens()
+        );
+        let cfg = &self.cfg;
+        let head_dim = cfg.head_dim();
+        let (cos, sin) = rope_at(position, head_dim, cfg.rope_theta);
+        let mut hidden = self
+            .model
+            .tensor_rows("token_embd.weight", &[token as usize])?;
+
+        for (layer_index, layer) in self.layers.iter().enumerate() {
+            let normed = rms_norm(&hidden, &layer.attn_norm, cfg.rms_norm_eps);
+            let mut query = self
+                .model
+                .linear_mapped(&format!("{}.attn_q.weight", layer.prefix), &normed)?;
+            let mut key = self
+                .model
+                .linear_mapped(&format!("{}.attn_k.weight", layer.prefix), &normed)?;
+            let mut value = self
+                .model
+                .linear_mapped(&format!("{}.attn_v.weight", layer.prefix), &normed)?;
+            add_bias(&mut query, &layer.bq)?;
+            add_bias(&mut key, &layer.bk)?;
+            add_bias(&mut value, &layer.bv)?;
+
+            let context = cache.attention_step(
+                layer_index,
+                &query[0],
+                &key[0],
+                &value[0],
+                cfg.num_attention_heads,
+                position,
+                &cos,
+                &sin,
+            )?;
+            let attention = self
+                .model
+                .linear_mapped(&format!("{}.attn_output.weight", layer.prefix), &[context])?;
+            hidden = add(&hidden, &attention);
+
+            let ffn_input = rms_norm(&hidden, &layer.ffn_norm, cfg.rms_norm_eps);
+            let gate = self
+                .model
+                .linear_mapped(&format!("{}.ffn_gate.weight", layer.prefix), &ffn_input)?;
+            let up = self
+                .model
+                .linear_mapped(&format!("{}.ffn_up.weight", layer.prefix), &ffn_input)?;
+            let activated: Matrix = gate
+                .iter()
+                .zip(up.iter())
+                .map(|(gate_row, up_row)| {
+                    gate_row
+                        .iter()
+                        .zip(up_row)
+                        .map(|(gate_value, up_value)| silu(*gate_value) * up_value)
+                        .collect()
+                })
+                .collect();
+            let ffn = self
+                .model
+                .linear_mapped(&format!("{}.ffn_down.weight", layer.prefix), &activated)?;
+            hidden = add(&hidden, &ffn);
+        }
+
+        let normed = rms_norm(&hidden, &self.final_norm, cfg.rms_norm_eps);
+        self.model.row_logits("token_embd.weight", &normed[0])
+    }
 }
 
 /// Index of the largest logit (greedy next-token).
@@ -576,6 +742,13 @@ pub struct GgufLlmRunner {
     tokenizer: tokenizers::Tokenizer,
 }
 
+pub struct DiskKvGeneration {
+    pub text: String,
+    pub prefill: Duration,
+    pub decode: Duration,
+    pub cache: crate::kv_cache::DiskKvStats,
+}
+
 impl GgufLlmRunner {
     pub fn load(model_dir: &Path, gguf_path: &Path) -> Result<Self> {
         let cfg = LlmConfig::load(&model_dir.join("config.json"))?;
@@ -612,5 +785,74 @@ impl GgufLlmRunner {
         self.tokenizer
             .decode(&tokens[start..], false)
             .map_err(|error| anyhow::anyhow!("decode failed: {error}"))
+    }
+
+    pub fn generate_with_disk_cache(
+        &self,
+        prompt: &str,
+        max_new: usize,
+        cache_config: crate::kv_cache::DiskKvConfig,
+        mut on_token: impl FnMut(&str),
+    ) -> Result<DiskKvGeneration> {
+        ensure!(
+            cache_config.num_layers == self.weights.cfg.num_hidden_layers
+                && cache_config.num_kv_heads == self.weights.cfg.num_key_value_heads
+                && cache_config.head_dim == self.weights.cfg.head_dim(),
+            "KV cache dimensions do not match the model"
+        );
+        let encoding = self
+            .tokenizer
+            .encode(prompt, false)
+            .map_err(|error| anyhow::anyhow!("tokenize failed: {error}"))?;
+        let prompt_tokens = encoding.get_ids();
+        ensure!(
+            !prompt_tokens.is_empty(),
+            "prompt must contain at least one token"
+        );
+        ensure!(
+            prompt_tokens.len().saturating_add(max_new) <= cache_config.max_tokens,
+            "prompt plus requested output exceeds KV cache capacity"
+        );
+        if max_new == 0 {
+            return Ok(DiskKvGeneration {
+                text: String::new(),
+                prefill: Duration::ZERO,
+                decode: Duration::ZERO,
+                cache: crate::kv_cache::DiskKvCache::create(cache_config)?.stats(),
+            });
+        }
+
+        let mut cache = crate::kv_cache::DiskKvCache::create(cache_config)?;
+        let prefill_start = Instant::now();
+        let mut logits = self
+            .weights
+            .prefill_last_logits(prompt_tokens, &mut cache)?;
+        let prefill = prefill_start.elapsed();
+
+        let mut generated = Vec::with_capacity(max_new);
+        let decode_start = Instant::now();
+        for generated_index in 0..max_new {
+            let next = argmax(&logits) as u32;
+            generated.push(next);
+            if let Ok(piece) = self.tokenizer.decode(&[next], false) {
+                on_token(&piece);
+            }
+            if generated_index + 1 < max_new {
+                let position = prompt_tokens.len() + generated_index;
+                logits = self.weights.decode_step(next, position, &mut cache)?;
+            }
+        }
+        let decode = decode_start.elapsed();
+        let text = self
+            .tokenizer
+            .decode(&generated, false)
+            .map_err(|error| anyhow::anyhow!("decode failed: {error}"))?;
+        let stats = cache.stats();
+        Ok(DiskKvGeneration {
+            text,
+            prefill,
+            decode,
+            cache: stats,
+        })
     }
 }

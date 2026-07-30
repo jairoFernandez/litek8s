@@ -46,22 +46,27 @@ pub fn silu(x: f64) -> f64 {
 /// head dimension `head_dim` (must be even). `theta` is the base (10000 for
 /// Llama). Returns (cos, sin), each `seq_len x head_dim/2`.
 pub fn rope_tables(seq_len: usize, head_dim: usize, theta: f64) -> (Matrix, Matrix) {
-    let half = head_dim / 2;
-    let inv_freq: Vec<f64> = (0..half)
-        .map(|i| 1.0 / theta.powf((2 * i) as f64 / head_dim as f64))
-        .collect();
     let mut cos = Vec::with_capacity(seq_len);
     let mut sin = Vec::with_capacity(seq_len);
     for pos in 0..seq_len {
-        let mut c = Vec::with_capacity(half);
-        let mut s = Vec::with_capacity(half);
-        for &freq in &inv_freq {
-            let angle = pos as f64 * freq;
-            c.push(angle.cos());
-            s.push(angle.sin());
-        }
+        let (c, s) = rope_at(pos, head_dim, theta);
         cos.push(c);
         sin.push(s);
+    }
+    (cos, sin)
+}
+
+/// RoPE cos/sin values for one position without allocating tables for the
+/// entire prefix. Incremental decoding calls this once per new token.
+pub fn rope_at(pos: usize, head_dim: usize, theta: f64) -> (Vec<f64>, Vec<f64>) {
+    let half = head_dim / 2;
+    let mut cos = Vec::with_capacity(half);
+    let mut sin = Vec::with_capacity(half);
+    for index in 0..half {
+        let frequency = 1.0 / theta.powf((2 * index) as f64 / head_dim as f64);
+        let angle = pos as f64 * frequency;
+        cos.push(angle.cos());
+        sin.push(angle.sin());
     }
     (cos, sin)
 }
@@ -103,10 +108,12 @@ pub fn grouped_query_attention(
         let q_base = qh_idx * head_dim;
         let kv_base = kv * head_dim;
 
-        let mut qh: Vec<Vec<f64>> =
-            (0..seq).map(|t| q[t][q_base..q_base + head_dim].to_vec()).collect();
-        let mut kh: Vec<Vec<f64>> =
-            (0..seq).map(|t| k[t][kv_base..kv_base + head_dim].to_vec()).collect();
+        let mut qh: Vec<Vec<f64>> = (0..seq)
+            .map(|t| q[t][q_base..q_base + head_dim].to_vec())
+            .collect();
+        let mut kh: Vec<Vec<f64>> = (0..seq)
+            .map(|t| k[t][kv_base..kv_base + head_dim].to_vec())
+            .collect();
         for t in 0..seq {
             apply_rope(&mut qh[t], &cos[t], &sin[t]);
             apply_rope(&mut kh[t], &cos[t], &sin[t]);
@@ -141,8 +148,9 @@ pub struct KvCache {
 
 /// One incremental GQA step: `q_new`/`k_new`/`v_new` are the single new token's
 /// projections (length n_q_heads*head_dim and n_kv_heads*head_dim). Applies RoPE
-/// at position `pos`, appends k/v to the cache, and returns the new token's
-/// context vector (n_q_heads*head_dim) attending over the whole cache. The cache
+/// using `cos`/`sin` (precomputed for the new token's position), appends k/v to
+/// the cache, and returns the new token's context vector (n_q_heads*head_dim)
+/// attending over the whole cache. The cache
 /// grows by one row per call — turning the O(seq) per-token attention into O(1)
 /// new work plus a scan over the cache.
 pub fn gqa_step(
@@ -153,7 +161,6 @@ pub fn gqa_step(
     n_q_heads: usize,
     n_kv_heads: usize,
     head_dim: usize,
-    pos: usize,
     cos: &[f64],
     sin: &[f64],
 ) -> Vec<f64> {
@@ -237,8 +244,12 @@ pub fn causal_self_attention(
     for h in 0..n_heads {
         let base = h * head_dim;
         // Rotate this head's q/k for every position up front.
-        let mut qh: Vec<Vec<f64>> = (0..seq).map(|t| q[t][base..base + head_dim].to_vec()).collect();
-        let mut kh: Vec<Vec<f64>> = (0..seq).map(|t| k[t][base..base + head_dim].to_vec()).collect();
+        let mut qh: Vec<Vec<f64>> = (0..seq)
+            .map(|t| q[t][base..base + head_dim].to_vec())
+            .collect();
+        let mut kh: Vec<Vec<f64>> = (0..seq)
+            .map(|t| k[t][base..base + head_dim].to_vec())
+            .collect();
         for t in 0..seq {
             apply_rope(&mut qh[t], &cos[t], &sin[t]);
             apply_rope(&mut kh[t], &cos[t], &sin[t]);

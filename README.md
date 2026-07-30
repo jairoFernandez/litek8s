@@ -64,6 +64,33 @@ cargo run --release -- llm generate \
   "The capital of France is"
 ```
 
+Incremental generation can place the KV cache on one or more disks:
+
+```bash
+cargo run --release -- llm generate \
+  --model-dir /path/to/Qwen2.5-0.5B \
+  --gguf ~/.ollama/models/blobs/sha256-... \
+  --kv-cache-dir /fast-disk/litek8s-kv,/large-disk/litek8s-kv \
+  --kv-max-tokens 32768 \
+  --kv-buffer-mb 16 \
+  --max-new 4 \
+  "The capital of France is"
+```
+
+This mode performs one batched prompt prefill and then processes only the new
+token at each decode step. It creates one grow-on-demand F16 K/V file per
+transformer layer, distributes the files round-robin across the supplied
+directories, and accesses them through writable mmap. Files grow in 64-token
+groups, avoiding full-capacity allocation on filesystems such as APFS. Only the
+configured tile buffer and the current attention scores need additional
+resident memory. Cache files are removed automatically; pass
+`--keep-kv-cache` to retain them for inspection or reuse by external tooling.
+
+For Qwen2.5-0.5B, disk KV storage costs 12 KiB per cached token across all 24
+layers. A 32,768-token limit therefore has 384 MiB of maximum capacity, while
+the initial mapped allocation is only 1.5 MiB across 24 layers. The CLI reports
+both bytes containing live rows and the current mapped file lengths.
+
 The mmap backend loads only requested embedding rows, decodes each projection
 weight once per input batch, reuses it across the batch rows, and computes tied
 embedding logits without materializing the vocabulary matrix. The original
@@ -89,8 +116,22 @@ An alternating, page-cache-warm comparison isolates the two mmap readers:
 
 The quantized file is 2.484x smaller, reduces measured RSS by about 55.6%, and
 is about 1.22x faster in the current scalar CPU kernel. GGUF startup alone is
-about 0.40 s versus 0.20 s for SafeTensors; generation still reruns the full
-sequence because neither local backend has a KV cache yet.
+about 0.40 s versus 0.20 s for SafeTensors.
+
+With the same GGUF, prompt, warm page cache, and four generated tokens, the disk
+KV path produced the same `Paris. It is` output in 4.31 s versus 10.18 s for
+full-prefix recomputation, a 2.36x speedup. It used 0.10 MiB of KV rows for the
+eight positions actually processed. These timings describe the current scalar
+CPU implementation; longer contexts trade additional disk I/O for bounded,
+evictable memory instead of keeping the whole KV history in anonymous RAM.
+
+Measured with `/usr/bin/time -l` on macOS, both modes peak at about 454 MiB of
+RSS — dominated by the file-backed, evictable pages of the ~379 MiB mmapped
+GGUF — while the anonymous "peak memory footprint" is 82 MiB for the disk KV
+path versus 84 MiB for recomputation. At only eight cached positions the KV
+difference is negligible; the disk path's advantage grows with context length,
+since its resident KV state stays bounded by the tile buffer rather than the
+full history.
 
 ## Firepack
 
