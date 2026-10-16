@@ -7,11 +7,14 @@ use crate::control_plane::raft::ControlPlaneNode;
 use crate::control_plane::{ClusterCommand, CommandResult};
 use crate::node::{ClusterNode, NodeClient, select_nodes_for_manifest};
 use crate::runtime::LocalRuntime;
-use crate::runtime::docker::{replica_container_name, summarize_exit_state};
+use crate::runtime::docker::{ContainerExitState, replica_container_name, summarize_exit_state};
 use crate::store::{DeploymentStatus, EventLevel, ReplicaState, Store, StoredDeployment};
 
 const RECREATE_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const MAX_RESTART_BACKOFF_SECS: u64 = 15;
+/// How long after creation a `created`/`restarting` container is still
+/// considered to be starting rather than stuck.
+const STARTUP_GRACE: Duration = Duration::from_secs(10);
 
 pub async fn reconcile_all(
     store: &Store,
@@ -279,9 +282,18 @@ pub async fn reconcile_replica(
         .filter(|c| c.ordinal == Some(ordinal) || (ordinal == 0 && c.ordinal.is_none()))
         .collect();
 
-    // Collapse duplicates for the same ordinal down to one.
+    // Collapse duplicates for the same ordinal down to one, keeping a healthy
+    // container (preferring the one this replica already tracks) so a
+    // duplicate never churns the replica's container ID.
     if containers.len() > 1 {
-        containers.sort_by(|a, b| a.id.cmp(&b.id));
+        let tracked_id = replica.and_then(|r| r.container_id.as_deref());
+        containers.sort_by_key(|c| {
+            (
+                !(c.running && c.spec_hash.as_deref() == Some(deployment.spec_hash.as_str())),
+                Some(c.id.as_str()) != tracked_id,
+                c.id.clone(),
+            )
+        });
         for extra in &containers[1..] {
             runtime.remove_container(&extra.id).await?;
         }
@@ -364,11 +376,18 @@ pub async fn reconcile_replica(
         } else if container.running {
             Some("runtime drift".to_string())
         } else {
-            runtime
-                .inspect_exit_state(&container.id)
-                .await
-                .ok()
-                .and_then(|state| summarize_exit_state(&state))
+            let exit_state = runtime.inspect_exit_state(&container.id).await.ok();
+            if exit_state
+                .as_ref()
+                .is_some_and(|state| is_transient_not_running(state, container.created_at))
+            {
+                // Not an exit: the list was stale or the container is still
+                // starting. Leave it alone; a later pass will see it settle.
+                return Ok(());
+            }
+            exit_state
+                .as_ref()
+                .and_then(summarize_exit_state)
                 .or_else(|| Some("container exited".to_string()))
         };
 
@@ -534,6 +553,22 @@ async fn wait_until_container_gone(
     }
 }
 
+/// Whether a hash-matching container that the list reported as not running is
+/// only transiently so, and must not be treated as an exit. Under load Docker
+/// can list a healthy container before its state settles: inspect says it is
+/// actually `running` (stale list), or it is still `created`/`restarting`
+/// shortly after creation. Past the startup grace window those states count as
+/// stuck, so a container whose start failed is still replaced.
+fn is_transient_not_running(exit_state: &ContainerExitState, created_at: Option<i64>) -> bool {
+    match exit_state.status.as_deref() {
+        Some("running") => true,
+        Some("created" | "restarting") => created_at.is_some_and(|created_at| {
+            (now_unix() as i64).saturating_sub(created_at) < STARTUP_GRACE.as_secs() as i64
+        }),
+        _ => false,
+    }
+}
+
 fn restart_backoff_for_streak(streak: u32) -> Duration {
     let streak = streak.max(1);
     let exponential = 1u64
@@ -572,7 +607,183 @@ async fn record_deployment_event(
 
 #[cfg(test)]
 mod tests {
-    use super::restart_backoff_for_streak;
+    use std::sync::Arc;
+
+    use super::{reconcile_replica, restart_backoff_for_streak};
+    use crate::control_plane::ClusterCommand;
+    use crate::control_plane::raft::ControlPlaneNode;
+    use crate::node::{ClusterNode, NodeClient};
+    use crate::runtime::{ContainerRuntime, FakeRuntime, LocalRuntime};
+    use crate::store::{DeploymentStatus, ReplicaState, Store, StoredDeployment};
+
+    struct Harness {
+        store: Arc<Store>,
+        ha_node: ControlPlaneNode,
+        fake: Arc<FakeRuntime>,
+        client: NodeClient,
+        _tmp: tempfile::TempDir,
+    }
+
+    impl Harness {
+        async fn new() -> Self {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let store = Arc::new(Store::load(tmp.path().join("state.json")).await.unwrap());
+            let ha_node =
+                ControlPlaneNode::start(1, "127.0.0.1:0".into(), Arc::clone(&store), None)
+                    .await
+                    .unwrap();
+            ha_node
+                .propose(ClusterCommand::ApplyDeployment {
+                    manifest_yaml: r#"apiVersion: litek8s.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 1
+  template:
+    spec:
+      restartPolicy: Always
+      containers:
+        - name: app
+          image: alpine:latest
+"#
+                    .to_string(),
+                })
+                .await
+                .unwrap();
+            let fake = Arc::new(FakeRuntime::new());
+            let client =
+                NodeClient::for_node(&ClusterNode::local(), LocalRuntime::Fake(fake.clone()));
+            Self {
+                store,
+                ha_node,
+                fake,
+                client,
+                _tmp: tmp,
+            }
+        }
+
+        async fn deployment(&self) -> StoredDeployment {
+            self.store.get("web").await.expect("deployment stored")
+        }
+
+        async fn create_replica(&self) -> String {
+            let deployment = self.deployment().await;
+            self.fake
+                .create_and_start(&deployment.manifest, &deployment.spec_hash, 0)
+                .await
+                .unwrap()
+        }
+
+        async fn reconcile(&self, replica: Option<&ReplicaState>) {
+            let deployment = self.deployment().await;
+            reconcile_replica(&self.ha_node, &self.client, &deployment, 0, replica)
+                .await
+                .unwrap();
+        }
+
+        async fn container_ids(&self) -> Vec<String> {
+            self.fake
+                .list_containers_for_deployment("web")
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|c| c.id)
+                .collect()
+        }
+    }
+
+    fn mark_not_running(fake: &FakeRuntime, id: &str, inspected_status: &str) {
+        fake.set_container_state(id, |state| {
+            state.running = false;
+            state.state = Some(inspected_status.to_string());
+            state.exit.status = Some(inspected_status.to_string());
+        });
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn freshly_created_container_is_not_churned() {
+        let h = Harness::new().await;
+        let id = h.create_replica().await;
+        mark_not_running(&h.fake, &id, "created");
+
+        h.reconcile(None).await;
+
+        assert_eq!(h.fake.remove_calls(), 0);
+        assert_eq!(h.container_ids().await, vec![id]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_list_of_running_container_is_not_churned() {
+        let h = Harness::new().await;
+        let id = h.create_replica().await;
+        // The list says not running but inspect says running.
+        h.fake.set_container_state(&id, |state| {
+            state.running = false;
+            state.state = Some("exited".to_string());
+        });
+
+        h.reconcile(None).await;
+
+        assert_eq!(h.fake.remove_calls(), 0);
+        assert_eq!(h.container_ids().await, vec![id]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn container_stuck_in_created_is_replaced_after_grace() {
+        let h = Harness::new().await;
+        let id = h.create_replica().await;
+        mark_not_running(&h.fake, &id, "created");
+        h.fake.set_created_at(&id, 0);
+
+        h.reconcile(None).await;
+
+        assert_eq!(h.fake.remove_calls(), 1);
+        assert!(h.container_ids().await.is_empty());
+        let replica = h.deployment().await.replicas[0].clone();
+        assert_eq!(replica.status, DeploymentStatus::Restarting);
+        assert!(
+            replica.next_retry_at.is_some(),
+            "exit path keeps restart backoff"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exited_container_is_removed_with_backoff() {
+        let h = Harness::new().await;
+        let id = h.create_replica().await;
+        h.fake.set_container_state(&id, |state| {
+            state.running = false;
+            state.state = Some("exited".to_string());
+            state.exit.status = Some("exited".to_string());
+            state.exit.exit_code = Some(1);
+        });
+
+        h.reconcile(None).await;
+
+        assert_eq!(h.fake.remove_calls(), 1);
+        let replica = h.deployment().await.replicas[0].clone();
+        assert_eq!(replica.status, DeploymentStatus::Restarting);
+        assert_eq!(replica.restart_streak, 1);
+        assert_eq!(replica.last_exit.as_deref(), Some("exited(1)"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn duplicate_collapse_keeps_tracked_container() {
+        let h = Harness::new().await;
+        let first = h.create_replica().await;
+        let tracked = h.create_replica().await;
+        let replica = ReplicaState {
+            ordinal: 0,
+            container_id: Some(tracked.clone()),
+            ..ReplicaState::default()
+        };
+
+        h.reconcile(Some(&replica)).await;
+
+        assert_eq!(h.container_ids().await, vec![tracked]);
+        assert_ne!(first, h.container_ids().await[0]);
+    }
 
     #[test]
     fn caps_restart_backoff() {

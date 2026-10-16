@@ -108,6 +108,10 @@ const CLUSTER_SNAPSHOT_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 // healthy remote nodes Offline. Aligned with the ssh ConnectTimeout=5 used in node.rs.
 const CLUSTER_REMOTE_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 const CLUSTER_SNAPSHOT_WARMING_UP: &str = "cluster snapshot is warming up";
+// Docker events arrive in bursts (create/start/die/destroy per container, and
+// the reconciler's own actions emit more). Wait this long after the first event
+// so a burst coalesces into a single reconcile pass instead of one per event.
+const RECONCILE_EVENT_DEBOUNCE: Duration = Duration::from_millis(400);
 
 pub async fn serve(config: ServerConfig) -> Result<()> {
     config::ensure_parent_dir(&config.socket_path)?;
@@ -1123,15 +1127,23 @@ fn spawn_reconcile_loop(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(poll_interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 _ = ticker.tick() => {}
-                _ = notify.notified() => {}
+                _ = notify.notified() => {
+                    // Debounce: let the rest of the event burst land, then drop
+                    // the permit it left behind — this pass observes all of it.
+                    tokio::time::sleep(RECONCILE_EVENT_DEBOUNCE).await;
+                    let _ = tokio::time::timeout(Duration::ZERO, notify.notified()).await;
+                }
             }
 
             if let Err(error) = state.reconcile_all().await {
                 eprintln!("reconciliation failed: {error}");
             }
+            // A pass just ran; the next periodic one is a full interval away.
+            ticker.reset();
         }
     })
 }

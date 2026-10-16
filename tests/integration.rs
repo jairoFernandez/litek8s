@@ -145,15 +145,10 @@ async fn replicas_three_creates_three_containers() -> Result<()> {
     Ok(())
 }
 
-// IGNORED — known reconciler limitation (tracked for follow-up): under the
-// event-driven reconcile (every Docker container create/remove notifies the
-// loop), a multi-replica deployment can enter a reconcile storm where a healthy
-// replica's container is transiently observed as not-running and recreated,
-// churning its container ID. The per-component logic is correct (see unit tests
-// + `replicas_three_creates_three_containers`); fixing this needs event
-// debouncing / tolerance for transient not-running states in the reconciler.
-// Run with `--ignored` to exercise end-to-end once that lands.
-#[ignore]
+// Guards against the event-driven reconcile storm: every Docker create/remove
+// wakes the loop, and a healthy replica transiently listed as not-running used
+// to be recreated, churning its container ID. Covered by event debouncing in
+// the reconcile loop and transient-state tolerance in the reconciler.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn scaling_up_and_down_keeps_surviving_replica_ids() -> Result<()> {
     let _guard = integration_lock().lock().await;
@@ -210,12 +205,8 @@ async fn scaling_up_and_down_keeps_surviving_replica_ids() -> Result<()> {
     Ok(())
 }
 
-// IGNORED — same reconciler-storm limitation as
-// `scaling_up_and_down_keeps_surviving_replica_ids` (see its note). Killing one
-// replica triggers an event flood that can transiently churn the other
-// replicas' container IDs. Run with `--ignored` once the reconciler tolerates
-// transient not-running states.
-#[ignore]
+// Killing one replica triggers an event flood; the other replicas' container
+// IDs must not churn (see `scaling_up_and_down_keeps_surviving_replica_ids`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn killed_replica_is_recreated() -> Result<()> {
     let _guard = integration_lock().lock().await;

@@ -52,6 +52,9 @@ pub struct ManagedContainer {
     /// inspect per container); filled on demand by the service-resolve path.
     #[serde(default)]
     pub container_ip: Option<String>,
+    /// Creation time (unix seconds) as reported by the container list.
+    #[serde(default)]
+    pub created_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -494,6 +497,7 @@ impl DockerRuntime {
                 spec_hash: labels.get(LABEL_HASH).cloned(),
                 ordinal,
                 container_ip: None,
+                created_at: container.created,
             });
         }
 

@@ -68,6 +68,13 @@ impl FakeContainerState {
     }
 }
 
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
 #[derive(Debug, Default)]
 struct FakeState {
     containers: HashMap<String, (ManagedContainer, FakeContainerState)>,
@@ -102,6 +109,15 @@ impl FakeRuntime {
             managed.running = fake.running;
             managed.state = fake.state.clone();
             managed.status = fake.status.clone();
+        }
+    }
+
+    /// Override a container's creation time (unix seconds), e.g. to age it
+    /// past the reconciler's startup grace window.
+    pub fn set_created_at(&self, container_id: &str, created_at: i64) {
+        let mut state = self.state.lock().unwrap();
+        if let Some((managed, _)) = state.containers.get_mut(container_id) {
+            managed.created_at = Some(created_at);
         }
     }
 
@@ -152,6 +168,7 @@ impl ContainerRuntime for FakeRuntime {
             spec_hash: Some(spec_hash.to_string()),
             ordinal: Some(ordinal),
             container_ip: None,
+            created_at: Some(now_unix()),
         };
         state
             .containers
