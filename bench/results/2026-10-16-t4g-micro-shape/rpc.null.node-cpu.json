@@ -1,0 +1,53 @@
+{
+ "window_s": 0.2,
+ "buckets": {
+  "containerd": {
+   "cpu_s": 0.0,
+   "pct_one_core": 0.0
+  },
+  "dockerd": {
+   "cpu_s": 0.0,
+   "pct_one_core": 0.0
+  },
+  "litek8s-agent": {
+   "cpu_s": 0.0,
+   "pct_one_core": 0.0
+  },
+  "os/other": {
+   "cpu_s": 0.022,
+   "pct_one_core": 10.078
+  },
+  "ssh.service (short-lived)": {
+   "cpu_s": 0.015,
+   "pct_one_core": 6.829
+  },
+  "sshd": {
+   "cpu_s": 0.01,
+   "pct_one_core": 4.661
+  },
+  "user.slice (short-lived)": {
+   "cpu_s": 0.054,
+   "pct_one_core": 25.041
+  }
+ },
+ "categories": {
+  "node-agent": {
+   "cpu_s": 0.078,
+   "pct_one_core": 36.531
+  },
+  "os/other": {
+   "cpu_s": 0.022,
+   "pct_one_core": 10.078
+  },
+  "runtime": {
+   "cpu_s": 0.0,
+   "pct_one_core": 0.0
+  }
+ },
+ "write_syscall_kib": {
+  "sshd": 22
+ },
+ "busy_cpu_s": 0.1,
+ "system_busy_pct_of_all_cpus": 22.727,
+ "ncpu": 2
+}

@@ -1,0 +1,106 @@
+{
+ "buckets": {
+  "os/other": {
+   "rss_kib": 155356,
+   "pss_kib": 77587,
+   "procs": 18,
+   "comms": {
+    "systemd": 2,
+    "systemd-journal": 1,
+    "multipathd": 1,
+    "systemd-udevd": 1,
+    "systemd-resolve": 1,
+    "systemd-timesyn": 1,
+    "systemd-network": 1,
+    "cron": 1,
+    "dbus-daemon": 1,
+    "polkitd": 1,
+    "systemd-logind": 1,
+    "udisksd": 1,
+    "rsyslogd": 1,
+    "ModemManager": 1,
+    "agetty": 2,
+    "(sd-pam)": 1
+   }
+  },
+  "sshd": {
+   "rss_kib": 22820,
+   "pss_kib": 7338,
+   "procs": 3,
+   "comms": {
+    "sshd": 3
+   }
+  },
+  "k3s-server": {
+   "rss_kib": 467908,
+   "pss_kib": 409952,
+   "procs": 1,
+   "comms": {
+    "k3s-server": 1
+   }
+  },
+  "containerd": {
+   "rss_kib": 160324,
+   "pss_kib": 102368,
+   "procs": 1,
+   "comms": {
+    "containerd": 1
+   }
+  },
+  "containerd-shim": {
+   "rss_kib": 16468,
+   "pss_kib": 16464,
+   "procs": 1,
+   "comms": {
+    "containerd-shim": 1
+   }
+  },
+  "pod sandbox (pause)": {
+   "rss_kib": 500,
+   "pss_kib": 496,
+   "procs": 1,
+   "comms": {
+    "pause": 1
+   }
+  },
+  "k8s addon pods": {
+   "rss_kib": 56628,
+   "pss_kib": 56624,
+   "procs": 1,
+   "comms": {
+    "coredns": 1
+   }
+  }
+ },
+ "categories": {
+  "os/other": {
+   "rss_kib": 155356,
+   "pss_kib": 77587
+  },
+  "node-agent": {
+   "rss_kib": 22820,
+   "pss_kib": 7338
+  },
+  "control-plane": {
+   "rss_kib": 467908,
+   "pss_kib": 409952
+  },
+  "runtime": {
+   "rss_kib": 177292,
+   "pss_kib": 119328
+  },
+  "addons": {
+   "rss_kib": 56628,
+   "pss_kib": 56624
+  }
+ },
+ "system": {
+  "mem_total_kib": 974620,
+  "mem_available_kib": 393380,
+  "mem_used_kib": 581240
+ },
+ "cgroup_memory_current_kib": {
+  "system.slice/k3s.service": 673724,
+  "kubepods.slice": 10836
+ }
+}
