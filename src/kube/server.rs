@@ -85,6 +85,10 @@ pub struct ApiState {
     pub(crate) cluster_dns: std::sync::atomic::AtomicBool,
     /// Serves `https://` on the same port when set (in-cluster clients).
     tls: Option<tls::ServerTls>,
+    /// ClusterIPs and nodePorts handed out but maybe not stored yet. Helm
+    /// creates a chart's Services concurrently; each allocation looks at the
+    /// stored Services, so without this two could get the same address.
+    allocated: std::sync::Mutex<Vec<(String, std::time::Instant)>>,
 }
 
 impl ApiState {
@@ -104,6 +108,7 @@ impl ApiState {
             hub: Arc::new(AgentHub::default()),
             cluster_dns: std::sync::atomic::AtomicBool::new(false),
             tls,
+            allocated: std::sync::Mutex::default(),
         };
         state.bootstrap()?;
         Ok(state)
@@ -1713,7 +1718,9 @@ impl ApiState {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
+            let mut allocated = self.recent_allocations();
             let mut used = self.used_node_ports();
+            used.extend(allocated.iter().filter_map(|(a, _)| a.strip_prefix("port:")?.parse::<i64>().ok()));
             if let Some(ports) = spec.get_mut("ports").and_then(Value::as_array_mut) {
                 for port in ports {
                     if port.get("nodePort").and_then(Value::as_i64).unwrap_or(0) != 0 {
@@ -1727,6 +1734,7 @@ impl ApiState {
                     let np = reuse.unwrap_or_else(|| {
                         let np = (30000..=32767).find(|p| !used.contains(p)).unwrap_or(30000);
                         used.push(np);
+                        allocated.push((format!("port:{np}"), std::time::Instant::now()));
                         np
                     });
                     port["nodePort"] = json!(np);
@@ -1738,15 +1746,26 @@ impl ApiState {
         }
     }
 
+    /// The recent allocations, locked: allocate while holding it. Entries
+    /// expire after a minute, long after the Service is stored or rejected.
+    fn recent_allocations(&self) -> std::sync::MutexGuard<'_, Vec<(String, std::time::Instant)>> {
+        let mut allocated = self.allocated.lock().unwrap();
+        allocated.retain(|(_, at)| at.elapsed() < std::time::Duration::from_secs(60));
+        allocated
+    }
+
     fn allocate_cluster_ip(&self) -> String {
+        let mut allocated = self.recent_allocations();
         let (services, _) = self.store.list("", "services", None);
-        let used: Vec<String> = services
+        let mut used: Vec<String> = services
             .iter()
             .filter_map(|s| s.pointer("/spec/clusterIP").and_then(Value::as_str).map(str::to_string))
             .collect();
+        used.extend(allocated.iter().filter_map(|(a, _)| a.strip_prefix("ip:").map(str::to_string)));
         for n in 10u32..65_000 {
             let ip = format!("{SERVICE_CIDR_PREFIX}.{}.{}", n / 256, n % 256);
             if !used.contains(&ip) {
+                allocated.push((format!("ip:{ip}"), std::time::Instant::now()));
                 return ip;
             }
         }

@@ -329,3 +329,28 @@ async fn jobs_complete_and_no_op_updates_keep_the_resource_version() -> Result<(
     assert_eq!(a["metadata"]["resourceVersion"], b["metadata"]["resourceVersion"], "an update that changes nothing is not a write");
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_service_creates_get_distinct_addresses() -> Result<()> {
+    let addr = start().await?;
+    // Helm creates a chart's Services in parallel.
+    let creates = (0..16).map(|i| {
+        let addr = addr.clone();
+        tokio::spawn(async move {
+            let svc = json!({
+                "apiVersion": "v1", "kind": "Service", "metadata": {"name": format!("s{i}")},
+                "spec": {"type": "NodePort", "ports": [{"port": 80}]}
+            });
+            post(&addr, "/api/v1/namespaces/default/services", svc).await
+        })
+    });
+    let mut ips = std::collections::HashSet::new();
+    let mut ports = std::collections::HashSet::new();
+    for create in creates.collect::<Vec<_>>() {
+        let (code, svc) = create.await??;
+        assert_eq!(code, 201, "{svc}");
+        assert!(ips.insert(svc["spec"]["clusterIP"].as_str().unwrap().to_string()), "duplicate ClusterIP: {svc}");
+        assert!(ports.insert(svc["spec"]["ports"][0]["nodePort"].as_i64().unwrap()), "duplicate nodePort: {svc}");
+    }
+    Ok(())
+}
