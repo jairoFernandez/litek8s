@@ -1,42 +1,110 @@
 # Compatibility results
 
-Corpus: 74 cases in 5 tiers (see [README.md](README.md)). Run on 2026-10-16
-with kubectl v1.33.9 and Helm v4.3.0 on an Apple M3 Max.
+Corpus: 101 cases in 5 tiers (see [README.md](README.md)); L4 grew from 20
+to 47 Helm charts on 2026-10-17. Run on 2026-10-17 with kubectl v1.33.9 and
+Helm v4.3.0 on an Apple M3 Max, Docker 29.8.2 under OrbStack.
 
-| tier | k3s (k3d, reference) | litek8s apiserver, API only (2026-10-16) | litek8s apiserver + controllers + node agent (2026-10-17) |
+| tier | k3s (k3d, reference) | litek8s, 74-case corpus (main, e8a5de6) | litek8s, 101-case corpus (2026-10-17) |
 |---|---|---|---|
 | L0 discovery | 7/7 | 7/7 | **7/7** |
 | L1 object API | 25/25 | 25/25 | **25/25** |
-| L2 workloads | 15/15 | 0/15 | **14/15** |
-| L3 networking | 7/7 | 0/7 | **6/7** |
-| L4 Helm charts (`--wait`) | 20/20 | 0/20 | **20/20** |
-| **all** | **74/74 (100 %)** | **32/74 (43 %)** | **72/74 (97 %)** |
+| L2 workloads | 15/15 | 14/15 | **15/15** |
+| L3 networking | 7/7 | 6/7 | **7/7** |
+| L4 Helm charts (`--wait`) | 47/47 | 20/20 (of the first 20) | **47/47** |
+| **all** | **101/101 (100 %)** | **72/74 (97 %)** | **101/101 (100 %)** |
 
-- **Reference.** k3s v1.36.5+k3s1 via k3d (1 server + 1 agent, traefik and
-  metrics-server disabled because L4 installs them). Every case passes, so the
-  corpus itself is sound. Two cases (`api_versions`, `list_all_namespaces`)
-  were fixed during the run, for a SIGPIPE race between `kubectl | grep -q` and
-  `pipefail`. Their results come from a recheck on the same cluster and are
-  merged into `results/20261016-202102-k3d-baseline/`.
-- **litek8s, 2026-10-17.** One run of the whole corpus,
-  `results/20261017-114819-litek8s-full/`: `litek8s apiserver` (release build, in-memory store)
-  with its controllers, scheduler, cluster DNS and the local Docker-backed
-  node agent in the same process, on OrbStack (Docker 29.8) on an M3 Max.
-  `--max-case-seconds 300`, `COMPAT_HELM_TIMEOUT=4m`. Most L2 and L3 cases
-  finish in about a second; the slowest chart (kyverno) in under a minute.
-- **Not passing (2):**
-  - `port_forward` (fixed since): it failed in the full run and in some
-    reruns. The agent's first connection to a pod created a moment earlier
-    could be refused (nginx not listening yet) or go unanswered (the host's
-    route to a brand-new pod address under OrbStack), and kubectl 1.33 ends
-    the whole port-forward on the first stream error. The agent now retries
-    such connections for up to 5 s; L2 has passed 15/15 since.
-  - `api_from_pod`: the case uses busybox's built-in TLS client, which
-    aborts the handshake with the API server's rustls TLS stack. In-cluster
-    clients built on Go or OpenSSL connect fine (every L4 chart with an
-    operator talks to the API this way).
+- **Reference.** k3s v1.33.4+k3s1 via k3d (1 server + 1 agent, traefik and
+  metrics-server disabled because L4 installs them),
+  `results/20261017-143430-k3d-baseline/`. Every case passes, so the corpus
+  is sound. Three L4 cases come from a recheck on the same cluster, merged
+  into that directory: `helm_headlamp` (its helm process was killed by
+  mistake during the run), `helm_alloy` (a chart download from GitHub
+  failed) and `helm_home_assistant` (the 1.5 GB image did not pull within
+  the 6 min timeout on the node it landed on).
+- **litek8s.** One run of the whole corpus,
+  `results/20261017-151522-litek8s-full/`: `litek8s apiserver` (release
+  build, in-memory store) with its controllers, scheduler, cluster DNS and
+  the local Docker-backed node agent in the same process.
+  `--max-case-seconds 420`. Then L2+L3 three more times
+  (`results/*-litek8s-l2l3-rerun{1,2,3}/`, 22/22 each), and L0–L3 with the
+  `--no-default-features` build (`results/*-litek8s-minimal-build/`, 54/54).
+- **Time.** The whole corpus took 12.3 min on litek8s (L4: 11.4 min, the
+  slowest chart pihole at 62 s) against 50.6 min on k3s (L4: 47 min). The
+  27 new charts alone: 6.0 min against 26.3 min. The k3s run shared the
+  Docker VM with litek8s runs for part of the time, and image caches
+  differ, so take the ratio as rough.
+- **The 27 charts added** (`charts.txt`): kube-prometheus-stack,
+  VictoriaMetrics single, Grafana Alloy, HAProxy ingress, Envoy Gateway,
+  NGINX Inc. ingress, MetalLB, OpenEBS local PV (hostpath), OT redis-operator,
+  mariadb-operator, Zalando postgres-operator, Valkey, Home Assistant,
+  Jellyfin, Nextcloud, Uptime Kuma, Vaultwarden, Pi-hole, Node-RED,
+  Homepage, Gatus, zot, the CNCF Docker registry, Flux, Argo Workflows,
+  descheduler, Trivy operator. Tried and left out because they fail on k3s
+  too: fluent-bit, authelia, immich, ollama (see `charts.txt`).
 
-## What made L2, L3 and L4 pass
+## What the 27 new charts exposed (fixed)
+
+- **Protobuf from client-go**: `SelfSubjectAccessReview` (prometheus-operator)
+  and `CustomResourceDefinition` (haproxy-ingress's CRD job, zalando
+  postgres-operator) arrive as protobuf. Vendored the authorization,
+  authentication and apiextensions schemas; JSONSchemaProps needs its
+  hand-written JSON forms (`$ref`, `x-kubernetes-*`, schema-or-bool unions).
+- **ValidatingAdmissionPolicy(+Binding)** served (Envoy Gateway ships one;
+  the CEL rules are stored, not evaluated), and RuntimeClass.
+- **Concurrent Service creates got the same ClusterIP** (and could get the
+  same nodePort): cert-manager's webhook and cainjector Services shared an
+  address. Allocations are now serialized and reserved until stored.
+- **Serving certificate without an authority key identifier**: Python 3.13's
+  strict verification (Grafana's k8s-sidecar) rejected it.
+- **Probes**: probe `httpHeaders` now replace the default `Host` (Nextcloud
+  answered the duplicate with 400); a hostNetwork pod's `127.0.0.1` is the
+  Docker VM's loopback, not the node's (metallb).
+- **Pods**: `shareProcessNamespace` and `hostPID` (metallb's frr reloader is
+  signalled by PID); memory `emptyDir` is world-writable (haproxy binds a
+  socket in a `/run` emptyDir as uid 1000); image `VOLUME`s get named
+  volumes instead of Docker's anonymous ones, which vaultwarden refuses as
+  "not persistent".
+
+## The two failures on main
+
+- **`api_from_pod`**: busybox's built-in TLS client (`wget` in busybox
+  images) expects one TLS handshake message per record. rustls sends its
+  whole first TLS 1.2 flight (ServerHello, Certificate, ServerKeyExchange,
+  ServerHelloDone) as one record, and busybox stalled after the
+  ServerHello. Versions, cipher suites, key type and certificate were all
+  fine: busybox offered TLS 1.2 with ECDHE-ECDSA-AES128-GCM and P-256/X25519,
+  which rustls accepts. The API server's TLS transport now re-frames the
+  plaintext handshake records it writes, one message per record (valid TLS
+  for every client; OpenSSL still negotiates TLS 1.3, defaults unchanged).
+- **`port_forward`, and an intermittent `http_readiness`**: with Docker in a
+  VM, the host's route to a pod address is sometimes missing for a while
+  (OrbStack: the VM reaches the pod, macOS does not; Docker Desktop has no
+  route at all), so anything the node or API server dials at a pod address
+  can hang. Probes, port-forward, NodePort relays and admission webhook
+  calls now try the address directly first, and when that neither
+  connects nor is refused they go through the pod's sandbox (`nc`/`wget`
+  run in the pod's network namespace), or for webhooks through the node
+  agent that runs the pod. The address is remembered so later connections
+  skip the timeout. This was reproduced by dropping host traffic inside one
+  pod with iptables: the pod still turned Ready and port-forward, NodePort
+  and webhook calls still worked.
+
+## Binary size
+
+Release builds on macOS arm64 (`opt-level = 3`, unstripped):
+
+| build | size |
+|---|---|
+| main (e8a5de6) | 26.5 MiB (27,789,328 B) |
+| default features (`llm` on) | 26.7 MiB (27,969,152 B) |
+| `--no-default-features` (no LLM/tensor-model stack) | **21.7 MiB** (22,725,632 B) |
+
+The `llm` feature gates safetensors/GGUF loading, tokenizers (oniguruma),
+the transformer, KV cache and distributed LLM coordinator, and the `llm`
+and `model` commands. Distributed matmul stays, since the daemon and node
+agent protocol carry it. `strip` would take another ~4 MiB off either build.
+
+## What made L2, L3 and L4 pass on main
 
 - **Controllers in-process, on the store's change feed** (`src/kube/controllers/`):
   ReplicaSet, Deployment (RollingUpdate/Recreate, revisions, `rollout undo`),
@@ -122,6 +190,9 @@ Found by running real kubectl against the server, not from the spec:
 
 1. Authentication and authorization (today every client is admin), and
    admission webhooks for writes made by the in-process controllers.
-2. A TLS stack that also accepts busybox's minimal client (`api_from_pod`).
-3. Service proxy without the helper container on Linux hosts, where the
+2. Evaluate CEL: ValidatingAdmissionPolicy rules and webhook
+   `matchConditions` are accepted but not enforced.
+3. A memory `emptyDir` is one tmpfs per container mount today; Kubernetes
+   shares one per pod between its containers.
+4. Service proxy without the helper container on Linux hosts, where the
    agent can program the host's NAT table directly.

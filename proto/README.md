@@ -1,6 +1,6 @@
 # Vendored Kubernetes protobuf schemas
 
-`generated.proto` files from [kubernetes/api](https://github.com/kubernetes/api)
+`generated.proto` files from [kubernetes/api](https://github.com/kubernetes/api),
 [kubernetes/apimachinery](https://github.com/kubernetes/apimachinery) and
 [kubernetes/apiextensions-apiserver](https://github.com/kubernetes/apiextensions-apiserver), tag
 `v0.33.0` (Kubernetes 1.33), unmodified, Apache-2.0 (see `LICENSE`).
