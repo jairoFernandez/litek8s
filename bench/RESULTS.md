@@ -37,6 +37,63 @@ Memory breakdown (PSS, MiB, 0 → 5 workloads):
 empty-cluster CPU. It already **loses on CPU at 5 workloads**, and that gap grows with every
 deployment, because of its own polling (overhead #2 below), not because of Docker.
 
+## After cutting steady-state polling (`cfb4222`)
+
+Rerun of the litek8s and remote-node phases (`bench/run.sh litek8s rpc`) on fresh guests of
+the same shape, after fixing overheads #2, #4 and #6 below. Raw data:
+[`results/2026-10-16-after-polling-cut/`](results/2026-10-16-after-polling-cut/).
+"Before" is the baseline above (`78fc083`); the run also includes the reconciler-storm fix
+(`78b42d3`), which does not touch the steady-state path.
+
+| metric | before | after | k3s minimal |
+|---|---|---|---|
+| Idle CPU, 5 nginx (whole guest, % of one vCPU) | 5.8 % | **2.55 %** | 5.2 % |
+| … of which dockerd + containerd + shims | 5.27 % | 2.14 % | – |
+| … of which litek8s serve | 0.59 % | 0.41 % | – |
+| containerd `write()` traffic, 5 nginx | 12.6 MiB/min | 6.1 MiB/min | – |
+| Idle CPU, 0 workloads | 0.9 % | 0.81 % | 4.2 % |
+| Remote node: RPCs/s, 5 deployments at steady state | 14.9 | **2.1** | – |
+| Remote node: RPCs per reconcile pass | 11.2 | 1.9 | – |
+| Remote node: node VM busy | 13.3 % | **3.41 %** | – |
+| Remote node: control-plane VM busy | 7.8 % | **1.89 %** | – |
+| Apply → first ready container (median) | 0.16 s (10 runs) | 0.21 s (5 runs) | 0.79 s |
+| Idle orchestrator memory, 5 nginx (PSS) | 188 MiB | 183 MiB | 603 MiB |
+
+litek8s now uses **half the idle CPU of k3s minimal** with 5 workloads, instead of losing to it.
+Apply → ready shows the same bimodal ~0.17 s / ~0.34 s split as before (the slow runs are
+slow in the CLI apply itself); with 5 vs 10 runs the median shift is within noise.
+
+RPC census after the change (5 deployments on the SSH node, 60 s):
+
+| request | per second (before → after) | why |
+|---|---|---|
+| `StatsSnapshot` | 7.50 → **0** | stats only while a `top` client is watching |
+| `ListContainersForDeployment` | 2.58 → **0** | replaced by the per-node list |
+| `ListManagedContainers` | 0.50 → 0.48 | one per node per pass, shared by cleanup and all replicas |
+| `ProbeContainerTcp` | 2.52 → 0.43 | Ready replicas re-probed every 10 s, new containers at once |
+| `Ping` | 1.62 → 1.00 | no snapshot refresh after each reconcile pass, 1 s ticker only |
+| `HostResources` | 0.18 → 0.17 | unchanged (5 s cache) |
+
+What changed:
+
+- **Snapshot loop**: per-container `docker stats` is collected only while a `top` request
+  arrived in the last 15 s. The first `top` after a quiet period refreshes the snapshot
+  inline, so it still shows memory and network numbers (CPU % needs a second sample, as
+  before). The extra snapshot refresh after every reconcile pass is gone.
+- **Reconciler**: one `ListManagedContainers` per node per pass, grouped by deployment and
+  ordinal and shared with orphan cleanup, instead of one list per replica plus one for cleanup.
+- **Readiness probe**: a Ready replica whose container ID has not changed is probed every
+  10 s instead of every 2 s pass. A new container is probed on the next pass. A failing probe
+  is still retried every pass.
+- **Raft**: `SetReplicaAssignment` / `SetReplicaStatus` are proposed only when the store says
+  they would change something. The check uses the same transition logic, including the
+  time-based restart-streak reset. An unchanged pass now adds no Raft log entries.
+
+What is left at idle: on the local node, dockerd + containerd still do 2.1 % for one container list
+per pass, one Docker ping per second (node health in the snapshot loop) and a probe per
+deployment every 10 s. On the remote node the remaining cost is almost all ssh + `litek8s
+agent` exec per RPC (overhead #3), not the RPC count.
+
 ## Remote node over SSH (litek8s only)
 
 Control plane in one guest, the node in a second guest of the same shape, reached through
@@ -73,7 +130,7 @@ litek8s's local node) and **7.8 % on the control plane**, 5.8 % of it in forked 
    (52–105 MiB). Replacing dockerd + containerd with crun/litecontainer is the largest single
    win for memory and disk.
 
-2. **Polling makes the runtime work 15× harder.** Going from 0 to 5 deployments takes
+2. *(Fixed in `cfb4222`, see above.)* **Polling makes the runtime work 15× harder.** Going from 0 to 5 deployments takes
    dockerd + containerd + shims from 0.34 % to 5.27 % of a vCPU, while litek8s serve only goes
    from 0.47 % to 0.59 %. litek8s causes that runtime load itself:
    - The cluster snapshot loop calls `StatsSnapshot` (`docker stats`) for **every deployment
@@ -99,7 +156,8 @@ litek8s's local node) and **7.8 % on the control plane**, 5.8 % of it in forked 
    The resident agent and its TCP listener already exist; a persistent connection, or a node
    push, removes the ssh + exec entirely.
 
-4. **The RPC count grows with deployments, even at steady state.** That is 2 RPCs per deployment
+4. *(Mostly fixed in `cfb4222`: 1.9 RPCs per pass, no longer O(deployments) except probes every 10 s.)*
+   **The RPC count grows with deployments, even at steady state.** That is 2 RPCs per deployment
    per reconcile pass plus 1 per deployment per snapshot refresh. One batched "node status"
    call (all containers + probe results + stats) would make it about 1 per node per pass.
 
@@ -109,7 +167,7 @@ litek8s's local node) and **7.8 % on the control plane**, 5.8 % of it in forked 
    k3s-server. The full pretty-printed rewrite (including up to 250 events) will cost during
    churn: restarts, rollouts, flapping probes. This benchmark does not exercise churn.
 
-6. *Minor:* each pass proposes `SetReplicaAssignment` + `SetReplicaStatus` through Raft for
+6. *(Fixed in `cfb4222`.)* *Minor:* each pass proposes `SetReplicaAssignment` + `SetReplicaStatus` through Raft for
    every replica, even when they are unchanged. The log is in memory and compacted by
    openraft's default snapshot policy, and all of litek8s serve stays under 0.6 % CPU, so it is
    low priority.
