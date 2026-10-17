@@ -1,0 +1,116 @@
+{
+ "buckets": {
+  "os/other": {
+   "rss_kib": 157144,
+   "pss_kib": 78435,
+   "procs": 18,
+   "comms": {
+    "systemd": 2,
+    "systemd-journal": 1,
+    "multipathd": 1,
+    "systemd-udevd": 1,
+    "systemd-resolve": 1,
+    "systemd-timesyn": 1,
+    "systemd-network": 1,
+    "cron": 1,
+    "dbus-daemon": 1,
+    "polkitd": 1,
+    "systemd-logind": 1,
+    "udisksd": 1,
+    "rsyslogd": 1,
+    "agetty": 2,
+    "ModemManager": 1,
+    "(sd-pam)": 1
+   }
+  },
+  "sshd": {
+   "rss_kib": 22820,
+   "pss_kib": 6873,
+   "procs": 3,
+   "comms": {
+    "sshd": 3
+   }
+  },
+  "containerd": {
+   "rss_kib": 61712,
+   "pss_kib": 60451,
+   "procs": 1,
+   "comms": {
+    "containerd": 1
+   }
+  },
+  "dockerd": {
+   "rss_kib": 93956,
+   "pss_kib": 91586,
+   "procs": 1,
+   "comms": {
+    "dockerd": 1
+   }
+  },
+  "litek8s-serve": {
+   "rss_kib": 19384,
+   "pss_kib": 17876,
+   "procs": 1,
+   "comms": {
+    "litek8s": 1
+   }
+  },
+  "containerd-shim": {
+   "rss_kib": 105644,
+   "pss_kib": 41194,
+   "procs": 10,
+   "comms": {
+    "containerd-shim": 10
+   }
+  },
+  "pod sandbox (pause)": {
+   "rss_kib": 10116,
+   "pss_kib": 2681,
+   "procs": 10,
+   "comms": {
+    "docker-init": 5,
+    "sleep": 5
+   }
+  },
+  "workload": {
+   "rss_kib": 61056,
+   "pss_kib": 18029,
+   "procs": 15,
+   "comms": {
+    "nginx": 15
+   }
+  }
+ },
+ "categories": {
+  "os/other": {
+   "rss_kib": 157144,
+   "pss_kib": 78435
+  },
+  "node-agent": {
+   "rss_kib": 22820,
+   "pss_kib": 6873
+  },
+  "runtime": {
+   "rss_kib": 271428,
+   "pss_kib": 195912
+  },
+  "control-plane": {
+   "rss_kib": 19384,
+   "pss_kib": 17876
+  },
+  "workload": {
+   "rss_kib": 61056,
+   "pss_kib": 18029
+  }
+ },
+ "system": {
+  "mem_total_kib": 974608,
+  "mem_available_kib": 617108,
+  "mem_used_kib": 357500
+ },
+ "cgroup_memory_current_kib": {
+  "system.slice/litek8s.service": 5140,
+  "system.slice/docker.service": 53256,
+  "system.slice/containerd.service": 216428
+ }
+}

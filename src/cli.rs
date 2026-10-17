@@ -256,6 +256,8 @@ enum Command {
         cluster_dns: std::net::SocketAddr,
         #[arg(long, help = "Do not serve cluster DNS")]
         no_cluster_dns: bool,
+        #[arg(long, default_value_t = 443, help = "Extra port on the listen address for pods (kubernetes.default.svc:443); 0 disables it")]
+        in_cluster_port: u16,
     },
     #[command(
         about = "Run a node agent that joins a remote litek8s API server",
@@ -1049,6 +1051,7 @@ pub async fn run() -> Result<()> {
             node_dir,
             cluster_dns,
             no_cluster_dns,
+            in_cluster_port,
         } => {
             crate::kube::serve(crate::kube::ApiServerConfig {
                 listen,
@@ -1059,6 +1062,7 @@ pub async fn run() -> Result<()> {
                 node_name,
                 node_dir,
                 cluster_dns: (!no_cluster_dns).then_some(cluster_dns),
+                in_cluster_port: (in_cluster_port != 0).then_some(in_cluster_port),
             })
             .await
         }

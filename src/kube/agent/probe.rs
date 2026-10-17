@@ -73,16 +73,25 @@ pub(crate) async fn run<R: PodRuntime>(
     tokio::time::sleep(Duration::from_secs(secs(&probe, "initialDelaySeconds", 0))).await;
     let period = Duration::from_secs(secs(&probe, "periodSeconds", 10).max(1));
     let timeout = Duration::from_secs(secs(&probe, "timeoutSeconds", 1).max(1));
+    // Readiness checks start fast (25 ms, doubling up to the period) until
+    // the first success, so a pod turns Ready as soon as its process listens
+    // instead of one full period later. A readiness failure before the first
+    // success changes nothing (the container is not ready yet). Startup and
+    // liveness failures count toward a restart, so they keep the period.
+    let mut fast = kind == ProbeKind::Readiness;
+    let mut wait = Duration::from_millis(25).min(period);
     let mut first = true;
     loop {
         if !first {
-            // Until the first success, check readiness more often so pods
-            // turn Ready promptly (results are still thresholded).
-            tokio::time::sleep(period).await;
+            tokio::time::sleep(if fast { wait } else { period }).await;
+            wait = (wait * 2).min(period);
         }
         first = false;
         let ok = tokio::time::timeout(timeout, check(&*rt, &probe, &target)).await.unwrap_or(false);
         let result = ProbeResult { container: target.container.clone(), container_id: target.container_id.clone(), kind, ok };
+        if ok {
+            fast = false;
+        }
         if tx.send(PodMsg::Probe(result)).is_err() {
             return;
         }

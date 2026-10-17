@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Reproducible litek8s vs k3s footprint benchmark on a small Linux node.
 #
-#   bench/run.sh [phase...]      phases: litek8s rpc k3s k3s-minimal   (default: all, in that order)
+#   bench/run.sh [phase...]      phases: litek8s rpc k3s k3s-minimal kube   (default: litek8s rpc k3s k3s-minimal)
 #
 # Each system gets a fresh throwaway VM from bench/vm.sh (Ubuntu 24.04 arm64,
 # 2 vCPU, 1 GiB RAM, no swap: an AWS t4g.micro shape). The `rpc` phase reuses
@@ -30,7 +30,8 @@ VM_CPUS="${VM_CPUS:-2}"
 OUT="${OUT:-$HERE/results/$(date -u +%Y%m%dT%H%M%SZ)}"
 IMAGE="nginx:alpine"
 LK_SOCK=/run/litek8s/daemon.sock
-PORT_LK=2291 PORT_K3S=2292 PORT_K3SMIN=2293 PORT_NODE=2294
+PORT_LK=2291 PORT_K3S=2292 PORT_K3SMIN=2293 PORT_NODE=2294 PORT_KUBE=2295
+KUBE_URL=http://127.0.0.1:6443
 
 PHASES=("$@")
 [[ ${#PHASES[@]} -gt 0 ]] || PHASES=(litek8s rpc k3s k3s-minimal)
@@ -104,6 +105,22 @@ spec:
             periodSeconds: 2
             timeoutSeconds: 1
 EOF
+}
+
+# The same Deployment as JSON, for the litek8s Kubernetes API (no kubectl on
+# the VM: probe.py POSTs it).
+kube_manifest() {
+  python3 - "$1" <<'PY'
+import json, sys
+name = sys.argv[1]
+print(json.dumps({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": name},
+  "spec": {"replicas": 1, "selector": {"matchLabels": {"app": name}},
+    "template": {"metadata": {"labels": {"app": name}}, "spec": {"containers": [{
+      "name": "nginx", "image": "nginx:alpine",
+      "resources": {"requests": {"cpu": "50m", "memory": "32Mi"}, "limits": {"cpu": "500m", "memory": "128Mi"}},
+      "ports": [{"containerPort": 80}],
+      "readinessProbe": {"tcpSocket": {"port": 80}, "initialDelaySeconds": 0, "periodSeconds": 2, "timeoutSeconds": 1}}]}}}}))
+PY
 }
 
 push_manifest() { # vm path  (stdin = content)
@@ -225,6 +242,70 @@ PY" | save litek8s.size.json
   lk_wait_ready "$vm" web-0 web-1 web-2 web-3 web-4
   measure_idle "$vm" litek8s idle5
   rroot "$vm" "stat -c %s /var/lib/litek8s/state.json" | save litek8s.idle5.statefile-bytes.txt
+}
+
+# ------------------------------------------------------------------ kube
+
+# litek8s's Kubernetes path: `litek8s apiserver` with its controllers and the
+# local node agent in one process, on Docker. Same workload as the k3s phases.
+phase_kube() {
+  local vm=kube bin
+  bin="$(linux_binary)"
+  log "kube: preparing VM"
+  vm_prepare "$vm" "$PORT_KUBE"
+  rroot "$vm" "probe.py mem" | save kube.baseline.mem.json
+  local disk0 pkg0; disk0="$(disk_used_kib "$vm")"; pkg0="$(pkg_kib "$vm")"
+
+  log "kube: installing docker.io + litek8s apiserver"
+  install_docker "$vm"
+  "$VM" scp "$vm" "$bin" /tmp/litek8s
+  rroot "$vm" 'install -m 755 /tmp/litek8s /usr/local/bin/litek8s && rm /tmp/litek8s
+    mkdir -p /var/lib/litek8s
+    systemd-run --unit=litek8s --quiet /usr/local/bin/litek8s apiserver --listen 127.0.0.1:6443 \
+      --data-dir /var/lib/litek8s/apiserver --kubeconfig /root/litek8s.kubeconfig
+    for i in $(seq 1 100); do curl -sf '"$KUBE_URL"'/readyz >/dev/null && break; sleep 0.1; done
+    # Pull the pod sandbox and service-proxy helper images now, as k3s ships its pause image.
+    docker pull -q busybox:1.36 >/dev/null; docker pull -q rancher/klipper-lb:v0.4.13 >/dev/null'
+  sleep 3
+  local disk1 pkg1
+  disk1="$(disk_used_kib "$vm")"; pkg1="$(pkg_kib "$vm")"
+  rroot "$vm" "python3 - <<'PY'
+import json, os, subprocess
+du = lambda p: int(subprocess.run(['du','-sk',p],capture_output=True,text=True).stdout.split()[0]) if os.path.exists(p) else 0
+ver = subprocess.run(['dpkg-query','-Wf','\${Version}','docker.io'],capture_output=True,text=True).stdout
+print(json.dumps({
+  'disk_used_delta_kib': $disk1 - $disk0,
+  'pkg_installed_delta_kib': $pkg1 - $pkg0,
+  'litek8s_binary_kib': os.path.getsize('/usr/local/bin/litek8s')//1024,
+  'var_lib_docker_kib': du('/var/lib/docker'),
+  'docker_io_version': ver,
+}))
+PY" | save kube.size.json
+
+  measure_idle "$vm" kube idle0
+
+  log "kube: time-to-ready x$TTR_RUNS (image pre-pulled)"
+  rroot "$vm" "docker pull -q $IMAGE >/dev/null"
+  kube_manifest ttr | push_manifest "$vm" /tmp/ttr.json
+  {
+    echo '['
+    for i in $(seq 1 "$TTR_RUNS"); do
+      rroot "$vm" "probe.py ttr-kube $KUBE_URL /tmp/ttr.json ttr"
+      rroot "$vm" "probe.py kube-delete $KUBE_URL ttr >/dev/null; sleep 2"
+      [[ $i -lt $TTR_RUNS ]] && echo ','
+    done
+    echo ']'
+  } | save kube.ttr.json
+
+  log "kube: 5 nginx deployments"
+  for i in 0 1 2 3 4; do
+    kube_manifest "web-$i" | push_manifest "$vm" "/tmp/web-$i.json"
+    rroot "$vm" "probe.py kube-apply $KUBE_URL /tmp/web-$i.json >/dev/null"
+  done
+  rroot "$vm" "probe.py kube-ready $KUBE_URL web-0 web-1 web-2 web-3 web-4 >/dev/null"
+  measure_idle "$vm" kube idle5
+  rroot "$vm" "du -sb /var/lib/litek8s/apiserver | cut -f1" | save kube.idle5.statefile-bytes.txt
+  [[ -n "${KEEP_VMS:-}" ]] || "$VM" down "$vm"
 }
 
 # ------------------------------------------------------------------ k3s
@@ -396,6 +477,7 @@ for p in "${PHASES[@]}"; do
     k3s) phase_k3s k3s "$PORT_K3S" "" ;;
     k3s-minimal) phase_k3s k3smin "$PORT_K3SMIN" "--disable=traefik,servicelb,metrics-server,local-storage" ;;
     rpc) phase_rpc ;;
+    kube) phase_kube ;;
     *) echo "unknown phase $p" >&2; exit 2 ;;
   esac
 done

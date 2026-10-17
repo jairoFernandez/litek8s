@@ -45,6 +45,9 @@ pub struct ServerTls {
 
 impl ServerTls {
     pub fn load_or_create(data_dir: Option<&Path>) -> Result<Self> {
+        if let Some(dir) = data_dir {
+            std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
+        }
         let path = data_dir.map(|d| d.join("tls.json"));
         let stored = match path.as_ref().filter(|p| p.exists()) {
             Some(p) => serde_json::from_slice(&std::fs::read(p)?).with_context(|| format!("failed to read {}", p.display()))?,

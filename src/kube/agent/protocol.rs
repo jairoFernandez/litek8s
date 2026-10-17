@@ -67,6 +67,16 @@ pub enum Message {
     /// A ConfigMap or Secret in a namespace with pods on this node changed:
     /// volumes that project it are refreshed.
     ObjectChanged { resource: String, namespace: String, name: String },
+    /// A Service (with its Endpoints) changed; `service: None` is a delete.
+    /// Sent for every Service: each node proxies all of them.
+    ServiceUpdate {
+        namespace: String,
+        name: String,
+        #[serde(default)]
+        service: Option<Value>,
+        #[serde(default)]
+        endpoints: Option<Value>,
+    },
     GetResult {
         id: u64,
         #[serde(default)]

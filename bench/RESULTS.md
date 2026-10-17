@@ -94,6 +94,75 @@ per pass, one Docker ping per second (node health in the snapshot loop) and a pr
 deployment every 10 s. On the remote node the remaining cost is almost all ssh + `litek8s
 agent` exec per RPC (overhead #3), not the RPC count.
 
+## The Kubernetes path: `litek8s apiserver` + node agent (2026-10-17)
+
+The same harness (`bench/run.sh kube`, new phase) on the same VM shape, for
+the path litek8s is moving to: `litek8s apiserver` with its controllers,
+scheduler, cluster DNS and the local node agent in one process (systemd unit
+`litek8s`), on Docker. The workload is the same 5 `nginx:alpine` Deployments
+as for k3s (requests 50m/32Mi, limits 500m/128Mi, TCP readiness probe every
+2 s), created through the Kubernetes API. Raw data:
+[`results/2026-10-17-kube/`](results/2026-10-17-kube/) (before) and
+[`results/2026-10-17-kube-after/`](results/2026-10-17-kube-after/) (after the
+fixes below); k3s columns from
+[`results/2026-10-16-t4g-micro-shape/`](results/2026-10-16-t4g-micro-shape/).
+
+| metric | kube path, before | kube path, after | litek8s daemon (`cfb4222`) | k3s minimal |
+|---|---|---|---|---|
+| Idle orchestrator memory, 0 workloads (PSS) | 176.6 MiB | **166.1 MiB** | 128 MiB | 572 MiB |
+| Idle orchestrator memory, 5 nginx (PSS) | 214.6 MiB | **208.8 MiB** | 183 MiB | 603 MiB |
+| … of which the litek8s process, 0 → 5 nginx | 15.0 → 17.7 MiB | **14.5 → 17.5 MiB** | 11 → 14 MiB | k3s-server 400 → 402 MiB |
+| Guest RAM left (MemAvailable), 5 nginx | 587 MiB | **602 MiB** | 627 MiB | 321 MiB |
+| Idle CPU, 0 workloads (whole guest, % of one vCPU) | 0.17 % | **0.18 %** | 0.81 % | 4.2 % |
+| Idle CPU, 5 nginx (whole guest, % of one vCPU) | 0.49 % | **0.46 %** | 2.55 % | 5.2 % |
+| Apply → first Ready pod (median of 5, warm image) | 2.19 s | **0.20 s** | 0.21 s | 0.79 s |
+| Disk used after install (no workload images) | 324 MiB | 324 MiB | 285 MiB | 406 MiB |
+| Orchestrator binary | 31.1 MiB | 31.1 MiB | 22.6 MiB | 68.1 MiB |
+
+**Read:** the Kubernetes path keeps the daemon's footprint (a third of k3s
+minimal's memory) and uses **a tenth of k3s's idle CPU**: the API server,
+controllers and agent are event-driven end to end (store change feed,
+Docker's event stream, one pushed connection to the agent), so with 5 pods
+the litek8s process itself averages 0.08 % of a vCPU, almost all of it the
+readiness probes. It is now as fast as the daemon from apply to Ready and 4×
+faster than k3s.
+
+What changed between the two runs:
+
+1. **Readiness probes start fast** (`agent/probe.rs`). The first check ran
+   the instant the container started, failed (nginx not listening yet), and
+   the next waited the full `periodSeconds` (2 s). Until the first success
+   readiness is now re-checked after 25 ms, doubling up to the period; a
+   readiness failure before the first success changes nothing, so the
+   thresholds keep their meaning (startup and liveness keep the plain
+   period). Apply → Ready **2.19 s → 0.20 s**.
+2. **No helper container unless a Service needs routing, and none on a
+   Linux host** (`agent/runtime.rs`, `agent/proxy.rs`). The ClusterIP NAT
+   rules go straight into the host's table with `iptables-restore` when the
+   agent is root next to a local Docker; the privileged helper container is
+   only for VM-backed Docker. Idle memory **−10 MiB** (its containerd-shim).
+3. **Watch history as compact JSON** (`kube/store.rs`). Every retained
+   version used to be a parsed object pinned twice (history and the change
+   feed's ring). History now keeps serialized bytes (parsed back only when a
+   watch resumes) and the live feed is 256 slots. On a 60-pod create/delete
+   churn the live heap dropped from 14.8 MiB to 5.9 MiB after everything was
+   deleted (19.2 → 12.2 MiB with the 60 pods running); with 5 quiet pods it
+   does not show.
+
+Also found by running it on a stock Ubuntu guest, and fixed before the
+"before" numbers: the TLS material was written before the data directory
+existed (TLS silently off, so no `kube-root-ca.crt` and every pod stuck),
+cluster DNS could not bind `0.0.0.0:53` next to systemd-resolved, and pods
+could not reach an API server listening on loopback only. DNS and the
+in-cluster API port now also bind the Docker gateway address pods use.
+
+Biggest remaining overhead: Docker runs one containerd-shim per container,
+and a pod is two containers (the sandbox that owns the network namespace,
+plus nginx), so 5 pods cost ~40 MiB of shims where the daemon's 5 bare
+containers cost 28 MiB and k3s's CRI groups a pod under one shim. A runtime
+that shares one shim per pod (containerd's CRI shim, or crun/litecontainer
+behind the `PodRuntime` trait) removes it.
+
 ## Remote node over SSH (litek8s only)
 
 Control plane in one guest, the node in a second guest of the same shape, reached through

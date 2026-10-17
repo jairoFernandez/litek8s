@@ -18,6 +18,7 @@ mod kubelet;
 mod pod;
 mod probe;
 pub mod protocol;
+mod proxy;
 pub mod runtime;
 mod volumes;
 
@@ -117,6 +118,7 @@ pub struct Agent<R: PodRuntime> {
     images: Mutex<HashMap<String, ImageState>>,
     /// The address `host-gateway` stands for in pods (found once).
     gateway_ip: tokio::sync::OnceCell<Option<String>>,
+    proxy: Arc<proxy::Proxy>,
 }
 
 enum ImageState {
@@ -139,7 +141,9 @@ impl<R: PodRuntime> Agent<R> {
             streams: Mutex::new(HashMap::new()),
             images: Mutex::new(HashMap::new()),
             gateway_ip: tokio::sync::OnceCell::new(),
+            proxy: Arc::new(proxy::Proxy::default()),
         });
+        tokio::spawn(proxy::run(agent.proxy.clone(), agent.rt.clone()));
         let exits = agent.clone();
         tokio::spawn(async move {
             let mut stream = exits.rt.exits();
@@ -369,6 +373,9 @@ impl<R: PodRuntime> Agent<R> {
                     }
                 });
             }
+            Message::ServiceUpdate { namespace, name, service, endpoints } => {
+                self.proxy.update(namespace, name, service, endpoints);
+            }
             Message::ObjectChanged { resource, namespace, name } => {
                 for tx in self.workers.lock().unwrap().values() {
                     let _ = tx.send(pod::PodMsg::ObjectChanged { resource: resource.clone(), namespace: namespace.clone(), name: name.clone() });
@@ -551,10 +558,23 @@ async fn port_forward_stream(
     let Some(ip) = ip else {
         return finish(&link, stream, None, Some("pod has no IP address yet".into())).await;
     };
-    let conn = match tokio::time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect((ip.as_str(), port))).await {
-        Ok(Ok(c)) => c,
-        Ok(Err(e)) => return finish(&link, stream, None, Some(format!("failed to connect to {ip}:{port}: {e}"))).await,
-        Err(_) => return finish(&link, stream, None, Some(format!("timed out connecting to {ip}:{port}"))).await,
+    // A container counts as started before its process listens, and a
+    // brand-new pod address may not be routable from the node for a moment:
+    // retry refused or unanswered connections briefly instead of failing the
+    // client's stream (kubectl ends the whole port-forward on an error).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let conn = loop {
+        let attempt = tokio::time::timeout(Duration::from_secs(1), tokio::net::TcpStream::connect((ip.as_str(), port))).await;
+        let retry = tokio::time::Instant::now() < deadline;
+        match attempt {
+            Ok(Ok(c)) => break c,
+            Ok(Err(e)) if retry && e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(_) if retry => {}
+            Ok(Err(e)) => return finish(&link, stream, None, Some(format!("failed to connect to {ip}:{port}: {e}"))).await,
+            Err(_) => return finish(&link, stream, None, Some(format!("timed out connecting to {ip}:{port}"))).await,
+        }
     };
     let _ = conn.set_nodelay(true);
     let (mut r, mut w) = conn.into_split();

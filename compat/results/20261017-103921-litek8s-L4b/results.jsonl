@@ -1,9 +1,0 @@
-{"id": "helm_metrics_server", "tier": "L4", "status": "pass", "seconds": 23, "detail": "metrics-server-3.14.0"}
-{"id": "helm_cnpg", "tier": "L4", "status": "fail", "seconds": 243, "detail": "context deadline exceeded"}
-{"id": "helm_headlamp", "tier": "L4", "status": "pass", "seconds": 33, "detail": "headlamp-0.46.0"}
-{"id": "helm_nats", "tier": "L4", "status": "pass", "seconds": 28, "detail": "nats-2.15.1"}
-{"id": "helm_vault", "tier": "L4", "status": "pass", "seconds": 32, "detail": "vault-0.34.1"}
-{"id": "helm_minio_operator", "tier": "L4", "status": "pass", "seconds": 11, "detail": "operator-7.1.1"}
-{"id": "helm_external_dns", "tier": "L4", "status": "pass", "seconds": 16, "detail": "external-dns-1.23.0"}
-{"id": "helm_gitea", "tier": "L4", "status": "fail", "seconds": 242, "detail": "context deadline exceeded"}
-{"id": "helm_loki", "tier": "L4", "status": "fail", "seconds": 242, "detail": "context deadline exceeded"}

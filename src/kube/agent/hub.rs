@@ -281,6 +281,13 @@ async fn feed_pods(api: Arc<ApiState>, node: String, tx: mpsc::Sender<Frame>) {
         if tx.send(Frame::Control(Message::SyncDone)).await.is_err() {
             return;
         }
+        let (services, _) = api.store().list("", "services", None);
+        for svc in &services {
+            let (ns, name) = util::ns_name(svc);
+            if tx.send(Frame::Control(service_update(&api, &ns, &name))).await.is_err() {
+                return;
+            }
+        }
         loop {
             let event = match live.recv().await {
                 Ok(e) => e,
@@ -309,6 +316,7 @@ async fn feed_pods(api: Arc<ApiState>, node: String, tx: mpsc::Sender<Frame>) {
                         Message::PodUpsert { pod: event.object.clone() }
                     }
                 }
+                ("", "services" | "endpoints") => service_update(&api, &event.key.namespace, &event.key.name),
                 ("", resource @ ("configmaps" | "secrets")) if event.event != EventType::Deleted => {
                     let ns = &event.key.namespace;
                     if !namespaces.get(ns).is_some_and(|n| *n > 0) {
@@ -333,6 +341,15 @@ async fn feed_pods(api: Arc<ApiState>, node: String, tx: mpsc::Sender<Frame>) {
             }
         }
         // Lagged behind the feed: start over with a full sync.
+    }
+}
+
+fn service_update(api: &ApiState, ns: &str, name: &str) -> Message {
+    Message::ServiceUpdate {
+        namespace: ns.to_string(),
+        name: name.to_string(),
+        service: api.get_object("", "services", ns, name),
+        endpoints: api.get_object("", "endpoints", ns, name),
     }
 }
 

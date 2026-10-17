@@ -19,8 +19,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
-/// How many past events a watch can resume from before getting `410 Gone`.
-const HISTORY_CAPACITY: usize = 10_000;
+/// How many past events a watch can resume from before getting `410 Gone`
+/// (clients then relist). History keeps each version as compact JSON bytes,
+/// a quarter of the size of the parsed form.
+const HISTORY_CAPACITY: usize = 1024;
+/// Live change-feed buffer. Every consumer drains it right away; one that
+/// falls this far behind resyncs. Kept small because each slot pins a parsed
+/// object version until it is overwritten.
+const FEED_CAPACITY: usize = 256;
 /// Compact the WAL once it holds this many records beyond one per object.
 const WAL_COMPACT_SLACK: usize = 20_000;
 
@@ -79,6 +85,25 @@ pub enum StoreError {
     Gone,
 }
 
+/// A past change, kept for watches that resume from a resourceVersion.
+struct HistoryEntry {
+    rv: u64,
+    key: ObjectKey,
+    event: EventType,
+    object: Vec<u8>,
+}
+
+impl HistoryEntry {
+    fn to_event(&self) -> Arc<WatchEvent> {
+        Arc::new(WatchEvent {
+            rv: self.rv,
+            key: self.key.clone(),
+            event: self.event,
+            object: serde_json::from_slice(&self.object).unwrap_or(Value::Null),
+        })
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 struct WalRecord {
     rv: u64,
@@ -96,7 +121,7 @@ struct Wal {
 struct Inner {
     objects: BTreeMap<ObjectKey, Value>,
     rv: u64,
-    history: VecDeque<Arc<WatchEvent>>,
+    history: VecDeque<HistoryEntry>,
     wal: Option<Wal>,
 }
 
@@ -145,7 +170,7 @@ impl Store {
                 Some(write_compacted(&path, &objects, rv)?)
             }
         };
-        let (events, _) = broadcast::channel(4096);
+        let (events, _) = broadcast::channel(FEED_CAPACITY);
         Ok(Self {
             inner: Mutex::new(Inner {
                 objects,
@@ -273,7 +298,7 @@ impl Store {
                     .history
                     .iter()
                     .filter(|e| e.rv > rv)
-                    .cloned()
+                    .map(HistoryEntry::to_event)
                     .collect()
             }
         };
@@ -334,7 +359,12 @@ impl Store {
             event,
             object: stored.clone(),
         });
-        inner.history.push_back(event.clone());
+        inner.history.push_back(HistoryEntry {
+            rv,
+            key: event.key.clone(),
+            event: event.event,
+            object: serde_json::to_vec(&event.object).unwrap_or_default(),
+        });
         if inner.history.len() > HISTORY_CAPACITY {
             inner.history.pop_front();
         }

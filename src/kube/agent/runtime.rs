@@ -7,6 +7,7 @@
 //! Kubernetes-specific stays in the agent.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -26,7 +27,7 @@ use bollard::system::EventsOptions;
 use bollard::volume::{CreateVolumeOptions, RemoveVolumeOptions};
 use futures_util::stream::{BoxStream, StreamExt};
 use hyper::body::Bytes;
-use tokio::io::AsyncWrite;
+use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 pub const LABEL_POD_UID: &str = "litek8s.pod.uid";
 pub const LABEL_POD_NAME: &str = "litek8s.pod.name";
@@ -39,6 +40,10 @@ pub const LABEL_HASH: &str = "litek8s.container.hash";
 /// The network pods join, so they get an address of their own.
 const POD_NETWORK: &str = "litek8s-pods";
 const SANDBOX_IMAGE: &str = "busybox:1.36";
+/// A small image with iptables (k3s's service load balancer), used as the
+/// helper that edits NAT rules in Docker's host network namespace.
+const PROXY_IMAGE: &str = "rancher/klipper-lb:v0.4.13";
+const PROXY_CONTAINER: &str = "litek8s-service-proxy";
 
 #[derive(Debug, Clone)]
 pub enum MountSource {
@@ -156,6 +161,9 @@ pub trait PodRuntime: Send + Sync + 'static {
     fn logs(&self, id: &str, options: LogOptions) -> ByteStream;
     /// (cumulative CPU nanoseconds, memory working set bytes) of a container.
     fn stats(&self, id: &str) -> impl Future<Output = Result<Option<(u64, u64)>>> + Send;
+    /// Load the service NAT chain (`iptables-restore` input) where pod
+    /// traffic is routed.
+    fn apply_service_rules(&self, rules: &str) -> impl Future<Output = Result<()>> + Send;
     /// The address containers reach the host at (Docker's `host-gateway`).
     fn host_gateway_ip(&self) -> impl Future<Output = Result<String>> + Send;
     /// Ids of pod containers as they exit, for as long as the runtime runs.
@@ -168,11 +176,57 @@ pub trait PodRuntime: Send + Sync + 'static {
 #[derive(Clone)]
 pub struct DockerPods {
     docker: Docker,
+    /// Round-robin pod address allocation in the pod network (see `next_ip`).
+    ips: Arc<std::sync::Mutex<Option<IpRing>>>,
 }
+
+/// The pod subnet and where the next allocation starts.
+#[derive(Debug, Clone, Copy)]
+struct IpRing {
+    base: u32,
+    size: u32,
+    next: u32,
+}
+
+/// The pod network's preferred subnet (k3s's pod CIDR).
+const POD_SUBNET: &str = "10.42.0.0/16";
 
 impl DockerPods {
     pub fn new(docker: Docker) -> Self {
-        Self { docker }
+        Self { docker, ips: Arc::default() }
+    }
+
+    /// The next pod address, round robin over the subnet like CNI's
+    /// host-local IPAM: a just-freed address is not handed out again right
+    /// away (with a VM-backed Docker the host's path to a reused address can
+    /// stay stale for a while).
+    async fn next_ip(&self) -> Option<std::net::Ipv4Addr> {
+        let ring = *self.ips.lock().unwrap();
+        let mut ring = match ring {
+            Some(r) => r,
+            None => {
+                let net = self.docker.inspect_network::<String>(POD_NETWORK, None).await.ok()?;
+                let subnet = net.ipam?.config?.into_iter().find_map(|c| c.subnet)?;
+                let (addr, prefix) = subnet.split_once('/')?;
+                let addr: std::net::Ipv4Addr = addr.parse().ok()?;
+                let prefix: u32 = prefix.parse().ok()?;
+                let size = 1u32.checked_shl(32 - prefix)?;
+                let mut seed = [0u8; 4];
+                rand_core::RngCore::fill_bytes(&mut rand_core::OsRng, &mut seed);
+                IpRing { base: u32::from(addr), size, next: u32::from_le_bytes(seed) % size.max(1) }
+            }
+        };
+        if ring.size < 8 {
+            return None;
+        }
+        // Skip the network address, the gateway (.1) and the broadcast.
+        let mut offset = ring.next % ring.size;
+        if offset < 2 || offset == ring.size - 1 {
+            offset = 2;
+        }
+        ring.next = offset + 1;
+        *self.ips.lock().unwrap() = Some(ring);
+        Some(std::net::Ipv4Addr::from(ring.base + offset))
     }
 
     /// Capacity and identity of the machine the containers run on (for a
@@ -200,25 +254,119 @@ impl DockerPods {
         if self.docker.inspect_network::<String>(POD_NETWORK, None).await.is_ok() {
             return Ok(());
         }
-        match self
-            .docker
-            .create_network(CreateNetworkOptions {
-                name: POD_NETWORK.to_string(),
-                driver: "bridge".to_string(),
-                labels: HashMap::from([("litek8s.managed".to_string(), "true".to_string())]),
+        let options = |subnet: Option<&str>| CreateNetworkOptions {
+            name: POD_NETWORK.to_string(),
+            driver: "bridge".to_string(),
+            labels: HashMap::from([(LABEL_ROLE.to_string(), "pod-network".to_string())]),
+            ipam: bollard::models::Ipam {
+                config: subnet.map(|s| vec![bollard::models::IpamConfig { subnet: Some(s.to_string()), ..Default::default() }]),
                 ..Default::default()
-            })
-            .await
-        {
+            },
+            ..Default::default()
+        };
+        // Prefer a /16 (plenty of room for round-robin allocation); fall
+        // back to whatever Docker picks if that range is taken.
+        let mut result = self.docker.create_network(options(Some(POD_SUBNET))).await;
+        if matches!(result, Err(BollardError::DockerResponseServerError { status_code, .. }) if status_code != 409) {
+            result = self.docker.create_network(options(None)).await;
+        }
+        match result {
             Ok(_) => Ok(()),
             Err(BollardError::DockerResponseServerError { status_code: 409, .. }) => Ok(()),
             Err(e) => Err(e).context("failed to create the pod network"),
         }
     }
 
+    /// The long-running helper that owns the service NAT chain.
+    async fn ensure_proxy_helper(&self) -> Result<String> {
+        if let Ok(details) = self.docker.inspect_container(PROXY_CONTAINER, None::<InspectContainerOptions>).await {
+            if details.state.and_then(|s| s.running) == Some(true) {
+                return Ok(details.id.unwrap_or_default());
+            }
+            let _ = self.remove(PROXY_CONTAINER).await;
+        }
+        self.pull_image(PROXY_IMAGE, false).await?;
+        let config = Config {
+            image: Some(PROXY_IMAGE.to_string()),
+            entrypoint: Some(vec!["sleep".into(), "infinity".into()]),
+            // Not `litek8s.managed`: that label marks the daemon's deployment
+            // containers, and the daemon expects a deployment on them.
+            labels: Some(HashMap::from([(LABEL_ROLE.to_string(), "service-proxy".to_string())])),
+            host_config: Some(HostConfig {
+                network_mode: Some("host".into()),
+                privileged: Some(true),
+                restart_policy: Some(bollard::models::RestartPolicy {
+                    name: Some(bollard::models::RestartPolicyNameEnum::UNLESS_STOPPED),
+                    maximum_retry_count: None,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let created = self
+            .docker
+            .create_container(Some(CreateContainerOptions { name: PROXY_CONTAINER.to_string(), platform: None }), config)
+            .await
+            .context("failed to create the service proxy helper")?;
+        self.docker.start_container(&created.id, None::<StartContainerOptions<String>>).await?;
+        // Hook the chain into PREROUTING (pod traffic) and OUTPUT (host
+        // network pods), once.
+        let setup = format!(
+            "iptables -t nat -N {chain} 2>/dev/null; for c in PREROUTING OUTPUT; do \
+             iptables -t nat -C $c -j {chain} 2>/dev/null || iptables -t nat -I $c 1 -j {chain}; done",
+            chain = super::proxy::CHAIN
+        );
+        let session = self.exec(&created.id, vec!["sh".into(), "-c".into(), setup], false, false).await?;
+        let mut out = session.output;
+        while out.next().await.is_some() {}
+        Ok(created.id)
+    }
+
     async fn image_present(&self, image: &str) -> bool {
         self.docker.inspect_image(image).await.is_ok()
     }
+}
+
+/// Whether service rules can go straight into this host's NAT table: a
+/// Linux host where the agent is root, next to a local Docker. Otherwise
+/// (Docker in a VM, rootless) a helper container in Docker's host network
+/// namespace applies them.
+fn host_iptables() -> bool {
+    use std::os::unix::fs::MetadataExt;
+    static ON_HOST: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON_HOST.get_or_init(|| {
+        cfg!(target_os = "linux")
+            && std::fs::metadata("/proc/self").is_ok_and(|m| m.uid() == 0)
+            && std::env::var("DOCKER_HOST").map_or(true, |h| h.starts_with("unix://"))
+            && std::process::Command::new("iptables-restore")
+                .arg("--version")
+                .output()
+                .is_ok_and(|o| o.status.success())
+    })
+}
+
+async fn apply_rules_on_host(rules: &str) -> Result<()> {
+    use tokio::process::Command;
+    let chain = super::proxy::CHAIN;
+    let setup = format!(
+        "iptables -t nat -N {chain} 2>/dev/null; for c in PREROUTING OUTPUT; do \
+         iptables -t nat -C $c -j {chain} 2>/dev/null || iptables -t nat -I $c 1 -j {chain}; done"
+    );
+    Command::new("sh").arg("-c").arg(setup).status().await.context("failed to run iptables")?;
+    let mut child = Command::new("iptables-restore")
+        .arg("--noflush")
+        .stdin(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("failed to run iptables-restore")?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(rules.as_bytes()).await?;
+    }
+    let out = child.wait_with_output().await?;
+    if !out.status.success() {
+        bail!("iptables-restore failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(())
 }
 
 fn docker_mount(m: &MountSpec) -> Mount {
@@ -337,27 +485,55 @@ impl PodRuntime for DockerPods {
             init: Some(true),
             ..Default::default()
         };
-        let config = Config {
-            image: Some(SANDBOX_IMAGE.to_string()),
-            cmd: Some(vec!["sleep".into(), "infinity".into()]),
-            hostname: (!spec.host_network).then(|| spec.hostname.clone()),
-            labels: Some(spec.labels.clone()),
-            exposed_ports: (!exposed.is_empty()).then_some(exposed),
-            host_config: Some(host_config),
-            ..Default::default()
-        };
-        let _ = self.remove(&spec.name).await;
-        let created = self
-            .docker
-            .create_container(Some(CreateContainerOptions { name: spec.name.clone(), platform: None }), config)
-            .await
-            .context("failed to create pod sandbox")?;
-        self.docker
-            .start_container(&created.id, None::<StartContainerOptions<String>>)
-            .await
-            .context("failed to start pod sandbox")?;
-        let ip = self.sandbox_ip(&created.id).await?;
-        Ok(SandboxInfo { id: created.id, ip })
+        // A few attempts: a chosen address may be in use by a pod that
+        // survived an agent restart.
+        let mut last_error = None;
+        for _ in 0..8 {
+            let address = if spec.host_network { None } else { self.next_ip().await };
+            let networking_config = address.map(|ip| bollard::container::NetworkingConfig {
+                endpoints_config: HashMap::from([(
+                    POD_NETWORK.to_string(),
+                    bollard::models::EndpointSettings {
+                        ipam_config: Some(bollard::models::EndpointIpamConfig {
+                            ipv4_address: Some(ip.to_string()),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                )]),
+            });
+            let config = Config {
+                image: Some(SANDBOX_IMAGE.to_string()),
+                cmd: Some(vec!["sleep".into(), "infinity".into()]),
+                hostname: (!spec.host_network).then(|| spec.hostname.clone()),
+                labels: Some(spec.labels.clone()),
+                exposed_ports: (!exposed.is_empty()).then(|| exposed.clone()),
+                host_config: Some(host_config.clone()),
+                networking_config,
+                ..Default::default()
+            };
+            let _ = self.remove(&spec.name).await;
+            let created = self
+                .docker
+                .create_container(Some(CreateContainerOptions { name: spec.name.clone(), platform: None }), config)
+                .await
+                .context("failed to create pod sandbox")?;
+            match self.docker.start_container(&created.id, None::<StartContainerOptions<String>>).await {
+                Ok(()) => {
+                    let ip = self.sandbox_ip(&created.id).await?;
+                    return Ok(SandboxInfo { id: created.id, ip });
+                }
+                Err(e) => {
+                    let _ = self.remove(&created.id).await;
+                    let in_use = e.to_string().contains("in use") || e.to_string().contains("already");
+                    last_error = Some(e);
+                    if address.is_none() || !in_use {
+                        break;
+                    }
+                }
+            }
+        }
+        Err(anyhow::anyhow!("failed to start pod sandbox: {}", last_error.map(|e| e.to_string()).unwrap_or_default()))
     }
 
     async fn sandbox_ip(&self, id: &str) -> Result<Option<String>> {
@@ -563,6 +739,26 @@ impl PodRuntime for DockerPods {
         };
         let usage = stats.memory_stats.usage.unwrap_or(0);
         Ok(Some((stats.cpu_stats.cpu_usage.total_usage, usage.saturating_sub(inactive))))
+    }
+
+    async fn apply_service_rules(&self, rules: &str) -> Result<()> {
+        if host_iptables() {
+            return apply_rules_on_host(rules).await;
+        }
+        let id = self.ensure_proxy_helper().await?;
+        let mut session = self
+            .exec(&id, vec!["iptables-restore".into(), "--noflush".into()], false, true)
+            .await?;
+        session.input.write_all(rules.as_bytes()).await?;
+        session.input.shutdown().await?;
+        let mut errors = String::new();
+        while let Some(Ok((_, bytes))) = session.output.next().await {
+            errors.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        match self.exec_exit_code(&session.id).await? {
+            Some(0) | None => Ok(()),
+            Some(code) => bail!("iptables-restore exited with {code}: {}", errors.trim()),
+        }
     }
 
     async fn host_gateway_ip(&self) -> Result<String> {

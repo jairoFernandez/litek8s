@@ -68,6 +68,9 @@ pub struct ApiServerConfig {
     pub node_dir: Option<PathBuf>,
     /// UDP address for cluster DNS (pods use port 53); `None` disables it.
     pub cluster_dns: Option<SocketAddr>,
+    /// Also serve the API on this port of the listen address, so pods reach
+    /// it at `https://kubernetes.default.svc` (port 443) as in Kubernetes.
+    pub in_cluster_port: Option<u16>,
 }
 
 pub struct ApiState {
@@ -226,32 +229,109 @@ pub async fn serve(config: ApiServerConfig) -> Result<()> {
     }
     eprintln!("apiserver: listening on http://{addr} (and https for in-cluster clients; no authentication)");
     tokio::spawn(super::controllers::run(state.clone()));
-    if let Some(dns_addr) = config.cluster_dns {
-        if let Some(socket) = super::dns::bind(dns_addr).await {
-            state.cluster_dns.store(true, std::sync::atomic::Ordering::Relaxed);
-            tokio::spawn(super::dns::serve(state.clone(), socket));
-        }
-    }
-    if config.run_node {
+
+    // The local node comes first: where pods reach this host (Docker's
+    // host-gateway) decides where DNS and the in-cluster port can listen.
+    let agent = if config.run_node {
         let node_dir = config
             .node_dir
             .clone()
             .or_else(|| config.data_dir.as_ref().map(|d| d.join("node-agent")));
         match super::agent::docker_agent(config.node_name.clone(), node_dir).await {
-            Ok(agent) => {
-                eprintln!("apiserver: running local node {}", agent.config().node_name);
-                tokio::spawn(super::agent::run_local(state.clone(), agent, addr.port()));
+            Ok(agent) => Some(agent),
+            Err(error) => {
+                eprintln!("apiserver: not running a local node: {error:#}");
+                None
             }
-            Err(error) => eprintln!("apiserver: not running a local node: {error:#}"),
         }
+    } else {
+        None
+    };
+    let gateway: Option<std::net::IpAddr> = match &agent {
+        Some(agent) => agent.resolve_host("host-gateway").await.and_then(|ip| ip.parse().ok()),
+        None => None,
+    };
+
+    if let Some(dns_addr) = config.cluster_dns {
+        // The wildcard address may be taken (systemd-resolved holds
+        // 127.0.0.53:53); the gateway address is all pods need.
+        let mut socket = super::dns::bind(dns_addr).await;
+        if socket.is_none() {
+            if let Some(ip) = gateway {
+                socket = super::dns::bind(SocketAddr::new(ip, dns_addr.port())).await;
+            }
+        }
+        if let Some(socket) = socket {
+            state.cluster_dns.store(true, std::sync::atomic::Ordering::Relaxed);
+            tokio::spawn(super::dns::serve(state.clone(), socket));
+        }
+    }
+
+    // The port pods use: the in-cluster one when it could be bound.
+    let mut pod_port = addr.port();
+    if let Some(port) = config.in_cluster_port.filter(|p| *p != addr.port()) {
+        pod_port = bind_in_cluster(&state, addr, gateway, port).await.unwrap_or(addr.port());
+    } else if let Some(ip) = gateway.filter(|_| addr.ip().is_loopback()) {
+        // Pods cannot reach a loopback-only listener on a Linux host.
+        if let Ok(extra) = TcpListener::bind(SocketAddr::new(ip, addr.port())).await {
+            tokio::spawn(serve_listener(state.clone(), extra));
+        }
+    }
+    if let Some(agent) = agent {
+        eprintln!("apiserver: running local node {}", agent.config().node_name);
+        tokio::spawn(super::agent::run_local(state.clone(), agent, pod_port));
     }
     serve_listener(state, listener).await
 }
 
+/// Serve the API on `port` for pods. On a Linux host pods reach the host at
+/// the Docker gateway address, so that is tried first; with a VM-backed
+/// Docker they arrive through loopback.
+async fn bind_in_cluster(state: &Arc<ApiState>, addr: SocketAddr, gateway: Option<std::net::IpAddr>, port: u16) -> Option<u16> {
+    let serve_also_on = |listener: TcpListener, loopback_only: bool| {
+        tokio::spawn(serve_listener_filtered(state.clone(), listener, loopback_only));
+    };
+    let mut bound = false;
+    if let Some(ip) = gateway.filter(|_| addr.ip().is_loopback()) {
+        if let Ok(l) = TcpListener::bind(SocketAddr::new(ip, port)).await {
+            serve_also_on(l, false);
+            bound = true;
+        }
+    }
+    match TcpListener::bind(SocketAddr::new(addr.ip(), port)).await {
+        Ok(l) => {
+            serve_also_on(l, false);
+            return Some(port);
+        }
+        // macOS lets unprivileged processes bind low ports only on the
+        // wildcard address. Keep the API as private as the main listener:
+        // when that is loopback, accept loopback peers only.
+        Err(_) if addr.ip().is_loopback() && !bound => {
+            match TcpListener::bind(SocketAddr::from(([0, 0, 0, 0], port))).await {
+                Ok(l) => {
+                    serve_also_on(l, true);
+                    return Some(port);
+                }
+                Err(e) => eprintln!("apiserver: in-cluster port {port} unavailable ({e}); pods use {}", addr.port()),
+            }
+        }
+        Err(e) if !bound => eprintln!("apiserver: in-cluster port {port} unavailable ({e}); pods use {}", addr.port()),
+        Err(_) => {}
+    }
+    bound.then_some(port)
+}
+
 /// Accept connections on an already-bound listener (used by tests).
 pub async fn serve_listener(state: Arc<ApiState>, listener: TcpListener) -> Result<()> {
+    serve_listener_filtered(state, listener, false).await
+}
+
+async fn serve_listener_filtered(state: Arc<ApiState>, listener: TcpListener, loopback_only: bool) -> Result<()> {
     loop {
-        let (stream, _) = listener.accept().await?;
+        let (stream, peer) = listener.accept().await?;
+        if loopback_only && !peer.ip().is_loopback() {
+            continue;
+        }
         let _ = stream.set_nodelay(true);
         let state = state.clone();
         tokio::spawn(async move {
@@ -266,7 +346,15 @@ pub async fn serve_listener(state: Arc<ApiState>, listener: TcpListener) -> Resu
             });
             match state.tls().filter(|_| is_tls) {
                 Some(tls) => {
-                    let Ok(tls_stream) = tls.acceptor().accept(stream).await else { return };
+                    let tls_stream = match tls.acceptor().accept(stream).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            if state.log_requests {
+                                eprintln!("apiserver: TLS handshake failed: {e}");
+                            }
+                            return;
+                        }
+                    };
                     let _ = http1::Builder::new()
                         .serve_connection(TokioIo::new(tls_stream), service)
                         .with_upgrades()
@@ -1545,6 +1633,9 @@ impl ApiState {
             }
             ("apiextensions.k8s.io", "CustomResourceDefinition") => {
                 let types = super::registry::crd_types(obj).map_err(|e| ApiError::invalid(rt, &name, e.to_string()))?;
+                if !obj.pointer("/spec/conversion").is_some_and(Value::is_object) {
+                    obj["spec"]["conversion"] = json!({"strategy": "None"});
+                }
                 let expected = format!("{}.{}", types[0].plural, types[0].group);
                 if name != expected {
                     return Err(ApiError::invalid(

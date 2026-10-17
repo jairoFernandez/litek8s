@@ -215,38 +215,41 @@ impl<R: PodRuntime> Agent<R> {
             } else if let Some(path) = volume.pointer("/hostPath/path").and_then(Value::as_str) {
                 Prepared::HostPath(path.to_string())
             } else if let Some(src) = volume.get("configMap") {
-                reset_dir(&dir)?;
+                let stage = begin_write(&dir)?;
                 let cm_name = s(src, "/name");
                 let optional = src.get("optional").and_then(Value::as_bool) == Some(true);
                 match self.lookup("configmaps", ns, cm_name).await? {
-                    Some(cm) => project(&dir, &object_data(&cm, false), src.get("items"), default_mode(src), optional, &format!("configmap {cm_name}"))?,
+                    Some(cm) => project(&stage, &object_data(&cm, false), src.get("items"), default_mode(src), optional, &format!("configmap {cm_name}"))?,
                     None if optional => {}
                     None => return Err(format!("configmap \"{cm_name}\" not found")),
                 }
+                publish(&dir, &stage, fs_group)?;
                 Prepared::Dir(dir)
             } else if let Some(src) = volume.get("secret") {
-                reset_dir(&dir)?;
+                let stage = begin_write(&dir)?;
                 let secret_name = s(src, "/secretName");
                 let optional = src.get("optional").and_then(Value::as_bool) == Some(true);
                 match self.lookup("secrets", ns, secret_name).await? {
-                    Some(sec) => project(&dir, &object_data(&sec, true), src.get("items"), default_mode(src), optional, &format!("secret {secret_name}"))?,
+                    Some(sec) => project(&stage, &object_data(&sec, true), src.get("items"), default_mode(src), optional, &format!("secret {secret_name}"))?,
                     None if optional => {}
                     None => return Err(format!("secret \"{secret_name}\" not found")),
                 }
+                publish(&dir, &stage, fs_group)?;
                 Prepared::Dir(dir)
             } else if let Some(src) = volume.get("downwardAPI") {
-                reset_dir(&dir)?;
-                self.write_downward(&dir, pod, src.get("items"), default_mode(src), node)?;
+                let stage = begin_write(&dir)?;
+                self.write_downward(&stage, pod, src.get("items"), default_mode(src), node)?;
+                publish(&dir, &stage, fs_group)?;
                 Prepared::Dir(dir)
             } else if let Some(src) = volume.get("projected") {
-                reset_dir(&dir)?;
+                let stage = begin_write(&dir)?;
                 let mode = default_mode(src);
                 for source in src.get("sources").and_then(Value::as_array).into_iter().flatten() {
                     if let Some(cm) = source.get("configMap") {
                         let cm_name = s(cm, "/name");
                         let optional = cm.get("optional").and_then(Value::as_bool) == Some(true);
                         match self.lookup("configmaps", ns, cm_name).await? {
-                            Some(obj) => project(&dir, &object_data(&obj, false), cm.get("items"), mode, optional, &format!("configmap {cm_name}"))?,
+                            Some(obj) => project(&stage, &object_data(&obj, false), cm.get("items"), mode, optional, &format!("configmap {cm_name}"))?,
                             None if optional => {}
                             None => return Err(format!("configmap \"{cm_name}\" not found")),
                         }
@@ -254,12 +257,12 @@ impl<R: PodRuntime> Agent<R> {
                         let sec_name = s(sec, "/name");
                         let optional = sec.get("optional").and_then(Value::as_bool) == Some(true);
                         match self.lookup("secrets", ns, sec_name).await? {
-                            Some(obj) => project(&dir, &object_data(&obj, true), sec.get("items"), mode, optional, &format!("secret {sec_name}"))?,
+                            Some(obj) => project(&stage, &object_data(&obj, true), sec.get("items"), mode, optional, &format!("secret {sec_name}"))?,
                             None if optional => {}
                             None => return Err(format!("secret \"{sec_name}\" not found")),
                         }
                     } else if let Some(da) = source.get("downwardAPI") {
-                        self.write_downward(&dir, pod, da.get("items"), mode, node)?;
+                        self.write_downward(&stage, pod, da.get("items"), mode, node)?;
                     } else if let Some(tok) = source.get("serviceAccountToken") {
                         let sa = s(pod, "/spec/serviceAccountName");
                         let token = self
@@ -268,9 +271,10 @@ impl<R: PodRuntime> Agent<R> {
                             .and_then(|t| t.get("token").and_then(Value::as_str).map(str::to_string))
                             .ok_or("failed to get a service account token")?;
                         let path = tok.get("path").and_then(Value::as_str).unwrap_or("token");
-                        write_file(&dir, path, token.as_bytes(), mode)?;
+                        write_file(&stage, path, token.as_bytes(), mode)?;
                     }
                 }
+                publish(&dir, &stage, fs_group)?;
                 Prepared::Dir(dir)
             } else {
                 // csi, ephemeral and the rest: scratch space.
@@ -282,9 +286,6 @@ impl<R: PodRuntime> Agent<R> {
                     .map_err(|e| format!("{e:#}"))?;
                 Prepared::Named { volume: v, fresh, empty_dir: true }
             };
-            if let (Prepared::Dir(dir), Some(gid)) = (&prepared, fs_group) {
-                apply_fs_group(dir, gid);
-            }
             out.insert(name, prepared);
         }
         Ok(out)
@@ -308,23 +309,66 @@ impl<R: PodRuntime> Agent<R> {
     }
 }
 
-/// Empty a volume directory but keep the directory itself: containers have
-/// it bind-mounted, so replacing it would hide refreshed files from them.
-fn reset_dir(dir: &Path) -> Result<(), String> {
+/// Start writing a new version of a projected volume: a fresh hidden
+/// directory next to the current one (the kubelet's atomic writer layout).
+fn begin_write(dir: &Path) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("failed to create {}: {e}", dir.display()))?;
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let _ = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+    let stamp = chrono::Utc::now().format("..%Y_%m_%d_%H_%M_%S.%f").to_string();
+    let stage = dir.join(stamp);
+    std::fs::create_dir_all(&stage).map_err(|e| format!("failed to create {}: {e}", stage.display()))?;
+    Ok(stage)
+}
+
+/// Switch the volume to `stage` atomically: `..data` points at it and every
+/// top-level entry is a symlink through `..data`, as the kubelet lays it
+/// out (some charts look for those symlinks). Containers keep the volume
+/// directory bind-mounted, so they see the switch.
+fn publish(dir: &Path, stage: &Path, fs_group: Option<u32>) -> Result<(), String> {
+    use std::os::unix::fs::symlink;
+    let io = |e: std::io::Error| format!("failed to update volume {}: {e}", dir.display());
+    if let Some(gid) = fs_group {
+        apply_fs_group(stage, gid);
+    }
+    let _ = std::fs::set_permissions(stage, std::fs::Permissions::from_mode(0o755));
+    let stage_name = stage.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let entries: Vec<String> = std::fs::read_dir(stage)
+        .map_err(io)?
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    let tmp = dir.join("..data_tmp");
+    let _ = std::fs::remove_file(&tmp);
+    symlink(&stage_name, &tmp).map_err(io)?;
+    std::fs::rename(&tmp, dir.join("..data")).map_err(io)?;
+    for name in &entries {
+        let link = dir.join(name);
+        match std::fs::symlink_metadata(&link) {
+            Ok(m) if m.file_type().is_symlink() => continue,
+            Ok(m) if m.is_dir() => std::fs::remove_dir_all(&link).map_err(io)?,
+            Ok(_) => std::fs::remove_file(&link).map_err(io)?,
+            Err(_) => {}
+        }
+        symlink(format!("..data/{name}"), &link).map_err(io)?;
+    }
+    // Drop entries and versions that are no longer current.
+    for entry in std::fs::read_dir(dir).map_err(io)?.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path();
+        if name == "..data" || name == stage_name || entries.contains(&name) {
+            continue;
+        }
+        if name.starts_with("..") && path.is_dir() && !path.is_symlink() {
+            let _ = std::fs::remove_dir_all(&path);
+        } else if path.is_symlink() || !name.starts_with("..") {
+            let _ = std::fs::remove_file(&path).or_else(|_| std::fs::remove_dir_all(&path));
         }
     }
-    let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755));
     Ok(())
 }
 
 /// Give the pod's `fsGroup` access the way the kubelet does (group
 /// ownership). Where the agent may not change ownership (not root), the
-/// group's permissions are granted to everyone instead.
+/// group's permissions are granted to owner and others as well.
 fn apply_fs_group(dir: &Path, gid: u32) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
@@ -332,7 +376,10 @@ fn apply_fs_group(dir: &Path, gid: u32) {
         if std::os::unix::fs::chown(&path, None, Some(gid)).is_err() {
             if let Ok(meta) = std::fs::metadata(&path) {
                 let mode = meta.permissions().mode() & 0o777;
-                let widened = mode | ((mode & 0o070) >> 3);
+                // Owner too: VM-backed Docker shows bind-mounted files as
+                // owned by whoever reads them.
+                let group = (mode >> 3) & 0o7;
+                let widened = mode | (group << 6) | group;
                 let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(widened));
             }
         }
@@ -346,6 +393,25 @@ fn apply_fs_group(dir: &Path, gid: u32) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn publishes_like_the_kubelet_atomic_writer() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("vol");
+        let stage = begin_write(&dir).unwrap();
+        write_file(&stage, "a", b"1", 0o644).unwrap();
+        write_file(&stage, "old", b"x", 0o644).unwrap();
+        publish(&dir, &stage, None).unwrap();
+        assert!(std::fs::symlink_metadata(dir.join("a")).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read_to_string(dir.join("a")).unwrap(), "1");
+        let stage = begin_write(&dir).unwrap();
+        write_file(&stage, "a", b"2", 0o644).unwrap();
+        publish(&dir, &stage, None).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("a")).unwrap(), "2");
+        assert!(!dir.join("old").exists() && std::fs::symlink_metadata(dir.join("old")).is_err());
+        let versions = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.path().is_dir() && !e.path().is_symlink()).count();
+        assert_eq!(versions, 1, "older versions are removed");
+    }
 
     #[test]
     fn downward_fields() {

@@ -1,0 +1,22 @@
+{"id": "deploy_ready", "tier": "L2", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "deploy_scale", "tier": "L2", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "deploy_rollout_undo", "tier": "L2", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "pod_logs", "tier": "L2", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "pod_exec", "tier": "L2", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "port_forward", "tier": "L2", "status": "pass", "seconds": 2, "detail": ""}
+{"id": "job_complete", "tier": "L2", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "cronjob_schedules", "tier": "L2", "status": "pass", "seconds": 39, "detail": ""}
+{"id": "statefulset_ordinals", "tier": "L2", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "daemonset_all_nodes", "tier": "L2", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "multi_container_pod", "tier": "L2", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "config_injection", "tier": "L2", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "http_readiness", "tier": "L2", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "restart_on_crash", "tier": "L2", "status": "pass", "seconds": 4, "detail": ""}
+{"id": "pvc_local", "tier": "L2", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "svc_clusterip", "tier": "L3", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "svc_dns", "tier": "L3", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "svc_endpoints", "tier": "L3", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "svc_headless", "tier": "L3", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "svc_nodeport", "tier": "L3", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "pod_to_pod", "tier": "L3", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "api_from_pod", "tier": "L3", "status": "fail", "seconds": 30, "detail": "timed out after 30s waiting for: kubectl -n compat-api-from-pod exec client -- sh -c wget -qO- -T 3 --no-check-certificate --header \"Authorization: Bearer $(cat /var/run/secrets/kubernetes.io/serviceaccount/token)\" https://kubernetes.default.svc/version"}

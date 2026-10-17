@@ -1,9 +1,7 @@
 //! Cluster DNS, answered from the object store (what CoreDNS does in k3s).
 //!
-//! - `<service>.<ns>.svc.cluster.local`: the ready endpoints' pod IPs. There
-//!   is no service proxy yet, so ClusterIPs are not routable; answering with
-//!   pod IPs works for clients that use the service port when it equals the
-//!   target port (most charts), and is exactly right for headless services.
+//! - `<service>.<ns>.svc.cluster.local`: the ClusterIP (each node's service
+//!   proxy routes it), or the ready pod IPs for a headless Service.
 //! - `<pod>.<service>.<ns>.svc.cluster.local` (StatefulSet pods, `hostname`
 //!   plus `subdomain`) and `<a-b-c-d>.<ns>.pod.cluster.local`.
 //! - Everything else is forwarded to the host's resolver.
@@ -113,12 +111,12 @@ fn resolve(api: &ApiState, name: &str) -> Option<Vec<Ipv4Addr>> {
     match parts.as_slice() {
         [svc, ns, "svc"] => {
             let service = api.get_object("", "services", ns, svc)?;
-            let mut ips = endpoint_ips(api, ns, svc, None);
-            if ips.is_empty() {
-                // No selector (or no endpoints yet): the ClusterIP, if any.
-                ips.extend(service.pointer("/spec/clusterIP").and_then(Value::as_str).and_then(|ip| ip.parse::<Ipv4Addr>().ok()));
+            // A ClusterIP (the node's service proxy routes it); headless
+            // services resolve to their ready pods.
+            match service.pointer("/spec/clusterIP").and_then(Value::as_str).and_then(|ip| ip.parse::<Ipv4Addr>().ok()) {
+                Some(ip) => Some(vec![ip]),
+                None => Some(endpoint_ips(api, ns, svc, None)),
             }
-            Some(ips)
         }
         [host, svc, ns, "svc"] => {
             api.get_object("", "services", ns, svc)?;

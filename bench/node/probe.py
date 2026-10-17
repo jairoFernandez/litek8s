@@ -7,6 +7,11 @@
   probe.py cpu-diff <file>             -> JSON: per-bucket CPU since the snapshot
   probe.py ttr-litek8s <sock> <yaml> <name>   -> JSON: apply -> first ready replica
   probe.py ttr-k3s <yaml> <name>              -> JSON: apply -> first Ready pod
+  probe.py ttr-kube <url> <json> <name>       -> JSON: POST a Deployment to the litek8s
+                                                 Kubernetes API -> first Ready pod
+  probe.py kube-apply <url> <json>            -> POST a Deployment (no wait)
+  probe.py kube-delete <url> <name>           -> DELETE a Deployment, wait for its pods
+  probe.py kube-ready <url> <name...>         -> exit 0 once every Deployment is Available
   probe.py agent-direct <sock> <n> <json>     -> JSON: latency of n requests sent
                                                  straight to the resident agent socket
   probe.py ssh-rpc <n> <json> -- <ssh argv>   -> JSON: latency of n ssh-exec RPCs
@@ -16,6 +21,7 @@ ssh-spawned `litek8s agent` proxies) are still charged to the right owner via
 the cgroup's cumulative cpu.stat even after they exit.
 """
 import json
+import urllib.request
 import os
 import socket
 import statistics
@@ -109,6 +115,10 @@ def bucket(cg, comm):
     if unit == "litek8s.service":
         return "litek8s-serve"
     if unit.startswith("docker-") and unit.endswith(".scope"):
+        # litek8s pod sandboxes (busybox `sleep`) and its iptables helper are
+        # the counterpart of k3s's pause containers.
+        if comm in ("sleep", "docker-init"):
+            return "pod sandbox (pause)"
         return "workload"
     if unit in ("docker.service", "containerd.service", "k3s.service"):
         if comm == "k3s-server":
@@ -326,6 +336,57 @@ def ttr_litek8s(sock_path, manifest, name, timeout=180):
     raise SystemExit(f"{name} not ready after {timeout}s")
 
 
+def kube(url, method, path, body=None):
+    req = urllib.request.Request(url + path, method=method, data=None if body is None else json.dumps(body).encode(),
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.load(r)
+
+
+def kube_pod_ready(url, name):
+    pods = kube(url, "GET", f"/api/v1/namespaces/default/pods?labelSelector=app%3D{name}")
+    return any(c.get("type") == "Ready" and c.get("status") == "True"
+               for p in pods.get("items", []) for c in p.get("status", {}).get("conditions", []))
+
+
+def ttr_kube(url, manifest, name, timeout=180):
+    with open(manifest) as f:
+        body = json.load(f)
+    t0 = time.monotonic()
+    kube(url, "POST", "/apis/apps/v1/namespaces/default/deployments", body)
+    t_applied = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        if kube_pod_ready(url, name):
+            t1 = time.monotonic()
+            return {"seconds": round(t1 - t0, 3), "apply_cli_s": round(t_applied - t0, 3)}
+        time.sleep(0.02)
+    raise SystemExit(f"{name} not ready after {timeout}s")
+
+
+def kube_delete(url, name, timeout=120):
+    kube(url, "DELETE", f"/apis/apps/v1/namespaces/default/deployments/{name}")
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        pods = kube(url, "GET", f"/api/v1/namespaces/default/pods?labelSelector=app%3D{name}")
+        if not pods.get("items"):
+            return {}
+        time.sleep(0.2)
+    raise SystemExit(f"pods of {name} still present after {timeout}s")
+
+
+def kube_ready(url, names, timeout=300):
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        ok = True
+        for n in names:
+            d = kube(url, "GET", f"/apis/apps/v1/namespaces/default/deployments/{n}")
+            ok &= d.get("status", {}).get("availableReplicas", 0) >= 1
+        if ok:
+            return {}
+        time.sleep(0.5)
+    raise SystemExit("not ready: " + " ".join(names))
+
+
 def ttr_k3s(manifest, name, timeout=180):
     jsonpath = '{.metadata.name} {.status.conditions[?(@.type=="Ready")].status}{"\\n"}'
     watcher = subprocess.Popen(
@@ -413,6 +474,16 @@ def main():
         out = ttr_litek8s(*args)
     elif cmd == "ttr-k3s":
         out = ttr_k3s(*args)
+    elif cmd == "ttr-kube":
+        out = ttr_kube(*args)
+    elif cmd == "kube-apply":
+        with open(args[1]) as f:
+            out = kube(args[0], "POST", "/apis/apps/v1/namespaces/default/deployments", json.load(f))
+        out = {"name": out.get("metadata", {}).get("name")}
+    elif cmd == "kube-delete":
+        out = kube_delete(*args)
+    elif cmd == "kube-ready":
+        out = kube_ready(args[0], args[1:])
     elif cmd == "agent-direct":
         out = agent_direct(args[0], int(args[1]), args[2])
     elif cmd == "ssh-rpc":
