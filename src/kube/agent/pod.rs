@@ -672,6 +672,7 @@ impl<R: PodRuntime> Worker<R> {
         let host = if self.host_network() { "127.0.0.1".to_string() } else { self.pod_ip() };
         let rt = self.agent.runtime().clone();
         let tx = self.tx.clone();
+        let sandbox_id = if self.host_network() { None } else { self.sandbox.as_ref().map(|s| s.id.clone()) };
         let c = if init { &mut self.init[i] } else { &mut self.main[i] };
         c.stop_probes();
         let Some(id) = c.id.clone() else { return };
@@ -693,7 +694,13 @@ impl<R: PodRuntime> Worker<R> {
         if !c.init || c.sidecar {
             for (kind, field) in probes {
                 if let Some(probe) = c.spec.get(field).filter(|p| p.is_object()) {
-                    let target = ProbeTarget { container: c.name.clone(), container_id: id.clone(), host: host.clone(), ports: ports.clone() };
+                    let target = ProbeTarget {
+                        container: c.name.clone(),
+                        container_id: id.clone(),
+                        sandbox_id: sandbox_id.clone(),
+                        host: host.clone(),
+                        ports: ports.clone(),
+                    };
                     c.probes.push(tokio::spawn(probe::run(rt.clone(), kind, probe.clone(), target, started_rx.clone(), tx.clone())));
                 }
             }
@@ -1194,6 +1201,7 @@ impl<R: PodRuntime> Worker<R> {
             namespace: self.ns.clone(),
             name: self.name.clone(),
             ip: Some(self.pod_ip()).filter(|ip| !ip.is_empty()),
+            sandbox: self.sandbox.as_ref().map(|s| s.id.clone()),
             containers: HashMap::new(),
         };
         for c in self.main.iter().chain(self.init.iter()) {

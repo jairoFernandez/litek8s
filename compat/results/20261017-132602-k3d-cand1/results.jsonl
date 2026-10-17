@@ -1,0 +1,10 @@
+{"id": "helm_kps", "tier": "L4", "status": "pass", "seconds": 350, "detail": "kube-prometheus-stack-92.10.1"}
+{"id": "helm_fluent_bit", "tier": "L4", "status": "fail", "seconds": 362, "detail": "context deadline exceeded"}
+{"id": "helm_nginx_ingress", "tier": "L4", "status": "pass", "seconds": 58, "detail": "nginx-ingress-2.8.0"}
+{"id": "helm_redis_operator", "tier": "L4", "status": "pass", "seconds": 11, "detail": "redis-operator-0.27.0"}
+{"id": "helm_valkey", "tier": "L4", "status": "pass", "seconds": 22, "detail": "valkey-0.12.0"}
+{"id": "helm_nextcloud", "tier": "L4", "status": "pass", "seconds": 199, "detail": "nextcloud-9.4.0"}
+{"id": "helm_pihole", "tier": "L4", "status": "pass", "seconds": 85, "detail": "pihole-2.38.0"}
+{"id": "helm_zot", "tier": "L4", "status": "pass", "seconds": 44, "detail": "zot-0.1.128"}
+{"id": "helm_descheduler", "tier": "L4", "status": "pass", "seconds": 2, "detail": "descheduler-0.37.0"}
+{"id": "helm_gatus", "tier": "L4", "status": "pass", "seconds": 11, "detail": "gatus-1.5.0"}

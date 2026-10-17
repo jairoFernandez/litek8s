@@ -32,6 +32,9 @@ pub(crate) struct ProbeResult {
 pub(crate) struct ProbeTarget {
     pub container: String,
     pub container_id: String,
+    /// The pod's sandbox (busybox, owns the network namespace); None for
+    /// hostNetwork pods.
+    pub sandbox_id: Option<String>,
     /// Where network probes connect (the pod IP, or loopback for hostNetwork).
     pub host: String,
     /// The container's named ports.
@@ -101,12 +104,7 @@ pub(crate) async fn run<R: PodRuntime>(
 async fn check<R: PodRuntime>(rt: &R, probe: &Value, target: &ProbeTarget) -> bool {
     if let Some(command) = probe.pointer("/exec/command").and_then(Value::as_array) {
         let command: Vec<String> = command.iter().filter_map(Value::as_str).map(str::to_string).collect();
-        let Ok(session) = rt.exec(&target.container_id, command, false, false).await else {
-            return false;
-        };
-        let mut output = session.output;
-        while output.next().await.is_some() {}
-        return rt.exec_exit_code(&session.id).await.ok().flatten() == Some(0);
+        return exec_ok(rt, &target.container_id, command).await;
     }
     if let Some(http) = probe.get("httpGet") {
         let Some(port) = resolve_port(http.get("port"), target) else { return false };
@@ -127,21 +125,94 @@ async fn check<R: PodRuntime>(rt: &R, probe: &Value, target: &ProbeTarget) -> bo
             })
             .unwrap_or_default();
         let https = http.get("scheme").and_then(Value::as_str) == Some("HTTPS");
-        return http_get(host, port, path, &headers, https).await;
+        return match dial(host, port, target).await {
+            Dial::Direct(tcp) => http_get(tcp, host, port, path, &headers, https).await,
+            Dial::Refused => false,
+            Dial::InPod(sandbox) => {
+                let scheme = if https { "https" } else { "http" };
+                let mut command = vec!["wget".to_string(), "-q".into(), "-O".into(), "/dev/null".into(), "-T".into(), "1".into()];
+                command.push("--header".into());
+                command.push("User-Agent: kube-probe/1.33".into());
+                for (k, v) in &headers {
+                    command.push("--header".into());
+                    command.push(format!("{k}: {v}"));
+                }
+                if https {
+                    command.push("--no-check-certificate".into());
+                }
+                command.push(format!("{scheme}://{}{path}", host_port(host, port)));
+                exec_ok(rt, &sandbox, command).await
+            }
+        };
     }
     let port = probe
         .pointer("/tcpSocket/port")
         .or_else(|| probe.pointer("/grpc/port"));
     if let Some(port) = resolve_port(port, target) {
         let host = probe.pointer("/tcpSocket/host").and_then(Value::as_str).filter(|h| !h.is_empty()).unwrap_or(&target.host);
-        return TcpStream::connect((host, port)).await.is_ok();
+        return match dial(host, port, target).await {
+            Dial::Direct(_) => true,
+            Dial::Refused => false,
+            // `-e true`: connect, then exit at once with success.
+            Dial::InPod(sandbox) => exec_ok(rt, &sandbox, vec!["nc".into(), host.into(), port.to_string(), "-e".into(), "true".into()]).await,
+        };
     }
     false
 }
 
+enum Dial {
+    Direct(TcpStream),
+    Refused,
+    /// The node has no working path to the pod address: probe from inside
+    /// the pod's network namespace, through its sandbox.
+    InPod(String),
+}
+
+/// Pod addresses the node could not reach directly. With Docker in a VM the
+/// host's path to a container address can be missing (Docker Desktop) or
+/// stay stale for a new address (OrbStack) although the pod is fine; probes
+/// to these go through the pod's sandbox instead of waiting for a timeout
+/// each period.
+static UNROUTABLE: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+
+/// How long a direct connect may take before the address counts as
+/// unroutable. A listening socket on a local bridge answers in well under a
+/// millisecond; a missing route never answers.
+const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
+
+async fn dial(host: &str, port: u16, target: &ProbeTarget) -> Dial {
+    let Some(sandbox) = target.sandbox_id.clone() else {
+        return TcpStream::connect((host, port)).await.map_or(Dial::Refused, Dial::Direct);
+    };
+    if UNROUTABLE.lock().unwrap().as_ref().is_some_and(|s| s.contains(host)) {
+        return Dial::InPod(sandbox);
+    }
+    match tokio::time::timeout(DIRECT_CONNECT_TIMEOUT, TcpStream::connect((host, port))).await {
+        Ok(Ok(tcp)) => Dial::Direct(tcp),
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => Dial::Refused,
+        _ => {
+            UNROUTABLE.lock().unwrap().get_or_insert_default().insert(host.to_string());
+            Dial::InPod(sandbox)
+        }
+    }
+}
+
+fn host_port(host: &str, port: u16) -> String {
+    if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") }
+}
+
+/// Run `command` in container `id`; true when it exits 0.
+async fn exec_ok<R: PodRuntime>(rt: &R, id: &str, command: Vec<String>) -> bool {
+    let Ok(session) = rt.exec(id, command, false, false).await else {
+        return false;
+    };
+    let mut output = session.output;
+    while output.next().await.is_some() {}
+    rt.exec_exit_code(&session.id).await.ok().flatten() == Some(0)
+}
+
 /// A probe-style GET: success is any 2xx/3xx status.
-async fn http_get(host: &str, port: u16, path: &str, headers: &[(String, String)], https: bool) -> bool {
-    let Ok(tcp) = TcpStream::connect((host, port)).await else { return false };
+async fn http_get(tcp: TcpStream, host: &str, port: u16, path: &str, headers: &[(String, String)], https: bool) -> bool {
     let mut request = format!("GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUser-Agent: kube-probe/1.33\r\nAccept: */*\r\nConnection: close\r\n");
     for (k, v) in headers {
         request.push_str(&format!("{k}: {v}\r\n"));

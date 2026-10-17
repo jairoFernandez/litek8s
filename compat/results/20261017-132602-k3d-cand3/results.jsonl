@@ -1,0 +1,10 @@
+{"id": "helm_alloy", "tier": "L4", "status": "pass", "seconds": 348, "detail": "alloy-1.13.1"}
+{"id": "helm_envoy_gateway", "tier": "L4", "status": "pass", "seconds": 48, "detail": "gateway-helm-1.9.2"}
+{"id": "helm_openebs_local", "tier": "L4", "status": "pass", "seconds": 20, "detail": "localpv-provisioner-4.6.0"}
+{"id": "helm_zalando_pg", "tier": "L4", "status": "pass", "seconds": 46, "detail": "postgres-operator-2.0.3"}
+{"id": "helm_jellyfin", "tier": "L4", "status": "pass", "seconds": 139, "detail": "jellyfin-3.2.0"}
+{"id": "helm_vaultwarden", "tier": "L4", "status": "pass", "seconds": 41, "detail": "vaultwarden-0.46.3"}
+{"id": "helm_homepage", "tier": "L4", "status": "pass", "seconds": 48, "detail": "homepage-2.1.0"}
+{"id": "helm_flux2", "tier": "L4", "status": "pass", "seconds": 88, "detail": "flux2-2.19.1"}
+{"id": "helm_argo_wf", "tier": "L4", "status": "pass", "seconds": 76, "detail": "argo-workflows-2.0.13"}
+{"id": "helm_authelia", "tier": "L4", "status": "fail", "seconds": 364, "detail": "context deadline exceeded"}
