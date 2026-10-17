@@ -1,0 +1,1 @@
+kube-system   coredns-7cfb7bc9c7-p9knq   1/1   Running   0     10s

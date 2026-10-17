@@ -1,0 +1,122 @@
+{
+ "buckets": {
+  "os/other": {
+   "rss_kib": 96364,
+   "pss_kib": 56655,
+   "procs": 18,
+   "comms": {
+    "systemd": 2,
+    "systemd-journal": 1,
+    "multipathd": 1,
+    "systemd-udevd": 1,
+    "systemd-resolve": 1,
+    "systemd-timesyn": 1,
+    "systemd-network": 1,
+    "cron": 1,
+    "dbus-daemon": 1,
+    "polkitd": 1,
+    "systemd-logind": 1,
+    "udisksd": 1,
+    "rsyslogd": 1,
+    "agetty": 2,
+    "ModemManager": 1,
+    "(sd-pam)": 1
+   }
+  },
+  "sshd": {
+   "rss_kib": 13636,
+   "pss_kib": 6408,
+   "procs": 3,
+   "comms": {
+    "sshd": 3
+   }
+  },
+  "k3s-server": {
+   "rss_kib": 552584,
+   "pss_kib": 551856,
+   "procs": 1,
+   "comms": {
+    "k3s-server": 1
+   }
+  },
+  "containerd": {
+   "rss_kib": 53904,
+   "pss_kib": 53176,
+   "procs": 1,
+   "comms": {
+    "containerd": 1
+   }
+  },
+  "containerd-shim": {
+   "rss_kib": 53948,
+   "pss_kib": 51356,
+   "procs": 10,
+   "comms": {
+    "containerd-shim": 10
+   }
+  },
+  "pod sandbox (pause)": {
+   "rss_kib": 420,
+   "pss_kib": 380,
+   "procs": 10,
+   "comms": {
+    "pause": 10
+   }
+  },
+  "k8s addon pods": {
+   "rss_kib": 57812,
+   "pss_kib": 57788,
+   "procs": 6,
+   "comms": {
+    "coredns": 1,
+    "metrics-server": 1,
+    "local-path-prov": 1,
+    "entry": 2,
+    "traefik": 1
+   }
+  },
+  "workload": {
+   "rss_kib": 26904,
+   "pss_kib": 13194,
+   "procs": 15,
+   "comms": {
+    "nginx": 15
+   }
+  }
+ },
+ "categories": {
+  "os/other": {
+   "rss_kib": 96364,
+   "pss_kib": 56655
+  },
+  "node-agent": {
+   "rss_kib": 13636,
+   "pss_kib": 6408
+  },
+  "control-plane": {
+   "rss_kib": 552584,
+   "pss_kib": 551856
+  },
+  "runtime": {
+   "rss_kib": 108272,
+   "pss_kib": 104912
+  },
+  "addons": {
+   "rss_kib": 57812,
+   "pss_kib": 57788
+  },
+  "workload": {
+   "rss_kib": 26904,
+   "pss_kib": 13194
+  }
+ },
+ "system": {
+  "mem_total_kib": 974612,
+  "mem_available_kib": 59916,
+  "mem_used_kib": 914696
+ },
+ "cgroup_memory_current_kib": {
+  "system.slice/k3s.service": 683164,
+  "kubepods.slice": 79496
+ }
+}

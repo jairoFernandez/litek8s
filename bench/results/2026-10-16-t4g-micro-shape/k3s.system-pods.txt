@@ -1,0 +1,7 @@
+kube-system   coredns-7cfb7bc9c7-sjdts                  1/1   Running     0             53s
+kube-system   helm-install-traefik-crd-6jvl9            0/1   Completed   0             53s
+kube-system   helm-install-traefik-sdcnp                0/1   Completed   2 (26s ago)   53s
+kube-system   local-path-provisioner-77b9867795-qflt8   1/1   Running     0             53s
+kube-system   metrics-server-6dc596dfb8-vlhpp           1/1   Running     0             53s
+kube-system   svclb-traefik-46e56afd-95gl4              2/2   Running     0             13s
+kube-system   traefik-7c8544f77-5hb7p                   1/1   Running     0             13s

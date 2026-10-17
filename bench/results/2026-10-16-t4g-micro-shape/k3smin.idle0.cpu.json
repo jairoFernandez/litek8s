@@ -1,0 +1,72 @@
+{
+ "window_s": 300.0,
+ "buckets": {
+  "containerd": {
+   "cpu_s": 1.06,
+   "pct_one_core": 0.353
+  },
+  "containerd-shim": {
+   "cpu_s": 0.43,
+   "pct_one_core": 0.143
+  },
+  "k3s-server": {
+   "cpu_s": 9.55,
+   "pct_one_core": 3.183
+  },
+  "k3s.service (short-lived)": {
+   "cpu_s": 0.147,
+   "pct_one_core": 0.049
+  },
+  "k8s addon pods": {
+   "cpu_s": 0.57,
+   "pct_one_core": 0.19
+  },
+  "os/other": {
+   "cpu_s": 0.773,
+   "pct_one_core": 0.258
+  },
+  "pod sandbox (pause)": {
+   "cpu_s": 0.0,
+   "pct_one_core": 0.0
+  },
+  "sshd": {
+   "cpu_s": 0.0,
+   "pct_one_core": 0.0
+  },
+  "user.slice (short-lived)": {
+   "cpu_s": 0.01,
+   "pct_one_core": 0.003
+  }
+ },
+ "categories": {
+  "addons": {
+   "cpu_s": 0.57,
+   "pct_one_core": 0.19
+  },
+  "control-plane": {
+   "cpu_s": 9.55,
+   "pct_one_core": 3.183
+  },
+  "node-agent": {
+   "cpu_s": 0.01,
+   "pct_one_core": 0.003
+  },
+  "os/other": {
+   "cpu_s": 0.773,
+   "pct_one_core": 0.258
+  },
+  "runtime": {
+   "cpu_s": 1.637,
+   "pct_one_core": 0.546
+  }
+ },
+ "write_syscall_kib": {
+  "containerd": 1034,
+  "containerd-shim": 80,
+  "k3s-server": 7727,
+  "k8s addon pods": 88
+ },
+ "busy_cpu_s": 12.54,
+ "system_busy_pct_of_all_cpus": 2.098,
+ "ncpu": 2
+}
