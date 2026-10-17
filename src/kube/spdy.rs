@@ -375,6 +375,8 @@ async fn relay(
     });
     while let Some(event) = handle.events.recv().await {
         match event {
+            // Channel 2 is the agent's stderr when it relays through the pod sandbox.
+            StreamEvent::Data { channel: 2, .. } => {}
             StreamEvent::Data { bytes, .. } => {
                 for chunk in bytes.chunks(32 * 1024) {
                     let _ = out.send(data(sid, 0, chunk));
