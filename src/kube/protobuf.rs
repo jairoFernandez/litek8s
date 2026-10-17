@@ -18,6 +18,7 @@ use serde_json::{Map, Value, json};
 
 const MAGIC: &[u8] = b"k8s\0";
 const META: &str = "k8s.io.apimachinery.pkg.apis.meta.v1";
+const APIEXT: &str = "k8s.io.apiextensions_apiserver.pkg.apis.apiextensions.v1";
 
 fn pool() -> &'static DescriptorPool {
     static POOL: OnceLock<DescriptorPool> = OnceLock::new();
@@ -80,6 +81,8 @@ fn message_for(api_version: &str, kind: &str) -> Option<MessageDescriptor> {
     };
     [
         format!("k8s.io.api.{short}.{version}.{kind}"),
+        // CustomResourceDefinition lives outside k8s.io/api.
+        format!("k8s.io.{short}_apiserver.pkg.apis.{short}.{version}.{kind}"),
         format!("{META}.{kind}"),
     ]
     .iter()
@@ -120,6 +123,45 @@ fn to_json(msg: &DynamicMessage) -> Value {
         name if name == "k8s.io.apimachinery.pkg.runtime.RawExtension" || name == format!("{META}.FieldsV1") => {
             let raw = get("raw").or_else(|| get("Raw")).and_then(|v| v.as_bytes().cloned()).unwrap_or_default();
             serde_json::from_slice(&raw).unwrap_or(Value::Null)
+        }
+        // apiextensions' JSON-schema types marshal to JSON by hand in Go.
+        name if name == format!("{APIEXT}.JSON") => {
+            let raw = get("raw").and_then(|v| v.as_bytes().cloned()).unwrap_or_default();
+            serde_json::from_slice(&raw).unwrap_or(Value::Null)
+        }
+        name if name == format!("{APIEXT}.JSONSchemaPropsOrArray") => match get("jSONSchemas").map(|v| scalar_or_nested(&v)) {
+            Some(Value::Array(items)) if !items.is_empty() => Value::Array(items),
+            _ => get("schema").map(|v| scalar_or_nested(&v)).unwrap_or(Value::Null),
+        },
+        name if name == format!("{APIEXT}.JSONSchemaPropsOrBool") => match msg.has_field_by_name("schema") {
+            true => get("schema").map(|v| scalar_or_nested(&v)).unwrap_or(Value::Null),
+            false => json!(get("allows").and_then(|v| v.as_bool()).unwrap_or(false)),
+        },
+        name if name == format!("{APIEXT}.JSONSchemaPropsOrStringArray") => match msg.has_field_by_name("schema") {
+            true => get("schema").map(|v| scalar_or_nested(&v)).unwrap_or(Value::Null),
+            false => get("property").map(|v| scalar_or_nested(&v)).unwrap_or(json!([])),
+        },
+        name if name == format!("{APIEXT}.JSONSchemaProps") => {
+            let mut out = Map::new();
+            for (field, value) in msg.fields() {
+                let key = match field.name() {
+                    "schema" => "$schema".to_string(),
+                    "ref" => "$ref".to_string(),
+                    other => match other.strip_prefix("xKubernetes") {
+                        // xKubernetesListMapKeys -> x-kubernetes-list-map-keys
+                        Some(rest) => rest.chars().fold("x-kubernetes".to_string(), |mut acc, c| {
+                            if c.is_ascii_uppercase() {
+                                acc.push('-');
+                            }
+                            acc.push(c.to_ascii_lowercase());
+                            acc
+                        }),
+                        None => other.to_string(),
+                    },
+                };
+                out.insert(key, scalar_or_nested(value));
+            }
+            Value::Object(out)
         }
         _ => {
             let mut out = Map::new();
@@ -223,5 +265,41 @@ mod tests {
         // Operators check their permissions with these (client-go sends protobuf).
         assert!(message_for("authorization.k8s.io/v1", "SelfSubjectAccessReview").is_some());
         assert!(message_for("authentication.k8s.io/v1", "TokenReview").is_some());
+        assert!(message_for("apiextensions.k8s.io/v1", "CustomResourceDefinition").is_some());
+    }
+
+    #[test]
+    fn decodes_json_schema_props() {
+        let pool = pool();
+        let msg = |name: &str| DynamicMessage::new(pool.get_message_by_name(&format!("{APIEXT}.{name}")).unwrap());
+        let mut string = msg("JSONSchemaProps");
+        string.set_field_by_name("type", Pv::String("string".into()));
+        let mut default = msg("JSON");
+        default.set_field_by_name("raw", Pv::Bytes(br#""a""#.to_vec().into()));
+        string.set_field_by_name("default", Pv::Message(default));
+        let mut items = msg("JSONSchemaPropsOrArray");
+        items.set_field_by_name("schema", Pv::Message(string.clone()));
+        let mut list = msg("JSONSchemaProps");
+        list.set_field_by_name("type", Pv::String("array".into()));
+        list.set_field_by_name("items", Pv::Message(items));
+        list.set_field_by_name("xKubernetesListType", Pv::String("set".into()));
+        let mut free = msg("JSONSchemaPropsOrBool");
+        free.set_field_by_name("allows", Pv::Bool(true));
+        let mut root = msg("JSONSchemaProps");
+        root.set_field_by_name("type", Pv::String("object".into()));
+        root.set_field_by_name("xKubernetesPreserveUnknownFields", Pv::Bool(true));
+        root.set_field_by_name("additionalProperties", Pv::Message(free));
+        let mut props = std::collections::HashMap::new();
+        props.insert(MapKey::String("tags".into()), Pv::Message(list));
+        root.set_field_by_name("properties", Pv::Map(props));
+        assert_eq!(
+            to_json(&root),
+            json!({
+                "type": "object",
+                "x-kubernetes-preserve-unknown-fields": true,
+                "additionalProperties": true,
+                "properties": {"tags": {"type": "array", "x-kubernetes-list-type": "set", "items": {"type": "string", "default": "a"}}}
+            })
+        );
     }
 }
