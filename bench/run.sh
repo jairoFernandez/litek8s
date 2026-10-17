@@ -323,7 +323,9 @@ PY" | save $tag.size.json
   done
   rroot "$vm" "probe.py kube-ready $KUBE_URL web-0 web-1 web-2 web-3 web-4 >/dev/null"
   measure_idle "$vm" $tag idle5
-  rroot "$vm" "du -sb /var/lib/litek8s/apiserver | cut -f1" | save $tag.idle5.statefile-bytes.txt
+  # The object log, not the crun image store and container root filesystems
+  # under node-agent/crun (du would also descend into the mounted rootfs).
+  rroot "$vm" "du -sbx --exclude=crun /var/lib/litek8s/apiserver | cut -f1" | save $tag.idle5.statefile-bytes.txt
   [[ -n "${KEEP_VMS:-}" ]] || "$VM" down "$vm"
 }
 

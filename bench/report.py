@@ -10,7 +10,8 @@ import sys
 from collections import Counter
 
 DIR = sys.argv[1]
-SYSTEMS = [("litek8s", "litek8s"), ("kube", "litek8s apiserver + agent"), ("k3s", "k3s (default)"), ("k3smin", "k3s (minimal)")]
+SYSTEMS = [("litek8s", "litek8s"), ("kube", "litek8s apiserver + agent"), ("kubecrun", "litek8s apiserver + agent, crun"),
+           ("k3s", "k3s (default)"), ("k3smin", "k3s (minimal)")]
 
 
 def load(name):
@@ -105,8 +106,10 @@ if present:
         z = load(f"{tag}.size.json")
         if not z:
             continue
-        if tag in ("litek8s", "kube"):
-            p(f"| {label} | {mib(z['litek8s_binary_kib'])} | docker.io {z['docker_io_version']} + deps: "
+        if tag in ("litek8s", "kube", "kubecrun"):
+            pkg = "crun" if z.get("runtime") == "crun" else "docker.io"
+            ver = z.get("docker_io_version") or z.get("runtime_version", "")
+            p(f"| {label} | {mib(z['litek8s_binary_kib'])} | {pkg} {ver} + deps: "
               f"{mib(z['pkg_installed_delta_kib'])} (dpkg Installed-Size) | **{mib(z['disk_used_delta_kib'])}** |")
         else:
             p(f"| {label} | {mib(z['k3s_binary_kib'])} | extracted data dir {mib(z['k3s_data_dir_kib'])} + "

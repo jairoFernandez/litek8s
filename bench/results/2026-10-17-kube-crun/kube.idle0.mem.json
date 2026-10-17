@@ -1,0 +1,88 @@
+{
+ "buckets": {
+  "os/other": {
+   "rss_kib": 176060,
+   "pss_kib": 89714,
+   "procs": 19,
+   "comms": {
+    "systemd": 2,
+    "systemd-journal": 1,
+    "multipathd": 1,
+    "systemd-udevd": 1,
+    "systemd-resolve": 1,
+    "systemd-timesyn": 1,
+    "systemd-network": 1,
+    "cron": 1,
+    "dbus-daemon": 1,
+    "polkitd": 1,
+    "systemd-logind": 1,
+    "udisksd": 1,
+    "rsyslogd": 1,
+    "ModemManager": 1,
+    "agetty": 2,
+    "packagekitd": 1,
+    "(sd-pam)": 1
+   }
+  },
+  "sshd": {
+   "rss_kib": 22828,
+   "pss_kib": 6705,
+   "procs": 3,
+   "comms": {
+    "sshd": 3
+   }
+  },
+  "containerd": {
+   "rss_kib": 65832,
+   "pss_kib": 64569,
+   "procs": 1,
+   "comms": {
+    "containerd": 1
+   }
+  },
+  "dockerd": {
+   "rss_kib": 95672,
+   "pss_kib": 93285,
+   "procs": 1,
+   "comms": {
+    "dockerd": 1
+   }
+  },
+  "litek8s-serve": {
+   "rss_kib": 17416,
+   "pss_kib": 15895,
+   "procs": 1,
+   "comms": {
+    "litek8s": 1
+   }
+  }
+ },
+ "categories": {
+  "os/other": {
+   "rss_kib": 176060,
+   "pss_kib": 89714
+  },
+  "node-agent": {
+   "rss_kib": 22828,
+   "pss_kib": 6705
+  },
+  "runtime": {
+   "rss_kib": 161504,
+   "pss_kib": 157854
+  },
+  "control-plane": {
+   "rss_kib": 17416,
+   "pss_kib": 15895
+  }
+ },
+ "system": {
+  "mem_total_kib": 974620,
+  "mem_available_kib": 641960,
+  "mem_used_kib": 332660
+ },
+ "cgroup_memory_current_kib": {
+  "system.slice/litek8s.service": 2228,
+  "system.slice/docker.service": 53172,
+  "system.slice/containerd.service": 71280
+ }
+}

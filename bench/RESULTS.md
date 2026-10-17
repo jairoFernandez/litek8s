@@ -163,6 +163,54 @@ containers cost 28 MiB and k3s's CRI groups a pod under one shim. A runtime
 that shares one shim per pod (containerd's CRI shim, or crun/litecontainer
 behind the `PodRuntime` trait) removes it.
 
+## The Kubernetes path on crun, without Docker (2026-10-17)
+
+Same harness and VM shape; new phase `bench/run.sh kube-crun` runs the same
+`litek8s apiserver` with `--runtime crun`: pods run with crun directly
+(images, overlayfs root filesystems, pod network namespaces, logs and exit
+codes handled by litek8s itself; one small `litek8s-shim` per container).
+Both litek8s columns come from one run on fresh guests
+([`results/2026-10-17-kube-crun/`](results/2026-10-17-kube-crun/), `b5bb4b2`);
+k3s minimal from [`results/2026-10-16-t4g-micro-shape/`](results/2026-10-16-t4g-micro-shape/).
+
+| metric | kube path on Docker | **kube path on crun** | k3s minimal |
+|---|---|---|---|
+| Idle orchestrator memory, 0 workloads (PSS) | 169.7 MiB | **14.0 MiB** | 572 MiB |
+| Idle orchestrator memory, 5 nginx (PSS) | 209.5 MiB | **24.6 MiB** | 603 MiB |
+| … the litek8s process, 0 → 5 nginx | 15.5 → 18.3 MiB | 14.0 → 17.2 MiB | k3s-server 400 → 402 MiB |
+| … the container runtime, 0 → 5 nginx | 154.2 → 191.2 MiB | **0 → 7.4 MiB** (5 shims) | 117 → 144 MiB |
+| Guest RAM left (MemAvailable), 5 nginx | 604 MiB | **663 MiB** | 321 MiB |
+| Idle CPU, 0 workloads (whole guest, % of one vCPU) | 0.20 % | **0.08 %** | 4.2 % |
+| Idle CPU, 5 nginx (whole guest, % of one vCPU) | 0.48 % | **0.21 %** | 5.2 % |
+| Apply → first Ready pod (median of 5, warm image) | 0.22 s | **0.08 s** | 0.79 s |
+| Disk used after install (no workload images) | 325 MiB | **41.5 MiB** | 406 MiB |
+| Orchestrator binary | 32.5 MiB | 32.5 MiB | 68.1 MiB |
+
+**Read:** with 5 pods the whole orchestrator (control plane, scheduler,
+controllers, DNS, service proxy, node agent and container runtime) takes
+**24.6 MiB, 8.5× less than on Docker and 24× less than k3s minimal**, and
+the guest has 59 MiB more free memory than on Docker. The runtime side shrank
+from 191 MiB (dockerd 89, containerd 59, ten containerd-shims 41, five sandbox
+`sleep` containers 3) to five shims of ~1.5 MiB PSS each (3.7 MiB RSS, most of
+it the shared litek8s binary): there is no pause/sandbox process at all, the
+pod's network and IPC namespaces live as bind mounts. Nothing in the runtime
+polls (exits arrive through a pidfd per shim), so the idle runtime CPU is 0
+and the guest idles at 0.21 % with 5 pods, a 25th of k3s. Apply → Ready drops
+to 80 ms because a pod start is now `unshare` + one `ip -batch` + `crun
+create/start`, instead of two containers through dockerd → containerd → shim →
+runc. Disk after install is the binary plus the crun package (2 MiB): no
+Docker. Pulled images are stored once, as unpacked layers only (compressed
+blobs are verified while downloading and then dropped).
+
+Compatibility is unchanged: the compat corpus against this runtime scores
+L2 15/15, L3 6/7, L4 20/20, the same as on Docker
+([`compat/results/20261017-142548-litek8s-crun/`](../compat/results/20261017-142548-litek8s-crun/summary.md)).
+
+Caveat: the run's `kubecrun.idle5.statefile-bytes.txt` (381 MB) is not the
+object log: `du` also counted the image store and descended into the mounted
+container root filesystems under `node-agent/crun`. `run.sh` now excludes
+them; the object log itself is the same size as on Docker (~270 KB).
+
 ## Remote node over SSH (litek8s only)
 
 Control plane in one guest, the node in a second guest of the same shape, reached through
@@ -280,6 +328,7 @@ litek8s's local node) and **7.8 % on the control plane**, 5.8 % of it in forked 
 ```bash
 bench/run.sh                        # all phases on fresh local VMs, ~55 min
 bench/run.sh litek8s rpc            # just litek8s single-node + remote-node phases
+bench/run.sh kube kube-crun         # the Kubernetes path on Docker and on crun
 IDLE_SECS=60 SETTLE_SECS=10 bench/run.sh k3s-minimal   # quick look
 python3 bench/report.py bench/results/<timestamp>      # tables from raw JSON
 ```
