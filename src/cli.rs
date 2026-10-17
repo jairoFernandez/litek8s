@@ -466,6 +466,7 @@ enum Command {
         #[command(subcommand)]
         command: PipelineCommand,
     },
+    #[cfg(feature = "llm")]
     #[command(
         about = "Inspect and distribute model weights (safetensors)",
         help_template = HELP_TEMPLATE
@@ -474,6 +475,7 @@ enum Command {
         #[command(subcommand)]
         command: ModelCommand,
     },
+    #[cfg(feature = "llm")]
     #[command(
         about = "Generate text with a local LLM (safetensors model dir)",
         help_template = HELP_TEMPLATE
@@ -492,6 +494,7 @@ enum Command {
     },
 }
 
+#[cfg(feature = "llm")]
 #[derive(Debug, Subcommand)]
 enum LlmCommand {
     #[command(
@@ -584,6 +587,7 @@ enum LlmCommand {
     },
 }
 
+#[cfg(feature = "llm")]
 #[derive(Debug, Subcommand)]
 enum ModelCommand {
     #[command(
@@ -1584,6 +1588,7 @@ pub async fn run() -> Result<()> {
                 .await
             }
         },
+        #[cfg(feature = "llm")]
         Command::Llm { command } => match command {
             LlmCommand::Generate {
                 model_dir,
@@ -1629,6 +1634,7 @@ pub async fn run() -> Result<()> {
                 max_new,
             } => run_llm_preloaded(&model_dir, &manifest, &prompt, max_new).await,
         },
+        #[cfg(feature = "llm")]
         Command::Model { command } => match command {
             ModelCommand::Inspect { file } => run_model_inspect(&file),
             ModelCommand::Load {
@@ -1652,6 +1658,7 @@ pub async fn run() -> Result<()> {
     }
 }
 
+#[cfg(feature = "llm")]
 async fn run_model_load(
     endpoint: &DaemonEndpoint,
     name: &str,
@@ -1743,6 +1750,7 @@ async fn run_model_load(
     }
 }
 
+#[cfg(feature = "llm")]
 async fn run_model_list(endpoint: &DaemonEndpoint) -> Result<()> {
     let response = endpoint.request(Request::ListModels).await?;
     match response {
@@ -1775,6 +1783,7 @@ async fn run_model_list(endpoint: &DaemonEndpoint) -> Result<()> {
     }
 }
 
+#[cfg(feature = "llm")]
 async fn run_model_run(
     endpoint: &DaemonEndpoint,
     name: &str,
@@ -1865,6 +1874,7 @@ async fn run_model_run(
     }
 }
 
+#[cfg(feature = "llm")]
 async fn run_llm_distributed(
     model_dir: &Path,
     peers: &[String],
@@ -1912,6 +1922,7 @@ async fn run_llm_distributed(
     generate_distributed(&model, &tokenizer, prompt, max_new).await
 }
 
+#[cfg(feature = "llm")]
 async fn run_llm_preloaded(
     model_dir: &Path,
     manifest_path: &Path,
@@ -1938,6 +1949,7 @@ async fn run_llm_preloaded(
     generate_distributed(&model, &tokenizer, prompt, max_new).await
 }
 
+#[cfg(feature = "llm")]
 /// Greedy autoregressive generation with a KV cache, streaming tokens. The
 /// prompt is prefilled token-by-token into the caches, then each new token is a
 /// single decode step (one row through the sharded matmuls, attending over the
@@ -2001,6 +2013,7 @@ async fn generate_distributed(
     Ok(())
 }
 
+#[cfg(feature = "llm")]
 fn run_llm_generate(
     model_dir: &Path,
     prompt: &str,
@@ -2108,6 +2121,7 @@ fn run_llm_generate(
     Ok(())
 }
 
+#[cfg(feature = "llm")]
 fn run_model_inspect(file: &Path) -> Result<()> {
     let infos = crate::model::inspect(file)?;
     println!("{}", title("Model Tensors"));

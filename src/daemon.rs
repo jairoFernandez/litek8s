@@ -1518,6 +1518,7 @@ impl AppState {
 
     /// Reachable, schedulable nodes paired with their CPU-core weight, for
     /// CPU-proportional sharding.
+    #[cfg(feature = "llm")]
     async fn ready_targets_with_cores(&self) -> Vec<(ClusterNode, u32)> {
         let mut targets = Vec::new();
         for node in self.store.list_nodes().await {
@@ -1538,11 +1539,22 @@ impl AppState {
         targets
     }
 
+    #[cfg(not(feature = "llm"))]
+    async fn load_model(
+        &self,
+        _name: String,
+        _file_path: String,
+        _layers: Vec<crate::protocol::ModelLayerSpec>,
+    ) -> Result<Response> {
+        anyhow::bail!("this litek8s was built without the `llm` feature")
+    }
+
     /// Distribute a safetensors model across the cluster. For each layer, read
     /// its tensor's dimensions, split the columns across nodes by CPU weight,
     /// read each node's column shard from the file (one layer at a time — the
     /// whole model never lives in memory at once), upload it to the node's cache
     /// (skipping nodes that already hold it), and record a manifest.
+    #[cfg(feature = "llm")]
     async fn load_model(
         &self,
         name: String,
