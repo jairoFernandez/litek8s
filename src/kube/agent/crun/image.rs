@@ -499,6 +499,56 @@ async fn download(response: hyper::Response<hyper::body::Incoming>, path: &Path,
 // ---------------------------------------------------------------------------
 // Unpacking
 
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
+/// Skippable zstd frames: 0x184D2A50..=0x184D2A5F (zstd:chunked layers
+/// carry their table of contents in one).
+const SKIPPABLE_MAGIC: u32 = 0x184d_2a50;
+
+/// Decompresses a zstd stream of any number of frames (`tar+zstd` layers
+/// may hold several, plus skippable ones), in pure Rust.
+struct ZstdFrames<R: std::io::BufRead> {
+    source: R,
+    decoder: ruzstd::decoding::FrameDecoder,
+    in_frame: bool,
+}
+
+impl<R: std::io::BufRead> ZstdFrames<R> {
+    fn new(source: R) -> Self {
+        Self { source, decoder: ruzstd::decoding::FrameDecoder::new(), in_frame: false }
+    }
+}
+
+impl<R: std::io::BufRead> Read for ZstdFrames<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        use ruzstd::decoding::BlockDecodingStrategy;
+        use ruzstd::decoding::errors::{FrameDecoderError, ReadFrameHeaderError};
+        loop {
+            if self.in_frame {
+                while self.decoder.can_collect() == 0 && !self.decoder.is_finished() {
+                    self.decoder
+                        .decode_blocks(&mut self.source, BlockDecodingStrategy::UptoBlocks(1))
+                        .map_err(std::io::Error::other)?;
+                }
+                let n = self.decoder.read(buf)?;
+                if n > 0 || buf.is_empty() {
+                    return Ok(n);
+                }
+                self.in_frame = false;
+            }
+            if self.source.fill_buf()?.is_empty() {
+                return Ok(0);
+            }
+            match self.decoder.reset(&mut self.source) {
+                Ok(()) => self.in_frame = true,
+                Err(FrameDecoderError::ReadFrameHeaderError(ReadFrameHeaderError::SkipFrame { length, .. })) => {
+                    std::io::copy(&mut (&mut self.source).take(u64::from(length)), &mut std::io::sink())?;
+                }
+                Err(e) => return Err(std::io::Error::other(e)),
+            }
+        }
+    }
+}
+
 const WHITEOUT_PREFIX: &str = ".wh.";
 const OPAQUE_MARKER: &str = ".wh..wh..opq";
 
@@ -528,8 +578,8 @@ pub(crate) fn unpack_layer(blob: &Path, dest: &Path, diff_id: &str, owners: bool
     let raw = head.chain(file);
     let reader: Box<dyn Read> = if magic[..2] == [0x1f, 0x8b] {
         Box::new(flate2::read::MultiGzDecoder::new(raw))
-    } else if magic == [0x28, 0xb5, 0x2f, 0xfd] {
-        bail!("zstd-compressed layers are not supported yet");
+    } else if magic == ZSTD_MAGIC || u32::from_le_bytes(magic) & 0xffff_fff0 == SKIPPABLE_MAGIC {
+        Box::new(ZstdFrames::new(std::io::BufReader::new(raw)))
     } else {
         Box::new(raw)
     };
@@ -945,6 +995,28 @@ mod tests {
             b.append_data(&mut h, path, &data[..]).unwrap();
         }
         b.into_inner().unwrap()
+    }
+
+    #[test]
+    fn unpacks_multi_frame_zstd_layers() {
+        use ruzstd::encoding::{CompressionLevel, compress_to_vec};
+        let tmp = tempfile::tempdir().unwrap();
+        let tar = tar_of(&[("a", b"first"), ("dir/b", &[7u8; 70_000][..])]);
+        // Two frames with a skippable frame between them, as zstd:chunked
+        // layers have.
+        let (head, tail) = tar.split_at(1024);
+        let mut blob = compress_to_vec(head, CompressionLevel::Fastest);
+        blob.extend_from_slice(&0x184d_2a5eu32.to_le_bytes());
+        blob.extend_from_slice(&3u32.to_le_bytes());
+        blob.extend_from_slice(b"toc");
+        blob.extend_from_slice(&compress_to_vec(tail, CompressionLevel::Fastest));
+        let path = tmp.path().join("blob");
+        std::fs::write(&path, &blob).unwrap();
+        let diff_id = format!("sha256:{}", sha256_hex(&tar));
+        let dest = tmp.path().join("layer");
+        unpack_layer(&path, &dest, &diff_id, false).unwrap();
+        assert_eq!(std::fs::read(dest.join("a")).unwrap(), b"first");
+        assert_eq!(std::fs::read(dest.join("dir/b")).unwrap(), vec![7u8; 70_000]);
     }
 
     #[test]

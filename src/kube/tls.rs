@@ -27,7 +27,6 @@ use rcgen::{BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio_rustls::TlsAcceptor;
 
 /// Names the serving certificate is valid for.
 const SERVER_NAMES: &[&str] = &[
@@ -51,7 +50,9 @@ struct Stored {
 }
 
 pub struct ServerTls {
-    acceptor: TlsAcceptor,
+    config: Arc<rustls::ServerConfig>,
+    /// The same, with X25519 as the only key exchange group (see `accept`).
+    x25519: Arc<rustls::ServerConfig>,
     ca_pem: String,
 }
 
@@ -85,19 +86,39 @@ impl ServerTls {
         let cert = CertificateDer::from(b64.decode(&stored.cert_der)?);
         let ca = CertificateDer::from(b64.decode(&stored.ca_der)?);
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(b64.decode(&stored.key_der)?));
-        let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-            .with_safe_default_protocol_versions()?
-            .with_no_client_auth()
-            .with_single_cert(vec![cert, ca], key)?;
-        config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let build = |provider: rustls::crypto::CryptoProvider| -> Result<Arc<rustls::ServerConfig>> {
+            let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
+                .with_safe_default_protocol_versions()?
+                .with_no_client_auth()
+                .with_single_cert(vec![cert.clone(), ca.clone()], key.clone_key())?;
+            config.alpn_protocols = vec![b"http/1.1".to_vec()];
+            Ok(Arc::new(config))
+        };
+        let mut x25519 = rustls::crypto::ring::default_provider();
+        x25519.kx_groups = vec![rustls::crypto::ring::kx_group::X25519];
         Ok(Self {
-            acceptor: TlsAcceptor::from(Arc::new(config)),
+            config: build(rustls::crypto::ring::default_provider())?,
+            x25519: build(x25519)?,
             ca_pem: stored.ca_pem,
         })
     }
 
-    pub fn acceptor(&self) -> &TlsAcceptor {
-        &self.acceptor
+    /// Accept a TLS connection. rustls takes the key exchange group the
+    /// client lists first; busybox's client lists P-256 first, and its
+    /// x86_64 P-256 code sends invalid key shares (rustls: InvalidKeyShare,
+    /// the client sees alert 47). So a client that offers X25519 gets X25519,
+    /// as many servers prefer anyway; others get the default groups.
+    pub async fn accept<IO>(&self, io: IO) -> std::io::Result<tokio_rustls::server::TlsStream<IO>>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        let start = tokio_rustls::LazyConfigAcceptor::new(rustls::server::Acceptor::default(), io).await?;
+        let offers_x25519 = start
+            .client_hello()
+            .named_groups()
+            .is_some_and(|groups| groups.contains(&rustls::NamedGroup::X25519));
+        let config = if offers_x25519 { self.x25519.clone() } else { self.config.clone() };
+        start.into_stream(config).await
     }
 
     /// The cluster CA, as published in every namespace's `kube-root-ca.crt`.

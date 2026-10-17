@@ -159,6 +159,17 @@ mod linux {
         .map_err(|_| anyhow::anyhow!("namespace thread panicked"))?
     }
 
+    /// Whether `path` is a live namespace file (an nsfs bind mount). After a
+    /// reboot, or a restart where /run is not a tmpfs, the file can still be
+    /// there with nothing mounted on it.
+    pub(crate) fn is_ns_file(path: &Path) -> bool {
+        const NSFS_MAGIC: i64 = 0x6e73_6673;
+        let Ok(c) = cstr(path) else { return false };
+        // SAFETY: statfs writes into the zeroed struct we own.
+        let mut s: libc::statfs = unsafe { std::mem::zeroed() };
+        unsafe { libc::statfs(c.as_ptr(), &mut s) == 0 && s.f_type as i64 == NSFS_MAGIC }
+    }
+
     /// Unmount and remove a namespace file.
     pub(crate) fn remove_ns_file(path: &Path) {
         unmount(path);
@@ -281,6 +292,9 @@ mod other {
         bail!("the crun runtime needs Linux")
     }
     pub(crate) fn remove_ns_file(_: &Path) {}
+    pub(crate) fn is_ns_file(_: &Path) -> bool {
+        false
+    }
     pub(crate) fn bridge_attach(_: &str, _: &str) -> Result<()> {
         bail!("the crun runtime needs Linux")
     }

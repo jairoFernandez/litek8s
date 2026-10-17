@@ -300,8 +300,8 @@ impl CrunPods {
 
     fn sandbox_running(meta: &SandboxMeta) -> bool {
         !meta.stopped
-            && meta.netns.as_ref().is_none_or(|n| Path::new(n).exists())
-            && Path::new(&meta.ipc).exists()
+            && meta.netns.as_ref().is_none_or(|n| sys::is_ns_file(Path::new(n)))
+            && sys::is_ns_file(Path::new(&meta.ipc))
             && meta.pause_pid.is_none_or(|p| pid_alive(p, "crun-pause"))
     }
 
