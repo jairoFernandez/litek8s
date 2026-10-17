@@ -220,5 +220,8 @@ mod tests {
         assert!(message_for("apps/v1", "Deployment").is_some());
         assert!(message_for("networking.k8s.io/v1", "Ingress").is_some());
         assert!(message_for("v1", "DeleteOptions").is_some());
+        // Operators check their permissions with these (client-go sends protobuf).
+        assert!(message_for("authorization.k8s.io/v1", "SelfSubjectAccessReview").is_some());
+        assert!(message_for("authentication.k8s.io/v1", "TokenReview").is_some());
     }
 }

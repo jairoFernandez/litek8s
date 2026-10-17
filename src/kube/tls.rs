@@ -61,8 +61,18 @@ impl ServerTls {
             std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
         }
         let path = data_dir.map(|d| d.join("tls.json"));
-        let stored = match path.as_ref().filter(|p| p.exists()) {
-            Some(p) => serde_json::from_slice(&std::fs::read(p)?).with_context(|| format!("failed to read {}", p.display()))?,
+        let existing: Option<Stored> = match path.as_ref().filter(|p| p.exists()) {
+            Some(p) => Some(serde_json::from_slice(&std::fs::read(p)?).with_context(|| format!("failed to read {}", p.display()))?),
+            None => None,
+        };
+        // Certificates from before the authority key identifier was added are
+        // rejected by strict verifiers (Python 3.13's ssl): make new ones.
+        let existing = existing.filter(|s| {
+            let b64 = base64::engine::general_purpose::STANDARD;
+            b64.decode(&s.cert_der).is_ok_and(|der| has_authority_key_identifier(&der))
+        });
+        let stored = match existing {
+            Some(s) => s,
             None => {
                 let fresh = generate()?;
                 if let Some(p) = &path {
@@ -112,6 +122,9 @@ fn generate() -> Result<Stored> {
     }
     let server_key = KeyPair::generate()?;
     let mut params = CertificateParams::new(names)?;
+    // Strict X.509 verification (Python 3.13's default ssl context, used by
+    // e.g. the kubernetes Python client) requires it on non-root certificates.
+    params.use_authority_key_identifier_extension = true;
     params.distinguished_name.push(DnType::CommonName, "kube-apiserver");
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
     params.key_usages = vec![KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyEncipherment];
@@ -126,6 +139,12 @@ fn generate() -> Result<Stored> {
         cert_der: b64.encode(cert.der()),
         key_der: b64.encode(server_key.serialize_der()),
     })
+}
+
+/// Whether a DER certificate carries an authority key identifier extension
+/// (OID 2.5.29.35).
+fn has_authority_key_identifier(der: &[u8]) -> bool {
+    der.windows(5).any(|w| w == [0x06, 0x03, 0x55, 0x1d, 0x23])
 }
 
 const CONTENT_HANDSHAKE: u8 = 22;
@@ -273,6 +292,13 @@ mod tests {
         let mut m = vec![kind, 0, (len >> 8) as u8, len as u8];
         m.extend(std::iter::repeat_n(kind, len));
         m
+    }
+
+    #[test]
+    fn serving_certificate_names_its_issuer_key() {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let stored = generate().unwrap();
+        assert!(has_authority_key_identifier(&b64.decode(&stored.cert_der).unwrap()));
     }
 
     #[tokio::test]
