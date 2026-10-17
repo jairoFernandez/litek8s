@@ -32,6 +32,15 @@ Mental model:
   `serve` runs the control loop.
   Everything else talks to that daemon over a local Unix socket.";
 
+const APISERVER_AFTER_HELP: &str = "\
+Examples:
+  litek8s apiserver --kubeconfig /tmp/litek8s.kubeconfig
+  KUBECONFIG=/tmp/litek8s.kubeconfig kubectl get namespaces
+  litek8s apiserver --data-dir ~/.local/share/litek8s/apiserver --listen 127.0.0.1:6443
+
+Experimental: objects are stored and served, but nothing runs pods yet.
+There is no TLS or authentication, so keep it on localhost.";
+
 const SERVE_AFTER_HELP: &str = "\
 Examples:
   litek8s serve
@@ -209,6 +218,21 @@ enum Command {
             help = "How often to refresh per-node host resources in `top`, in seconds"
         )]
         node_resource_interval_secs: u64,
+    },
+    #[command(
+        about = "Run the Kubernetes-compatible API server (kubectl/Helm talk to it)",
+        help_template = HELP_TEMPLATE,
+        after_help = APISERVER_AFTER_HELP
+    )]
+    Apiserver {
+        #[arg(long, default_value = "127.0.0.1:6443", help = "Address to listen on (plain HTTP, no auth)")]
+        listen: std::net::SocketAddr,
+        #[arg(long, help = "Directory for the object log; omit to keep objects in memory only")]
+        data_dir: Option<PathBuf>,
+        #[arg(long, help = "Write a kubeconfig that points at this server to this path")]
+        kubeconfig: Option<PathBuf>,
+        #[arg(long, help = "Log one line per HTTP request to stderr")]
+        log_requests: bool,
     },
     #[command(
         about = "Apply a reduced Deployment or Service manifest",
@@ -979,6 +1003,20 @@ pub async fn run() -> Result<()> {
         Command::Infra { command } => match command {
             InfraCommand::Init { dir, name, force } => crate::infra::scaffold(&dir, &name, force),
         },
+        Command::Apiserver {
+            listen,
+            data_dir,
+            kubeconfig,
+            log_requests,
+        } => {
+            crate::kube::serve(crate::kube::ApiServerConfig {
+                listen,
+                data_dir,
+                kubeconfig_out: kubeconfig,
+                log_requests,
+            })
+            .await
+        }
         Command::Serve {
             state_file,
             poll_interval_secs,
