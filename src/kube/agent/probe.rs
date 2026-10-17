@@ -186,12 +186,21 @@ static UNROUTABLE: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
 /// millisecond; a missing route never answers.
 const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
 
+/// Whether the node failed to reach `addr` (an address, or `address:port`).
+pub(crate) fn is_unroutable(addr: &str) -> bool {
+    UNROUTABLE.lock().unwrap().as_ref().is_some_and(|s| s.contains(addr))
+}
+
+pub(crate) fn mark_unroutable(addr: &str) {
+    UNROUTABLE.lock().unwrap().get_or_insert_default().insert(addr.to_string());
+}
+
 async fn dial(host: &str, port: u16, target: &ProbeTarget) -> Dial {
     let Some(sandbox) = target.sandbox_id.clone() else {
         return TcpStream::connect((host, port)).await.map_or(Dial::Refused, Dial::Direct);
     };
     let host_port = host_port(host, port);
-    if UNROUTABLE.lock().unwrap().as_ref().is_some_and(|s| s.contains(host) || s.contains(&host_port)) {
+    if is_unroutable(host) || is_unroutable(&host_port) {
         return Dial::InPod(sandbox, None);
     }
     match tokio::time::timeout(DIRECT_CONNECT_TIMEOUT, TcpStream::connect((host, port))).await {
@@ -201,7 +210,7 @@ async fn dial(host: &str, port: u16, target: &ProbeTarget) -> Dial {
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused && target.host_network => Dial::InPod(sandbox, Some(host_port)),
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => Dial::Refused,
         _ => {
-            UNROUTABLE.lock().unwrap().get_or_insert_default().insert(host.to_string());
+            mark_unroutable(host);
             Dial::InPod(sandbox, None)
         }
     }
@@ -210,7 +219,7 @@ async fn dial(host: &str, port: u16, target: &ProbeTarget) -> Dial {
 async fn in_pod_ok<R: PodRuntime>(rt: &R, sandbox: &str, command: Vec<String>, remember: Option<String>) -> bool {
     let ok = exec_ok(rt, sandbox, command).await;
     if let Some(key) = remember.filter(|_| ok) {
-        UNROUTABLE.lock().unwrap().get_or_insert_default().insert(key);
+        mark_unroutable(&key);
     }
     ok
 }

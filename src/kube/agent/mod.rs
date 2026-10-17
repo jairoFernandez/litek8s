@@ -145,6 +145,16 @@ impl<R: PodRuntime> Agent<R> {
             gateway_ip: tokio::sync::OnceCell::new(),
             proxy: Arc::new(proxy::Proxy::default()),
         });
+        let weak = Arc::downgrade(&agent);
+        let in_pod: proxy::InPodDial = Arc::new(move |ip: String, port: u16| {
+            let weak = weak.clone();
+            Box::pin(async move {
+                let agent = weak.upgrade()?;
+                let sandbox = agent.views.lock().unwrap().values().find(|v| v.ip.as_deref() == Some(ip.as_str()))?.sandbox.clone()?;
+                agent.rt.exec(&sandbox, vec!["nc".into(), ip, port.to_string()], false, true).await.ok()
+            })
+        });
+        let _ = agent.proxy.in_pod.set(in_pod);
         tokio::spawn(proxy::run(agent.proxy.clone(), agent.rt.clone()));
         let exits = agent.clone();
         tokio::spawn(async move {
