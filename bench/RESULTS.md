@@ -204,7 +204,9 @@ blobs are verified while downloading and then dropped).
 
 Compatibility is unchanged: the compat corpus against this runtime scores
 L2 15/15, L3 6/7, L4 20/20, the same as on Docker
-([`compat/results/20261017-142548-litek8s-crun/`](../compat/results/20261017-142548-litek8s-crun/summary.md)).
+([`compat/results/20261017-142548-litek8s-crun/`](../compat/results/20261017-142548-litek8s-crun/summary.md)), and the same 41/42 on x86_64 (crun in a
+privileged Ubuntu 24.04 container on a Linux workstation, amd64 images:
+[`results/20261017-150615-litek8s-crun-amd64/`](../results/20261017-150615-litek8s-crun-amd64/summary.md)).
 
 Caveat: the run's `kubecrun.idle5.statefile-bytes.txt` (381 MB) is not the
 object log: `du` also counted the image store and descended into the mounted
