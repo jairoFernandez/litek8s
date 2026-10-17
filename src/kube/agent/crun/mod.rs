@@ -384,7 +384,7 @@ impl CrunPods {
             }
         } else {
             hosts.push_str("# Kubernetes-managed hosts file.\n127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n");
-            hosts.push_str("fe00::0\tip6-localnet\nfe00::0\tip6-mcastprefix\nfe00::1\tip6-allnodes\nfe00::2\tip6-allrouters\n");
+            hosts.push_str("fe00::0\tip6-localnet\nff00::0\tip6-mcastprefix\nff02::1\tip6-allnodes\nff02::2\tip6-allrouters\n");
             if let Some(ip) = ip {
                 hosts.push_str(&format!("{ip}\t{}\n", spec.hostname));
             }
