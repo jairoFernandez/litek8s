@@ -1,14 +1,15 @@
 //! HTTP front end of the Kubernetes-compatible API server.
 //!
 //! Serves discovery, the generic object API (get/list/watch/create/update/
-//! patch/delete/deletecollection) for every registered resource type, and the
-//! `status` and `scale` subresources. Objects are stored as JSON in
-//! [`Store`]; nothing here runs containers yet, so pods stay Pending until the
-//! node agent is wired to this object model.
+//! patch/delete/deletecollection) for every registered resource type, the
+//! `status` and `scale` subresources, the streaming pod subresources (`log`,
+//! `exec`, `attach`, `portforward`, see `pod_streams`), and the node agent
+//! connection endpoint. Objects are stored as JSON in [`Store`]; the
+//! controllers and node agents act on them.
 //!
-//! Not yet: TLS and authentication (bind to localhost only), protobuf,
-//! admission webhooks, schema validation, managedFields, garbage collection
-//! through ownerReferences, and the pod `log`/`exec`/`portforward` subresources.
+//! Not yet: authentication and authorization (any client is admin), schema
+//! validation, managedFields, and admission webhooks for writes made by the
+//! in-process controllers.
 
 use std::collections::{HashMap, VecDeque};
 use std::convert::Infallible;
@@ -32,6 +33,9 @@ use serde_json::{Map, Value, json};
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
 
+use super::admission;
+use super::agent::AgentHub;
+use super::defaults;
 use super::discovery;
 use super::patch;
 use super::protobuf;
@@ -39,8 +43,9 @@ use super::registry::{Registry, ResourceType};
 use super::selector::{FieldSelector, LabelSelector};
 use super::store::{ObjectKey, Store, StoreError, WatchEvent, resource_version};
 use super::table;
+use super::tls;
 
-type Body = UnsyncBoxBody<Bytes, std::io::Error>;
+pub(crate) type Body = UnsyncBoxBody<Bytes, std::io::Error>;
 
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_WATCH_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -55,6 +60,14 @@ pub struct ApiServerConfig {
     pub kubeconfig_out: Option<PathBuf>,
     /// Log one line per request to stderr.
     pub log_requests: bool,
+    /// Run this machine as a node (controllers always run).
+    pub run_node: bool,
+    /// The local node's name (default: the hostname).
+    pub node_name: Option<String>,
+    /// Where the local node agent keeps pod files.
+    pub node_dir: Option<PathBuf>,
+    /// UDP address for cluster DNS (pods use port 53); `None` disables it.
+    pub cluster_dns: Option<SocketAddr>,
 }
 
 pub struct ApiState {
@@ -62,15 +75,32 @@ pub struct ApiState {
     registry: Registry,
     server_address: String,
     log_requests: bool,
+    /// Node agents connected to this server; pod log/exec/port-forward
+    /// requests are relayed through them.
+    pub(crate) hub: Arc<AgentHub>,
+    /// Cluster DNS is being served (pods get it as their resolver).
+    pub(crate) cluster_dns: std::sync::atomic::AtomicBool,
+    /// Serves `https://` on the same port when set (in-cluster clients).
+    tls: Option<tls::ServerTls>,
 }
 
 impl ApiState {
     pub fn open(data_dir: Option<&Path>, server_address: String, log_requests: bool) -> Result<Self> {
+        let tls = match tls::ServerTls::load_or_create(data_dir) {
+            Ok(tls) => Some(tls),
+            Err(error) => {
+                eprintln!("apiserver: TLS disabled: {error:#}");
+                None
+            }
+        };
         let state = Self {
             store: Store::open(data_dir)?,
             registry: Registry::with_builtins(),
             server_address,
             log_requests,
+            hub: Arc::new(AgentHub::default()),
+            cluster_dns: std::sync::atomic::AtomicBool::new(false),
+            tls,
         };
         state.bootstrap()?;
         Ok(state)
@@ -104,6 +134,33 @@ impl ApiState {
                 "spec": {
                     "clusterIP": KUBERNETES_SERVICE_IP,
                     "ports": [{"name": "https", "port": 443, "protocol": "TCP", "targetPort": 6443}],
+                },
+            }),
+        )?;
+        self.ensure(
+            &self.builtin("storage.k8s.io", "storageclasses"),
+            None,
+            json!({
+                "metadata": {
+                    "name": defaults::DEFAULT_STORAGE_CLASS,
+                    "annotations": {"storageclass.kubernetes.io/is-default-class": "true"},
+                },
+                "provisioner": "litek8s.dev/local-path",
+                "reclaimPolicy": "Delete",
+                "volumeBindingMode": "WaitForFirstConsumer",
+            }),
+        )?;
+        self.ensure(
+            &self.builtin("", "services"),
+            Some("kube-system"),
+            json!({
+                "metadata": {"name": "kube-dns", "labels": {"k8s-app": "kube-dns", "kubernetes.io/name": "CoreDNS"}},
+                "spec": {
+                    "clusterIP": "10.43.0.10",
+                    "ports": [
+                        {"name": "dns", "port": 53, "protocol": "UDP", "targetPort": 53},
+                        {"name": "dns-tcp", "port": 53, "protocol": "TCP", "targetPort": 53},
+                    ],
                 },
             }),
         )?;
@@ -167,7 +224,27 @@ pub async fn serve(config: ApiServerConfig) -> Result<()> {
         write_kubeconfig(path, &format!("http://{client_addr}"))?;
         eprintln!("apiserver: wrote kubeconfig to {}", path.display());
     }
-    eprintln!("apiserver: listening on http://{addr} (no TLS, no authentication)");
+    eprintln!("apiserver: listening on http://{addr} (and https for in-cluster clients; no authentication)");
+    tokio::spawn(super::controllers::run(state.clone()));
+    if let Some(dns_addr) = config.cluster_dns {
+        if let Some(socket) = super::dns::bind(dns_addr).await {
+            state.cluster_dns.store(true, std::sync::atomic::Ordering::Relaxed);
+            tokio::spawn(super::dns::serve(state.clone(), socket));
+        }
+    }
+    if config.run_node {
+        let node_dir = config
+            .node_dir
+            .clone()
+            .or_else(|| config.data_dir.as_ref().map(|d| d.join("node-agent")));
+        match super::agent::docker_agent(config.node_name.clone(), node_dir).await {
+            Ok(agent) => {
+                eprintln!("apiserver: running local node {}", agent.config().node_name);
+                tokio::spawn(super::agent::run_local(state.clone(), agent, addr.port()));
+            }
+            Err(error) => eprintln!("apiserver: not running a local node: {error:#}"),
+        }
+    }
     serve_listener(state, listener).await
 }
 
@@ -178,13 +255,30 @@ pub async fn serve_listener(state: Arc<ApiState>, listener: TcpListener) -> Resu
         let _ = stream.set_nodelay(true);
         let state = state.clone();
         tokio::spawn(async move {
+            // TLS and plain HTTP share the port: a TLS ClientHello starts
+            // with 0x16, an HTTP request with a method name.
+            let mut first = [0u8; 1];
+            let is_tls = matches!(stream.peek(&mut first).await, Ok(1)) && first[0] == 0x16;
+            let service_state = state.clone();
             let service = service_fn(move |req| {
-                let state = state.clone();
+                let state = service_state.clone();
                 async move { Ok::<_, Infallible>(handle(state, req).await) }
             });
-            let _ = http1::Builder::new()
-                .serve_connection(TokioIo::new(stream), service)
-                .await;
+            match state.tls().filter(|_| is_tls) {
+                Some(tls) => {
+                    let Ok(tls_stream) = tls.acceptor().accept(stream).await else { return };
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(tls_stream), service)
+                        .with_upgrades()
+                        .await;
+                }
+                None => {
+                    let _ = http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .with_upgrades()
+                        .await;
+                }
+            }
         });
     }
 }
@@ -204,21 +298,60 @@ pub fn write_kubeconfig(path: &Path, server: &str) -> Result<()> {
 // ---------------------------------------------------------------------------
 // Request plumbing
 
-struct Req {
+pub(crate) struct Req {
     method: Method,
     query: HashMap<String, String>,
+    raw_query: String,
     accept: String,
     content_type: String,
     body: Bytes,
+    headers: hyper::HeaderMap,
+    upgrade: std::sync::Mutex<Option<hyper::upgrade::OnUpgrade>>,
 }
 
 impl Req {
-    fn q(&self, key: &str) -> Option<&str> {
+    pub(crate) fn q(&self, key: &str) -> Option<&str> {
         self.query.get(key).map(String::as_str).filter(|v| !v.is_empty())
+    }
+
+    /// Every value of a repeated query parameter (`command=a&command=b`).
+    pub(crate) fn query_all(&self, key: &str) -> Vec<String> {
+        self.raw_query
+            .split('&')
+            .filter_map(|pair| pair.split_once('='))
+            .filter(|(k, _)| percent_decode(k) == key)
+            .map(|(_, v)| percent_decode(v))
+            .collect()
+    }
+
+    pub(crate) fn header(&self, name: &str) -> &str {
+        self.headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or_default()
+    }
+
+    pub(crate) fn take_upgrade(&self) -> Option<hyper::upgrade::OnUpgrade> {
+        self.upgrade.lock().unwrap().take()
+    }
+
+    fn clone_with_query(&self, query: HashMap<String, String>) -> Self {
+        Self {
+            method: self.method.clone(),
+            query,
+            raw_query: self.raw_query.clone(),
+            accept: self.accept.clone(),
+            content_type: self.content_type.clone(),
+            body: self.body.clone(),
+            headers: self.headers.clone(),
+            upgrade: std::sync::Mutex::new(None),
+        }
     }
 
     fn dry_run(&self) -> bool {
         self.q("dryRun").is_some()
+    }
+
+    /// Metadata-only clients (client-go's metadata informers).
+    fn wants_partial(&self) -> bool {
+        self.accept.contains("as=PartialObjectMetadata")
     }
 
     fn wants_table(&self) -> bool {
@@ -227,15 +360,23 @@ impl Req {
 }
 
 #[derive(Debug)]
-struct ApiError {
-    code: StatusCode,
-    reason: &'static str,
-    message: String,
+pub(crate) struct ApiError {
+    pub(crate) code: StatusCode,
+    pub(crate) reason: &'static str,
+    pub(crate) message: String,
     details: Option<Value>,
 }
 
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} ({})", self.message, self.code.as_u16())
+    }
+}
+
+impl std::error::Error for ApiError {}
+
 impl ApiError {
-    fn new(code: StatusCode, reason: &'static str, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: StatusCode, reason: &'static str, message: impl Into<String>) -> Self {
         Self {
             code,
             reason,
@@ -244,7 +385,7 @@ impl ApiError {
         }
     }
 
-    fn bad_request(message: impl Into<String>) -> Self {
+    pub(crate) fn bad_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, "BadRequest", message)
     }
 
@@ -308,7 +449,7 @@ fn qualified(rt: &ResourceType) -> String {
     }
 }
 
-fn full(bytes: impl Into<Bytes>) -> Body {
+pub(crate) fn full(bytes: impl Into<Bytes>) -> Body {
     Full::new(bytes.into()).map_err(|never| match never {}).boxed_unsync()
 }
 
@@ -364,8 +505,12 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-async fn handle(state: Arc<ApiState>, req: Request<Incoming>) -> Response<Body> {
+async fn handle(state: Arc<ApiState>, mut req: Request<Incoming>) -> Response<Body> {
     let started = Instant::now();
+    let upgrade = req
+        .headers()
+        .contains_key(hyper::header::UPGRADE)
+        .then(|| hyper::upgrade::on(&mut req));
     let (parts, body) = req.into_parts();
     let path = parts.uri.path().to_string();
     let header = |name| {
@@ -386,9 +531,12 @@ async fn handle(state: Arc<ApiState>, req: Request<Incoming>) -> Response<Body> 
     let req = Req {
         method: parts.method.clone(),
         query: parse_query(parts.uri.query()),
+        raw_query: parts.uri.query().unwrap_or_default().to_string(),
         accept: header(ACCEPT),
         content_type: header(CONTENT_TYPE),
         body,
+        headers: parts.headers.clone(),
+        upgrade: std::sync::Mutex::new(upgrade),
     };
     let resp = match route(&state, &path, &req).await {
         Ok(resp) => resp,
@@ -472,6 +620,7 @@ async fn route(state: &Arc<ApiState>, path: &str, req: &Req) -> Result<Response<
             StatusCode::OK,
             &json!({"swagger": "2.0", "info": {"title": "Kubernetes", "version": discovery::KUBE_GIT_VERSION}, "paths": {}, "definitions": {}}),
         )),
+        ["apis", "agent.litek8s.dev", "v1", "connect"] if get => agent_connect(state, req),
         ["api", "v1", rest @ ..] => resource_request(state, req, "", "v1", rest).await,
         ["apis", group, version, rest @ ..] => resource_request(state, req, group, version, rest).await,
         _ => Err(ApiError::not_found_path()),
@@ -548,30 +697,41 @@ async fn resource_request(
             }
         }
         (&Method::GET, Some(name), None) if legacy_watch => {
-            let mut req2 = Req {
-                method: req.method.clone(),
-                query: req.query.clone(),
-                accept: req.accept.clone(),
-                content_type: req.content_type.clone(),
-                body: req.body.clone(),
-            };
-            req2.query
-                .insert("fieldSelector".into(), format!("metadata.name={name}"));
-            state.watch(rt, ns, &req2)
+            let mut query = req.query.clone();
+            query.insert("fieldSelector".into(), format!("metadata.name={name}"));
+            state.watch(rt, ns, &req.clone_with_query(query))
+        }
+        (&Method::POST, None, None) if is_review(rt) => state.review(rt, req),
+        (&Method::GET, Some(name), Some("log")) if is_pods(rt) => {
+            super::pod_streams::log(state, ns.unwrap_or_default(), name, req).await
+        }
+        (&Method::GET | &Method::POST, Some(name), Some(sub @ ("exec" | "attach"))) if is_pods(rt) => {
+            super::pod_streams::exec(state, ns.unwrap_or_default(), name, req, sub == "attach").await
+        }
+        (&Method::GET | &Method::POST, Some(name), Some("portforward")) if is_pods(rt) => {
+            super::pod_streams::port_forward(state, ns.unwrap_or_default(), name, req).await
+        }
+        (&Method::POST, Some(name), Some("binding")) if is_pods(rt) => state.bind(ns.unwrap_or_default(), name, req),
+        (&Method::POST, Some(name), Some("eviction")) if is_pods(rt) => {
+            let key = key_for(rt, ns, name);
+            let old = self_get(state, &key, rt, name)?;
+            let gone = state.delete_object(rt, &key, old, None).map_err(|e| ApiError::from_store(e, rt, name))?;
+            let _ = gone;
+            Ok(json_response(StatusCode::CREATED, &json!({"kind": "Status", "apiVersion": "v1", "metadata": {}, "status": "Success", "code": 201})))
         }
         (&Method::POST, None, None) => {
             if rt.namespaced && ns.is_none() {
                 return Err(ApiError::not_found_path());
             }
-            state.create(rt, ns, req)
+            state.create(rt, ns, req).await
         }
         (&Method::DELETE, None, None) => state.delete_collection(rt, ns, req),
         (&Method::GET, Some(name), None | Some("status")) => state.get(rt, ns, name, req),
         (&Method::PUT, Some(name), None | Some("status") | Some("finalize")) => {
-            state.update(rt, ns, name, target.sub.as_deref(), req)
+            state.update(rt, ns, name, target.sub.as_deref(), req).await
         }
         (&Method::PATCH, Some(name), None | Some("status")) => {
-            state.patch(rt, ns, name, target.sub.as_deref(), req)
+            state.patch(rt, ns, name, target.sub.as_deref(), req).await
         }
         (&Method::DELETE, Some(name), None) => state.delete(rt, ns, name, req),
         (m, Some(name), Some("scale")) if rt.has_scale => state.scale(rt, ns, name, m, req),
@@ -586,6 +746,46 @@ async fn resource_request(
             "the server does not allow this method on the requested resource",
         )),
     }
+}
+
+fn is_pods(rt: &ResourceType) -> bool {
+    rt.group.is_empty() && rt.plural == "pods"
+}
+
+/// Access and token reviews: answered, never stored. Without
+/// authentication or authorization every review is allowed.
+fn is_review(rt: &ResourceType) -> bool {
+    matches!(rt.group.as_str(), "authorization.k8s.io" | "authentication.k8s.io")
+}
+
+fn self_get(state: &ApiState, key: &ObjectKey, rt: &ResourceType, name: &str) -> Result<Value, ApiError> {
+    state.store.get(key).ok_or_else(|| ApiError::from_store(StoreError::NotFound, rt, name))
+}
+
+/// A node agent dialing in: upgrade the connection to the agent protocol.
+fn agent_connect(state: &Arc<ApiState>, req: &Req) -> Result<Response<Body>, ApiError> {
+    if !req.header("upgrade").eq_ignore_ascii_case(super::agent::protocol::PROTOCOL_VERSION) {
+        return Err(ApiError::bad_request(format!("expected Upgrade: {}", super::agent::protocol::PROTOCOL_VERSION)));
+    }
+    let on_upgrade = req.take_upgrade().ok_or_else(|| ApiError::bad_request("connection cannot be upgraded"))?;
+    // Pods on that node reach this server at the address the agent used.
+    let host_header = req.header("host").to_string();
+    let (api_host, api_port) = match host_header.rsplit_once(':') {
+        Some((h, p)) => (h.trim_matches(['[', ']']).to_string(), p.parse().unwrap_or(6443)),
+        None => (host_header.clone(), 80),
+    };
+    let state = state.clone();
+    tokio::spawn(async move {
+        let Ok(upgraded) = on_upgrade.await else { return };
+        if let Err(e) = AgentHub::serve_agent(state, TokioIo::new(upgraded), api_host, api_port).await {
+            eprintln!("apiserver: agent connection failed: {e:#}");
+        }
+    });
+    let mut resp = Response::new(full(Bytes::new()));
+    *resp.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+    resp.headers_mut().insert(hyper::header::UPGRADE, HeaderValue::from_static(super::agent::protocol::PROTOCOL_VERSION));
+    resp.headers_mut().insert(hyper::header::CONNECTION, HeaderValue::from_static("Upgrade"));
+    Ok(resp)
 }
 
 // ---------------------------------------------------------------------------
@@ -689,6 +889,13 @@ impl ApiState {
             list_meta["continue"] = json!(c);
             list_meta["remainingItemCount"] = json!(remaining.unwrap_or(0));
         }
+        if req.wants_partial() {
+            let items: Vec<Value> = items.iter().map(partial_metadata).collect();
+            return Ok(json_response(
+                StatusCode::OK,
+                &json!({"kind": "PartialObjectMetadataList", "apiVersion": "meta.k8s.io/v1", "metadata": list_meta, "items": items}),
+            ));
+        }
         Ok(json_response(
             StatusCode::OK,
             &json!({
@@ -700,6 +907,50 @@ impl ApiState {
         ))
     }
 
+    fn review(&self, rt: &ResourceType, req: &Req) -> Result<Response<Body>, ApiError> {
+        let mut obj = parse_body(req)?;
+        obj["kind"] = json!(rt.kind);
+        obj["apiVersion"] = json!(rt.api_version());
+        if !obj.get("metadata").is_some_and(Value::is_object) {
+            obj["metadata"] = json!({});
+        }
+        obj["metadata"]["creationTimestamp"] = Value::Null;
+        obj["status"] = match rt.kind.as_str() {
+            "TokenReview" => {
+                let user = token_user(obj.pointer("/spec/token").and_then(Value::as_str).unwrap_or_default());
+                json!({"authenticated": true, "user": user, "audiences": obj.pointer("/spec/audiences").cloned().unwrap_or(json!([]))})
+            }
+            "SelfSubjectRulesReview" => json!({
+                "resourceRules": [{"verbs": ["*"], "apiGroups": ["*"], "resources": ["*"]}],
+                "nonResourceRules": [{"verbs": ["*"], "nonResourceURLs": ["*"]}],
+                "incomplete": false,
+            }),
+            "SelfSubjectReview" => json!({"userInfo": {"username": "system:admin", "groups": ["system:masters", "system:authenticated"]}}),
+            _ => json!({"allowed": true, "reason": "litek8s has no authorization yet"}),
+        };
+        Ok(json_response(StatusCode::CREATED, &obj))
+    }
+
+    /// `pods/binding`: what an external scheduler posts.
+    fn bind(&self, ns: &str, name: &str, req: &Req) -> Result<Response<Body>, ApiError> {
+        let binding = parse_body(req)?;
+        let node = binding.pointer("/target/name").and_then(Value::as_str).unwrap_or_default();
+        if node.is_empty() {
+            return Err(ApiError::bad_request("binding target name is required"));
+        }
+        let rt = self.builtin("", "pods");
+        let mut pod = self
+            .store
+            .get(&key_for(&rt, Some(ns), name))
+            .ok_or_else(|| ApiError::from_store(StoreError::NotFound, &rt, name))?;
+        if pod.pointer("/spec/nodeName").and_then(Value::as_str).is_some_and(|n| !n.is_empty()) {
+            return Err(ApiError::new(StatusCode::CONFLICT, "Conflict", format!("pod {name} is already assigned to a node")));
+        }
+        pod["spec"]["nodeName"] = json!(node);
+        self.update_object("", "pods", pod)?;
+        Ok(json_response(StatusCode::CREATED, &json!({"kind": "Status", "apiVersion": "v1", "metadata": {}, "status": "Success", "code": 201})))
+    }
+
     fn get(&self, rt: &ResourceType, ns: Option<&str>, name: &str, req: &Req) -> Result<Response<Body>, ApiError> {
         let obj = self
             .store
@@ -709,13 +960,27 @@ impl ApiState {
             let rv = resource_version(&obj).unwrap_or(0);
             return Ok(json_response(StatusCode::OK, &table::build(rt, &[obj], rv, true)));
         }
+        if req.wants_partial() {
+            return Ok(json_response(StatusCode::OK, &partial_metadata(&obj)));
+        }
         Ok(json_response(StatusCode::OK, &obj))
     }
 
-    fn create(&self, rt: &ResourceType, ns: Option<&str>, req: &Req) -> Result<Response<Body>, ApiError> {
+    async fn create(self: &Arc<Self>, rt: &ResourceType, ns: Option<&str>, req: &Req) -> Result<Response<Body>, ApiError> {
         let mut obj = parse_body(req)?;
         let generated = meta(&obj).get("name").and_then(Value::as_str).unwrap_or_default().is_empty();
         self.prepare_create(rt, ns, &mut obj, true)?;
+        let name = name_of(&obj);
+        let attrs = admission::Attributes {
+            rt,
+            operation: "CREATE",
+            namespace: ns.unwrap_or_default(),
+            name: &name,
+            sub: None,
+            old: None,
+            dry_run: req.dry_run(),
+        };
+        let mut obj = admission::admit(self, &attrs, obj).await?;
         if req.dry_run() {
             return Ok(json_response(StatusCode::CREATED, &obj));
         }
@@ -737,8 +1002,8 @@ impl ApiState {
         }
     }
 
-    fn update(
-        &self,
+    async fn update(
+        self: &Arc<Self>,
         rt: &ResourceType,
         ns: Option<&str>,
         name: &str,
@@ -758,6 +1023,16 @@ impl ApiState {
             .map(|s| s.parse::<u64>().map_err(|_| ApiError::bad_request("invalid resourceVersion")))
             .transpose()?;
         let new = self.prepare_update(rt, &old, obj, sub, name)?;
+        let attrs = admission::Attributes {
+            rt,
+            operation: "UPDATE",
+            namespace: ns.unwrap_or_default(),
+            name,
+            sub,
+            old: Some(&old),
+            dry_run: req.dry_run(),
+        };
+        let new = admission::admit(self, &attrs, new).await?;
         if req.dry_run() {
             return Ok(json_response(StatusCode::OK, &new));
         }
@@ -767,8 +1042,8 @@ impl ApiState {
         Ok(json_response(StatusCode::OK, &stored))
     }
 
-    fn patch(
-        &self,
+    async fn patch(
+        self: &Arc<Self>,
         rt: &ResourceType,
         ns: Option<&str>,
         name: &str,
@@ -797,6 +1072,16 @@ impl ApiState {
                         obj["metadata"]["name"] = json!(name);
                     }
                     self.prepare_create(rt, ns, &mut obj, true)?;
+                    let attrs = admission::Attributes {
+                        rt,
+                        operation: "CREATE",
+                        namespace: ns.unwrap_or_default(),
+                        name,
+                        sub: None,
+                        old: None,
+                        dry_run: req.dry_run(),
+                    };
+                    let obj = admission::admit(self, &attrs, obj).await?;
                     if req.dry_run() {
                         return Ok(json_response(StatusCode::CREATED, &obj));
                     }
@@ -834,6 +1119,16 @@ impl ApiState {
                 }
             }
             let new = self.prepare_update(rt, &old, target, sub, name)?;
+            let attrs = admission::Attributes {
+                rt,
+                operation: "UPDATE",
+                namespace: ns.unwrap_or_default(),
+                name,
+                sub,
+                old: Some(&old),
+                dry_run: req.dry_run(),
+            };
+            let new = admission::admit(self, &attrs, new).await?;
             if req.dry_run() {
                 return Ok(json_response(StatusCode::OK, &new));
             }
@@ -870,6 +1165,12 @@ impl ApiState {
             .and_then(|s| s.parse().ok());
         if req.dry_run() || opts.get("dryRun").and_then(Value::as_array).is_some_and(|a| !a.is_empty()) {
             return Ok(json_response(StatusCode::OK, &old));
+        }
+        let orphan = opts.get("propagationPolicy").and_then(Value::as_str) == Some("Orphan")
+            || req.q("propagationPolicy") == Some("Orphan")
+            || opts.get("orphanDependents").and_then(Value::as_bool) == Some(true);
+        if orphan {
+            self.orphan_dependents(&old);
         }
         let result = self
             .delete_object(rt, &key, old, expected)
@@ -932,6 +1233,22 @@ impl ApiState {
         Ok(gone)
     }
 
+    /// Drop the ownerReferences other objects hold to `owner`, so the
+    /// garbage collector leaves them alone (`--cascade=orphan`).
+    fn orphan_dependents(&self, owner: &Value) {
+        let Some(uid) = meta(owner).get("uid").and_then(Value::as_str) else { return };
+        let ns = meta(owner).get("namespace").and_then(Value::as_str).unwrap_or_default();
+        for (key, mut obj) in self.store.objects_in_namespace(ns) {
+            let Some(refs) = obj.pointer_mut("/metadata/ownerReferences").and_then(Value::as_array_mut) else { continue };
+            let before = refs.len();
+            refs.retain(|r| r.get("uid").and_then(Value::as_str) != Some(uid));
+            if refs.len() != before {
+                let rv = resource_version(&obj);
+                let _ = self.store.update(key, obj, rv);
+            }
+        }
+    }
+
     /// Store an update; an object that is being deleted and has just lost its
     /// last finalizer is removed instead.
     fn commit_update(
@@ -945,6 +1262,14 @@ impl ApiState {
             let gone = self.store.delete(&key, expected)?;
             self.after_delete(rt, &gone);
             return Ok(gone);
+        }
+        // A write that changes nothing is not a write: no new
+        // resourceVersion, no watch event (watchers would react to it).
+        if let Some(current) = self.store.get(&key) {
+            let expected_ok = expected.is_none_or(|rv| resource_version(&current) == Some(rv));
+            if expected_ok && same_content(&current, &new) {
+                return Ok(current);
+            }
         }
         let stored = self.store.update(key, new, expected)?;
         self.after_write(rt, &stored);
@@ -1152,6 +1477,10 @@ impl ApiState {
         let name = name_of(obj);
         match (rt.group.as_str(), rt.kind.as_str()) {
             ("", "Namespace") => {
+                if !obj["metadata"].get("labels").is_some_and(Value::is_object) {
+                    obj["metadata"]["labels"] = json!({});
+                }
+                obj["metadata"]["labels"]["kubernetes.io/metadata.name"] = json!(name);
                 if old.is_none() {
                     obj["spec"]["finalizers"] = json!(["kubernetes"]);
                     obj["status"] = json!({"phase": "Active"});
@@ -1176,9 +1505,22 @@ impl ApiState {
             ("", "Service") => self.default_service(obj, old),
             ("", "Pod") => {
                 if old.is_none() {
-                    obj["status"] = json!({"phase": "Pending", "qosClass": "BestEffort"});
+                    let ns = meta(obj).get("namespace").and_then(Value::as_str).unwrap_or_default().to_string();
+                    let sa_name = obj
+                        .pointer("/spec/serviceAccountName")
+                        .or_else(|| obj.pointer("/spec/serviceAccount"))
+                        .and_then(Value::as_str)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("default")
+                        .to_string();
+                    let sa = self.store.get(&ObjectKey::new("", "serviceaccounts", &ns, &sa_name));
+                    defaults::pod_on_create(obj, sa.as_ref(), &random_suffix());
                 }
             }
+            ("", "PersistentVolumeClaim") => defaults::pvc(obj, old),
+            ("batch", "Job") => defaults::job(obj, old),
+            ("batch", "CronJob") => defaults::cronjob(obj),
+            ("apps", "DaemonSet") => defaults::daemonset(obj),
             ("apps", "Deployment") => {
                 let spec = obj.as_object_mut().unwrap().entry("spec").or_insert_with(|| json!({}));
                 if spec.get("replicas").is_none() {
@@ -1194,7 +1536,8 @@ impl ApiState {
                     spec["progressDeadlineSeconds"] = json!(600);
                 }
             }
-            ("apps", "StatefulSet" | "ReplicaSet") => {
+            ("apps", "StatefulSet") => defaults::statefulset(obj),
+            ("apps", "ReplicaSet") => {
                 let spec = obj.as_object_mut().unwrap().entry("spec").or_insert_with(|| json!({}));
                 if spec.get("replicas").is_none() {
                     spec["replicas"] = json!(1);
@@ -1417,6 +1760,7 @@ impl ApiState {
             .unwrap_or(DEFAULT_WATCH_TIMEOUT);
         let bookmarks = req.q("allowWatchBookmarks") == Some("true");
         let as_table = req.wants_table();
+        let as_partial = req.wants_partial();
         let rt = rt.clone();
         let (tx, rx) = mpsc::channel::<Bytes>(64);
 
@@ -1426,6 +1770,8 @@ impl ApiState {
                     let obj = event["object"].take();
                     let rv = resource_version(&obj).unwrap_or(0);
                     event["object"] = table::build(&rt, &[obj], rv, true);
+                } else if as_partial {
+                    event["object"] = partial_metadata(&event["object"]);
                 }
                 let mut line = serde_json::to_vec(&event).unwrap_or_default();
                 line.push(b'\n');
@@ -1496,6 +1842,143 @@ impl ApiState {
             .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         Ok(resp)
     }
+}
+
+// ---------------------------------------------------------------------------
+// In-process API for controllers, the scheduler and the agent hub. Same
+// defaulting and invariants as HTTP requests, without the HTTP.
+
+impl ApiState {
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
+    pub(crate) fn resource(&self, group: &str, plural: &str) -> Option<ResourceType> {
+        self.registry.find_plural(group, plural)
+    }
+
+    fn internal_rt(&self, group: &str, plural: &str) -> Result<ResourceType, ApiError> {
+        self.resource(group, plural).ok_or_else(ApiError::not_found_path)
+    }
+
+    pub(crate) fn get_object(&self, group: &str, plural: &str, ns: &str, name: &str) -> Option<Value> {
+        self.store.get(&ObjectKey::new(group, plural, ns, name))
+    }
+
+    /// Create an object; `metadata.generateName` is honoured.
+    pub(crate) fn create_object(&self, group: &str, plural: &str, ns: Option<&str>, mut obj: Value) -> Result<Value, ApiError> {
+        let rt = self.internal_rt(group, plural)?;
+        let generated = name_of(&obj).is_empty();
+        self.prepare_create(&rt, ns, &mut obj, true)?;
+        for _ in 0..5 {
+            let name = name_of(&obj);
+            match self.store.create(key_for(&rt, ns, &name), obj.clone()) {
+                Ok(stored) => {
+                    self.after_write(&rt, &stored);
+                    return Ok(stored);
+                }
+                Err(StoreError::AlreadyExists) if generated => {
+                    let base = meta(&obj).get("generateName").and_then(Value::as_str).unwrap_or_default().to_string();
+                    obj["metadata"]["name"] = json!(format!("{base}{}", random_suffix()));
+                }
+                Err(e) => return Err(ApiError::from_store(e, &rt, &name)),
+            }
+        }
+        Err(ApiError::from_store(StoreError::AlreadyExists, &rt, &name_of(&obj)))
+    }
+
+    /// Replace an object's spec and metadata (status is kept), guarded by
+    /// the resourceVersion `obj` carries.
+    pub(crate) fn update_object(&self, group: &str, plural: &str, obj: Value) -> Result<Value, ApiError> {
+        self.internal_update(group, plural, obj, None)
+    }
+
+    /// Replace an object's status, guarded by the resourceVersion `obj` carries.
+    pub(crate) fn update_status(&self, group: &str, plural: &str, obj: Value) -> Result<Value, ApiError> {
+        self.internal_update(group, plural, obj, Some("status"))
+    }
+
+    fn internal_update(&self, group: &str, plural: &str, obj: Value, sub: Option<&str>) -> Result<Value, ApiError> {
+        let rt = self.internal_rt(group, plural)?;
+        let name = name_of(&obj);
+        let ns = meta(&obj).get("namespace").and_then(Value::as_str).map(str::to_string);
+        let key = key_for(&rt, ns.as_deref(), &name);
+        let old = self
+            .store
+            .get(&key)
+            .ok_or_else(|| ApiError::from_store(StoreError::NotFound, &rt, &name))?;
+        let expected = resource_version(&obj);
+        let new = self.prepare_update(&rt, &old, obj, sub, &name)?;
+        self.commit_update(&rt, key, new, expected)
+            .map_err(|e| ApiError::from_store(e, &rt, &name))
+    }
+
+    /// Delete an object (background propagation: the garbage collector
+    /// removes dependents).
+    pub(crate) fn delete_named(&self, group: &str, plural: &str, ns: &str, name: &str) -> Result<Value, ApiError> {
+        let rt = self.internal_rt(group, plural)?;
+        let key = key_for(&rt, Some(ns), name);
+        let old = self
+            .store
+            .get(&key)
+            .ok_or_else(|| ApiError::from_store(StoreError::NotFound, &rt, name))?;
+        self.delete_object(&rt, &key, old, None)
+            .map_err(|e| ApiError::from_store(e, &rt, name))
+    }
+
+    pub(crate) fn tls(&self) -> Option<&tls::ServerTls> {
+        self.tls.as_ref()
+    }
+}
+
+impl ApiError {
+    pub(crate) fn is_conflict(&self) -> bool {
+        self.code == StatusCode::CONFLICT && self.reason == "Conflict"
+    }
+
+    pub(crate) fn is_not_found(&self) -> bool {
+        self.code == StatusCode::NOT_FOUND
+    }
+
+    pub(crate) fn is_already_exists(&self) -> bool {
+        self.reason == "AlreadyExists"
+    }
+}
+
+/// The user a service account token names (its `sub` claim), or admin.
+fn token_user(token: &str) -> Value {
+    let claims = token
+        .split('.')
+        .nth(1)
+        .and_then(|p| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(p.trim_end_matches('=')).ok())
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok());
+    match claims.as_ref().and_then(|c| c.get("sub")).and_then(Value::as_str) {
+        Some(sub) => {
+            let ns = sub.split(':').nth(2).unwrap_or_default();
+            json!({"username": sub, "groups": ["system:serviceaccounts", format!("system:serviceaccounts:{ns}"), "system:authenticated"]})
+        }
+        None => json!({"username": "system:admin", "groups": ["system:masters", "system:authenticated"]}),
+    }
+}
+
+/// Equal apart from the resourceVersion.
+fn same_content(a: &Value, b: &Value) -> bool {
+    let strip = |v: &Value| {
+        let mut v = v.clone();
+        if let Some(m) = v.get_mut("metadata").and_then(Value::as_object_mut) {
+            m.remove("resourceVersion");
+        }
+        v
+    };
+    strip(a) == strip(b)
+}
+
+fn partial_metadata(obj: &Value) -> Value {
+    json!({
+        "kind": "PartialObjectMetadata",
+        "apiVersion": "meta.k8s.io/v1",
+        "metadata": obj.get("metadata").cloned().unwrap_or_else(|| json!({})),
+    })
 }
 
 fn item_cursor(obj: &Value) -> String {

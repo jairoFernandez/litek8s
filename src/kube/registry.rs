@@ -48,6 +48,9 @@ impl ResourceType {
     }
 
     pub fn verbs(&self) -> Vec<&'static str> {
+        if matches!(self.group.as_str(), "authentication.k8s.io" | "authorization.k8s.io") {
+            return vec!["create"];
+        }
         vec![
             "create",
             "delete",
@@ -115,6 +118,12 @@ const BUILTINS: &[Builtin] = &[
     ("admissionregistration.k8s.io", "v1", "MutatingWebhookConfiguration", "mutatingwebhookconfigurations", &[], false, false, false),
     ("admissionregistration.k8s.io", "v1", "ValidatingWebhookConfiguration", "validatingwebhookconfigurations", &[], false, false, false),
     ("certificates.k8s.io", "v1", "CertificateSigningRequest", "certificatesigningrequests", &["csr"], false, true, false),
+    ("authentication.k8s.io", "v1", "TokenReview", "tokenreviews", &[], false, false, false),
+    ("authentication.k8s.io", "v1", "SelfSubjectReview", "selfsubjectreviews", &[], false, false, false),
+    ("authorization.k8s.io", "v1", "SubjectAccessReview", "subjectaccessreviews", &[], false, false, false),
+    ("authorization.k8s.io", "v1", "SelfSubjectAccessReview", "selfsubjectaccessreviews", &[], false, false, false),
+    ("authorization.k8s.io", "v1", "SelfSubjectRulesReview", "selfsubjectrulesreviews", &[], false, false, false),
+    ("authorization.k8s.io", "v1", "LocalSubjectAccessReview", "localsubjectaccessreviews", &[], true, false, false),
 ];
 
 fn category_for(kind: &str) -> Vec<String> {
@@ -161,6 +170,16 @@ impl Registry {
             .unwrap()
             .iter()
             .find(|t| t.group == group && t.version == version && t.plural == plural)
+            .cloned()
+    }
+
+    /// The first registered version of a resource (the preferred one).
+    pub fn find_plural(&self, group: &str, plural: &str) -> Option<ResourceType> {
+        self.types
+            .read()
+            .unwrap()
+            .iter()
+            .find(|t| t.group == group && t.plural == plural)
             .cloned()
     }
 

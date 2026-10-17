@@ -31,6 +31,39 @@ impl LabelSelector {
         Ok(Self(requirements))
     }
 
+    /// A structured `metav1.LabelSelector` (`matchLabels` plus
+    /// `matchExpressions`). `None` (or `null`) selects nothing, the empty
+    /// object everything, as in Kubernetes.
+    pub fn from_object(selector: Option<&Value>) -> Option<Self> {
+        let selector = selector.filter(|s| !s.is_null())?;
+        let mut requirements = Vec::new();
+        if let Some(labels) = selector.get("matchLabels").and_then(Value::as_object) {
+            for (k, v) in labels {
+                requirements.push(LabelRequirement::Equals(k.clone(), v.as_str().unwrap_or_default().to_string()));
+            }
+        }
+        for expr in selector.get("matchExpressions").and_then(Value::as_array).into_iter().flatten() {
+            let key = expr.get("key").and_then(Value::as_str).unwrap_or_default().to_string();
+            let values: Vec<String> = expr
+                .get("values")
+                .and_then(Value::as_array)
+                .map(|vs| vs.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                .unwrap_or_default();
+            requirements.push(match expr.get("operator").and_then(Value::as_str).unwrap_or_default() {
+                "In" => LabelRequirement::In(key, values),
+                "NotIn" => LabelRequirement::NotIn(key, values),
+                "Exists" => LabelRequirement::Exists(key),
+                "DoesNotExist" => LabelRequirement::DoesNotExist(key),
+                _ => return None,
+            });
+        }
+        Some(Self(requirements))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     pub fn matches(&self, object: &Value) -> bool {
         let labels = object.pointer("/metadata/labels");
         let get = |key: &str| labels.and_then(|l| l.get(key)).and_then(Value::as_str);

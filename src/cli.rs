@@ -38,8 +38,21 @@ Examples:
   KUBECONFIG=/tmp/litek8s.kubeconfig kubectl get namespaces
   litek8s apiserver --data-dir ~/.local/share/litek8s/apiserver --listen 127.0.0.1:6443
 
-Experimental: objects are stored and served, but nothing runs pods yet.
-There is no TLS or authentication, so keep it on localhost.";
+Controllers (Deployment, ReplicaSet, StatefulSet, DaemonSet, Job, CronJob,
+garbage collection), a scheduler and a Docker-backed node agent run in the
+same process, so pods run on this machine (`--no-node` to only serve).
+Plain HTTP serves kubectl; pods reach the same port over TLS. There is no
+authentication, so keep it on localhost or a trusted network.";
+
+const NODE_AGENT_AFTER_HELP: &str = "\
+Examples:
+  litek8s node-agent --server http://192.168.1.10:6443
+  litek8s node-agent --server http://apiserver:6443 --node-name pi-4
+
+The agent keeps one connection to the API server: pods bound to this node
+are pushed over it, status goes back on it, and kubectl logs/exec are relayed
+through it. It reconnects on its own; running pods keep running meanwhile.
+The API server must listen on an address this machine can reach.";
 
 const SERVE_AFTER_HELP: &str = "\
 Examples:
@@ -233,6 +246,29 @@ enum Command {
         kubeconfig: Option<PathBuf>,
         #[arg(long, help = "Log one line per HTTP request to stderr")]
         log_requests: bool,
+        #[arg(long, help = "Do not run this machine as a node (no pods run here)")]
+        no_node: bool,
+        #[arg(long, help = "Name of the local node (default: the hostname)")]
+        node_name: Option<String>,
+        #[arg(long, help = "Directory for the local node agent's pod files")]
+        node_dir: Option<PathBuf>,
+        #[arg(long, default_value = "0.0.0.0:53", help = "UDP address for cluster DNS (pods use port 53)")]
+        cluster_dns: std::net::SocketAddr,
+        #[arg(long, help = "Do not serve cluster DNS")]
+        no_cluster_dns: bool,
+    },
+    #[command(
+        about = "Run a node agent that joins a remote litek8s API server",
+        help_template = HELP_TEMPLATE,
+        after_help = NODE_AGENT_AFTER_HELP
+    )]
+    NodeAgent {
+        #[arg(long, help = "API server URL, e.g. http://192.168.1.10:6443")]
+        server: String,
+        #[arg(long, help = "Name of this node (default: the hostname)")]
+        node_name: Option<String>,
+        #[arg(long, help = "Directory for pod files")]
+        node_dir: Option<PathBuf>,
     },
     #[command(
         about = "Apply a reduced Deployment or Service manifest",
@@ -1008,14 +1044,27 @@ pub async fn run() -> Result<()> {
             data_dir,
             kubeconfig,
             log_requests,
+            no_node,
+            node_name,
+            node_dir,
+            cluster_dns,
+            no_cluster_dns,
         } => {
             crate::kube::serve(crate::kube::ApiServerConfig {
                 listen,
                 data_dir,
                 kubeconfig_out: kubeconfig,
                 log_requests,
+                run_node: !no_node,
+                node_name,
+                node_dir,
+                cluster_dns: (!no_cluster_dns).then_some(cluster_dns),
             })
             .await
+        }
+        Command::NodeAgent { server, node_name, node_dir } => {
+            let agent = crate::kube::agent::docker_agent(node_name, node_dir).await?;
+            crate::kube::agent::run_remote(agent, &server).await
         }
         Command::Serve {
             state_file,

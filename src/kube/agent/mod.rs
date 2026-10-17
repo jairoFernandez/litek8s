@@ -1,0 +1,763 @@
+//! The node agent: runs the pods the scheduler binds to its node.
+//!
+//! An agent holds ONE persistent connection to the API server (see
+//! [`protocol`]): pods arrive as pushed events, status goes back on the same
+//! connection, and log/exec/port-forward streams are multiplexed over it.
+//! Nothing polls and nothing opens a connection per request, which is what
+//! makes remote nodes cheap (an `ssh` exec per call costs ~7 ms and ~9 ms of
+//! CPU, a resident socket ~0.2 ms; see bench/RESULTS.md).
+//!
+//! The local node runs in-process over an in-memory pipe; a remote node runs
+//! `litek8s node-agent --server http://<apiserver>:6443`, which upgrades one
+//! HTTP connection to the same protocol and reconnects if it drops. Running
+//! pods survive reconnects: the server resends the node's pods and the agent
+//! reconciles.
+
+pub mod hub;
+mod kubelet;
+mod pod;
+mod probe;
+pub mod protocol;
+pub mod runtime;
+mod volumes;
+
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use futures_util::StreamExt;
+use hyper::body::Bytes;
+use serde_json::{Value, json};
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
+use tokio::sync::{mpsc, oneshot, watch};
+use tokio::task::JoinHandle;
+
+use protocol::{Frame, Message, read_frame, write_frame};
+use runtime::{DockerPods, LogOptions, PodRuntime};
+
+pub use hub::AgentHub;
+
+pub struct AgentConfig {
+    pub node_name: String,
+    /// Where pod volumes (configMap, secret, projected) are materialized.
+    pub root_dir: PathBuf,
+    /// The Node object announced on connect.
+    pub node: Value,
+    /// This node's address (`status.hostIP`, hostNetwork pods' IP).
+    pub node_ip: String,
+}
+
+/// Where pods reach the API server, as announced by the server.
+#[derive(Clone, Debug)]
+pub(crate) struct ApiEndpoint {
+    pub host: String,
+    pub port: u16,
+    pub cluster_dns: bool,
+}
+
+/// The live connection to the server, while there is one.
+pub(crate) struct Link {
+    tx: mpsc::Sender<Frame>,
+    pending: Mutex<HashMap<u64, oneshot::Sender<Option<Value>>>>,
+    next_id: AtomicU64,
+}
+
+impl Link {
+    pub(crate) async fn get(&self, resource: &str, namespace: &str, name: &str) -> Result<Option<Value>> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().unwrap().insert(id, tx);
+        let msg = Message::Get { id, resource: resource.into(), namespace: namespace.into(), name: name.into() };
+        if self.tx.send(Frame::Control(msg)).await.is_err() {
+            bail!("disconnected from the API server");
+        }
+        match tokio::time::timeout(Duration::from_secs(15), rx).await {
+            Ok(Ok(obj)) => Ok(obj),
+            _ => {
+                self.pending.lock().unwrap().remove(&id);
+                bail!("lookup of {resource} {namespace}/{name} timed out")
+            }
+        }
+    }
+
+    pub(crate) async fn send(&self, msg: Message) -> bool {
+        self.tx.send(Frame::Control(msg)).await.is_ok()
+    }
+}
+
+/// What stream handlers need to know about a pod, kept by its worker.
+#[derive(Default, Clone, Debug)]
+pub(crate) struct PodView {
+    pub namespace: String,
+    pub name: String,
+    pub ip: Option<String>,
+    /// container name → (current container id, previous container id)
+    pub containers: HashMap<String, (Option<String>, Option<String>)>,
+}
+
+enum StreamInput {
+    Data(#[allow(dead_code)] u8, Bytes),
+    Close,
+    Resize(u16, u16),
+}
+
+pub struct Agent<R: PodRuntime> {
+    rt: Arc<R>,
+    config: AgentConfig,
+    link: watch::Sender<Option<Arc<Link>>>,
+    api: Mutex<Option<ApiEndpoint>>,
+    workers: Mutex<HashMap<String, mpsc::UnboundedSender<pod::PodMsg>>>,
+    views: Mutex<HashMap<String, PodView>>,
+    /// container id → pod uid, to route exits.
+    containers: Mutex<HashMap<String, String>>,
+    streams: Mutex<HashMap<u32, (mpsc::UnboundedSender<StreamInput>, JoinHandle<()>)>>,
+    images: Mutex<HashMap<String, ImageState>>,
+    /// The address `host-gateway` stands for in pods (found once).
+    gateway_ip: tokio::sync::OnceCell<Option<String>>,
+}
+
+enum ImageState {
+    Pulling(Vec<mpsc::UnboundedSender<pod::PodMsg>>),
+    Ready,
+    Failed(String, tokio::time::Instant),
+}
+
+impl<R: PodRuntime> Agent<R> {
+    pub fn new(rt: R, config: AgentConfig) -> Arc<Self> {
+        let (link, _) = watch::channel(None);
+        let agent = Arc::new(Self {
+            rt: Arc::new(rt),
+            config,
+            link,
+            api: Mutex::new(None),
+            workers: Mutex::new(HashMap::new()),
+            views: Mutex::new(HashMap::new()),
+            containers: Mutex::new(HashMap::new()),
+            streams: Mutex::new(HashMap::new()),
+            images: Mutex::new(HashMap::new()),
+            gateway_ip: tokio::sync::OnceCell::new(),
+        });
+        let exits = agent.clone();
+        tokio::spawn(async move {
+            let mut stream = exits.rt.exits();
+            while let Some(id) = stream.next().await {
+                let uid = exits.containers.lock().unwrap().get(&id).cloned();
+                if let Some(uid) = uid {
+                    exits.tell(&uid, pod::PodMsg::Died(id));
+                }
+            }
+        });
+        agent
+    }
+
+    pub(crate) fn link(&self) -> Option<Arc<Link>> {
+        self.link.borrow().clone()
+    }
+
+    pub(crate) fn subscribe_link(&self) -> watch::Receiver<Option<Arc<Link>>> {
+        self.link.subscribe()
+    }
+
+    pub(crate) fn api_endpoint(&self) -> Option<ApiEndpoint> {
+        self.api.lock().unwrap().clone()
+    }
+
+    /// An IP address for `host` as pods see it (`host-gateway` included).
+    pub(crate) async fn resolve_host(&self, host: &str) -> Option<String> {
+        if host == "host-gateway" {
+            return self
+                .gateway_ip
+                .get_or_init(|| async { self.rt.host_gateway_ip().await.ok() })
+                .await
+                .clone();
+        }
+        if host.parse::<std::net::IpAddr>().is_ok() {
+            return Some(host.to_string());
+        }
+        tokio::net::lookup_host((host, 53)).await.ok()?.find(|a| a.is_ipv4()).map(|a| a.ip().to_string())
+    }
+
+    pub(crate) fn runtime(&self) -> &Arc<R> {
+        &self.rt
+    }
+
+    pub(crate) fn config(&self) -> &AgentConfig {
+        &self.config
+    }
+
+    fn tell(&self, uid: &str, msg: pod::PodMsg) {
+        if let Some(tx) = self.workers.lock().unwrap().get(uid) {
+            let _ = tx.send(msg);
+        }
+    }
+
+    pub(crate) fn set_view(&self, uid: &str, view: PodView) {
+        self.views.lock().unwrap().insert(uid.to_string(), view);
+    }
+
+    pub(crate) fn track_container(&self, id: &str, uid: &str) {
+        self.containers.lock().unwrap().insert(id.to_string(), uid.to_string());
+    }
+
+    pub(crate) fn untrack_container(&self, id: &str) {
+        self.containers.lock().unwrap().remove(id);
+    }
+
+    /// Whether `image` is ready to run; if not, a pull is started (once per
+    /// image, shared by every pod that needs it) and `notify` hears when it
+    /// finishes. `Err` is the last pull failure, retried after a back-off.
+    pub(crate) fn image_ready(
+        self: &Arc<Self>,
+        image: &str,
+        always: bool,
+        notify: &mpsc::UnboundedSender<pod::PodMsg>,
+    ) -> Result<bool, String> {
+        let mut images = self.images.lock().unwrap();
+        match images.get_mut(image) {
+            Some(ImageState::Ready) => return Ok(true),
+            Some(ImageState::Pulling(waiters)) => {
+                waiters.push(notify.clone());
+                return Ok(false);
+            }
+            Some(ImageState::Failed(error, at)) if at.elapsed() < Duration::from_secs(10) => {
+                return Err(error.clone());
+            }
+            _ => {}
+        }
+        images.insert(image.to_string(), ImageState::Pulling(vec![notify.clone()]));
+        let agent = self.clone();
+        let image = image.to_string();
+        tokio::spawn(async move {
+            let result = agent.rt.pull_image(&image, always).await;
+            let state = match result {
+                Ok(()) => ImageState::Ready,
+                Err(e) => ImageState::Failed(format!("{e:#}"), tokio::time::Instant::now()),
+            };
+            let previous = agent.images.lock().unwrap().insert(image, state);
+            if let Some(ImageState::Pulling(waiters)) = previous {
+                for w in waiters {
+                    let _ = w.send(pod::PodMsg::Wake);
+                }
+            }
+        });
+        Ok(false)
+    }
+
+    fn upsert(self: &Arc<Self>, pod_obj: Value) {
+        let uid = pod_obj.pointer("/metadata/uid").and_then(Value::as_str).unwrap_or_default().to_string();
+        if uid.is_empty() {
+            return;
+        }
+        let mut workers = self.workers.lock().unwrap();
+        if let Some(tx) = workers.get(&uid) {
+            let _ = tx.send(pod::PodMsg::Update(pod_obj));
+            return;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        workers.insert(uid.clone(), tx.clone());
+        drop(workers);
+        let agent = self.clone();
+        tokio::spawn(async move {
+            pod::run(agent.clone(), pod_obj, tx, rx).await;
+            agent.workers.lock().unwrap().remove(&uid);
+            agent.views.lock().unwrap().remove(&uid);
+        });
+    }
+
+    /// Remove containers and volumes of pods the server no longer knows.
+    async fn cleanup_orphans(self: &Arc<Self>) {
+        let known: HashSet<String> = self.workers.lock().unwrap().keys().cloned().collect();
+        let Ok(containers) = self.rt.list().await else { return };
+        for c in containers {
+            let uid = c.labels.get(runtime::LABEL_POD_UID).cloned().unwrap_or_default();
+            if !known.contains(&uid) {
+                let _ = self.rt.remove(&c.id).await;
+            }
+        }
+        if let Ok(volumes) = self.rt.list_volumes(runtime::LABEL_POD_UID).await {
+            for v in volumes {
+                if !known.iter().any(|uid| v.contains(&uid[..8.min(uid.len())])) {
+                    let _ = self.rt.remove_volume(&v).await;
+                }
+            }
+        }
+        let pods_dir = self.config.root_dir.join("pods");
+        if let Ok(entries) = std::fs::read_dir(&pods_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if !known.contains(&name) {
+                    let _ = std::fs::remove_dir_all(entry.path());
+                }
+            }
+        }
+    }
+
+    /// Run one session over an established connection, until it ends.
+    pub async fn session<IO>(self: &Arc<Self>, io: IO) -> Result<()>
+    where
+        IO: AsyncRead + AsyncWrite + Send + 'static,
+    {
+        let (reader, writer) = tokio::io::split(io);
+        let mut reader = BufReader::new(reader);
+        let (tx, mut rx) = mpsc::channel::<Frame>(1024);
+        let writer_task = tokio::spawn(async move {
+            let mut writer = BufWriter::new(writer);
+            while let Some(frame) = rx.recv().await {
+                if write_frame(&mut writer, &frame).await.is_err() {
+                    break;
+                }
+                if rx.is_empty() && writer.flush().await.is_err() {
+                    break;
+                }
+            }
+        });
+        tx.send(Frame::Control(Message::Hello { node: self.config.node.clone() }))
+            .await
+            .ok()
+            .context("connection closed")?;
+        let link = Arc::new(Link { tx: tx.clone(), pending: Mutex::new(HashMap::new()), next_id: AtomicU64::new(1) });
+
+        let result = async {
+            while let Some(frame) = read_frame(&mut reader).await? {
+                match frame {
+                    Frame::Control(msg) => self.handle(&link, msg).await,
+                    Frame::Data { stream, channel, bytes } => self.stream_input(stream, StreamInput::Data(channel, bytes)),
+                    Frame::CloseInput { stream } => self.stream_input(stream, StreamInput::Close),
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        self.link.send_replace(None);
+        writer_task.abort();
+        for (_, (_, task)) in self.streams.lock().unwrap().drain() {
+            task.abort();
+        }
+        result
+    }
+
+    fn stream_input(&self, stream: u32, input: StreamInput) {
+        if let Some((tx, _)) = self.streams.lock().unwrap().get(&stream) {
+            let _ = tx.send(input);
+        }
+    }
+
+    async fn handle(self: &Arc<Self>, link: &Arc<Link>, msg: Message) {
+        match msg {
+            Message::Welcome { api_host, api_port, cluster_dns, .. } => {
+                *self.api.lock().unwrap() = Some(ApiEndpoint { host: api_host, port: api_port, cluster_dns });
+                self.link.send_replace(Some(link.clone()));
+            }
+            Message::PodUpsert { pod } => self.upsert(pod),
+            Message::PodDelete { uid } => self.tell(&uid, pod::PodMsg::Delete),
+            Message::SyncDone => {
+                let agent = self.clone();
+                tokio::spawn(async move { agent.cleanup_orphans().await });
+            }
+            Message::VolumeDelete { name } => {
+                let rt = self.rt.clone();
+                tokio::spawn(async move {
+                    // The pod using it may still be stopping; retry briefly.
+                    for _ in 0..30 {
+                        if rt.remove_volume(&volumes::pv_volume_name(&name)).await.is_ok() {
+                            return;
+                        }
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                    }
+                });
+            }
+            Message::ObjectChanged { resource, namespace, name } => {
+                for tx in self.workers.lock().unwrap().values() {
+                    let _ = tx.send(pod::PodMsg::ObjectChanged { resource: resource.clone(), namespace: namespace.clone(), name: name.clone() });
+                }
+            }
+            Message::GetResult { id, object } => {
+                if let Some(tx) = link.pending.lock().unwrap().remove(&id) {
+                    let _ = tx.send(object);
+                }
+            }
+            Message::Exec { stream, pod_uid, container, command, stdin, tty } => {
+                let target = self.container_id(&pod_uid, &container, false);
+                self.spawn_stream(link, stream, move |agent, link, input| {
+                    exec_stream(agent, link, stream, target, command, stdin, tty, input)
+                });
+            }
+            Message::Logs { stream, pod_uid, container, follow, previous, timestamps, tail_lines, since_seconds, limit_bytes } => {
+                let target = self.container_id(&pod_uid, &container, previous);
+                let options = LogOptions { follow, tail_lines, timestamps, since_seconds };
+                self.spawn_stream(link, stream, move |agent, link, _input| {
+                    logs_stream(agent, link, stream, target, options, limit_bytes)
+                });
+            }
+            Message::PortForward { stream, pod_uid, port } => {
+                let ip = self.views.lock().unwrap().get(&pod_uid).and_then(|v| v.ip.clone());
+                let host_network = self.views.lock().unwrap().get(&pod_uid).is_some() && ip.as_deref() == Some(self.config.node_ip.as_str());
+                let ip = if host_network { Some("127.0.0.1".to_string()) } else { ip };
+                self.spawn_stream(link, stream, move |_agent, link, input| port_forward_stream(link, stream, ip, port, input));
+            }
+            Message::Resize { stream, width, height } => self.stream_input(stream, StreamInput::Resize(width, height)),
+            Message::Cancel { stream } => {
+                if let Some((_, task)) = self.streams.lock().unwrap().remove(&stream) {
+                    task.abort();
+                }
+            }
+            other => eprintln!("node-agent: unexpected message {other:?}"),
+        }
+    }
+
+    /// Resolve a pod container to a runtime container id, or the reason
+    /// there is none (as the API server words it).
+    fn container_id(&self, uid: &str, container: &str, previous: bool) -> Result<String, String> {
+        let views = self.views.lock().unwrap();
+        let view = views.get(uid).ok_or_else(|| "pod is not running on this node".to_string())?;
+        let name = if container.is_empty() {
+            view.containers.keys().next().cloned().unwrap_or_default()
+        } else {
+            container.to_string()
+        };
+        let (current, prev) = view
+            .containers
+            .get(&name)
+            .ok_or_else(|| format!("container {name} is not valid for pod"))?;
+        let id = if previous { prev } else { current };
+        id.clone().ok_or_else(|| {
+            if previous {
+                format!("previous terminated container \"{name}\" not found")
+            } else {
+                format!("container \"{name}\" is waiting to start: ContainerCreating")
+            }
+        })
+    }
+
+    fn spawn_stream<F, Fut>(self: &Arc<Self>, link: &Arc<Link>, stream: u32, body: F)
+    where
+        F: FnOnce(Arc<Self>, Arc<Link>, mpsc::UnboundedReceiver<StreamInput>) -> Fut,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let fut = body(self.clone(), link.clone(), rx);
+        let agent = self.clone();
+        let task = tokio::spawn(async move {
+            fut.await;
+            agent.streams.lock().unwrap().remove(&stream);
+        });
+        self.streams.lock().unwrap().insert(stream, (tx, task));
+    }
+}
+
+async fn finish(link: &Link, stream: u32, exit_code: Option<i64>, error: Option<String>) {
+    let _ = link.tx.send(Frame::CloseInput { stream }).await;
+    let _ = link.send(Message::StreamDone { stream, exit_code, error }).await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn exec_stream<R: PodRuntime>(
+    agent: Arc<Agent<R>>,
+    link: Arc<Link>,
+    stream: u32,
+    target: Result<String, String>,
+    command: Vec<String>,
+    stdin: bool,
+    tty: bool,
+    mut input: mpsc::UnboundedReceiver<StreamInput>,
+) {
+    let id = match target {
+        Ok(id) => id,
+        Err(e) => return finish(&link, stream, None, Some(e)).await,
+    };
+    let session = match agent.rt.exec(&id, command, tty, stdin).await {
+        Ok(s) => s,
+        Err(e) => return finish(&link, stream, None, Some(format!("{e:#}"))).await,
+    };
+    let exec_id = session.id.clone();
+    let mut output = session.output;
+    let mut stdin_writer = Some(session.input);
+    let mut input_open = true;
+    loop {
+        tokio::select! {
+            chunk = output.next() => match chunk {
+                Some(Ok((channel, bytes))) => {
+                    if link.tx.send(Frame::Data { stream, channel: channel.max(1), bytes }).await.is_err() {
+                        return;
+                    }
+                }
+                _ => break,
+            },
+            msg = input.recv(), if input_open => match msg {
+                Some(StreamInput::Data(_, bytes)) => {
+                    if let Some(w) = stdin_writer.as_mut() {
+                        if w.write_all(&bytes).await.is_err() {
+                            stdin_writer = None;
+                        }
+                    }
+                }
+                Some(StreamInput::Close) => {
+                    if let Some(mut w) = stdin_writer.take() {
+                        let _ = w.shutdown().await;
+                    }
+                }
+                Some(StreamInput::Resize(w, h)) => {
+                    let _ = agent.rt.resize_exec(&exec_id, w, h).await;
+                }
+                None => input_open = false,
+            },
+        }
+    }
+    let code = agent.rt.exec_exit_code(&exec_id).await.ok().flatten();
+    finish(&link, stream, code, None).await;
+}
+
+async fn logs_stream<R: PodRuntime>(
+    agent: Arc<Agent<R>>,
+    link: Arc<Link>,
+    stream: u32,
+    target: Result<String, String>,
+    options: LogOptions,
+    limit_bytes: Option<i64>,
+) {
+    let id = match target {
+        Ok(id) => id,
+        Err(e) => return finish(&link, stream, None, Some(e)).await,
+    };
+    let mut logs = agent.rt.logs(&id, options);
+    let mut left = limit_bytes.filter(|l| *l > 0).map(|l| l as usize);
+    while let Some(chunk) = logs.next().await {
+        let Ok((_, mut bytes)) = chunk else { break };
+        if let Some(l) = left.as_mut() {
+            if bytes.len() >= *l {
+                bytes.truncate(*l);
+                let _ = link.tx.send(Frame::Data { stream, channel: 1, bytes }).await;
+                break;
+            }
+            *l -= bytes.len();
+        }
+        if link.tx.send(Frame::Data { stream, channel: 1, bytes }).await.is_err() {
+            return;
+        }
+    }
+    finish(&link, stream, None, None).await;
+}
+
+async fn port_forward_stream(
+    link: Arc<Link>,
+    stream: u32,
+    ip: Option<String>,
+    port: u16,
+    mut input: mpsc::UnboundedReceiver<StreamInput>,
+) {
+    let Some(ip) = ip else {
+        return finish(&link, stream, None, Some("pod has no IP address yet".into())).await;
+    };
+    let conn = match tokio::time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect((ip.as_str(), port))).await {
+        Ok(Ok(c)) => c,
+        Ok(Err(e)) => return finish(&link, stream, None, Some(format!("failed to connect to {ip}:{port}: {e}"))).await,
+        Err(_) => return finish(&link, stream, None, Some(format!("timed out connecting to {ip}:{port}"))).await,
+    };
+    let _ = conn.set_nodelay(true);
+    let (mut r, mut w) = conn.into_split();
+    let tx = link.tx.clone();
+    let reader = tokio::spawn(async move {
+        let mut buf = vec![0u8; 32 * 1024];
+        loop {
+            match tokio::io::AsyncReadExt::read(&mut r, &mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if tx.send(Frame::Data { stream, channel: 1, bytes: Bytes::copy_from_slice(&buf[..n]) }).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    let mut reader = reader;
+    loop {
+        tokio::select! {
+            _ = &mut reader => break,
+            msg = input.recv() => match msg {
+                Some(StreamInput::Data(_, bytes)) => {
+                    if w.write_all(&bytes).await.is_err() {
+                        break;
+                    }
+                }
+                Some(StreamInput::Close) => {
+                    let _ = w.shutdown().await;
+                }
+                Some(StreamInput::Resize(..)) => {}
+                None => break,
+            },
+        }
+    }
+    reader.abort();
+    finish(&link, stream, None, None).await;
+}
+
+// ---------------------------------------------------------------------------
+// Starting agents
+
+/// Describe this machine as a Node object.
+pub async fn describe_node(rt: &DockerPods, node_name: &str, node_ip: &str) -> Result<Value> {
+    let (cpus, memory, arch, kernel, os, docker_version) = rt.machine().await?;
+    let mem_ki = memory / 1024;
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let condition = |t: &str, status: &str, reason: &str, message: &str| {
+        json!({"type": t, "status": status, "reason": reason, "message": message, "lastHeartbeatTime": now, "lastTransitionTime": now})
+    };
+    Ok(json!({
+        "apiVersion": "v1",
+        "kind": "Node",
+        "metadata": {
+            "name": node_name,
+            "labels": {
+                "kubernetes.io/hostname": node_name,
+                "kubernetes.io/os": "linux",
+                "kubernetes.io/arch": arch,
+                "beta.kubernetes.io/os": "linux",
+                "beta.kubernetes.io/arch": arch,
+                "node.kubernetes.io/instance-type": "litek8s",
+            },
+            "annotations": {"node.alpha.kubernetes.io/ttl": "0"},
+        },
+        "spec": {"podCIDR": "10.42.0.0/24", "podCIDRs": ["10.42.0.0/24"]},
+        "status": {
+            "capacity": {"cpu": cpus.to_string(), "memory": format!("{mem_ki}Ki"), "pods": "110", "ephemeral-storage": "100Gi"},
+            "allocatable": {"cpu": cpus.to_string(), "memory": format!("{mem_ki}Ki"), "pods": "110", "ephemeral-storage": "100Gi"},
+            "conditions": [
+                condition("MemoryPressure", "False", "KubeletHasSufficientMemory", "kubelet has sufficient memory available"),
+                condition("DiskPressure", "False", "KubeletHasNoDiskPressure", "kubelet has no disk pressure"),
+                condition("PIDPressure", "False", "KubeletHasSufficientPID", "kubelet has sufficient PID available"),
+                condition("Ready", "True", "KubeletReady", "litek8s node agent is ready"),
+            ],
+            "addresses": [
+                {"type": "InternalIP", "address": node_ip},
+                {"type": "Hostname", "address": node_name},
+            ],
+            "daemonEndpoints": {"kubeletEndpoint": {"Port": 10250}},
+            "nodeInfo": {
+                "machineID": "",
+                "systemUUID": "",
+                "bootID": "",
+                "kernelVersion": kernel,
+                "osImage": os,
+                "containerRuntimeVersion": format!("docker://{docker_version}"),
+                "kubeletVersion": crate::kube::discovery::KUBE_GIT_VERSION,
+                "kubeProxyVersion": "",
+                "operatingSystem": "linux",
+                "architecture": arch,
+            },
+        },
+    }))
+}
+
+/// The address other machines reach this one at (the source address of the
+/// default route), or loopback.
+pub fn local_ip() -> String {
+    std::net::UdpSocket::bind("0.0.0.0:0")
+        .and_then(|s| {
+            s.connect("10.255.255.255:9")?;
+            s.local_addr()
+        })
+        .map(|a| a.ip().to_string())
+        .unwrap_or_else(|_| "127.0.0.1".into())
+}
+
+/// A node name from the hostname, as Kubernetes would derive it.
+pub fn default_node_name() -> String {
+    let raw = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+    let name: String = raw
+        .trim()
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' })
+        .collect();
+    let name = name.trim_matches('-').to_string();
+    if name.is_empty() { "litek8s-node".into() } else { name }
+}
+
+pub fn default_root_dir() -> PathBuf {
+    directories::ProjectDirs::from("dev", "litek8s", "litek8s")
+        .map(|d| d.data_dir().join("node-agent"))
+        .unwrap_or_else(|| std::env::temp_dir().join("litek8s-node-agent"))
+}
+
+/// Build a Docker-backed agent for this machine.
+pub async fn docker_agent(node_name: Option<String>, root_dir: Option<PathBuf>) -> Result<Arc<Agent<DockerPods>>> {
+    let docker = crate::runtime::DockerRuntime::connect()?;
+    docker.ping().await?;
+    let rt = DockerPods::new(docker.client());
+    let node_name = node_name.unwrap_or_else(default_node_name);
+    let node_ip = local_ip();
+    let node = describe_node(&rt, &node_name, &node_ip).await?;
+    let root_dir = root_dir.unwrap_or_else(default_root_dir);
+    std::fs::create_dir_all(&root_dir).with_context(|| format!("failed to create {}", root_dir.display()))?;
+    let agent = Agent::new(rt, AgentConfig { node_name, root_dir, node, node_ip });
+    tokio::spawn(kubelet::serve(agent.clone(), kubelet::PORT));
+    Ok(agent)
+}
+
+/// Run an agent inside the API server process, connected by a pipe.
+pub async fn run_local<R: PodRuntime>(api: Arc<crate::kube::ApiState>, agent: Arc<Agent<R>>, api_port: u16) {
+    loop {
+        let (server_end, agent_end) = tokio::io::duplex(1 << 20);
+        let server = tokio::spawn(AgentHub::serve_agent(api.clone(), server_end, "host-gateway".into(), api_port));
+        if let Err(e) = agent.session(agent_end).await {
+            eprintln!("node-agent: local session ended: {e:#}");
+        }
+        server.abort();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+/// Run an agent against a remote API server, reconnecting as needed.
+pub async fn run_remote<R: PodRuntime>(agent: Arc<Agent<R>>, server: &str) -> Result<()> {
+    let url = server.trim_end_matches('/');
+    let authority = url
+        .strip_prefix("http://")
+        .context("only http:// API server URLs are supported by the node agent for now")?;
+    let mut backoff = Duration::from_millis(500);
+    loop {
+        match connect(authority, &agent.config.node_name).await {
+            Ok(io) => {
+                backoff = Duration::from_millis(500);
+                eprintln!("node-agent: connected to {url}");
+                if let Err(e) = agent.session(io).await {
+                    eprintln!("node-agent: session ended: {e:#}");
+                }
+            }
+            Err(e) => eprintln!("node-agent: failed to connect to {url}: {e:#}"),
+        }
+        tokio::time::sleep(backoff).await;
+        backoff = (backoff * 2).min(Duration::from_secs(15));
+    }
+}
+
+/// Open the agent connection: one HTTP request upgraded to the protocol.
+async fn connect(authority: &str, node: &str) -> Result<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>> {
+    let tcp = tokio::net::TcpStream::connect(authority).await?;
+    let _ = tcp.set_nodelay(true);
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tcp)).await?;
+    tokio::spawn(async move {
+        let _ = conn.with_upgrades().await;
+    });
+    let req = hyper::Request::builder()
+        .uri(format!("/apis/agent.litek8s.dev/v1/connect?node={node}"))
+        .header(hyper::header::HOST, authority)
+        .header(hyper::header::CONNECTION, "Upgrade")
+        .header(hyper::header::UPGRADE, protocol::PROTOCOL_VERSION)
+        .body(http_body_util::Empty::<Bytes>::new())?;
+    let resp = sender.send_request(req).await?;
+    if resp.status() != hyper::StatusCode::SWITCHING_PROTOCOLS {
+        bail!("server answered {} instead of switching protocols", resp.status());
+    }
+    let upgraded = hyper::upgrade::on(resp).await?;
+    Ok(hyper_util::rt::TokioIo::new(upgraded))
+}

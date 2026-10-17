@@ -1,0 +1,12 @@
+{"id": "helm_podinfo", "tier": "L4", "status": "pass", "seconds": 4, "detail": "podinfo-6.15.0"}
+{"id": "helm_traefik", "tier": "L4", "status": "pass", "seconds": 4, "detail": "traefik-42.0.0"}
+{"id": "helm_cert_manager", "tier": "L4", "status": "pass", "seconds": 9, "detail": "cert-manager-v1.21.2"}
+{"id": "helm_metrics_server", "tier": "L4", "status": "fail", "seconds": 242, "detail": "context deadline exceeded"}
+{"id": "helm_node_exporter", "tier": "L4", "status": "pass", "seconds": 13, "detail": "prometheus-node-exporter-4.60.0"}
+{"id": "helm_ksm", "tier": "L4", "status": "pass", "seconds": 9, "detail": "kube-state-metrics-8.6.0"}
+{"id": "helm_grafana", "tier": "L4", "status": "pass", "seconds": 13, "detail": "grafana-10.5.15"}
+{"id": "helm_kyverno", "tier": "L4", "status": "pass", "seconds": 48, "detail": "kyverno-3.9.1"}
+{"id": "helm_ext_secrets", "tier": "L4", "status": "fail", "seconds": 243, "detail": "context deadline exceeded"}
+{"id": "helm_reloader", "tier": "L4", "status": "pass", "seconds": 12, "detail": "reloader-2.2.18"}
+{"id": "helm_keda", "tier": "L4", "status": "pass", "seconds": 48, "detail": "keda-2.21.0"}
+{"id": "helm_argo_cd", "tier": "L4", "status": "pass", "seconds": 47, "detail": "argo-cd-10.10.5"}

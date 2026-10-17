@@ -211,3 +211,121 @@ async fn namespace_deletion_cascades_and_finalizers_block() -> Result<()> {
     assert_eq!(code, 404, "creating in a missing namespace fails");
     Ok(())
 }
+
+/// A server with the controllers running (no node agent: pods do not run,
+/// the test plays the kubelet by writing pod status).
+async fn start_with_controllers() -> Result<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?.to_string();
+    let state = Arc::new(ApiState::open(None, addr.clone(), false)?);
+    tokio::spawn(litek8s::kube::controllers::run(state.clone()));
+    tokio::spawn(serve_listener(state, listener));
+    Ok(addr)
+}
+
+async fn eventually<F, Fut>(what: &str, mut check: F) -> Result<Value>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<Option<Value>>>,
+{
+    for _ in 0..100 {
+        if let Some(v) = check().await? {
+            return Ok(v);
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    anyhow::bail!("timed out waiting for {what}")
+}
+
+#[tokio::test]
+async fn deployment_rolls_out_through_replicasets_and_scheduler() -> Result<()> {
+    let addr = start_with_controllers().await?;
+    let node = json!({"metadata": {"name": "n1", "labels": {"kubernetes.io/hostname": "n1"}}});
+    post(&addr, "/api/v1/nodes", node).await?;
+    let status = json!({"metadata": {"name": "n1"}, "status": {
+        "conditions": [{"type": "Ready", "status": "True"}],
+        "allocatable": {"cpu": "4", "memory": "8Gi", "pods": "110"},
+        "addresses": [{"type": "InternalIP", "address": "10.0.0.5"}],
+    }});
+    call(&addr, "PUT", "/api/v1/nodes/n1/status", "application/json", &status.to_string()).await?;
+
+    let deploy = json!({"metadata": {"name": "web"}, "spec": {
+        "replicas": 2,
+        "selector": {"matchLabels": {"app": "web"}},
+        "template": {"metadata": {"labels": {"app": "web"}}, "spec": {"containers": [{"name": "c", "image": "nginx:1"}]}},
+    }});
+    let (code, _) = post(&addr, "/apis/apps/v1/namespaces/default/deployments", deploy).await?;
+    assert_eq!(code, 201);
+
+    // Two pods, owned by the ReplicaSet, bound to the node.
+    let pods = eventually("scheduled pods", || async {
+        let (_, list) = get(&addr, "/api/v1/namespaces/default/pods?labelSelector=app%3Dweb").await?;
+        let items = list["items"].as_array().cloned().unwrap_or_default();
+        let bound = items.iter().filter(|p| p["spec"]["nodeName"] == "n1").count();
+        Ok((bound == 2).then_some(json!(items)))
+    })
+    .await?;
+    let rs_name = pods[0]["metadata"]["ownerReferences"][0]["name"].as_str().unwrap().to_string();
+    assert!(rs_name.starts_with("web-"));
+    assert!(pods[0]["metadata"]["labels"]["pod-template-hash"].is_string());
+    assert_eq!(pods[0]["spec"]["serviceAccountName"], "default");
+
+    // Play the kubelet: mark both pods Running and Ready.
+    for pod in pods.as_array().unwrap() {
+        let name = pod["metadata"]["name"].as_str().unwrap();
+        let status = json!({"metadata": {"name": name}, "status": {
+            "phase": "Running",
+            "conditions": [{"type": "Ready", "status": "True", "lastTransitionTime": "2026-01-01T00:00:00Z"}],
+        }});
+        call(&addr, "PUT", &format!("/api/v1/namespaces/default/pods/{name}/status"), "application/json", &status.to_string()).await?;
+    }
+    let deploy = eventually("an available deployment", || async {
+        let (_, d) = get(&addr, "/apis/apps/v1/namespaces/default/deployments/web").await?;
+        Ok((d["status"]["availableReplicas"] == 2).then_some(d))
+    })
+    .await?;
+    assert_eq!(deploy["status"]["observedGeneration"], deploy["metadata"]["generation"]);
+    assert_eq!(deploy["metadata"]["annotations"]["deployment.kubernetes.io/revision"], "1");
+    let conditions = deploy["status"]["conditions"].as_array().unwrap();
+    assert!(conditions.iter().any(|c| c["type"] == "Available" && c["status"] == "True"));
+
+    // Deleting the Deployment garbage-collects its ReplicaSet and pods.
+    call(&addr, "DELETE", "/apis/apps/v1/namespaces/default/deployments/web", "application/json", "").await?;
+    eventually("garbage collection", || async {
+        let (_, pods) = get(&addr, "/api/v1/namespaces/default/pods").await?;
+        let (_, rs) = get(&addr, "/apis/apps/v1/namespaces/default/replicasets").await?;
+        let empty = pods["items"].as_array().is_some_and(|a| a.is_empty()) && rs["items"].as_array().is_some_and(|a| a.is_empty());
+        Ok(empty.then_some(Value::Null))
+    })
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn jobs_complete_and_no_op_updates_keep_the_resource_version() -> Result<()> {
+    let addr = start_with_controllers().await?;
+    let job = json!({"metadata": {"name": "once"}, "spec": {"template": {"spec": {
+        "restartPolicy": "Never", "containers": [{"name": "c", "image": "busybox"}],
+    }}}});
+    post(&addr, "/apis/batch/v1/namespaces/default/jobs", job).await?;
+    let pod = eventually("a job pod", || async {
+        let (_, list) = get(&addr, "/api/v1/namespaces/default/pods?labelSelector=job-name%3Donce").await?;
+        Ok(list["items"].as_array().and_then(|a| a.first().cloned()))
+    })
+    .await?;
+    let name = pod["metadata"]["name"].as_str().unwrap();
+    let status = json!({"metadata": {"name": name}, "status": {"phase": "Succeeded"}});
+    call(&addr, "PUT", &format!("/api/v1/namespaces/default/pods/{name}/status"), "application/json", &status.to_string()).await?;
+    eventually("a complete job", || async {
+        let (_, j) = get(&addr, "/apis/batch/v1/namespaces/default/jobs/once").await?;
+        let done = j["status"]["conditions"].as_array().is_some_and(|cs| cs.iter().any(|c| c["type"] == "Complete" && c["status"] == "True"));
+        Ok(done.then_some(j))
+    })
+    .await?;
+
+    let (_, a) = post(&addr, "/api/v1/namespaces/default/configmaps", cm("same", json!({"k": "v"}))).await?;
+    let (code, b) = call(&addr, "PUT", "/api/v1/namespaces/default/configmaps/same", "application/json", &a.to_string()).await?;
+    assert_eq!(code, 200);
+    assert_eq!(a["metadata"]["resourceVersion"], b["metadata"]["resourceVersion"], "an update that changes nothing is not a write");
+    Ok(())
+}

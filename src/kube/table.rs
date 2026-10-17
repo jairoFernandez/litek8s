@@ -101,18 +101,10 @@ fn columns_for(kind: &str) -> Vec<Column> {
                     json!(format!("{ready}/{}", count(v, "/spec/containers")))
                 },
             },
-            Column {
-                name: "Status",
-                type_: "string",
-                format: "",
-                cell: |v| {
-                    let phase = s(v, "/status/phase");
-                    json!(if phase.is_empty() { "Pending".to_string() } else { phase })
-                },
-            },
+            Column { name: "Status", type_: "string", format: "", cell: |v| json!(pod_status(v)) },
             Column {
                 name: "Restarts",
-                type_: "integer",
+                type_: "string",
                 format: "",
                 cell: |v| {
                     let n: i64 = v
@@ -120,8 +112,161 @@ fn columns_for(kind: &str) -> Vec<Column> {
                         .and_then(Value::as_array)
                         .map(|s| s.iter().map(|c| int(c, "/restartCount")).sum())
                         .unwrap_or(0);
-                    json!(n)
+                    json!(n.to_string())
                 },
+            },
+            AGE,
+            Column { name: "IP", type_: "string", format: "", cell: |v| json!(or_none(&s(v, "/status/podIP"))) },
+            Column { name: "Node", type_: "string", format: "", cell: |v| json!(or_none(&s(v, "/spec/nodeName"))) },
+        ],
+        "Node" => vec![
+            NAME,
+            Column {
+                name: "Status",
+                type_: "string",
+                format: "",
+                cell: |v| {
+                    let ready = v
+                        .pointer("/status/conditions")
+                        .and_then(Value::as_array)
+                        .and_then(|cs| cs.iter().find(|c| c["type"] == "Ready"))
+                        .map(|c| c["status"] == "True")
+                        .unwrap_or(false);
+                    let mut status = if ready { "Ready".to_string() } else { "NotReady".to_string() };
+                    if v.pointer("/spec/unschedulable") == Some(&json!(true)) {
+                        status.push_str(",SchedulingDisabled");
+                    }
+                    json!(status)
+                },
+            },
+            Column {
+                name: "Roles",
+                type_: "string",
+                format: "",
+                cell: |v| {
+                    let roles: Vec<String> = v
+                        .pointer("/metadata/labels")
+                        .and_then(Value::as_object)
+                        .map(|l| l.keys().filter_map(|k| k.strip_prefix("node-role.kubernetes.io/").map(str::to_string)).collect())
+                        .unwrap_or_default();
+                    json!(if roles.is_empty() { "<none>".to_string() } else { roles.join(",") })
+                },
+            },
+            AGE,
+            Column { name: "Version", type_: "string", format: "", cell: |v| json!(s(v, "/status/nodeInfo/kubeletVersion")) },
+            Column {
+                name: "Internal-IP",
+                type_: "string",
+                format: "",
+                cell: |v| {
+                    let ip = v
+                        .pointer("/status/addresses")
+                        .and_then(Value::as_array)
+                        .and_then(|a| a.iter().find(|x| x["type"] == "InternalIP"))
+                        .map(|x| s(x, "/address"))
+                        .unwrap_or_default();
+                    json!(or_none(&ip))
+                },
+            },
+            Column { name: "OS-Image", type_: "string", format: "", cell: |v| json!(s(v, "/status/nodeInfo/osImage")) },
+            Column { name: "Container-Runtime", type_: "string", format: "", cell: |v| json!(s(v, "/status/nodeInfo/containerRuntimeVersion")) },
+        ],
+        "ReplicaSet" => vec![
+            NAME,
+            Column { name: "Desired", type_: "integer", format: "", cell: |v| json!(int(v, "/spec/replicas")) },
+            Column { name: "Current", type_: "integer", format: "", cell: |v| json!(int(v, "/status/replicas")) },
+            Column { name: "Ready", type_: "integer", format: "", cell: |v| json!(int(v, "/status/readyReplicas")) },
+            AGE,
+        ],
+        "StatefulSet" => vec![
+            NAME,
+            Column {
+                name: "Ready",
+                type_: "string",
+                format: "",
+                cell: |v| json!(format!("{}/{}", int(v, "/status/readyReplicas"), replicas(v))),
+            },
+            AGE,
+        ],
+        "DaemonSet" => vec![
+            NAME,
+            Column { name: "Desired", type_: "integer", format: "", cell: |v| json!(int(v, "/status/desiredNumberScheduled")) },
+            Column { name: "Current", type_: "integer", format: "", cell: |v| json!(int(v, "/status/currentNumberScheduled")) },
+            Column { name: "Ready", type_: "integer", format: "", cell: |v| json!(int(v, "/status/numberReady")) },
+            Column { name: "Up-to-date", type_: "integer", format: "", cell: |v| json!(int(v, "/status/updatedNumberScheduled")) },
+            Column { name: "Available", type_: "integer", format: "", cell: |v| json!(int(v, "/status/numberAvailable")) },
+            AGE,
+        ],
+        "Job" => vec![
+            NAME,
+            Column {
+                name: "Status",
+                type_: "string",
+                format: "",
+                cell: |v| {
+                    let has = |t: &str| {
+                        v.pointer("/status/conditions")
+                            .and_then(Value::as_array)
+                            .is_some_and(|cs| cs.iter().any(|c| c["type"] == t && c["status"] == "True"))
+                    };
+                    json!(if has("Complete") {
+                        "Complete"
+                    } else if has("Failed") {
+                        "Failed"
+                    } else if has("Suspended") {
+                        "Suspended"
+                    } else {
+                        "Running"
+                    })
+                },
+            },
+            Column {
+                name: "Completions",
+                type_: "string",
+                format: "",
+                cell: |v| json!(format!("{}/{}", int(v, "/status/succeeded"), v.pointer("/spec/completions").and_then(Value::as_i64).unwrap_or(1))),
+            },
+            AGE,
+        ],
+        "CronJob" => vec![
+            NAME,
+            Column { name: "Schedule", type_: "string", format: "", cell: |v| json!(s(v, "/spec/schedule")) },
+            Column {
+                name: "Suspend",
+                type_: "boolean",
+                format: "",
+                cell: |v| json!(v.pointer("/spec/suspend").and_then(Value::as_bool).unwrap_or(false)),
+            },
+            Column { name: "Active", type_: "integer", format: "", cell: |v| count(v, "/status/active") },
+            Column {
+                name: "Last Schedule",
+                type_: "string",
+                format: "",
+                cell: |v| {
+                    let t = s(v, "/status/lastScheduleTime");
+                    json!(if t.is_empty() { "<none>".to_string() } else { age(&t) })
+                },
+            },
+            AGE,
+        ],
+        "PersistentVolumeClaim" => vec![
+            NAME,
+            Column { name: "Status", type_: "string", format: "", cell: |v| json!(s(v, "/status/phase")) },
+            Column { name: "Volume", type_: "string", format: "", cell: |v| json!(s(v, "/spec/volumeName")) },
+            Column { name: "Capacity", type_: "string", format: "", cell: |v| json!(s(v, "/status/capacity/storage")) },
+            Column { name: "Storage Class", type_: "string", format: "", cell: |v| json!(s(v, "/spec/storageClassName")) },
+            AGE,
+        ],
+        "PersistentVolume" => vec![
+            NAME,
+            Column { name: "Capacity", type_: "string", format: "", cell: |v| json!(s(v, "/spec/capacity/storage")) },
+            Column { name: "Reclaim Policy", type_: "string", format: "", cell: |v| json!(s(v, "/spec/persistentVolumeReclaimPolicy")) },
+            Column { name: "Status", type_: "string", format: "", cell: |v| json!(s(v, "/status/phase")) },
+            Column {
+                name: "Claim",
+                type_: "string",
+                format: "",
+                cell: |v| json!(format!("{}/{}", s(v, "/spec/claimRef/namespace"), s(v, "/spec/claimRef/name"))),
             },
             AGE,
         ],
@@ -161,6 +306,68 @@ fn columns_for(kind: &str) -> Vec<Column> {
         ],
         _ => vec![NAME, AGE],
     }
+}
+
+fn or_none(v: &str) -> String {
+    if v.is_empty() { "<none>".to_string() } else { v.to_string() }
+}
+
+/// The STATUS kubectl shows for a pod (its printPod logic, simplified).
+fn pod_status(v: &Value) -> String {
+    let phase = s(v, "/status/phase");
+    let mut reason = match s(v, "/status/reason").as_str() {
+        "" if phase.is_empty() => "Pending".to_string(),
+        "" => phase.clone(),
+        r => r.to_string(),
+    };
+    let describe = |c: &Value, init: bool| -> Option<String> {
+        let prefix = if init { "Init:" } else { "" };
+        if let Some(t) = c.pointer("/state/terminated") {
+            let code = t.get("exitCode").and_then(Value::as_i64).unwrap_or(0);
+            if init && code == 0 {
+                return None;
+            }
+            let r = s(t, "/reason");
+            return Some(if !r.is_empty() { format!("{prefix}{r}") } else { format!("{prefix}ExitCode:{code}") });
+        }
+        if let Some(w) = c.pointer("/state/waiting") {
+            let r = s(w, "/reason");
+            if !r.is_empty() && !(init && r == "PodInitializing") {
+                return Some(format!("{prefix}{r}"));
+            }
+        }
+        None
+    };
+    let inits = v.pointer("/status/initContainerStatuses").and_then(Value::as_array).cloned().unwrap_or_default();
+    let mut initializing = false;
+    for (i, c) in inits.iter().enumerate() {
+        let done = c.pointer("/state/terminated/exitCode").and_then(Value::as_i64) == Some(0);
+        let sidecar_running = c.pointer("/state/running").is_some() && c.get("started") == Some(&json!(true));
+        if done || sidecar_running {
+            continue;
+        }
+        initializing = true;
+        reason = describe(c, true).unwrap_or_else(|| format!("Init:{i}/{}", inits.len()));
+        break;
+    }
+    if !initializing {
+        let mut has_running = false;
+        let containers = v.pointer("/status/containerStatuses").and_then(Value::as_array).cloned().unwrap_or_default();
+        for c in containers.iter().rev() {
+            if let Some(r) = describe(c, false) {
+                reason = r;
+            } else if c.pointer("/state/running").is_some() && c.get("ready") == Some(&json!(true)) {
+                has_running = true;
+            }
+        }
+        if reason == "Completed" && has_running {
+            reason = "Running".into();
+        }
+    }
+    if v.pointer("/metadata/deletionTimestamp").is_some_and(|t| !t.is_null()) {
+        reason = "Terminating".into();
+    }
+    reason
 }
 
 fn replicas(v: &Value) -> i64 {
@@ -215,7 +422,12 @@ pub fn build(rt: &ResourceType, objects: &[Value], rv: u64, include_object: bool
         }
     } else {
         for col in builtin {
-            defs.push(json!({"name": col.name, "type": col.type_, "format": col.format, "description": "", "priority": 0}));
+            // Columns kubectl shows only with `-o wide`.
+            let wide = matches!(
+                (rt.kind.as_str(), col.name),
+                ("Pod", "IP" | "Node") | ("Node", "Internal-IP" | "OS-Image" | "Container-Runtime")
+            );
+            defs.push(json!({"name": col.name, "type": col.type_, "format": col.format, "description": "", "priority": if wide { 1 } else { 0 }}));
             extractors.push(Box::new(col.cell));
         }
     }

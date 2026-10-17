@@ -98,6 +98,12 @@ impl DockerRuntime {
         Ok(Self { docker })
     }
 
+    /// The underlying Docker client, for runtimes layered on this one (the
+    /// Kubernetes node agent's pod runtime).
+    pub fn client(&self) -> Docker {
+        self.docker.clone()
+    }
+
     pub async fn ping(&self) -> Result<()> {
         self.docker
             .ping()

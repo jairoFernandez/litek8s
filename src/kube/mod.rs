@@ -3,13 +3,23 @@
 //! CRUD, patch, watch, CRDs) so kubectl and Helm work against it unchanged.
 //! See compat/ for the corpus that measures how compatible it is.
 
+mod admission;
+pub mod agent;
+pub mod controllers;
+pub mod defaults;
 pub mod discovery;
+pub mod dns;
 pub mod patch;
+mod pod_streams;
 pub mod protobuf;
+pub mod quantity;
 pub mod registry;
 pub mod selector;
 pub mod server;
+mod spdy;
 pub mod store;
 pub mod table;
+pub mod tls;
+mod ws;
 
 pub use server::{ApiServerConfig, ApiState, serve, serve_listener, write_kubeconfig};

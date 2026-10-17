@@ -193,6 +193,17 @@ impl Store {
             .collect()
     }
 
+    /// Every object in a namespace (`""`: cluster-scoped ones), any resource.
+    pub fn objects_in_namespace(&self, namespace: &str) -> Vec<(ObjectKey, Value)> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .objects
+            .iter()
+            .filter(|(k, _)| k.namespace == namespace)
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
     pub fn keys_of_resource(&self, group: &str, resource: &str) -> Vec<ObjectKey> {
         let inner = self.inner.lock().unwrap();
         inner

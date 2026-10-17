@@ -133,7 +133,7 @@ fn remove(doc: &mut Value, path: &str) -> Result<Value> {
 fn merge_key(field: &str, items: &[Value]) -> Option<&'static str> {
     match field {
         "containers" | "initContainers" | "ephemeralContainers" | "volumes" | "env"
-        | "imagePullSecrets" | "hostAliases" => Some(if field == "hostAliases" { "ip" } else { "name" }),
+        | "imagePullSecrets" | "hostAliases" | "webhooks" => Some(if field == "hostAliases" { "ip" } else { "name" }),
         "volumeMounts" => Some("mountPath"),
         "volumeDevices" => Some("devicePath"),
         "ownerReferences" => Some("uid"),
