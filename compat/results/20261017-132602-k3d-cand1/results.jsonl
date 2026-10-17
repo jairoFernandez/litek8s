@@ -8,3 +8,4 @@
 {"id": "helm_zot", "tier": "L4", "status": "pass", "seconds": 44, "detail": "zot-0.1.128"}
 {"id": "helm_descheduler", "tier": "L4", "status": "pass", "seconds": 2, "detail": "descheduler-0.37.0"}
 {"id": "helm_gatus", "tier": "L4", "status": "pass", "seconds": 11, "detail": "gatus-1.5.0"}
+{"id": "helm_ollama", "tier": "L4", "status": "fail", "seconds": 362, "detail": "context deadline exceeded"}

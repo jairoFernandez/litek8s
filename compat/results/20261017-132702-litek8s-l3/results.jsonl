@@ -1,7 +1,0 @@
-{"id": "svc_clusterip", "tier": "L3", "status": "pass", "seconds": 2, "detail": ""}
-{"id": "svc_dns", "tier": "L3", "status": "pass", "seconds": 1, "detail": ""}
-{"id": "svc_endpoints", "tier": "L3", "status": "pass", "seconds": 1, "detail": ""}
-{"id": "svc_headless", "tier": "L3", "status": "pass", "seconds": 1, "detail": ""}
-{"id": "svc_nodeport", "tier": "L3", "status": "pass", "seconds": 2, "detail": ""}
-{"id": "pod_to_pod", "tier": "L3", "status": "pass", "seconds": 2, "detail": ""}
-{"id": "api_from_pod", "tier": "L3", "status": "pass", "seconds": 1, "detail": ""}
