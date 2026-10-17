@@ -21,7 +21,7 @@ use bollard::container::{
 use bollard::errors::Error as BollardError;
 use bollard::exec::{CreateExecOptions, ResizeExecOptions, StartExecOptions, StartExecResults};
 use bollard::image::CreateImageOptions;
-use bollard::models::{HostConfig, Mount, MountBindOptions, MountTypeEnum, MountVolumeOptions, PortBinding};
+use bollard::models::{HostConfig, Mount, MountBindOptions, MountTmpfsOptions, MountTypeEnum, MountVolumeOptions, PortBinding};
 use bollard::network::CreateNetworkOptions;
 use bollard::system::EventsOptions;
 use bollard::volume::{CreateVolumeOptions, RemoveVolumeOptions};
@@ -371,6 +371,10 @@ async fn apply_rules_on_host(rules: &str) -> Result<()> {
 
 fn docker_mount(m: &MountSpec) -> Mount {
     let mut bind_options = None;
+    // A memory-backed emptyDir is world-writable, as the kubelet makes it;
+    // Docker would otherwise copy the mode of the image's directory there
+    // (e.g. a root-owned 0775 /run for a non-root container).
+    let tmpfs_options = matches!(m.source, MountSource::Tmpfs).then(|| MountTmpfsOptions { mode: Some(0o777), ..Default::default() });
     let (typ, source, volume_options) = match &m.source {
         MountSource::Bind(path) => {
             bind_options = Some(MountBindOptions { create_mountpoint: Some(true), ..Default::default() });
@@ -390,6 +394,7 @@ fn docker_mount(m: &MountSpec) -> Mount {
         read_only: Some(m.read_only),
         volume_options,
         bind_options,
+        tmpfs_options,
         ..Default::default()
     }
 }
