@@ -15,7 +15,7 @@ fails there is a bug in the case, not a compatibility gap.
 | L1 | generic object semantics on config objects: create/get/list/watch, apply (client- and server-side), merge/JSON/strategic patch, labels and field selectors, conflicts, `generateName`, dry-run, namespace cascade, CRDs, table output | API server |
 | L2 | workloads actually running: Deployment rollout/scale/undo, logs, exec, port-forward, Job, CronJob, StatefulSet, DaemonSet, multi-container pods, ConfigMap/Secret injection, probes, restarts, PVCs | controllers + node agent |
 | L3 | networking: ClusterIP, DNS, EndpointSlices, headless and NodePort Services, pod-to-pod, in-cluster API access | service proxy, DNS, CNI |
-| L4 | 20 popular Helm charts install with `--wait` and uninstall cleanly (`charts.txt`) | everything above |
+| L4 | 47 popular Helm charts install with `--wait` and uninstall cleanly (`charts.txt`) | everything above |
 
 The overall rate is unweighted (passed / total). L4 is the closest thing to
 "does my stuff run": charts exercise CRDs, webhooks, RBAC, probes and

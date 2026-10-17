@@ -4,6 +4,13 @@
 # the runner records the version it actually installed in results.jsonl.
 # Chosen to cover what home/edge clusters typically run: ingress, certificates,
 # monitoring, GitOps, operators with CRDs and webhooks, and stateful apps.
+# Every chart here passes on the k3d reference. Tried and left out because
+# they fail there too: fluent-bit (mounts /etc/machine-id, absent on k3d
+# nodes), authelia and immich (need site-specific configuration or an
+# existing volume claim), ollama (a multi-GB image does not pull within the
+# timeout), sealed-secrets (its Helm repository is gone). Not tried: charts
+# that need kernel modules or cloud accounts (longhorn, openebs-lvm, cilium,
+# tailscale-operator), and ingress-nginx (retired upstream).
 podinfo        oci://ghcr.io/stefanprodan/charts/podinfo                    -
 traefik        https://traefik.github.io/charts                             traefik
 cert-manager   https://charts.jetstack.io                                   cert-manager           --set crds.enabled=true
@@ -24,3 +31,37 @@ minio-operator https://operator.min.io                                      oper
 external-dns   https://kubernetes-sigs.github.io/external-dns/              external-dns           --set provider.name=inmemory --set policy=upsert-only
 gitea          https://dl.gitea.com/charts/                                 gitea                  --set postgresql-ha.enabled=false --set valkey-cluster.enabled=false --set gitea.config.database.DB_TYPE=sqlite3 --set gitea.config.session.PROVIDER=memory --set gitea.config.cache.ADAPTER=memory --set gitea.config.queue.TYPE=level
 loki           https://grafana.github.io/helm-charts                        loki                   --set deploymentMode=SingleBinary --set loki.commonConfig.replication_factor=1 --set loki.storage.type=filesystem --set loki.useTestSchema=true --set singleBinary.replicas=1 --set read.replicas=0 --set write.replicas=0 --set backend.replicas=0 --set chunksCache.enabled=false --set resultsCache.enabled=false
+
+# Monitoring and logs
+kps            https://prometheus-community.github.io/helm-charts           kube-prometheus-stack
+vm-single      https://victoriametrics.github.io/helm-charts/               victoria-metrics-single
+alloy          https://grafana.github.io/helm-charts                        alloy
+# Ingress, gateways and load balancers
+haproxy        https://haproxytech.github.io/helm-charts                    kubernetes-ingress
+envoy-gateway  oci://docker.io/envoyproxy/gateway-helm                      -
+nginx-ingress  oci://ghcr.io/nginx/charts/nginx-ingress                     -
+metallb        https://metallb.github.io/metallb                            metallb
+# Storage and databases (operators and plain charts, no Bitnami images)
+openebs-local  https://openebs.github.io/dynamic-localpv-provisioner        localpv-provisioner
+redis-operator https://ot-container-kit.github.io/helm-charts/              redis-operator
+mariadb-op     https://helm.mariadb.com/mariadb-operator                    mariadb-operator      --set crds.enabled=true
+zalando-pg     https://opensource.zalando.com/postgres-operator/charts/postgres-operator postgres-operator
+valkey         https://valkey.io/valkey-helm/                               valkey
+# Home and self-hosted apps
+home-assistant http://pajikos.github.io/home-assistant-helm-chart/          home-assistant
+jellyfin       https://jellyfin.github.io/jellyfin-helm                     jellyfin
+nextcloud      https://nextcloud.github.io/helm/                            nextcloud
+uptime-kuma    https://helm.irsigler.cloud                                  uptime-kuma
+vaultwarden    https://guerzon.github.io/vaultwarden                        vaultwarden
+pihole         https://mojo2600.github.io/pihole-kubernetes/                pihole
+node-red       https://schwarzit.github.io/node-red-chart/                  node-red
+homepage       https://jameswynn.github.io/helm-charts                      homepage
+gatus          https://twin.github.io/helm-charts                           gatus
+# Registries
+zot            https://zotregistry.dev/helm-charts                          zot
+registry       https://twuni.github.io/docker-registry.helm                 docker-registry
+# GitOps, workflows and cluster tooling
+flux2          https://fluxcd-community.github.io/helm-charts               flux2
+argo-wf        https://argoproj.github.io/argo-helm                         argo-workflows
+descheduler    https://kubernetes-sigs.github.io/descheduler/               descheduler
+trivy-operator https://aquasecurity.github.io/helm-charts/                  trivy-operator

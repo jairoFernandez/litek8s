@@ -10,6 +10,8 @@
 //!   network, so it also works when Docker runs inside a VM).
 //! - NodePorts: plain TCP listeners on the node that relay to an endpoint,
 //!   so they answer on the node's own address wherever the runtime runs.
+//!   When the node cannot reach the endpoint's address (Docker in a VM, see
+//!   `probe.rs`), the relay goes through the pod's sandbox instead.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
@@ -21,7 +23,11 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
-use super::runtime::PodRuntime;
+use super::runtime::{ExecSession, PodRuntime};
+
+/// Connect to `ip:port` from inside the network namespace of the pod with
+/// that address (set by the agent).
+pub(crate) type InPodDial = Arc<dyn Fn(String, u16) -> futures_util::future::BoxFuture<'static, Option<ExecSession>> + Send + Sync>;
 
 pub(crate) const CHAIN: &str = "LITEK8S-SERVICES";
 
@@ -31,6 +37,7 @@ pub(crate) struct Proxy {
     services: Mutex<BTreeMap<(String, String), (Value, Option<Value>)>>,
     changed: Notify,
     node_ports: Mutex<HashMap<u16, JoinHandle<()>>>,
+    pub(crate) in_pod: std::sync::OnceLock<InPodDial>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -198,17 +205,67 @@ async fn serve_node_port(proxy: Arc<Proxy>, port: u16) {
         }
         let b = backends[next % backends.len()].clone();
         next = next.wrapping_add(1);
+        let in_pod = proxy.in_pod.get().cloned();
         tokio::spawn(async move {
-            let Ok(Ok(mut upstream)) =
-                tokio::time::timeout(Duration::from_secs(5), TcpStream::connect((b.ip.as_str(), b.port))).await
-            else {
-                return;
-            };
             let _ = client.set_nodelay(true);
-            let _ = upstream.set_nodelay(true);
-            let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+            let direct = async {
+                if super::probe::is_unroutable(&b.ip) {
+                    return Err(());
+                }
+                match tokio::time::timeout(Duration::from_secs(1), TcpStream::connect((b.ip.as_str(), b.port))).await {
+                    Ok(result) => Ok(result),
+                    Err(_) => {
+                        super::probe::mark_unroutable(&b.ip);
+                        Err(())
+                    }
+                }
+            };
+            match direct.await {
+                Ok(Ok(mut upstream)) => {
+                    let _ = upstream.set_nodelay(true);
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                }
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => {}
+                _ => {
+                    let Some(dial) = in_pod else { return };
+                    if let Some(session) = dial(b.ip.clone(), b.port).await {
+                        relay_exec(client, session).await;
+                    }
+                }
+            }
         });
     }
+}
+
+/// Copy bytes between a client connection and an exec session's stdio.
+async fn relay_exec(client: TcpStream, session: ExecSession) {
+    use futures_util::StreamExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let (mut read, mut write) = client.into_split();
+    let mut input = session.input;
+    let upload = async move {
+        let mut buf = vec![0u8; 32 * 1024];
+        while let Ok(n) = read.read(&mut buf).await {
+            if n == 0 || input.write_all(&buf[..n]).await.is_err() {
+                break;
+            }
+        }
+        let _ = input.shutdown().await;
+    };
+    let mut output = session.output;
+    let download = async move {
+        while let Some(Ok((channel, bytes))) = output.next().await {
+            if channel != 2 && write.write_all(&bytes).await.is_err() {
+                break;
+            }
+        }
+        let _ = write.shutdown().await;
+    };
+    // The session ends when the pod side closes; the client may stop
+    // sending long before that.
+    let upload = tokio::spawn(upload);
+    download.await;
+    upload.abort();
 }
 
 #[cfg(test)]

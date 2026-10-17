@@ -117,6 +117,10 @@ const BUILTINS: &[Builtin] = &[
     ("apiregistration.k8s.io", "v1", "APIService", "apiservices", &[], false, true, false),
     ("admissionregistration.k8s.io", "v1", "MutatingWebhookConfiguration", "mutatingwebhookconfigurations", &[], false, false, false),
     ("admissionregistration.k8s.io", "v1", "ValidatingWebhookConfiguration", "validatingwebhookconfigurations", &[], false, false, false),
+    // Stored and served; their CEL rules are not evaluated yet.
+    ("admissionregistration.k8s.io", "v1", "ValidatingAdmissionPolicy", "validatingadmissionpolicies", &[], false, true, false),
+    ("admissionregistration.k8s.io", "v1", "ValidatingAdmissionPolicyBinding", "validatingadmissionpolicybindings", &[], false, false, false),
+    ("node.k8s.io", "v1", "RuntimeClass", "runtimeclasses", &[], false, false, false),
     ("certificates.k8s.io", "v1", "CertificateSigningRequest", "certificatesigningrequests", &["csr"], false, true, false),
     ("authentication.k8s.io", "v1", "TokenReview", "tokenreviews", &[], false, false, false),
     ("authentication.k8s.io", "v1", "SelfSubjectReview", "selfsubjectreviews", &[], false, false, false),

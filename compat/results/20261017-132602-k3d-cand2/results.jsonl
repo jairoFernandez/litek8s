@@ -1,0 +1,10 @@
+{"id": "helm_vm_single", "tier": "L4", "status": "pass", "seconds": 61, "detail": "victoria-metrics-single-0.49.0"}
+{"id": "helm_haproxy", "tier": "L4", "status": "pass", "seconds": 101, "detail": "kubernetes-ingress-1.54.3"}
+{"id": "helm_metallb", "tier": "L4", "status": "pass", "seconds": 295, "detail": "metallb-0.16.1"}
+{"id": "helm_mariadb_op", "tier": "L4", "status": "pass", "seconds": 146, "detail": "mariadb-operator-26.10.1"}
+{"id": "helm_home_assistant", "tier": "L4", "status": "pass", "seconds": 201, "detail": "home-assistant-0.3.87"}
+{"id": "helm_uptime_kuma", "tier": "L4", "status": "pass", "seconds": 202, "detail": "uptime-kuma-4.2.0"}
+{"id": "helm_node_red", "tier": "L4", "status": "pass", "seconds": 53, "detail": "node-red-0.40.2"}
+{"id": "helm_registry", "tier": "L4", "status": "pass", "seconds": 15, "detail": "docker-registry-3.0.0"}
+{"id": "helm_trivy_operator", "tier": "L4", "status": "pass", "seconds": 33, "detail": "trivy-operator-0.37.0"}
+{"id": "helm_immich", "tier": "L4", "status": "fail", "seconds": 9, "detail": "Error: INSTALLATION FAILED: execution error at (immich/templates/checks.yaml:1:64): .Values.immich.persistence.library.existingClaim is required."}

@@ -7,6 +7,11 @@
 //! service and URL client configs, JSONPatch responses. `matchConditions`
 //! (CEL) are not evaluated: a webhook whose rules match is called.
 //! Requests made by the in-process controllers skip webhooks for now.
+//!
+//! A Service-backed webhook is called at a ready endpoint's pod address.
+//! When the API server cannot reach that address (a pod on another node, or
+//! Docker in a VM), the connection is tunneled through the node agent that
+//! runs the pod, the way `kubectl port-forward` is.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,6 +26,8 @@ use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, ServerName};
 use serde_json::{Value, json};
 
+use super::agent::hub::StreamEvent;
+use super::agent::protocol::Message;
 use super::controllers::util;
 use super::patch;
 use super::registry::ResourceType;
@@ -205,13 +212,13 @@ async fn call(api: &ApiState, hook: &Value, a: &Attributes<'_>, obj: &Value) -> 
         .get("caBundle")
         .and_then(Value::as_str)
         .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok());
-    let (addr, server_name, path) = match config.get("url").and_then(Value::as_str) {
+    let (backend, server_name, path) = match config.get("url").and_then(Value::as_str) {
         Some(url) => {
             let rest = url.strip_prefix("https://").context("webhook URL must be https")?;
             let (authority, path) = rest.split_once('/').map(|(a, p)| (a, format!("/{p}"))).unwrap_or((rest, "/".into()));
             let host = authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority).trim_matches(['[', ']']).to_string();
             let addr = if authority.contains(':') { authority.to_string() } else { format!("{authority}:443") };
-            (addr, host, path)
+            (Backend { addr, ..Default::default() }, host, path)
         }
         None => {
             let svc_ns = util::s(&config, "/service/namespace").to_string();
@@ -221,17 +228,27 @@ async fn call(api: &ApiState, hook: &Value, a: &Attributes<'_>, obj: &Value) -> 
                 "" => "/".to_string(),
                 p => p.to_string(),
             };
-            let addr = resolve_service(api, &svc_ns, &svc_name, port)?;
-            (addr, format!("{svc_name}.{svc_ns}.svc"), path)
+            let backend = resolve_service(api, &svc_ns, &svc_name, port)?;
+            (backend, format!("{svc_name}.{svc_ns}.svc"), path)
         }
     };
     let body = serde_json::to_vec(&review)?;
-    let response = tokio::time::timeout(timeout, post(&addr, &server_name, &path, body, ca)).await.context("webhook timed out")??;
+    let response = tokio::time::timeout(timeout, post(api, &backend, &server_name, &path, body, ca)).await.context("webhook timed out")??;
     response.get("response").cloned().context("webhook returned no response")
 }
 
-/// A ready backend of a Service port, as `ip:port`.
-fn resolve_service(api: &ApiState, ns: &str, name: &str, port: i64) -> Result<String> {
+/// Where a webhook listens: `ip:port`, and for a Service endpoint the pod
+/// behind it and its node.
+#[derive(Default)]
+struct Backend {
+    addr: String,
+    node: String,
+    pod_uid: String,
+    port: u16,
+}
+
+/// A ready backend of a Service port.
+fn resolve_service(api: &ApiState, ns: &str, name: &str, port: i64) -> Result<Backend> {
     let svc = api.get_object("", "services", ns, name).with_context(|| format!("service \"{ns}/{name}\" not found"))?;
     let ports = svc.pointer("/spec/ports").and_then(Value::as_array).cloned().unwrap_or_default();
     let svc_port = ports
@@ -250,14 +267,73 @@ fn resolve_service(api: &ApiState, ns: &str, name: &str, port: i64) -> Result<St
             .or_else(|| ports.first())
             .and_then(|p| p.get("port").and_then(Value::as_i64));
         if let Some(target) = target {
-            return Ok(format!("{ip}:{target}"));
+            return Ok(Backend {
+                addr: format!("{ip}:{target}"),
+                node: util::s(subset, "/addresses/0/nodeName").to_string(),
+                pod_uid: util::s(subset, "/addresses/0/targetRef/uid").to_string(),
+                port: target as u16,
+            });
         }
     }
     bail!("no ready endpoints for service \"{ns}/{name}\"")
 }
 
-async fn post(addr: &str, server_name: &str, path: &str, body: Vec<u8>, ca: Option<Vec<u8>>) -> Result<Value> {
-    let tcp = tokio::net::TcpStream::connect(addr).await.with_context(|| format!("failed to connect to {addr}"))?;
+trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Io for T {}
+
+/// Addresses the API server could not reach directly; tunneled from then on.
+static UNREACHABLE: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+
+async fn dial(api: &ApiState, backend: &Backend) -> Result<Box<dyn Io>> {
+    let addr = &backend.addr;
+    let tunnel = !backend.pod_uid.is_empty() && api.hub.is_connected(&backend.node);
+    if !tunnel || !UNREACHABLE.lock().unwrap().as_ref().is_some_and(|s| s.contains(addr)) {
+        match tokio::time::timeout(Duration::from_secs(1), tokio::net::TcpStream::connect(addr.as_str())).await {
+            Ok(Ok(tcp)) => return Ok(Box::new(tcp)),
+            Ok(Err(e)) if !tunnel || e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                return Err(e).with_context(|| format!("failed to connect to {addr}"));
+            }
+            Err(_) if !tunnel => bail!("timed out connecting to {addr}"),
+            _ => {
+                UNREACHABLE.lock().unwrap().get_or_insert_default().insert(addr.clone());
+            }
+        }
+    }
+    let (pod_uid, port) = (backend.pod_uid.clone(), backend.port);
+    let mut handle = api.hub.open_stream(&backend.node, |stream| Message::PortForward { stream, pod_uid, port }).await?;
+    let (ours, theirs) = tokio::io::duplex(64 * 1024);
+    let (mut from_us, mut to_us) = tokio::io::split(theirs);
+    let input = handle.input();
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut buf = vec![0u8; 32 * 1024];
+        while let Ok(n) = from_us.read(&mut buf).await {
+            if n == 0 || !input.send(0, Bytes::copy_from_slice(&buf[..n])).await {
+                break;
+            }
+        }
+        input.close().await;
+    });
+    tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        while let Some(event) = handle.events.recv().await {
+            match event {
+                StreamEvent::Data { channel: 2, .. } => {}
+                StreamEvent::Data { bytes, .. } => {
+                    if to_us.write_all(&bytes).await.is_err() {
+                        break;
+                    }
+                }
+                StreamEvent::Done { .. } => break,
+            }
+        }
+        let _ = to_us.shutdown().await;
+    });
+    Ok(Box::new(ours))
+}
+
+async fn post(api: &ApiState, backend: &Backend, server_name: &str, path: &str, body: Vec<u8>, ca: Option<Vec<u8>>) -> Result<Value> {
+    let tcp = dial(api, backend).await?;
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let builder = rustls::ClientConfig::builder_with_provider(provider).with_safe_default_protocol_versions()?;
     let config = match ca.filter(|c| !c.is_empty()) {

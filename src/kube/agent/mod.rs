@@ -111,7 +111,7 @@ pub(crate) struct PodView {
     pub namespace: String,
     pub name: String,
     pub ip: Option<String>,
-    /// The pod sandbox's runtime id.
+    /// The pod sandbox's runtime id; it owns the pod's network namespace.
     pub sandbox: Option<String>,
     /// container name → (current container id, previous container id)
     pub containers: HashMap<String, (Option<String>, Option<String>)>,
@@ -161,6 +161,16 @@ impl<R: PodRuntime> Agent<R> {
             gateway_ip: tokio::sync::OnceCell::new(),
             proxy: Arc::new(proxy::Proxy::default()),
         });
+        let weak = Arc::downgrade(&agent);
+        let in_pod: proxy::InPodDial = Arc::new(move |ip: String, port: u16| {
+            let weak = weak.clone();
+            Box::pin(async move {
+                let agent = weak.upgrade()?;
+                let sandbox = agent.views.lock().unwrap().values().find(|v| v.ip.as_deref() == Some(ip.as_str()))?.sandbox.clone()?;
+                agent.rt.exec(&sandbox, vec!["nc".into(), ip, port.to_string()], false, true).await.ok()
+            })
+        });
+        let _ = agent.proxy.in_pod.set(in_pod);
         tokio::spawn(proxy::run(agent.proxy.clone(), agent.rt.clone()));
         let exits = agent.clone();
         tokio::spawn(async move {
@@ -418,12 +428,11 @@ impl<R: PodRuntime> Agent<R> {
                 });
             }
             Message::PortForward { stream, pod_uid, port } => {
-                let view = self.views.lock().unwrap().get(&pod_uid).cloned();
-                let ip = view.as_ref().and_then(|v| v.ip.clone());
-                let host_network = view.is_some() && ip.as_deref() == Some(self.config.node_ip.as_str());
+                let (ip, sandbox) = self.views.lock().unwrap().get(&pod_uid).map(|v| (v.ip.clone(), v.sandbox.clone())).unwrap_or_default();
+                let host_network = sandbox.is_some() && ip.as_deref() == Some(self.config.node_ip.as_str());
+                // A hostNetwork pod's sandbox shares the node's (or Docker VM's) network.
                 let ip = if host_network { Some("127.0.0.1".to_string()) } else { ip };
-                let sandbox = view.and_then(|v| v.sandbox).filter(|_| !host_network);
-                self.spawn_stream(link, stream, move |agent, link, input| port_forward_stream(agent, link, stream, sandbox, ip, port, input));
+                self.spawn_stream(link, stream, move |agent, link, input| port_forward_stream(agent, link, stream, ip, sandbox, port, input));
             }
             Message::Resize { stream, width, height } => self.stream_input(stream, StreamInput::Resize(width, height)),
             Message::Cancel { stream } => {
@@ -572,16 +581,16 @@ async fn port_forward_stream<R: PodRuntime>(
     agent: Arc<Agent<R>>,
     link: Arc<Link>,
     stream: u32,
-    sandbox: Option<String>,
     ip: Option<String>,
+    sandbox: Option<String>,
     port: u16,
-    mut input: mpsc::UnboundedReceiver<StreamInput>,
+    input: mpsc::UnboundedReceiver<StreamInput>,
 ) {
     let Some(ip) = ip else {
         return finish(&link, stream, None, Some("pod has no IP address yet".into())).await;
     };
-    // Inside the pod's network namespace when the runtime can (reaches
-    // listeners bound to the pod's loopback too), else the pod's address.
+    // Dial inside the pod's network namespace when the runtime can (that also
+    // reaches listeners bound to the pod's loopback), else the pod's address.
     let dial = || {
         let (agent, sandbox, ip) = (agent.clone(), sandbox.clone(), ip.clone());
         async move {
@@ -593,24 +602,32 @@ async fn port_forward_stream<R: PodRuntime>(
             tokio::net::TcpStream::connect((ip.as_str(), port)).await
         }
     };
-    // A container counts as started before its process listens, and a
-    // brand-new pod address may not be routable from the node for a moment:
-    // retry refused or unanswered connections briefly instead of failing the
-    // client's stream (kubectl ends the whole port-forward on an error).
+    // A container counts as started before its process listens: retry
+    // refused connections briefly instead of failing the client's stream
+    // (kubectl ends the whole port-forward on an error). The node's path to
+    // a pod address can also be missing (Docker in a VM: Docker Desktop has
+    // none, OrbStack's sometimes stays stale for a new address); then, and
+    // for a process that only listens on loopback, connect from inside the
+    // pod's network namespace instead, as the kubelet does.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let conn = loop {
         let attempt = tokio::time::timeout(Duration::from_secs(1), dial()).await;
         let retry = tokio::time::Instant::now() < deadline;
         match attempt {
-            Ok(Ok(c)) => break c,
+            Ok(Ok(c)) => break Some(c),
             Ok(Err(e)) if retry && e.kind() == std::io::ErrorKind::ConnectionRefused => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            Err(_) if retry => {}
+            _ if sandbox.is_some() => break None,
             Ok(Err(e)) => return finish(&link, stream, None, Some(format!("failed to connect to {ip}:{port}: {e}"))).await,
             Err(_) => return finish(&link, stream, None, Some(format!("timed out connecting to {ip}:{port}"))).await,
         }
     };
+    let Some(conn) = conn else {
+        let command = vec!["nc".to_string(), "127.0.0.1".to_string(), port.to_string()];
+        return exec_stream(agent, link, stream, Ok(sandbox.unwrap_or_default()), command, true, false, input).await;
+    };
+    let mut input = input;
     let _ = conn.set_nodelay(true);
     let (mut r, mut w) = conn.into_split();
     let tx = link.tx.clone();

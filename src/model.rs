@@ -1,4 +1,5 @@
-//! Reading model weights from safetensors files.
+//! Distributed model manifests, and (with the `llm` feature) reading model
+//! weights from safetensors files.
 //!
 //! safetensors is the de-facto format for LLM weights (HuggingFace): a JSON
 //! header naming each tensor with its dtype, shape, and byte offsets, followed
@@ -7,12 +8,17 @@
 //! the rest of litek8s computes on — upcasting f16/bf16/f32 to f64 so a single
 //! kernel handles every common weight dtype.
 
+#[cfg(feature = "llm")]
 use anyhow::{Context, Result, bail, ensure};
+#[cfg(feature = "llm")]
 use half::{bf16, f16};
+#[cfg(feature = "llm")]
 use safetensors::{Dtype, SafeTensors};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "llm")]
 use std::path::Path;
 
+#[cfg(feature = "llm")]
 use crate::matrix::Matrix;
 
 /// A model distributed across the cluster: an ordered list of layers, each
@@ -51,6 +57,7 @@ impl ModelManifest {
 }
 
 /// One tensor's metadata as reported by a safetensors header.
+#[cfg(feature = "llm")]
 #[derive(Debug, Clone)]
 pub struct TensorInfo {
     pub name: String,
@@ -60,6 +67,7 @@ pub struct TensorInfo {
 
 /// List every tensor in a safetensors file without decoding any data — reads
 /// only the header, so it is cheap even for multi-GB models.
+#[cfg(feature = "llm")]
 pub fn inspect(path: &Path) -> Result<Vec<TensorInfo>> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("failed to read model file {}", path.display()))?;
@@ -80,6 +88,7 @@ pub fn inspect(path: &Path) -> Result<Vec<TensorInfo>> {
 
 /// Load a named 2D tensor from a safetensors file as a row-major f64 `Matrix`.
 /// Upcasts f16/bf16/f32 to f64; rejects non-2D tensors and unsupported dtypes.
+#[cfg(feature = "llm")]
 pub fn load_tensor_2d(path: &Path, name: &str) -> Result<Matrix> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("failed to read model file {}", path.display()))?;
@@ -116,6 +125,7 @@ pub fn load_tensor_2d(path: &Path, name: &str) -> Result<Matrix> {
 /// ever materializing the full f64 matrix — for the embedding table, which is
 /// large (vocab x hidden) and would blow a small node's RAM at f64. Returns
 /// (rows, cols, f16_bytes).
+#[cfg(feature = "llm")]
 pub fn load_tensor_2d_f16(path: &Path, name: &str) -> Result<(usize, usize, Vec<u8>)> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("failed to read model file {}", path.display()))?;
@@ -146,6 +156,7 @@ pub fn load_tensor_2d_f16(path: &Path, name: &str) -> Result<(usize, usize, Vec<
 }
 
 /// Bytes-per-element for the floating-point dtypes supported by this module.
+#[cfg(feature = "llm")]
 fn dtype_size(dtype: Dtype) -> usize {
     match dtype {
         Dtype::F64 => 8,
@@ -156,6 +167,7 @@ fn dtype_size(dtype: Dtype) -> usize {
 }
 
 /// Decode one little-endian element of a supported float dtype to f64.
+#[cfg(feature = "llm")]
 fn decode_one(dtype: Dtype, b: &[u8]) -> f64 {
     match dtype {
         Dtype::F64 => f64::from_le_bytes(b.try_into().unwrap()),
@@ -171,10 +183,12 @@ fn decode_one(dtype: Dtype, b: &[u8]) -> f64 {
 /// coordinator that distributes a model larger than its memory. Supports both a
 /// single `model.safetensors` and a sharded model (`*.index.json` + multiple
 /// `model-0000N-of-...safetensors`).
+#[cfg(feature = "llm")]
 pub struct ModelFile {
     mmaps: Vec<memmap2::Mmap>,
 }
 
+#[cfg(feature = "llm")]
 impl ModelFile {
     /// Open `path`. If a sibling `model.safetensors.index.json` exists, mmap all
     /// the shards it references; otherwise mmap the single file.
@@ -373,6 +387,7 @@ impl ModelFile {
 /// their native precision (f16/bf16) on disk and over the wire instead of being
 /// inflated to f64. f32/f64 stay as-is; quantized integer formats are not
 /// handled here (they reach this path already rejected by the decoder).
+#[cfg(feature = "llm")]
 pub fn storage_dtype(dtype: &str) -> crate::matrix::BinDtype {
     match dtype {
         "F16" => crate::matrix::BinDtype::F16,
@@ -384,6 +399,7 @@ pub fn storage_dtype(dtype: &str) -> crate::matrix::BinDtype {
 
 /// Load a named 1D tensor (norm weights, biases) as a flat f64 vector,
 /// upcasting f16/bf16/f32.
+#[cfg(feature = "llm")]
 pub fn load_tensor_1d(path: &Path, name: &str) -> Result<Vec<f64>> {
     let bytes = std::fs::read(path)
         .with_context(|| format!("failed to read model file {}", path.display()))?;
@@ -405,6 +421,7 @@ pub fn load_tensor_1d(path: &Path, name: &str) -> Result<Vec<f64>> {
 /// `cols` vectors of length `in_dim`, ready to cache as a node's shard. Loads
 /// one layer's tensor at a time (never the whole model), then slices out just
 /// the requested columns.
+#[cfg(feature = "llm")]
 pub fn load_layer_column_shard(
     path: &Path,
     tensor: &str,
@@ -427,6 +444,7 @@ pub fn load_layer_column_shard(
 /// Decode a contiguous little-endian tensor payload into f64 values, upcasting
 /// the common floating-point weight dtypes. Integer/quantized dtypes are
 /// rejected for now — they need dequantization (a later step).
+#[cfg(feature = "llm")]
 fn decode_to_f64(dtype: Dtype, data: &[u8]) -> Result<Vec<f64>> {
     match dtype {
         Dtype::F64 => decode_chunks::<8, _>(data, f64::from_le_bytes),
@@ -441,6 +459,7 @@ fn decode_to_f64(dtype: Dtype, data: &[u8]) -> Result<Vec<f64>> {
 }
 
 /// Split `data` into fixed-size little-endian elements and map each to an f64.
+#[cfg(feature = "llm")]
 fn decode_chunks<const N: usize, F>(data: &[u8], convert: F) -> Result<Vec<f64>>
 where
     F: Fn([u8; N]) -> f64,

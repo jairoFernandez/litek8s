@@ -18,13 +18,13 @@ http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "server", "client"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 libc = "0.2"
-memmap2 = "0.9.10"
+memmap2 = { version = "0.9.10", optional = true }
 openraft = { version = "=0.9.21", features = ["serde", "storage-v2"] }
 prost-reflect = "0.16.5"
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
-safetensors = "0.7.0"
+safetensors = { version = "0.7.0", optional = true }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 serde_yaml = "0.9.34"
@@ -34,11 +34,20 @@ socket2 = "0.6.4"
 sysinfo = "0.33.1"
 tar = "0.4.44"
 terminal_size = "0.4"
-tokenizers = { version = "0.23.1", default-features = false, features = ["onig"] }
+tokenizers = { version = "0.23.1", default-features = false, features = ["onig"], optional = true }
 tokio = { version = "1.44.1", features = ["full"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 webpki-roots = "1"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+[features]
+default = ["llm"]
+# The LLM/tensor-model stack: safetensors and GGUF loading, tokenizers
+# (oniguruma), the transformer, KV cache and distributed LLM coordinator, and
+# the `litek8s llm` / `litek8s model` commands. `--no-default-features` builds
+# the orchestrator alone. Distributed matmul (`matrix`) stays: the daemon and
+# node agent protocol carry it.
+llm = ["dep:memmap2", "dep:safetensors", "dep:tokenizers"]
 
 [dev-dependencies]
 prost = "0.14"
@@ -51,3 +60,19 @@ opt-level = 3
 protox = "0.10.0"
 # lto/codegen-units=1 give a few % more but make the per-node cross-compile
 # install painfully slow to iterate on; opt-level 3 already autovectorizes.
+
+[[test]]
+name = "llm_qwen"
+required-features = ["llm"]
+
+[[test]]
+name = "topk_attention"
+required-features = ["llm"]
+
+[[test]]
+name = "transformer"
+required-features = ["llm"]
+
+[[test]]
+name = "model_load"
+required-features = ["llm"]

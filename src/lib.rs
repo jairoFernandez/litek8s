@@ -4,12 +4,16 @@ pub mod cluster_manifest;
 pub mod cluster_orchestrator;
 pub mod config;
 pub mod control_plane;
+#[cfg(feature = "llm")]
 pub mod coordinator;
 pub mod daemon;
+#[cfg(feature = "llm")]
 pub mod gguf;
 pub mod infra;
 pub mod kube;
+#[cfg(feature = "llm")]
 pub mod kv_cache;
+#[cfg(feature = "llm")]
 pub mod llm;
 pub mod manifest;
 pub mod matrix;
@@ -21,5 +25,6 @@ pub mod reconciler;
 pub mod runtime;
 pub mod service;
 pub mod store;
+#[cfg(feature = "llm")]
 pub mod transformer;
 pub mod vpn;
