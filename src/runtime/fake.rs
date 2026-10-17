@@ -81,6 +81,8 @@ struct FakeState {
     next_id: u64,
     create_calls: u64,
     remove_calls: u64,
+    list_calls: u64,
+    probe_calls: u64,
 }
 
 #[derive(Debug, Default)]
@@ -99,6 +101,16 @@ impl FakeRuntime {
 
     pub fn remove_calls(&self) -> u64 {
         self.state.lock().unwrap().remove_calls
+    }
+
+    /// Container list calls (`list_managed_containers` and
+    /// `list_containers_for_deployment`).
+    pub fn list_calls(&self) -> u64 {
+        self.state.lock().unwrap().list_calls
+    }
+
+    pub fn probe_calls(&self) -> u64 {
+        self.state.lock().unwrap().probe_calls
     }
 
     /// Override state for a container by id (e.g. mark exited, set exit code).
@@ -122,7 +134,8 @@ impl FakeRuntime {
     }
 
     fn snapshot_managed(&self) -> Vec<ManagedContainer> {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+        state.list_calls += 1;
         let mut items: Vec<ManagedContainer> =
             state.containers.values().map(|(m, _)| m.clone()).collect();
         items.sort_by(|left, right| left.id.cmp(&right.id));
@@ -293,7 +306,8 @@ impl ContainerRuntime for FakeRuntime {
         _port: u16,
         _timeout: Duration,
     ) -> Result<()> {
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+        state.probe_calls += 1;
         let fake = state
             .containers
             .get(container_id)

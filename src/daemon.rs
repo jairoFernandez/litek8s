@@ -99,6 +99,10 @@ struct AppState {
     service_manager: Arc<Mutex<ServiceManager>>,
     cluster_snapshot: Arc<Mutex<ClusterSnapshotCache>>,
     snapshot_refresh: Arc<Notify>,
+    /// When a client last asked for `top`. Per-container `docker stats` are
+    /// collected only while someone is watching; see `STATS_WATCH_WINDOW`.
+    top_watched_at: Arc<std::sync::Mutex<Option<Instant>>>,
+    readiness: Arc<reconciler::ReadinessCache>,
     ha_node: Arc<ControlPlaneNode>,
 }
 
@@ -108,6 +112,11 @@ const CLUSTER_SNAPSHOT_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 // healthy remote nodes Offline. Aligned with the ssh ConnectTimeout=5 used in node.rs.
 const CLUSTER_REMOTE_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 const CLUSTER_SNAPSHOT_WARMING_UP: &str = "cluster snapshot is warming up";
+// `docker stats` per container is the most expensive thing the snapshot loop
+// does (it keeps dockerd/containerd busy), and only `top` reads the numbers.
+// Collect stats only while a `top` request arrived within this window; a
+// `top --watch` polls every few seconds and keeps it open.
+const STATS_WATCH_WINDOW: Duration = Duration::from_secs(15);
 // Docker events arrive in bursts (create/start/die/destroy per container, and
 // the reconciler's own actions emit more). Wait this long after the first event
 // so a burst coalesces into a single reconcile pass instead of one per event.
@@ -184,6 +193,8 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         service_manager: Arc::new(Mutex::new(ServiceManager::new())),
         cluster_snapshot: Arc::new(Mutex::new(ClusterSnapshotCache::default())),
         snapshot_refresh: snapshot_refresh.clone(),
+        top_watched_at: Arc::new(std::sync::Mutex::new(None)),
+        readiness: Arc::new(reconciler::ReadinessCache::new()),
         ha_node,
     };
     let app_state = Arc::new(app_state);
@@ -708,7 +719,7 @@ async fn process_request(state: Arc<AppState>, request: Request) -> Result<Respo
             })
         }
         Request::Top => {
-            let snapshot = state.latest_cluster_snapshot().await?;
+            let snapshot = state.top_snapshot().await?;
             Ok(Response::Top {
                 daemon: snapshot.daemon,
                 items: snapshot.deployments,
@@ -1178,12 +1189,12 @@ impl AppState {
         reconciler::reconcile_all(
             &self.store,
             &self.ha_node,
+            &self.readiness,
             &local_runtime,
             &nodes,
             self.cleanup_orphans,
         )
         .await?;
-        self.request_cluster_snapshot_refresh();
         Ok(())
     }
 
@@ -1963,6 +1974,34 @@ impl AppState {
         self.snapshot_refresh.notify_one();
     }
 
+    /// Snapshot for a `top` request. Marks `top` as watched so the snapshot
+    /// loop keeps collecting container stats, and if the cached snapshot was
+    /// taken without stats (nobody was watching), refreshes it inline so the
+    /// first `top` already shows memory and network numbers.
+    async fn top_snapshot(&self) -> Result<ClusterSnapshot> {
+        *self
+            .top_watched_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
+        let has_stats = {
+            let cache = self.cluster_snapshot.lock().await;
+            cache.snapshot.as_ref().map(|snapshot| snapshot.has_stats)
+        };
+        if has_stats == Some(false) {
+            if let Err(error) = self.refresh_cluster_snapshot().await {
+                eprintln!("cluster snapshot refresh failed: {error}");
+            }
+        }
+        self.latest_cluster_snapshot().await
+    }
+
+    fn top_is_watched(&self) -> bool {
+        self.top_watched_at
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .is_some_and(|at| at.elapsed() < STATS_WATCH_WINDOW)
+    }
+
     async fn refresh_cluster_snapshot(&self) -> Result<()> {
         let snapshot = self.collect_cluster_snapshot().await?;
         let mut cache = self.cluster_snapshot.lock().await;
@@ -1972,6 +2011,7 @@ impl AppState {
     }
 
     async fn collect_cluster_snapshot(&self) -> Result<ClusterSnapshot> {
+        let collect_stats = self.top_is_watched();
         let deployments = self.store.list().await;
         let nodes = self.store.list_nodes().await;
         let services = self.store.list_services().await;
@@ -1982,7 +2022,7 @@ impl AppState {
         let mut stats_snapshots = HashMap::new();
 
         for entry in &deployments {
-            if let Some(container_id) = entry.container_id.as_ref() {
+            if let Some(container_id) = entry.container_id.as_ref().filter(|_| collect_stats) {
                 let sample_key = top_sample_key(&entry.assigned_node, container_id);
                 active_container_ids.insert(sample_key.clone());
                 if let Ok(runtime) = self.client_for_node_name(&entry.assigned_node).await {
@@ -2123,6 +2163,7 @@ impl AppState {
 
         Ok(ClusterSnapshot {
             daemon,
+            has_stats: collect_stats,
             deployments: deployment_items,
             nodes: node_items,
             services: service_items,
@@ -2440,6 +2481,8 @@ struct DaemonMetricsSampler {
 #[derive(Debug, Clone)]
 struct ClusterSnapshot {
     daemon: DaemonTopSummary,
+    /// Whether container stats were collected for this snapshot.
+    has_stats: bool,
     deployments: Vec<DeploymentTopRow>,
     nodes: Vec<NodeSummary>,
     services: Vec<ServiceSummary>,

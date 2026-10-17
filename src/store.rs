@@ -631,6 +631,68 @@ impl Store {
         Ok(true)
     }
 
+    /// Whether `set_replica_assignment` would change anything. A replica that
+    /// does not exist yet always counts as a change (the assignment creates it).
+    pub async fn replica_assignment_would_change(
+        &self,
+        name: &str,
+        ordinal: u32,
+        assigned_node: &str,
+    ) -> bool {
+        let guard = self.state.read().await;
+        let Some(entry) = guard.deployments.get(name) else {
+            return false;
+        };
+        entry
+            .replicas
+            .iter()
+            .find(|replica| replica.ordinal == ordinal)
+            .is_none_or(|replica| replica.assigned_node != assigned_node)
+    }
+
+    /// Whether `set_replica_status` with these arguments would change the
+    /// stored replica, evaluated with the same transition logic (including
+    /// the time-based restart-streak reset). Lets callers skip no-op Raft
+    /// proposals. A replica that does not exist yet always counts as a change.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn replica_status_would_change(
+        &self,
+        name: &str,
+        ordinal: u32,
+        status: &DeploymentStatus,
+        ready: bool,
+        container_id: Option<&str>,
+        message: Option<&str>,
+        last_exit: Option<&str>,
+        increment_restart_count: bool,
+        increment_restart_streak: bool,
+        next_retry_at: Option<u64>,
+    ) -> bool {
+        let guard = self.state.read().await;
+        let Some(entry) = guard.deployments.get(name) else {
+            return false;
+        };
+        let Some(replica) = entry.replicas.iter().find(|r| r.ordinal == ordinal) else {
+            return true;
+        };
+        let probe = entry.manifest.container().readiness_probe().is_some();
+        let mut fields = StatusFields::from_replica(replica);
+        apply_status_transition(
+            &mut fields,
+            StatusUpdate {
+                status: status.clone(),
+                ready,
+                container_id: container_id.map(str::to_string),
+                message: message.map(str::to_string),
+                last_exit: last_exit.map(str::to_string),
+                increment_restart_count,
+                increment_restart_streak,
+                next_retry_at,
+            },
+            probe,
+        )
+    }
+
     /// Apply a status transition to one replica (ordinal), creating it if absent.
     #[allow(clippy::too_many_arguments)]
     pub async fn set_replica_status(

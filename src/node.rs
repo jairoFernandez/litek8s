@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
@@ -725,24 +725,6 @@ impl NodeClient {
 
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-    }
-
-    /// Remove containers of KNOWN deployments whose name is not desired (scaled-
-    /// down ordinals). Containers of deployments this daemon doesn't own are left
-    /// untouched. `desired_names` holds per-replica container names.
-    pub async fn remove_orphans(
-        &self,
-        desired_names: &HashSet<String>,
-        known_deployments: &HashSet<String>,
-    ) -> Result<()> {
-        for container in self.list_managed_containers().await? {
-            if known_deployments.contains(&container.deployment)
-                && !desired_names.contains(&container.name)
-            {
-                self.remove_container(&container.id).await?;
-            }
-        }
-        Ok(())
     }
 
     pub async fn logs(&self, name: &str, tail: usize) -> Result<String> {
