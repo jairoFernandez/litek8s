@@ -203,6 +203,13 @@ pub trait PodRuntime: Send + Sync + 'static {
     fn host_gateway_ip(&self) -> impl Future<Output = Result<String>> + Send;
     /// Ids of pod containers as they exit, for as long as the runtime runs.
     fn exits(&self) -> BoxStream<'static, String>;
+    /// Whether the node always reaches pod addresses (and a hostNetwork
+    /// pod's loopback is the node's). False for Docker, which may run in a
+    /// VM: then probes, NodePort relays and port-forwards fall back to
+    /// running `nc`/`wget` inside the pod's sandbox.
+    fn reaches_pods_directly(&self) -> bool {
+        false
+    }
     /// Connect to `port` on the pod's loopback from inside its network
     /// namespace; `None` when the runtime cannot (callers then dial the pod
     /// IP).
@@ -1028,6 +1035,9 @@ impl PodRuntime for NodeRuntime {
     }
     fn exits(&self) -> BoxStream<'static, String> {
         each!(self, rt => rt.exits())
+    }
+    fn reaches_pods_directly(&self) -> bool {
+        each!(self, rt => rt.reaches_pods_directly())
     }
     async fn connect(&self, sandbox: &str, port: u16) -> std::io::Result<Option<tokio::net::TcpStream>> {
         each!(self, rt => rt.connect(sandbox, port).await)

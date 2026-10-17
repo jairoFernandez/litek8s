@@ -47,6 +47,11 @@ pub fn crun_shim(args: &[String]) -> ! {
     crun::shim::main(args)
 }
 
+/// `litek8s crun-pause`: PID 1 of a pod's shared PID namespace.
+pub fn crun_pause(args: &[String]) -> ! {
+    crun::shim::pause_main(args)
+}
+
 /// Which container runtime a node runs pods with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum RuntimeChoice {
@@ -166,6 +171,9 @@ impl<R: PodRuntime> Agent<R> {
             let weak = weak.clone();
             Box::pin(async move {
                 let agent = weak.upgrade()?;
+                if agent.rt.reaches_pods_directly() {
+                    return None;
+                }
                 let sandbox = agent.views.lock().unwrap().values().find(|v| v.ip.as_deref() == Some(ip.as_str()))?.sandbox.clone()?;
                 agent.rt.exec(&sandbox, vec!["nc".into(), ip, port.to_string()], false, true).await.ok()
             })
@@ -618,7 +626,7 @@ async fn port_forward_stream<R: PodRuntime>(
             Ok(Err(e)) if retry && e.kind() == std::io::ErrorKind::ConnectionRefused => {
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            _ if sandbox.is_some() => break None,
+            _ if sandbox.is_some() && !agent.rt.reaches_pods_directly() => break None,
             Ok(Err(e)) => return finish(&link, stream, None, Some(format!("failed to connect to {ip}:{port}: {e}"))).await,
             Err(_) => return finish(&link, stream, None, Some(format!("timed out connecting to {ip}:{port}"))).await,
         }

@@ -17,6 +17,26 @@
 //! agent restarts (or is upgraded). It is a plain single-threaded process
 //! (no async runtime) of a few hundred KiB of private memory.
 
+/// `litek8s crun-pause`: the PID 1 of a pod's shared PID namespace
+/// (`shareProcessNamespace`), what the pause container is in that mode in
+/// Kubernetes. A PID namespace cannot outlive its first process, and the
+/// pod's containers come and go, so a process that does nothing but reap
+/// orphans holds it. Only pods that share their PID namespace get one.
+///
+/// It unshares a PID namespace and forks; the child (PID 1 there) detaches
+/// and stays; the parent prints the child's PID (as the node sees it) and
+/// exits.
+pub fn pause_main(args: &[String]) -> ! {
+    #[cfg(target_os = "linux")]
+    linux::pause(args);
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = args;
+        eprintln!("crun-pause needs Linux");
+        std::process::exit(1)
+    }
+}
+
 /// Entry point, before any async runtime exists. `args` follow `crun-shim`.
 pub fn main(args: &[String]) -> ! {
     #[cfg(target_os = "linux")]
@@ -137,6 +157,55 @@ mod linux {
                 let _ = reader.read_to_string(&mut msg);
                 eprint!("{}", if msg.is_empty() { "the shim exited before the container started\n" } else { &msg });
                 std::process::exit(1)
+            }
+        }
+    }
+
+    extern "C" fn exit_now(_: libc::c_int) {
+        // SAFETY: async-signal-safe.
+        unsafe { libc::_exit(0) }
+    }
+
+    extern "C" fn ignore(_: libc::c_int) {}
+
+    pub fn pause(args: &[String]) -> ! {
+        let cgroup = args.iter().position(|a| a == "--shim-cgroup").and_then(|i| args.get(i + 1)).map(PathBuf::from);
+        // SAFETY: single-threaded process; plain syscalls.
+        unsafe {
+            libc::prctl(libc::PR_SET_NAME, c"litek8s-pause".as_ptr(), 0, 0, 0);
+            if libc::unshare(libc::CLONE_NEWPID) != 0 {
+                fail_early("unshare(CLONE_NEWPID) failed");
+            }
+            match libc::fork() {
+                -1 => fail_early("fork failed"),
+                0 => {}
+                child => {
+                    println!("{child}");
+                    std::process::exit(0);
+                }
+            }
+            libc::setsid();
+            let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
+            for fd in 0..3 {
+                libc::dup2(null, fd);
+            }
+            if null > 2 {
+                libc::close(null);
+            }
+        }
+        if let Some(cg) = cgroup {
+            let _ = std::fs::create_dir_all(&cg);
+            let _ = std::fs::write(cg.join("cgroup.procs"), "0");
+        }
+        // SAFETY: installing handlers; the loop only sleeps and reaps.
+        unsafe {
+            libc::signal(libc::SIGTERM, exit_now as libc::sighandler_t);
+            libc::signal(libc::SIGINT, exit_now as libc::sighandler_t);
+            // A handler (not SIG_IGN) so SIGCHLD wakes pause() up.
+            libc::signal(libc::SIGCHLD, ignore as libc::sighandler_t);
+            loop {
+                while libc::waitpid(-1, std::ptr::null_mut(), libc::WNOHANG) > 0 {}
+                libc::pause();
             }
         }
     }

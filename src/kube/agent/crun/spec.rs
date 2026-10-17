@@ -64,6 +64,17 @@ pub(crate) struct ResolvedMount {
     pub read_only: bool,
 }
 
+/// The PID namespace a container runs in.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum PidNamespace {
+    /// Its own (the default): the container's process is PID 1.
+    New,
+    /// The node's (`hostPID`).
+    Host,
+    /// The pod's shared one (`shareProcessNamespace`), by path.
+    Shared(String),
+}
+
 pub(crate) struct BundleParams<'a> {
     pub spec: &'a ContainerSpec,
     pub image: &'a ImageConfig,
@@ -77,6 +88,7 @@ pub(crate) struct BundleParams<'a> {
     /// Whether the container gets a UTS namespace of its own (not with
     /// `hostNetwork`).
     pub own_uts: bool,
+    pub pid: PidNamespace,
     /// (target, source) of the pod's `/etc/hosts`, `/etc/resolv.conf`, ...
     pub etc_files: Vec<(String, String)>,
     /// The pod's shared `/dev/shm` directory.
@@ -511,7 +523,12 @@ pub(crate) fn config(p: &BundleParams) -> Result<Value> {
     if !gids.is_empty() {
         process["user"]["additionalGids"] = json!(gids);
     }
-    let mut namespaces = vec![json!({"type": "pid"}), json!({"type": "mount"}), json!({"type": "cgroup"})];
+    let mut namespaces = vec![json!({"type": "mount"}), json!({"type": "cgroup"})];
+    match &p.pid {
+        PidNamespace::New => namespaces.push(json!({"type": "pid"})),
+        PidNamespace::Host => {}
+        PidNamespace::Shared(path) => namespaces.push(json!({"type": "pid", "path": path})),
+    }
     match &p.ipcns {
         Some(path) => namespaces.push(json!({"type": "ipc", "path": path})),
         None => namespaces.push(json!({"type": "ipc"})),
@@ -560,6 +577,7 @@ mod tests {
             netns: Some("/run/netns/litek8s-abc".into()),
             ipcns: Some("/run/litek8s/ipc/abc".into()),
             own_uts: true,
+            pid: PidNamespace::New,
             etc_files: vec![("/etc/hosts".into(), "/pods/x/hosts".into()), ("/etc/resolv.conf".into(), "/pods/x/resolv.conf".into())],
             shm: Some("/pods/x/shm".into()),
             mounts: vec![],
@@ -671,6 +689,21 @@ mod tests {
         assert_eq!(c["linux"]["resources"]["devices"], json!([{"allow": true, "access": "rwm"}]));
         assert!(c.get("hostname").is_none());
         assert!(!c["linux"]["namespaces"].as_array().unwrap().iter().any(|n| n["type"] == "network" || n["type"] == "uts"));
+    }
+
+    #[test]
+    fn pid_namespaces() {
+        let image = ImageConfig { cmd: Some(vec!["sh".into()]), ..Default::default() };
+        let spec = ContainerSpec::default();
+        let pid_entries = |pid: PidNamespace| {
+            let mut p = params(&spec, &image);
+            p.pid = pid;
+            let c = config(&p).unwrap();
+            c["linux"]["namespaces"].as_array().unwrap().iter().filter(|n| n["type"] == "pid").cloned().collect::<Vec<_>>()
+        };
+        assert_eq!(pid_entries(PidNamespace::New), vec![json!({"type": "pid"})]);
+        assert!(pid_entries(PidNamespace::Host).is_empty());
+        assert_eq!(pid_entries(PidNamespace::Shared("/proc/42/ns/pid".into())), vec![json!({"type": "pid", "path": "/proc/42/ns/pid"})]);
     }
 
     #[test]

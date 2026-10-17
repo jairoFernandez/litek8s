@@ -77,6 +77,10 @@ struct SandboxMeta {
     /// pod's runtime volumes.
     volumes: Vec<(String, String)>,
     stopped: bool,
+    /// PID 1 of the pod's shared PID namespace (`shareProcessNamespace`),
+    /// started with the first container that needs it.
+    #[serde(default)]
+    pause_pid: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -295,7 +299,35 @@ impl CrunPods {
     }
 
     fn sandbox_running(meta: &SandboxMeta) -> bool {
-        !meta.stopped && meta.netns.as_ref().is_none_or(|n| Path::new(n).exists()) && Path::new(&meta.ipc).exists()
+        !meta.stopped
+            && meta.netns.as_ref().is_none_or(|n| Path::new(n).exists())
+            && Path::new(&meta.ipc).exists()
+            && meta.pause_pid.is_none_or(|p| pid_alive(p, "crun-pause"))
+    }
+
+    /// The pod's shared PID namespace, holding it with a `crun-pause`
+    /// process the first time a container asks for it.
+    async fn shared_pid_namespace(&self, meta: &mut SandboxMeta) -> Result<String> {
+        if let Some(pid) = meta.pause_pid.filter(|p| pid_alive(*p, "crun-pause")) {
+            return Ok(format!("/proc/{pid}/ns/pid"));
+        }
+        let out = tokio::process::Command::new(if cfg!(target_os = "linux") { "/proc/self/exe" } else { "litek8s" })
+            .arg0("litek8s")
+            .arg("crun-pause")
+            .arg("--shim-cgroup")
+            .arg(Self::cgroup_dir("/litek8s/shims"))
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .await
+            .context("failed to start the pod's PID namespace holder")?;
+        let pid: i32 = String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .with_context(|| format!("crun-pause failed: {}", String::from_utf8_lossy(&out.stderr).trim()))?;
+        meta.pause_pid = Some(pid);
+        write_json(&self.sandbox_dir(&meta.id).join("meta.json"), meta)?;
+        Ok(format!("/proc/{pid}/ns/pid"))
     }
 
     /// Tell the agent when the container's shim exits.
@@ -360,6 +392,11 @@ impl CrunPods {
     /// Release what a sandbox holds on the node (namespaces, address,
     /// shared memory); its directory stays until it is removed.
     async fn stop_sandbox(&self, meta: &mut SandboxMeta) {
+        if let Some(pid) = meta.pause_pid.take().filter(|p| pid_alive(*p, "crun-pause")) {
+            // Ends the shared PID namespace (and anything left in it).
+            // SAFETY: signalling a process we started.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
         if let Some(n) = &meta.netns {
             sys::remove_ns_file(Path::new(n));
         }
@@ -471,7 +508,7 @@ impl CrunPods {
         Ok(out)
     }
 
-    async fn create_container(&self, id: &str, dir: &Path, sandbox: &SandboxMeta, spec: &ContainerSpec) -> Result<ContainerMeta> {
+    async fn create_container(&self, id: &str, dir: &Path, sandbox: &SandboxMeta, spec: &ContainerSpec, pid: spec::PidNamespace) -> Result<ContainerMeta> {
         // The agent pulled it, but image GC may have removed it since.
         let image = match self.inner.images.get(&spec.image) {
             Some(image) => image,
@@ -509,6 +546,7 @@ impl CrunPods {
             netns: sandbox.netns.clone(),
             ipcns: Some(sandbox.ipc.clone()),
             own_uts: !sandbox.host_network,
+            pid,
             etc_files,
             shm: Some(sandbox_dir.join("shm").to_string_lossy().to_string()),
             mounts: self.resolve_mounts(spec)?,
@@ -720,6 +758,7 @@ impl PodRuntime for CrunPods {
                 })
                 .collect(),
             stopped: false,
+            pause_pid: None,
         };
         write_json(&dir.join("meta.json"), &meta)?;
         let result = async {
@@ -773,14 +812,21 @@ impl PodRuntime for CrunPods {
     }
 
     async fn run_container(&self, sandbox: &str, spec: &ContainerSpec) -> Result<String> {
-        let sandbox = self.sandbox_meta(sandbox).context("pod sandbox not found")?;
+        let mut sandbox = self.sandbox_meta(sandbox).context("pod sandbox not found")?;
+        let pid = if spec.host_pid {
+            spec::PidNamespace::Host
+        } else if spec.share_process_namespace {
+            spec::PidNamespace::Shared(self.shared_pid_namespace(&mut sandbox).await?)
+        } else {
+            spec::PidNamespace::New
+        };
         for old in self.containers().into_iter().filter(|c| c.name == spec.name) {
             let _ = self.remove(&old.id).await;
         }
         let id = image::random_hex(16);
         let dir = self.container_dir(&id);
         std::fs::create_dir_all(&dir)?;
-        let meta = match self.create_container(&id, &dir, &sandbox, spec).await {
+        let meta = match self.create_container(&id, &dir, &sandbox, spec, pid).await {
             Ok(m) => m,
             Err(e) => {
                 sys::unmount(&dir.join("rootfs"));

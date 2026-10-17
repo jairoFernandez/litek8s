@@ -696,7 +696,9 @@ impl<R: PodRuntime> Worker<R> {
                     let target = ProbeTarget {
                         container: c.name.clone(),
                         container_id: id.clone(),
-                        sandbox_id: sandbox_id.clone(),
+                        // Probes need the sandbox only to work around a node
+                        // that cannot reach the pod.
+                        sandbox_id: sandbox_id.clone().filter(|_| !rt.reaches_pods_directly()),
                         host_network,
                         host: host.clone(),
                         ports: ports.clone(),
