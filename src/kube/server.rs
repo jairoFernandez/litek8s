@@ -346,7 +346,7 @@ async fn serve_listener_filtered(state: Arc<ApiState>, listener: TcpListener, lo
             });
             match state.tls().filter(|_| is_tls) {
                 Some(tls) => {
-                    let tls_stream = match tls.acceptor().accept(stream).await {
+                    let tls_stream = match tls.acceptor().accept(crate::kube::tls::OneMessagePerRecord::new(stream)).await {
                         Ok(s) => s,
                         Err(e) => {
                             if state.log_requests {
