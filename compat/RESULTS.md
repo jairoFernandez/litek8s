@@ -4,14 +4,14 @@ Corpus: 101 cases in 5 tiers (see [README.md](README.md)); L4 grew from 20
 to 47 Helm charts on 2026-10-17. Run on 2026-10-17 with kubectl v1.33.9 and
 Helm v4.3.0 on an Apple M3 Max, Docker 29.8.2 under OrbStack.
 
-| tier | k3s (k3d, reference) | litek8s, 74-case corpus (main, e8a5de6) | litek8s, 101-case corpus (2026-10-17) |
-|---|---|---|---|
-| L0 discovery | 7/7 | 7/7 | **7/7** |
-| L1 object API | 25/25 | 25/25 | **25/25** |
-| L2 workloads | 15/15 | 14/15 | **15/15** |
-| L3 networking | 7/7 | 6/7 | **7/7** |
-| L4 Helm charts (`--wait`) | 47/47 | 20/20 (of the first 20) | **47/47** |
-| **all** | **101/101 (100 %)** | **72/74 (97 %)** | **101/101 (100 %)** |
+| tier | k3s (k3d, reference) | litek8s, 74-case corpus (main, e8a5de6) | litek8s, 101-case corpus (2026-10-17) | litek8s on crun, arm64 VM | litek8s on crun, x86_64 |
+|---|---|---|---|---|---|
+| L0 discovery | 7/7 | 7/7 | **7/7** | **7/7** | **7/7** |
+| L1 object API | 25/25 | 25/25 | **25/25** | **25/25** | **25/25** |
+| L2 workloads | 15/15 | 14/15 | **15/15** | **15/15** | **15/15** |
+| L3 networking | 7/7 | 6/7 | **7/7** | **7/7** | **7/7** |
+| L4 Helm charts (`--wait`) | 47/47 | 20/20 (of the first 20) | **47/47** | **47/47** | **47/47** |
+| **all** | **101/101 (100 %)** | **72/74 (97 %)** | **101/101 (100 %)** | **101/101 (100 %)** | **101/101 (100 %)** |
 
 - **Reference.** k3s v1.33.4+k3s1 via k3d (1 server + 1 agent, traefik and
   metrics-server disabled because L4 installs them),
@@ -28,6 +28,15 @@ Helm v4.3.0 on an Apple M3 Max, Docker 29.8.2 under OrbStack.
   `--max-case-seconds 420`. Then L2+L3 three more times
   (`results/*-litek8s-l2l3-rerun{1,2,3}/`, 22/22 each), and L0–L3 with the
   `--no-default-features` build (`results/*-litek8s-minimal-build/`, 54/54).
+- **litek8s on crun.** The same `litek8s apiserver` with `--runtime crun`:
+  pods run with crun directly, no Docker (see `bench/RESULTS.md`).
+  `results/20261017-164402-litek8s-crun-arm64/`: Ubuntu 24.04 arm64 qemu
+  VM (4 vCPU, 4 GiB, 12 GB disk, so image GC ran during L4), 32.2 min.
+  `results/20261017-164402-litek8s-crun-amd64/`: x86_64 Linux workstation,
+  the node inside a privileged Ubuntu 24.04 container (own network
+  namespace, mounts and cgroup subtree), 21.9 min. Both pulled every
+  image cold through the node's own registry client; the slowest chart
+  was Home Assistant on arm64 (228 s, a 1.5 GB zstd image).
 - **Time.** The whole corpus took 12.3 min on litek8s (L4: 11.4 min, the
   slowest chart pihole at 62 s) against 50.6 min on k3s (L4: 47 min). The
   27 new charts alone: 6.0 min against 26.3 min. The k3s run shared the
@@ -64,6 +73,26 @@ Helm v4.3.0 on an Apple M3 Max, Docker 29.8.2 under OrbStack.
   socket in a `/run` emptyDir as uid 1000); image `VOLUME`s get named
   volumes instead of Docker's anonymous ones, which vaultwarden refuses as
   "not persistent".
+
+## What the crun runtime needed for 101/101
+
+- **zstd layers**: Home Assistant's image is `tar+zstd`; the store only
+  knew gzip. Layers are now decoded with ruzstd (pure Rust), frame by
+  frame, skipping skippable frames (zstd:chunked's table of contents).
+- **busybox TLS on x86_64**: busybox's client lists P-256 first and rustls
+  takes the client's order, but busybox's x86_64 P-256 code sends invalid
+  key shares (rustls `InvalidKeyShare`, alert 47), so `api_from_pod` failed
+  on amd64 nodes only (arm64 passed). Clients that offer X25519 now get it.
+- **Images with a repeated layer** (argo-cd): overlayfs refuses
+  overlapping lower directories; only the topmost copy is kept.
+- **Stale namespace files after a node restart** where /run is not a
+  tmpfs: a sandbox counts as running only while its namespace files are
+  real nsfs mounts.
+- **`shareProcessNamespace` / `hostPID`**: no PID namespace entry for
+  hostPID; for a shared one, a tiny `litek8s crun-pause` holds the pod's
+  PID namespace as PID 1 (only in pods that ask for it).
+- The Docker-in-a-VM fallbacks (`nc`/`wget` in the sandbox) are skipped:
+  a crun node always reaches its pods directly.
 
 ## The two failures on main
 
