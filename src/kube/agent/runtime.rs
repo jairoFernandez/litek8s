@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use bollard::Docker;
+use sha2::{Digest, Sha256};
 use bollard::container::{
     Config, CreateContainerOptions, InspectContainerOptions, KillContainerOptions, ListContainersOptions, LogOutput,
     LogsOptions, MemoryStatsStats, RemoveContainerOptions, StartContainerOptions, StatsOptions,
@@ -104,6 +105,10 @@ pub struct ContainerSpec {
     pub memory_limit: Option<i64>,
     pub nano_cpus: Option<i64>,
     pub sysctls: HashMap<String, String>,
+    /// `spec.shareProcessNamespace`: join the sandbox's PID namespace.
+    pub share_process_namespace: bool,
+    /// `spec.hostPID`: use the node's PID namespace.
+    pub host_pid: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -179,6 +184,9 @@ pub struct DockerPods {
     /// Round-robin pod address allocation in the pod network (see `next_ip`).
     ips: Arc<std::sync::Mutex<Option<IpRing>>>,
 }
+
+/// Named volumes standing in for an image's VOLUMEs (see `run_container`).
+const IMAGE_VOLUME_PREFIX: &str = "litek8s-imgvol-";
 
 /// The pod subnet and where the next allocation starts.
 #[derive(Debug, Clone, Copy)]
@@ -552,10 +560,37 @@ impl PodRuntime for DockerPods {
 
     async fn run_container(&self, sandbox: &str, spec: &ContainerSpec) -> Result<String> {
         let ns = format!("container:{sandbox}");
+        let mut mounts: Vec<Mount> = spec.mounts.iter().map(docker_mount).collect();
+        // The image's VOLUMEs: Docker would make anonymous volumes, named by
+        // 64 hex digits, which some apps (vaultwarden) take for "no persistent
+        // volume" and refuse to start. Kubernetes runtimes never do that; give
+        // each one a named volume that lives as long as this container.
+        let image_volumes = match self.docker.inspect_image(&spec.image).await {
+            Ok(image) => image.config.and_then(|c| c.volumes).map(|v| v.into_keys().collect::<Vec<_>>()).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        };
+        for path in image_volumes {
+            if spec.mounts.iter().any(|m| m.target.trim_end_matches('/') == path.trim_end_matches('/')) {
+                continue;
+            }
+            let digest = Sha256::digest(format!("{}\0{path}", spec.name));
+            mounts.push(Mount {
+                target: Some(path),
+                source: Some(format!("{IMAGE_VOLUME_PREFIX}{}", hex::encode(&digest[..8]))),
+                typ: Some(MountTypeEnum::VOLUME),
+                ..Default::default()
+            });
+        }
+        let pid_mode = if spec.host_pid {
+            Some("host".to_string())
+        } else {
+            spec.share_process_namespace.then(|| ns.clone())
+        };
         let host_config = HostConfig {
             network_mode: Some(ns.clone()),
             ipc_mode: Some(ns),
-            mounts: (!spec.mounts.is_empty()).then(|| spec.mounts.iter().map(docker_mount).collect()),
+            pid_mode,
+            mounts: (!mounts.is_empty()).then_some(mounts),
             privileged: Some(spec.privileged),
             cap_add: (!spec.cap_add.is_empty()).then(|| spec.cap_add.clone()),
             cap_drop: (!spec.cap_drop.is_empty()).then(|| spec.cap_drop.clone()),
@@ -632,12 +667,27 @@ impl PodRuntime for DockerPods {
     }
 
     async fn remove(&self, id: &str) -> Result<()> {
+        let image_volumes: Vec<String> = match self.docker.inspect_container(id, None).await {
+            Ok(c) => c
+                .mounts
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|m| m.name)
+                .filter(|n| n.starts_with(IMAGE_VOLUME_PREFIX))
+                .collect(),
+            Err(_) => Vec::new(),
+        };
         match self
             .docker
             .remove_container(id, Some(RemoveContainerOptions { force: true, v: true, ..Default::default() }))
             .await
         {
-            Ok(()) => Ok(()),
+            Ok(()) => {
+                for name in image_volumes {
+                    let _ = self.docker.remove_volume(&name, None).await;
+                }
+                Ok(())
+            }
             Err(e) if not_found(&e) => Ok(()),
             Err(BollardError::DockerResponseServerError { status_code: 409, .. }) => Ok(()),
             Err(e) => Err(e).with_context(|| format!("failed to remove container {id}")),
