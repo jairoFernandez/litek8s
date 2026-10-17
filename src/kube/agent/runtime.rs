@@ -103,7 +103,28 @@ pub struct ContainerSpec {
     pub read_only_rootfs: bool,
     pub memory_limit: Option<i64>,
     pub nano_cpus: Option<i64>,
+    /// The CPU request, for the container's CPU weight.
+    pub cpu_request_milli: Option<i64>,
     pub sysctls: HashMap<String, String>,
+    /// `allowPrivilegeEscalation: false`.
+    pub no_new_privileges: bool,
+    /// `seccompProfile: Unconfined` (otherwise the runtime's default filter).
+    pub seccomp_unconfined: bool,
+    /// The pod's `fsGroup` and `supplementalGroups`.
+    pub supplemental_groups: Vec<u32>,
+}
+
+/// Capacity and identity of the machine the containers run on (for a
+/// VM-backed Docker, the VM).
+#[derive(Debug, Clone, Default)]
+pub struct MachineInfo {
+    pub cpus: i64,
+    pub memory: i64,
+    pub arch: String,
+    pub kernel: String,
+    pub os: String,
+    /// `docker://29.1.0`, `crun://1.14.1`
+    pub runtime_version: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -142,12 +163,21 @@ pub struct ExecSession {
 }
 
 pub trait PodRuntime: Send + Sync + 'static {
+    /// The prefix of container IDs in pod status (`docker://<id>`).
+    fn scheme(&self) -> &'static str {
+        "docker"
+    }
+    fn machine(&self) -> impl Future<Output = Result<MachineInfo>> + Send;
     fn pull_image(&self, image: &str, always: bool) -> impl Future<Output = Result<()>> + Send;
     fn ensure_volume(&self, name: &str, labels: HashMap<String, String>) -> impl Future<Output = Result<bool>> + Send;
     fn remove_volume(&self, name: &str) -> impl Future<Output = Result<()>> + Send;
     fn list_volumes(&self, label: &str) -> impl Future<Output = Result<Vec<String>>> + Send;
     fn run_sandbox(&self, spec: &SandboxSpec) -> impl Future<Output = Result<SandboxInfo>> + Send;
     fn sandbox_ip(&self, id: &str) -> impl Future<Output = Result<Option<String>>> + Send;
+    /// Make volume directories the sandbox mounts (targets as in
+    /// `SandboxSpec::mounts`, optionally with a sub path) world-writable,
+    /// creating them as needed.
+    fn prepare_sandbox_dirs(&self, sandbox: &str, world_writable: Vec<String>, subdirs: Vec<String>) -> impl Future<Output = Result<()>> + Send;
     /// Create and start a container in a sandbox's namespaces.
     fn run_container(&self, sandbox: &str, spec: &ContainerSpec) -> impl Future<Output = Result<String>> + Send;
     fn inspect(&self, id: &str) -> impl Future<Output = Result<Option<ContainerInfo>>> + Send;
@@ -168,6 +198,13 @@ pub trait PodRuntime: Send + Sync + 'static {
     fn host_gateway_ip(&self) -> impl Future<Output = Result<String>> + Send;
     /// Ids of pod containers as they exit, for as long as the runtime runs.
     fn exits(&self) -> BoxStream<'static, String>;
+    /// Connect to `port` on the pod's loopback from inside its network
+    /// namespace; `None` when the runtime cannot (callers then dial the pod
+    /// IP).
+    fn connect(&self, sandbox: &str, port: u16) -> impl Future<Output = std::io::Result<Option<tokio::net::TcpStream>>> + Send {
+        let _ = (sandbox, port);
+        async { Ok(None) }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -227,27 +264,6 @@ impl DockerPods {
         ring.next = offset + 1;
         *self.ips.lock().unwrap() = Some(ring);
         Some(std::net::Ipv4Addr::from(ring.base + offset))
-    }
-
-    /// Capacity and identity of the machine the containers run on (for a
-    /// VM-backed Docker, the VM): (cpus, memory bytes, arch, kernel, os, version).
-    pub async fn machine(&self) -> Result<(i64, i64, String, String, String, String)> {
-        let info = self.docker.info().await.context("failed to query Docker")?;
-        let arch = match info.architecture.as_deref().unwrap_or("") {
-            "aarch64" | "arm64" => "arm64",
-            "x86_64" | "amd64" => "amd64",
-            "armv7l" | "arm" => "arm",
-            other => other,
-        }
-        .to_string();
-        Ok((
-            info.ncpu.unwrap_or(1),
-            info.mem_total.unwrap_or(0),
-            arch,
-            info.kernel_version.unwrap_or_default(),
-            info.operating_system.unwrap_or_default(),
-            info.server_version.unwrap_or_default(),
-        ))
     }
 
     async fn ensure_network(&self) -> Result<()> {
@@ -345,7 +361,7 @@ fn host_iptables() -> bool {
     })
 }
 
-async fn apply_rules_on_host(rules: &str) -> Result<()> {
+pub(crate) async fn apply_rules_on_host(rules: &str) -> Result<()> {
     use tokio::process::Command;
     let chain = super::proxy::CHAIN;
     let setup = format!(
@@ -407,6 +423,42 @@ fn log_chunk(out: LogOutput) -> (u8, Bytes) {
 }
 
 impl PodRuntime for DockerPods {
+    async fn machine(&self) -> Result<MachineInfo> {
+        let info = self.docker.info().await.context("failed to query Docker")?;
+        let arch = match info.architecture.as_deref().unwrap_or("") {
+            "aarch64" | "arm64" => "arm64",
+            "x86_64" | "amd64" => "amd64",
+            "armv7l" | "arm" => "arm",
+            other => other,
+        }
+        .to_string();
+        Ok(MachineInfo {
+            cpus: info.ncpu.unwrap_or(1),
+            memory: info.mem_total.unwrap_or(0),
+            arch,
+            kernel: info.kernel_version.unwrap_or_default(),
+            os: info.operating_system.unwrap_or_default(),
+            runtime_version: format!("docker://{}", info.server_version.unwrap_or_default()),
+        })
+    }
+
+    async fn prepare_sandbox_dirs(&self, sandbox: &str, world_writable: Vec<String>, subdirs: Vec<String>) -> Result<()> {
+        let mut script = String::new();
+        for target in &world_writable {
+            script.push_str(&format!("chmod 0777 '{}'; ", target.replace('\'', "")));
+        }
+        for dir in &subdirs {
+            script.push_str(&format!("mkdir -p -m 0777 '{}'; ", dir.replace('\'', "")));
+        }
+        if script.is_empty() {
+            return Ok(());
+        }
+        let session = self.exec(sandbox, vec!["sh".into(), "-c".into(), script], false, false).await?;
+        let mut out = session.output;
+        while out.next().await.is_some() {}
+        Ok(())
+    }
+
     async fn pull_image(&self, image: &str, always: bool) -> Result<()> {
         if !always && self.image_present(image).await {
             return Ok(());
@@ -557,7 +609,19 @@ impl PodRuntime for DockerPods {
             readonly_rootfs: Some(spec.read_only_rootfs),
             memory: spec.memory_limit,
             nano_cpus: spec.nano_cpus,
+            cpu_shares: spec.cpu_request_milli.filter(|m| *m > 0).map(|m| (m * 1024 / 1000).max(2)),
             sysctls: (!spec.sysctls.is_empty()).then(|| spec.sysctls.clone()),
+            group_add: (!spec.supplemental_groups.is_empty()).then(|| spec.supplemental_groups.iter().map(u32::to_string).collect()),
+            security_opt: {
+                let mut opts = Vec::new();
+                if spec.no_new_privileges && !spec.privileged {
+                    opts.push("no-new-privileges".to_string());
+                }
+                if spec.seccomp_unconfined {
+                    opts.push("seccomp=unconfined".to_string());
+                }
+                (!opts.is_empty()).then_some(opts)
+            },
             ..Default::default()
         };
         let config = Config {
@@ -821,5 +885,96 @@ impl PodRuntime for DockerPods {
         })
         .filter(|id| std::future::ready(!id.is_empty()))
         .boxed()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Either backend, chosen at startup
+
+/// The runtime a node runs pods with: crun on Linux, Docker elsewhere (or
+/// when asked for).
+pub enum NodeRuntime {
+    Docker(DockerPods),
+    Crun(super::crun::CrunPods),
+}
+
+macro_rules! each {
+    ($self:ident, $rt:ident => $body:expr) => {
+        match $self {
+            NodeRuntime::Docker($rt) => $body,
+            NodeRuntime::Crun($rt) => $body,
+        }
+    };
+}
+
+impl PodRuntime for NodeRuntime {
+    fn scheme(&self) -> &'static str {
+        each!(self, rt => rt.scheme())
+    }
+    async fn machine(&self) -> Result<MachineInfo> {
+        each!(self, rt => rt.machine().await)
+    }
+    async fn pull_image(&self, image: &str, always: bool) -> Result<()> {
+        each!(self, rt => rt.pull_image(image, always).await)
+    }
+    async fn ensure_volume(&self, name: &str, labels: HashMap<String, String>) -> Result<bool> {
+        each!(self, rt => rt.ensure_volume(name, labels).await)
+    }
+    async fn remove_volume(&self, name: &str) -> Result<()> {
+        each!(self, rt => rt.remove_volume(name).await)
+    }
+    async fn list_volumes(&self, label: &str) -> Result<Vec<String>> {
+        each!(self, rt => rt.list_volumes(label).await)
+    }
+    async fn run_sandbox(&self, spec: &SandboxSpec) -> Result<SandboxInfo> {
+        each!(self, rt => rt.run_sandbox(spec).await)
+    }
+    async fn sandbox_ip(&self, id: &str) -> Result<Option<String>> {
+        each!(self, rt => rt.sandbox_ip(id).await)
+    }
+    async fn prepare_sandbox_dirs(&self, sandbox: &str, world_writable: Vec<String>, subdirs: Vec<String>) -> Result<()> {
+        each!(self, rt => rt.prepare_sandbox_dirs(sandbox, world_writable, subdirs).await)
+    }
+    async fn run_container(&self, sandbox: &str, spec: &ContainerSpec) -> Result<String> {
+        each!(self, rt => rt.run_container(sandbox, spec).await)
+    }
+    async fn inspect(&self, id: &str) -> Result<Option<ContainerInfo>> {
+        each!(self, rt => rt.inspect(id).await)
+    }
+    async fn stop(&self, id: &str, grace: Duration) -> Result<()> {
+        each!(self, rt => rt.stop(id, grace).await)
+    }
+    async fn remove(&self, id: &str) -> Result<()> {
+        each!(self, rt => rt.remove(id).await)
+    }
+    async fn list(&self) -> Result<Vec<RuntimeContainer>> {
+        each!(self, rt => rt.list().await)
+    }
+    async fn exec(&self, id: &str, command: Vec<String>, tty: bool, stdin: bool) -> Result<ExecSession> {
+        each!(self, rt => rt.exec(id, command, tty, stdin).await)
+    }
+    async fn exec_exit_code(&self, exec_id: &str) -> Result<Option<i64>> {
+        each!(self, rt => rt.exec_exit_code(exec_id).await)
+    }
+    async fn resize_exec(&self, exec_id: &str, width: u16, height: u16) -> Result<()> {
+        each!(self, rt => rt.resize_exec(exec_id, width, height).await)
+    }
+    fn logs(&self, id: &str, options: LogOptions) -> ByteStream {
+        each!(self, rt => rt.logs(id, options))
+    }
+    async fn stats(&self, id: &str) -> Result<Option<(u64, u64)>> {
+        each!(self, rt => rt.stats(id).await)
+    }
+    async fn apply_service_rules(&self, rules: &str) -> Result<()> {
+        each!(self, rt => rt.apply_service_rules(rules).await)
+    }
+    async fn host_gateway_ip(&self) -> Result<String> {
+        each!(self, rt => rt.host_gateway_ip().await)
+    }
+    fn exits(&self) -> BoxStream<'static, String> {
+        each!(self, rt => rt.exits())
+    }
+    async fn connect(&self, sandbox: &str, port: u16) -> std::io::Result<Option<tokio::net::TcpStream>> {
+        each!(self, rt => rt.connect(sandbox, port).await)
     }
 }

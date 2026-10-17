@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Reproducible litek8s vs k3s footprint benchmark on a small Linux node.
 #
-#   bench/run.sh [phase...]      phases: litek8s rpc k3s k3s-minimal kube   (default: litek8s rpc k3s k3s-minimal)
+#   bench/run.sh [phase...]      phases: litek8s rpc k3s k3s-minimal kube kube-crun   (default: litek8s rpc k3s k3s-minimal)
 #
 # Each system gets a fresh throwaway VM from bench/vm.sh (Ubuntu 24.04 arm64,
 # 2 vCPU, 1 GiB RAM, no swap: an AWS t4g.micro shape). The `rpc` phase reuses
@@ -30,7 +30,7 @@ VM_CPUS="${VM_CPUS:-2}"
 OUT="${OUT:-$HERE/results/$(date -u +%Y%m%dT%H%M%SZ)}"
 IMAGE="nginx:alpine"
 LK_SOCK=/run/litek8s/daemon.sock
-PORT_LK=2291 PORT_K3S=2292 PORT_K3SMIN=2293 PORT_NODE=2294 PORT_KUBE=2295
+PORT_LK=2291 PORT_K3S=2292 PORT_K3SMIN=2293 PORT_NODE=2294 PORT_KUBE=2295 PORT_KUBECRUN=2296
 KUBE_URL=http://127.0.0.1:6443
 
 PHASES=("$@")
@@ -247,46 +247,65 @@ PY" | save litek8s.size.json
 # ------------------------------------------------------------------ kube
 
 # litek8s's Kubernetes path: `litek8s apiserver` with its controllers and the
-# local node agent in one process, on Docker. Same workload as the k3s phases.
+# local node agent in one process. Same workload as the k3s phases.
+#   phase_kube docker  -> pods on Docker (dockerd + containerd + shims)
+#   phase_kube crun    -> pods on crun directly (no daemon; one small shim per container)
 phase_kube() {
-  local vm=kube bin
+  local rt="${1:-docker}" tag vm bin port
+  if [[ "$rt" == crun ]]; then tag=kubecrun vm=kubecrun port="$PORT_KUBECRUN"; else tag=kube vm=kube port="$PORT_KUBE"; fi
   bin="$(linux_binary)"
-  log "kube: preparing VM"
-  vm_prepare "$vm" "$PORT_KUBE"
-  rroot "$vm" "probe.py mem" | save kube.baseline.mem.json
+  log "$tag: preparing VM"
+  vm_prepare "$vm" "$port"
+  rroot "$vm" "probe.py mem" | save $tag.baseline.mem.json
   local disk0 pkg0; disk0="$(disk_used_kib "$vm")"; pkg0="$(pkg_kib "$vm")"
 
-  log "kube: installing docker.io + litek8s apiserver"
-  install_docker "$vm"
+  if [[ "$rt" == crun ]]; then
+    log "$tag: installing crun + litek8s apiserver"
+    rroot "$vm" 'export DEBIAN_FRONTEND=noninteractive
+      for i in 1 2 3 4 5; do apt-get update -qq && break; sleep 10; done
+      apt-get install -y -qq crun iptables >/dev/null'
+  else
+    log "$tag: installing docker.io + litek8s apiserver"
+    install_docker "$vm"
+  fi
   "$VM" scp "$vm" "$bin" /tmp/litek8s
   rroot "$vm" 'install -m 755 /tmp/litek8s /usr/local/bin/litek8s && rm /tmp/litek8s
     mkdir -p /var/lib/litek8s
     systemd-run --unit=litek8s --quiet /usr/local/bin/litek8s apiserver --listen 127.0.0.1:6443 \
-      --data-dir /var/lib/litek8s/apiserver --kubeconfig /root/litek8s.kubeconfig
-    for i in $(seq 1 100); do curl -sf '"$KUBE_URL"'/readyz >/dev/null && break; sleep 0.1; done
+      --data-dir /var/lib/litek8s/apiserver --kubeconfig /root/litek8s.kubeconfig --runtime '"$rt"'
+    for i in $(seq 1 100); do curl -sf '"$KUBE_URL"'/readyz >/dev/null && break; sleep 0.1; done'
+  if [[ "$rt" == docker ]]; then
     # Pull the pod sandbox and service-proxy helper images now, as k3s ships its pause image.
-    docker pull -q busybox:1.36 >/dev/null; docker pull -q rancher/klipper-lb:v0.4.13 >/dev/null'
+    rroot "$vm" 'docker pull -q busybox:1.36 >/dev/null; docker pull -q rancher/klipper-lb:v0.4.13 >/dev/null'
+  fi
   sleep 3
   local disk1 pkg1
   disk1="$(disk_used_kib "$vm")"; pkg1="$(pkg_kib "$vm")"
   rroot "$vm" "python3 - <<'PY'
 import json, os, subprocess
 du = lambda p: int(subprocess.run(['du','-sk',p],capture_output=True,text=True).stdout.split()[0]) if os.path.exists(p) else 0
-ver = subprocess.run(['dpkg-query','-Wf','\${Version}','docker.io'],capture_output=True,text=True).stdout
+pkg = 'crun' if '$rt' == 'crun' else 'docker.io'
+ver = subprocess.run(['dpkg-query','-Wf','\${Version}',pkg],capture_output=True,text=True).stdout
 print(json.dumps({
   'disk_used_delta_kib': $disk1 - $disk0,
   'pkg_installed_delta_kib': $pkg1 - $pkg0,
   'litek8s_binary_kib': os.path.getsize('/usr/local/bin/litek8s')//1024,
   'var_lib_docker_kib': du('/var/lib/docker'),
-  'docker_io_version': ver,
+  'runtime': '$rt',
+  'runtime_version': ver,
 }))
-PY" | save kube.size.json
+PY" | save $tag.size.json
 
-  measure_idle "$vm" kube idle0
+  measure_idle "$vm" $tag idle0
 
-  log "kube: time-to-ready x$TTR_RUNS (image pre-pulled)"
-  rroot "$vm" "docker pull -q $IMAGE >/dev/null"
+  log "$tag: time-to-ready x$TTR_RUNS (image pre-pulled)"
   kube_manifest ttr | push_manifest "$vm" /tmp/ttr.json
+  if [[ "$rt" == crun ]]; then
+    # No image CLI without Docker: one untimed run pulls the image.
+    rroot "$vm" "probe.py ttr-kube $KUBE_URL /tmp/ttr.json ttr >/dev/null; probe.py kube-delete $KUBE_URL ttr >/dev/null; sleep 2"
+  else
+    rroot "$vm" "docker pull -q $IMAGE >/dev/null"
+  fi
   {
     echo '['
     for i in $(seq 1 "$TTR_RUNS"); do
@@ -295,16 +314,16 @@ PY" | save kube.size.json
       [[ $i -lt $TTR_RUNS ]] && echo ','
     done
     echo ']'
-  } | save kube.ttr.json
+  } | save $tag.ttr.json
 
-  log "kube: 5 nginx deployments"
+  log "$tag: 5 nginx deployments"
   for i in 0 1 2 3 4; do
     kube_manifest "web-$i" | push_manifest "$vm" "/tmp/web-$i.json"
     rroot "$vm" "probe.py kube-apply $KUBE_URL /tmp/web-$i.json >/dev/null"
   done
   rroot "$vm" "probe.py kube-ready $KUBE_URL web-0 web-1 web-2 web-3 web-4 >/dev/null"
-  measure_idle "$vm" kube idle5
-  rroot "$vm" "du -sb /var/lib/litek8s/apiserver | cut -f1" | save kube.idle5.statefile-bytes.txt
+  measure_idle "$vm" $tag idle5
+  rroot "$vm" "du -sb /var/lib/litek8s/apiserver | cut -f1" | save $tag.idle5.statefile-bytes.txt
   [[ -n "${KEEP_VMS:-}" ]] || "$VM" down "$vm"
 }
 
@@ -477,7 +496,8 @@ for p in "${PHASES[@]}"; do
     k3s) phase_k3s k3s "$PORT_K3S" "" ;;
     k3s-minimal) phase_k3s k3smin "$PORT_K3SMIN" "--disable=traefik,servicelb,metrics-server,local-storage" ;;
     rpc) phase_rpc ;;
-    kube) phase_kube ;;
+    kube) phase_kube docker ;;
+    kube-crun) phase_kube crun ;;
     *) echo "unknown phase $p" >&2; exit 2 ;;
   esac
 done

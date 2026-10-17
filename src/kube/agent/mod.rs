@@ -13,6 +13,7 @@
 //! pods survive reconnects: the server resends the node's pods and the agent
 //! reconciles.
 
+mod crun;
 pub mod hub;
 mod kubelet;
 mod pod;
@@ -37,9 +38,24 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use protocol::{Frame, Message, read_frame, write_frame};
-use runtime::{DockerPods, LogOptions, PodRuntime};
+use runtime::{DockerPods, LogOptions, NodeRuntime, PodRuntime};
 
 pub use hub::AgentHub;
+
+/// `litek8s crun-shim ...`: the per-container shim of the crun runtime.
+pub fn crun_shim(args: &[String]) -> ! {
+    crun::shim::main(args)
+}
+
+/// Which container runtime a node runs pods with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum RuntimeChoice {
+    /// crun on a Linux host where it is installed (and the agent is root),
+    /// Docker otherwise.
+    Auto,
+    Crun,
+    Docker,
+}
 
 pub struct AgentConfig {
     pub node_name: String,
@@ -95,6 +111,8 @@ pub(crate) struct PodView {
     pub namespace: String,
     pub name: String,
     pub ip: Option<String>,
+    /// The pod sandbox's runtime id.
+    pub sandbox: Option<String>,
     /// container name → (current container id, previous container id)
     pub containers: HashMap<String, (Option<String>, Option<String>)>,
 }
@@ -400,10 +418,12 @@ impl<R: PodRuntime> Agent<R> {
                 });
             }
             Message::PortForward { stream, pod_uid, port } => {
-                let ip = self.views.lock().unwrap().get(&pod_uid).and_then(|v| v.ip.clone());
-                let host_network = self.views.lock().unwrap().get(&pod_uid).is_some() && ip.as_deref() == Some(self.config.node_ip.as_str());
+                let view = self.views.lock().unwrap().get(&pod_uid).cloned();
+                let ip = view.as_ref().and_then(|v| v.ip.clone());
+                let host_network = view.is_some() && ip.as_deref() == Some(self.config.node_ip.as_str());
                 let ip = if host_network { Some("127.0.0.1".to_string()) } else { ip };
-                self.spawn_stream(link, stream, move |_agent, link, input| port_forward_stream(link, stream, ip, port, input));
+                let sandbox = view.and_then(|v| v.sandbox).filter(|_| !host_network);
+                self.spawn_stream(link, stream, move |agent, link, input| port_forward_stream(agent, link, stream, sandbox, ip, port, input));
             }
             Message::Resize { stream, width, height } => self.stream_input(stream, StreamInput::Resize(width, height)),
             Message::Cancel { stream } => {
@@ -548,9 +568,11 @@ async fn logs_stream<R: PodRuntime>(
     finish(&link, stream, None, None).await;
 }
 
-async fn port_forward_stream(
+async fn port_forward_stream<R: PodRuntime>(
+    agent: Arc<Agent<R>>,
     link: Arc<Link>,
     stream: u32,
+    sandbox: Option<String>,
     ip: Option<String>,
     port: u16,
     mut input: mpsc::UnboundedReceiver<StreamInput>,
@@ -558,13 +580,26 @@ async fn port_forward_stream(
     let Some(ip) = ip else {
         return finish(&link, stream, None, Some("pod has no IP address yet".into())).await;
     };
+    // Inside the pod's network namespace when the runtime can (reaches
+    // listeners bound to the pod's loopback too), else the pod's address.
+    let dial = || {
+        let (agent, sandbox, ip) = (agent.clone(), sandbox.clone(), ip.clone());
+        async move {
+            if let Some(sb) = &sandbox {
+                if let Some(conn) = agent.rt.connect(sb, port).await? {
+                    return Ok(conn);
+                }
+            }
+            tokio::net::TcpStream::connect((ip.as_str(), port)).await
+        }
+    };
     // A container counts as started before its process listens, and a
     // brand-new pod address may not be routable from the node for a moment:
     // retry refused or unanswered connections briefly instead of failing the
     // client's stream (kubectl ends the whole port-forward on an error).
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let conn = loop {
-        let attempt = tokio::time::timeout(Duration::from_secs(1), tokio::net::TcpStream::connect((ip.as_str(), port))).await;
+        let attempt = tokio::time::timeout(Duration::from_secs(1), dial()).await;
         let retry = tokio::time::Instant::now() < deadline;
         match attempt {
             Ok(Ok(c)) => break c,
@@ -618,9 +653,10 @@ async fn port_forward_stream(
 // Starting agents
 
 /// Describe this machine as a Node object.
-pub async fn describe_node(rt: &DockerPods, node_name: &str, node_ip: &str) -> Result<Value> {
-    let (cpus, memory, arch, kernel, os, docker_version) = rt.machine().await?;
+pub async fn describe_node<R: PodRuntime>(rt: &R, node_name: &str, node_ip: &str) -> Result<Value> {
+    let runtime::MachineInfo { cpus, memory, arch, kernel, os, runtime_version } = rt.machine().await?;
     let mem_ki = memory / 1024;
+    let pod_cidr = crun::POD_CIDR;
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let condition = |t: &str, status: &str, reason: &str, message: &str| {
         json!({"type": t, "status": status, "reason": reason, "message": message, "lastHeartbeatTime": now, "lastTransitionTime": now})
@@ -640,7 +676,7 @@ pub async fn describe_node(rt: &DockerPods, node_name: &str, node_ip: &str) -> R
             },
             "annotations": {"node.alpha.kubernetes.io/ttl": "0"},
         },
-        "spec": {"podCIDR": "10.42.0.0/24", "podCIDRs": ["10.42.0.0/24"]},
+        "spec": {"podCIDR": pod_cidr, "podCIDRs": [pod_cidr]},
         "status": {
             "capacity": {"cpu": cpus.to_string(), "memory": format!("{mem_ki}Ki"), "pods": "110", "ephemeral-storage": "100Gi"},
             "allocatable": {"cpu": cpus.to_string(), "memory": format!("{mem_ki}Ki"), "pods": "110", "ephemeral-storage": "100Gi"},
@@ -661,7 +697,7 @@ pub async fn describe_node(rt: &DockerPods, node_name: &str, node_ip: &str) -> R
                 "bootID": "",
                 "kernelVersion": kernel,
                 "osImage": os,
-                "containerRuntimeVersion": format!("docker://{docker_version}"),
+                "containerRuntimeVersion": runtime_version,
                 "kubeletVersion": crate::kube::discovery::KUBE_GIT_VERSION,
                 "kubeProxyVersion": "",
                 "operatingSystem": "linux",
@@ -709,16 +745,29 @@ pub fn default_root_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("litek8s-node-agent"))
 }
 
-/// Build a Docker-backed agent for this machine.
-pub async fn docker_agent(node_name: Option<String>, root_dir: Option<PathBuf>) -> Result<Arc<Agent<DockerPods>>> {
-    let docker = crate::runtime::DockerRuntime::connect()?;
-    docker.ping().await?;
-    let rt = DockerPods::new(docker.client());
+/// Build an agent for this machine on the chosen runtime.
+pub async fn node_agent(choice: RuntimeChoice, node_name: Option<String>, root_dir: Option<PathBuf>) -> Result<Arc<Agent<NodeRuntime>>> {
+    let root_dir = root_dir.unwrap_or_else(default_root_dir);
+    std::fs::create_dir_all(&root_dir).with_context(|| format!("failed to create {}", root_dir.display()))?;
+    let use_crun = match choice {
+        RuntimeChoice::Crun => {
+            crun::available().map_err(|e| anyhow::anyhow!("cannot use the crun runtime: {e}"))?;
+            true
+        }
+        RuntimeChoice::Docker => false,
+        RuntimeChoice::Auto => crun::available().is_ok(),
+    };
+    let rt = if use_crun {
+        NodeRuntime::Crun(crun::CrunPods::new(&root_dir).await?)
+    } else {
+        let docker = crate::runtime::DockerRuntime::connect()?;
+        docker.ping().await?;
+        NodeRuntime::Docker(DockerPods::new(docker.client()))
+    };
     let node_name = node_name.unwrap_or_else(default_node_name);
     let node_ip = local_ip();
     let node = describe_node(&rt, &node_name, &node_ip).await?;
-    let root_dir = root_dir.unwrap_or_else(default_root_dir);
-    std::fs::create_dir_all(&root_dir).with_context(|| format!("failed to create {}", root_dir.display()))?;
+    eprintln!("node-agent: running pods with {}", node.pointer("/status/nodeInfo/containerRuntimeVersion").and_then(Value::as_str).unwrap_or("?"));
     let agent = Agent::new(rt, AgentConfig { node_name, root_dir, node, node_ip });
     tokio::spawn(kubelet::serve(agent.clone(), kubelet::PORT));
     Ok(agent)

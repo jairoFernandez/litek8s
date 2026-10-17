@@ -305,9 +305,11 @@ impl<R: PodRuntime> Worker<R> {
             let slot = self.main.iter_mut().chain(self.init.iter_mut()).find(|x| x.name == cname);
             match slot {
                 Some(slot) if c.running && Self::container_hash(&slot.spec) == hash && slot.id.is_none() => {
+                    let info = self.agent.runtime().inspect(&c.id).await.ok().flatten().unwrap_or_default();
                     slot.id = Some(c.id.clone());
                     slot.attempts = attempt + 1;
-                    slot.state = State::Running { started_at: now_str() };
+                    slot.image_id = info.image_id;
+                    slot.state = State::Running { started_at: info.started_at.as_deref().map(normalize_time).unwrap_or_else(now_str) };
                     slot.running_since = Some(Instant::now());
                     self.agent.track_container(&c.id, &self.uid);
                 }
@@ -537,7 +539,7 @@ impl<R: PodRuntime> Worker<R> {
         }
         // The sandbox mounts the pod's runtime volumes to prepare them.
         let mut mounts = Vec::new();
-        let mut fresh = Vec::new();
+        let mut fresh: Vec<String> = Vec::new();
         for (name, prepared) in self.volumes.iter().flatten() {
             if let Prepared::Named { volume, fresh: is_fresh, empty_dir } = prepared {
                 let target = format!("/.litek8s/volumes/{name}");
@@ -563,10 +565,7 @@ impl<R: PodRuntime> Worker<R> {
         self.agent.track_container(&sandbox.id, &self.uid);
         // emptyDir volumes are world-writable in Kubernetes, and fresh
         // persistent volumes start out that way too (like local-path).
-        let mut script = String::new();
-        for target in &fresh {
-            script.push_str(&format!("chmod 0777 '{target}'; "));
-        }
+        let mut subdirs = Vec::new();
         for c in self.init.iter().chain(self.main.iter()) {
             for m in c.spec.get("volumeMounts").and_then(Value::as_array).into_iter().flatten() {
                 let sub = m.get("subPath").and_then(Value::as_str).unwrap_or_default();
@@ -574,16 +573,12 @@ impl<R: PodRuntime> Worker<R> {
                     continue;
                 }
                 if let Some(Prepared::Named { .. }) = self.volumes.as_ref().and_then(|v| v.get(s(m, "/name"))) {
-                    script.push_str(&format!("mkdir -p -m 0777 '/.litek8s/volumes/{}/{}'; ", s(m, "/name"), sub.replace('\'', "")));
+                    subdirs.push(format!("/.litek8s/volumes/{}/{}", s(m, "/name"), sub.trim_matches('/')));
                 }
             }
         }
-        if !script.is_empty() {
-            if let Ok(session) = self.agent.runtime().exec(&sandbox.id, vec!["sh".into(), "-c".into(), script], false, false).await {
-                use futures_util::StreamExt;
-                let mut out = session.output;
-                while out.next().await.is_some() {}
-            }
+        if !fresh.is_empty() || !subdirs.is_empty() {
+            let _ = self.agent.runtime().prepare_sandbox_dirs(&sandbox.id, fresh, subdirs).await;
         }
         Ok(sandbox)
     }
@@ -653,7 +648,10 @@ impl<R: PodRuntime> Worker<R> {
                         c.state = State::Running { started_at: normalize_time(&t) };
                     }
                     if !info.running {
-                        // Exited before we looked: the exit event is on its way.
+                        // Exited before it was tracked: the runtime's exit
+                        // event may have been missed, so handle it now (a
+                        // second one for the same id is ignored).
+                        let _ = self.tx.send(PodMsg::Died(id.clone()));
                     }
                 }
                 self.start_probes(init, i);
@@ -1003,6 +1001,18 @@ impl<R: PodRuntime> Worker<R> {
                 .unwrap_or_default()
         };
         let limit = |res: &str| spec.pointer(&format!("/resources/limits/{res}")).and_then(quantity::milli_of);
+        let seccomp = |sc: &Value| sc.pointer("/seccompProfile/type").and_then(Value::as_str).map(str::to_string);
+        let seccomp_type = seccomp(&security).or_else(|| seccomp(&pod_security));
+        let mut supplemental_groups: Vec<u32> = pod_security
+            .get("supplementalGroups")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_u64).map(|g| g as u32).collect())
+            .unwrap_or_default();
+        if let Some(g) = pod_security.get("fsGroup").and_then(Value::as_u64) {
+            if !supplemental_groups.contains(&(g as u32)) {
+                supplemental_groups.push(g as u32);
+            }
+        }
         let mut labels = self.labels();
         labels.insert(LABEL_CONTAINER.into(), c.name.clone());
         labels.insert(LABEL_ATTEMPT.into(), c.attempts.to_string());
@@ -1026,6 +1036,14 @@ impl<R: PodRuntime> Worker<R> {
             read_only_rootfs: security.get("readOnlyRootFilesystem").and_then(Value::as_bool) == Some(true),
             memory_limit: limit("memory").map(|m| (m / 1000) as i64).filter(|m| *m >= 6 * 1024 * 1024),
             nano_cpus: limit("cpu").map(|m| (m * 1_000_000) as i64),
+            cpu_request_milli: spec
+                .pointer("/resources/requests/cpu")
+                .or_else(|| spec.pointer("/resources/limits/cpu"))
+                .and_then(quantity::milli_of)
+                .map(|m| m as i64),
+            no_new_privileges: security.get("allowPrivilegeEscalation").and_then(Value::as_bool) == Some(false),
+            seccomp_unconfined: seccomp_type.as_deref() == Some("Unconfined"),
+            supplemental_groups,
             // Namespaced sysctls belong to the sandbox's network namespace,
             // which joined containers cannot set; they are skipped.
             sysctls: HashMap::new(),
@@ -1069,7 +1087,7 @@ impl<R: PodRuntime> Worker<R> {
                 State::Terminated { exit_code, reason, message, started_at, finished_at, id } => {
                     let mut t = json!({"exitCode": exit_code, "reason": reason, "startedAt": started_at, "finishedAt": finished_at});
                     if !id.is_empty() {
-                        t["containerID"] = json!(format!("docker://{id}"));
+                        t["containerID"] = json!(format!("{}://{id}", self.agent.runtime().scheme()));
                     }
                     if let Some(m) = message {
                         t["message"] = json!(m);
@@ -1118,7 +1136,7 @@ impl<R: PodRuntime> Worker<R> {
             "lastState": last_state,
         });
         if let Some(id) = &c.id {
-            status["containerID"] = json!(format!("docker://{id}"));
+            status["containerID"] = json!(format!("{}://{id}", self.agent.runtime().scheme()));
         }
         status
     }
@@ -1194,6 +1212,7 @@ impl<R: PodRuntime> Worker<R> {
             namespace: self.ns.clone(),
             name: self.name.clone(),
             ip: Some(self.pod_ip()).filter(|ip| !ip.is_empty()),
+            sandbox: self.sandbox.as_ref().map(|s| s.id.clone()),
             containers: HashMap::new(),
         };
         for c in self.main.iter().chain(self.init.iter()) {

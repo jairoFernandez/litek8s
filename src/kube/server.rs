@@ -71,6 +71,8 @@ pub struct ApiServerConfig {
     /// Also serve the API on this port of the listen address, so pods reach
     /// it at `https://kubernetes.default.svc` (port 443) as in Kubernetes.
     pub in_cluster_port: Option<u16>,
+    /// The container runtime of the local node.
+    pub runtime: super::agent::RuntimeChoice,
 }
 
 pub struct ApiState {
@@ -231,13 +233,13 @@ pub async fn serve(config: ApiServerConfig) -> Result<()> {
     tokio::spawn(super::controllers::run(state.clone()));
 
     // The local node comes first: where pods reach this host (Docker's
-    // host-gateway) decides where DNS and the in-cluster port can listen.
+    // host-gateway, crun's bridge address) decides where DNS and the in-cluster port can listen.
     let agent = if config.run_node {
         let node_dir = config
             .node_dir
             .clone()
             .or_else(|| config.data_dir.as_ref().map(|d| d.join("node-agent")));
-        match super::agent::docker_agent(config.node_name.clone(), node_dir).await {
+        match super::agent::node_agent(config.runtime, config.node_name.clone(), node_dir).await {
             Ok(agent) => Some(agent),
             Err(error) => {
                 eprintln!("apiserver: not running a local node: {error:#}");

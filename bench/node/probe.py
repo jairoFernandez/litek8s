@@ -41,6 +41,7 @@ CATEGORY = {
     "docker-proxy": "runtime",
     "containerd": "runtime",
     "containerd-shim": "runtime",
+    "crun-shim": "runtime",
     "k3s.service (short-lived)": "runtime",
     "docker.service (short-lived)": "runtime",
     "containerd.service (short-lived)": "runtime",
@@ -86,6 +87,9 @@ def anchor_of(cg):
         return "/" + "/".join(parts[:1])
     if parts[:1] == ["system.slice"] and len(parts) >= 2:
         return "/system.slice/" + parts[1]
+    if parts[:1] == ["litek8s"] and len(parts) >= 2:
+        # litek8s's crun runtime: /litek8s/pod<uid>/<container>, /litek8s/shims
+        return "/litek8s/" + parts[1]
     if parts[:1] == ["user.slice"]:
         return "/user.slice"
     return "/" + "/".join(parts[:1]) if parts else "/"
@@ -114,6 +118,10 @@ def bucket(cg, comm):
         return pod_kind(a)
     if unit == "litek8s.service":
         return "litek8s-serve"
+    if a == "/litek8s/shims":
+        return "crun-shim"
+    if a.startswith("/litek8s/pod"):
+        return pod_kind(a)
     if unit.startswith("docker-") and unit.endswith(".scope"):
         # litek8s pod sandboxes (busybox `sleep`) and its iptables helper are
         # the counterpart of k3s's pause containers.
@@ -146,6 +154,10 @@ def anchor_default_bucket(a):
         return pod_kind(a) if (unit.startswith("pod") or "-pod" in unit) else None
     if unit.startswith("docker-") and unit.endswith(".scope"):
         return "workload"
+    if a == "/litek8s/shims":
+        return "crun-shim"
+    if a.startswith("/litek8s/pod"):
+        return pod_kind(a)
     if unit in ("docker.service", "containerd.service", "k3s.service", "litek8s.service", "ssh.service"):
         return f"{unit} (short-lived)"
     if a == "/user.slice":
