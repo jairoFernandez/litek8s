@@ -1,0 +1,26 @@
+# Helm charts for tier L4. One per line:
+#   <release> <repo-url-or-oci-ref> <chart> [extra helm args...]
+# For an OCI ref, put `-` as <chart>. Versions are left unpinned on purpose;
+# the runner records the version it actually installed in results.jsonl.
+# Chosen to cover what home/edge clusters typically run: ingress, certificates,
+# monitoring, GitOps, operators with CRDs and webhooks, and stateful apps.
+podinfo        oci://ghcr.io/stefanprodan/charts/podinfo                    -
+traefik        https://traefik.github.io/charts                             traefik
+cert-manager   https://charts.jetstack.io                                   cert-manager           --set crds.enabled=true
+metrics-server https://kubernetes-sigs.github.io/metrics-server/            metrics-server         --set args={--kubelet-insecure-tls}
+node-exporter  https://prometheus-community.github.io/helm-charts           prometheus-node-exporter
+ksm            https://prometheus-community.github.io/helm-charts           kube-state-metrics
+grafana        https://grafana.github.io/helm-charts                        grafana
+kyverno        https://kyverno.github.io/kyverno/                           kyverno
+ext-secrets    https://charts.external-secrets.io                           external-secrets
+reloader       https://stakater.github.io/stakater-charts                   reloader
+keda           https://kedacore.github.io/charts                            keda
+argo-cd        https://argoproj.github.io/argo-helm                         argo-cd
+cnpg           https://cloudnative-pg.github.io/charts                      cloudnative-pg
+headlamp       https://kubernetes-sigs.github.io/headlamp/                  headlamp
+nats           https://nats-io.github.io/k8s/helm/charts/                   nats
+vault          https://helm.releases.hashicorp.com                          vault                  --set server.dev.enabled=true
+minio-operator https://operator.min.io                                      operator
+external-dns   https://kubernetes-sigs.github.io/external-dns/              external-dns           --set provider.name=inmemory --set policy=upsert-only
+gitea          https://dl.gitea.com/charts/                                 gitea                  --set postgresql-ha.enabled=false --set valkey-cluster.enabled=false --set gitea.config.database.DB_TYPE=sqlite3 --set gitea.config.session.PROVIDER=memory --set gitea.config.cache.ADAPTER=memory --set gitea.config.queue.TYPE=level
+loki           https://grafana.github.io/helm-charts                        loki                   --set deploymentMode=SingleBinary --set loki.commonConfig.replication_factor=1 --set loki.storage.type=filesystem --set loki.useTestSchema=true --set singleBinary.replicas=1 --set read.replicas=0 --set write.replicas=0 --set backend.replicas=0 --set chunksCache.enabled=false --set resultsCache.enabled=false

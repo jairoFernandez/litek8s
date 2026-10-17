@@ -8,6 +8,7 @@ pub mod coordinator;
 pub mod daemon;
 pub mod gguf;
 pub mod infra;
+pub mod kube;
 pub mod kv_cache;
 pub mod llm;
 pub mod manifest;
