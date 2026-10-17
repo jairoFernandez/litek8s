@@ -8,10 +8,18 @@ use anyhow::{Result, bail};
 
 /// The overlayfs mount data for `lowers` (top layer first). Mount data is
 /// limited to one page, which bounds how many layers an image may have.
+///
+/// An image may contain the same layer twice (an identical or empty diff);
+/// overlayfs refuses overlapping lower directories (ELOOP), so only the
+/// topmost occurrence is kept. That is the same union: everything the
+/// lower copy adds or removes, the upper copy adds or removes again on top
+/// of the layers in between.
 pub(crate) fn overlay_options(lowers: &[PathBuf], upper: &Path, work: &Path) -> Result<String> {
     if lowers.is_empty() {
         bail!("an image needs at least one layer");
     }
+    let mut seen = std::collections::HashSet::new();
+    let lowers: Vec<PathBuf> = lowers.iter().filter(|p| seen.insert(p.as_path())).cloned().collect();
     for p in lowers.iter().map(PathBuf::as_path).chain([upper, work]) {
         let s = p.to_string_lossy();
         if s.contains(',') || s.contains(':') {
@@ -294,6 +302,9 @@ mod tests {
         let o = overlay_options(&lowers, Path::new("/c/1/upper"), Path::new("/c/1/work")).unwrap();
         assert_eq!(o, "lowerdir=/s/l/top:/s/l/base,upperdir=/c/1/upper,workdir=/c/1/work");
         assert!(overlay_options(&[], Path::new("/u"), Path::new("/w")).is_err());
+        let repeated = vec![PathBuf::from("/l/a"), PathBuf::from("/l/b"), PathBuf::from("/l/a"), PathBuf::from("/l/c")];
+        let o = overlay_options(&repeated, Path::new("/u"), Path::new("/w")).unwrap();
+        assert_eq!(o, "lowerdir=/l/a:/l/b:/l/c,upperdir=/u,workdir=/w");
         assert!(overlay_options(&[PathBuf::from("/a:b")], Path::new("/u"), Path::new("/w")).is_err());
         let many: Vec<PathBuf> = (0..200).map(|i| PathBuf::from(format!("/var/lib/litek8s/node-agent/crun/images/l/{i:016x}"))).collect();
         assert!(overlay_options(&many, Path::new("/u"), Path::new("/w")).is_err_and(|e| e.to_string().contains("too many layers")));

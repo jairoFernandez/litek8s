@@ -472,11 +472,11 @@ impl CrunPods {
     }
 
     async fn create_container(&self, id: &str, dir: &Path, sandbox: &SandboxMeta, spec: &ContainerSpec) -> Result<ContainerMeta> {
-        let image = self
-            .inner
-            .images
-            .get(&spec.image)
-            .with_context(|| format!("image \"{}\" is not present", spec.image))?;
+        // The agent pulled it, but image GC may have removed it since.
+        let image = match self.inner.images.get(&spec.image) {
+            Some(image) => image,
+            None => self.inner.images.pull(&spec.image, false).await?,
+        };
         for d in ["upper", "work", "rootfs"] {
             std::fs::create_dir_all(dir.join(d))?;
         }
