@@ -672,7 +672,8 @@ impl<R: PodRuntime> Worker<R> {
         let host = if self.host_network() { "127.0.0.1".to_string() } else { self.pod_ip() };
         let rt = self.agent.runtime().clone();
         let tx = self.tx.clone();
-        let sandbox_id = if self.host_network() { None } else { self.sandbox.as_ref().map(|s| s.id.clone()) };
+        let sandbox_id = self.sandbox.as_ref().map(|s| s.id.clone());
+        let host_network = self.host_network();
         let c = if init { &mut self.init[i] } else { &mut self.main[i] };
         c.stop_probes();
         let Some(id) = c.id.clone() else { return };
@@ -698,6 +699,7 @@ impl<R: PodRuntime> Worker<R> {
                         container: c.name.clone(),
                         container_id: id.clone(),
                         sandbox_id: sandbox_id.clone(),
+                        host_network,
                         host: host.clone(),
                         ports: ports.clone(),
                     };
@@ -1036,6 +1038,8 @@ impl<R: PodRuntime> Worker<R> {
             // Namespaced sysctls belong to the sandbox's network namespace,
             // which joined containers cannot set; they are skipped.
             sysctls: HashMap::new(),
+            share_process_namespace: self.pod.pointer("/spec/shareProcessNamespace").and_then(Value::as_bool) == Some(true),
+            host_pid: self.pod.pointer("/spec/hostPID").and_then(Value::as_bool) == Some(true),
         })
     }
 

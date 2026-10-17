@@ -404,7 +404,8 @@ impl<R: PodRuntime> Agent<R> {
             Message::PortForward { stream, pod_uid, port } => {
                 let (ip, sandbox) = self.views.lock().unwrap().get(&pod_uid).map(|v| (v.ip.clone(), v.sandbox.clone())).unwrap_or_default();
                 let host_network = sandbox.is_some() && ip.as_deref() == Some(self.config.node_ip.as_str());
-                let (ip, sandbox) = if host_network { (Some("127.0.0.1".to_string()), None) } else { (ip, sandbox) };
+                // A hostNetwork pod's sandbox shares the node's (or Docker VM's) network.
+                let ip = if host_network { Some("127.0.0.1".to_string()) } else { ip };
                 self.spawn_stream(link, stream, move |agent, link, input| port_forward_stream(agent, link, stream, ip, sandbox, port, input));
             }
             Message::Resize { stream, width, height } => self.stream_input(stream, StreamInput::Resize(width, height)),
