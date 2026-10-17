@@ -1,0 +1,52 @@
+{
+ "buckets": {
+  "os/other": {
+   "rss_kib": 161612,
+   "pss_kib": 77959,
+   "procs": 19,
+   "comms": {
+    "systemd": 2,
+    "systemd-journal": 1,
+    "multipathd": 1,
+    "systemd-udevd": 1,
+    "systemd-resolve": 1,
+    "systemd-timesyn": 1,
+    "systemd-network": 1,
+    "cron": 1,
+    "dbus-daemon": 1,
+    "polkitd": 1,
+    "systemd-logind": 1,
+    "udisksd": 1,
+    "rsyslogd": 1,
+    "agetty": 2,
+    "ModemManager": 1,
+    "systemd-timedat": 1,
+    "(sd-pam)": 1
+   }
+  },
+  "sshd": {
+   "rss_kib": 22828,
+   "pss_kib": 6903,
+   "procs": 3,
+   "comms": {
+    "sshd": 3
+   }
+  }
+ },
+ "categories": {
+  "os/other": {
+   "rss_kib": 161612,
+   "pss_kib": 77959
+  },
+  "node-agent": {
+   "rss_kib": 22828,
+   "pss_kib": 6903
+  }
+ },
+ "system": {
+  "mem_total_kib": 974616,
+  "mem_available_kib": 760064,
+  "mem_used_kib": 214552
+ },
+ "cgroup_memory_current_kib": {}
+}

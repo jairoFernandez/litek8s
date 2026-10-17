@@ -213,6 +213,14 @@ object log: `du` also counted the image store and descended into the mounted
 container root filesystems under `node-agent/crun`. `run.sh` now excludes
 them; the object log itself is the same size as on Docker (~270 KB).
 
+**Rerun on the merged code** (main with the 101-case corpus fixes, plus zstd
+layers, the pod PID namespaces and the TLS change; `18d0909`,
+[`results/2026-10-17-kube-crun-merged/`](results/2026-10-17-kube-crun-merged/)):
+the numbers held. 5 nginx: orchestrator 24.7 MiB PSS (litek8s 17.4, five
+shims 7.2), 665 MiB MemAvailable, idle CPU 0.23 % (0.08 % with no pods),
+apply → Ready 0.06 s median, disk after install 42.2 MiB (the binary grew
+0.6 MiB), object log 296 KB with the fixed measurement.
+
 ## Remote node over SSH (litek8s only)
 
 Control plane in one guest, the node in a second guest of the same shape, reached through
