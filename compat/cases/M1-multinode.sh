@@ -125,7 +125,7 @@ case_def multi_service_spreads M1 240 "a Service balances over endpoints on seve
 t_multi_service_spreads() {
     need_nodes 2
     use_ns
-    local nodes a b seen
+    local nodes a b
     nodes=$(node_names)
     a=$(echo "$nodes" | sed -n 1p)
     b=$(echo "$nodes" | sed -n 2p)
@@ -134,10 +134,9 @@ t_multi_service_spreads() {
     k -n "$NS" create service clusterip who --tcp=80:8080 >/dev/null
     k -n "$NS" wait --for=condition=Ready pod/pa pod/pb --timeout=150s >/dev/null
     wait_for 30 bash -c "[[ \$(kubectl -n $NS get endpoints who -o jsonpath='{.subsets[*].addresses[*].ip}' | wc -w | tr -d ' ') == 2 ]]"
-    # From a pod on the first node, the Service must answer from both.
-    seen=$(k -n "$NS" exec pa -- sh -c 'for i in $(seq 1 30); do wget -qO- -T 3 http://who/; done' | sort -u | tr '\n' ' ')
-    expect_contains "$seen" "pa"
-    expect_contains "$seen" "pb"
+    # From a pod on the first node, the Service must answer from both (the
+    # proxy may take a moment to program the second endpoint).
+    wait_for 60 bash -c "kubectl -n $NS exec pa -- sh -c 'for i in \$(seq 1 20); do wget -qO- -T 3 http://who/; done' | sort -u | tr '\\n' ' ' | grep -q 'pa pb'"
 }
 
 # Running, not deleting pods of app=web in <ns> on nodes other than <node>.

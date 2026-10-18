@@ -1,0 +1,15 @@
+{"id": "helm_home_assistant", "tier": "L4", "status": "pass", "seconds": 153, "detail": "home-assistant-0.3.87"}
+{"id": "helm_jellyfin", "tier": "L4", "status": "pass", "seconds": 21, "detail": "jellyfin-3.2.0"}
+{"id": "helm_nextcloud", "tier": "L4", "status": "pass", "seconds": 12, "detail": "nextcloud-9.4.0"}
+{"id": "helm_uptime_kuma", "tier": "L4", "status": "pass", "seconds": 87, "detail": "uptime-kuma-4.2.0"}
+{"id": "helm_vaultwarden", "tier": "L4", "status": "pass", "seconds": 16, "detail": "vaultwarden-0.46.3"}
+{"id": "helm_pihole", "tier": "L4", "status": "pass", "seconds": 70, "detail": "pihole-2.38.0"}
+{"id": "helm_node_red", "tier": "L4", "status": "pass", "seconds": 38, "detail": "node-red-0.40.2"}
+{"id": "helm_homepage", "tier": "L4", "status": "pass", "seconds": 22, "detail": "homepage-2.1.0"}
+{"id": "helm_gatus", "tier": "L4", "status": "pass", "seconds": 5, "detail": "gatus-1.5.0"}
+{"id": "helm_zot", "tier": "L4", "status": "pass", "seconds": 28, "detail": "zot-0.1.128"}
+{"id": "helm_registry", "tier": "L4", "status": "pass", "seconds": 13, "detail": "docker-registry-3.0.0"}
+{"id": "helm_flux2", "tier": "L4", "status": "pass", "seconds": 48, "detail": "flux2-2.19.1"}
+{"id": "helm_argo_wf", "tier": "L4", "status": "pass", "seconds": 42, "detail": "argo-workflows-2.0.13"}
+{"id": "helm_descheduler", "tier": "L4", "status": "pass", "seconds": 1, "detail": "descheduler-0.37.0"}
+{"id": "helm_trivy_operator", "tier": "L4", "status": "pass", "seconds": 18, "detail": "trivy-operator-0.37.0"}

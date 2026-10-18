@@ -1,0 +1,5 @@
+{"id": "multi_pod_to_pod", "tier": "M1", "status": "pass", "seconds": 2, "detail": ""}
+{"id": "multi_daemonset_every_node", "tier": "M1", "status": "pass", "seconds": 4, "detail": ""}
+{"id": "multi_service_spreads", "tier": "M1", "status": "fail", "seconds": 0, "detail": "error: failed to create ClusterIP service: services \"who\" is forbidden: unable to create new content in namespace compat-multi-service-spreads because it is being terminated"}
+{"id": "multi_node_kill_deployment", "tier": "M1", "status": "pass", "seconds": 71, "detail": ""}
+{"id": "multi_node_short_outage", "tier": "M1", "status": "pass", "seconds": 60, "detail": ""}

@@ -379,9 +379,13 @@ impl ImageStore {
             download(response, &tmp_file, digest).await?;
             let tmp_dir = self.root.join("tmp").join(random_hex(8));
             let (src, dst, expected, owners) = (tmp_file.clone(), tmp_dir.clone(), diff_id.to_string(), self.owners);
-            tokio::task::spawn_blocking(move || unpack_layer(&src, &dst, &expected, owners))
-                .await?
-                .with_context(|| format!("failed to unpack layer {digest}"))?;
+            let unpacked = tokio::task::spawn_blocking(move || unpack_layer(&src, &dst, &expected, owners)).await;
+            if !matches!(unpacked, Ok(Ok(()))) {
+                // A partly unpacked layer (a full disk, a bad blob) must not
+                // stay behind: it would only fill the disk further.
+                let _ = std::fs::remove_dir_all(&tmp_dir);
+            }
+            unpacked?.with_context(|| format!("failed to unpack layer {digest}"))?;
             if let Err(e) = std::fs::rename(&tmp_dir, &dir) {
                 let _ = std::fs::remove_dir_all(&tmp_dir);
                 if !dir.is_dir() {
@@ -438,13 +442,18 @@ impl ImageStore {
             blobs.insert(self.blob_path(&e.manifest));
             blobs.insert(self.blob_path(&e.config));
         }
+        // Layers and blobs of a pull still in progress are not indexed yet:
+        // leave anything written in the last few minutes alone.
+        let fresh = |e: &std::fs::DirEntry| {
+            e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age < std::time::Duration::from_secs(600)))
+        };
         for entry in std::fs::read_dir(self.root.join("l"))?.flatten() {
-            if !layers.contains(&entry.path()) {
+            if !layers.contains(&entry.path()) && !fresh(&entry) {
                 let _ = std::fs::remove_dir_all(entry.path());
             }
         }
         for entry in std::fs::read_dir(self.root.join("blobs/sha256"))?.flatten() {
-            if !blobs.contains(&entry.path()) {
+            if !blobs.contains(&entry.path()) && !fresh(&entry) {
                 let _ = std::fs::remove_file(entry.path());
             }
         }

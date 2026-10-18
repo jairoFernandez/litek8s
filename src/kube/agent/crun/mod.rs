@@ -691,10 +691,13 @@ impl PodRuntime for CrunPods {
     }
 
     async fn pull_image(&self, image: &str, always: bool) -> Result<()> {
-        self.inner.images.pull(image, always).await?;
+        // Make room first (a no-op below the GC threshold), and again after:
+        // a pull that failed for lack of space must not wait 10 minutes.
+        self.gc().await;
+        let result = self.inner.images.pull(image, always).await;
         let pods = self.clone();
         tokio::spawn(async move { pods.gc().await });
-        Ok(())
+        result.map(|_| ())
     }
 
     async fn ensure_volume(&self, name: &str, labels: HashMap<String, String>) -> Result<bool> {

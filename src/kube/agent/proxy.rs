@@ -38,6 +38,9 @@ pub(crate) struct Proxy {
     changed: Notify,
     node_ports: Mutex<HashMap<u16, JoinHandle<()>>>,
     pub(crate) in_pod: std::sync::OnceLock<InPodDial>,
+    /// The node routes to every pod address (crun, also across nodes over
+    /// the overlay): a slow connect is a slow backend, not a missing route.
+    pub(crate) direct: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -206,21 +209,25 @@ async fn serve_node_port(proxy: Arc<Proxy>, port: u16) {
         let b = backends[next % backends.len()].clone();
         next = next.wrapping_add(1);
         let in_pod = proxy.in_pod.get().cloned();
+        let direct = proxy.direct.load(std::sync::atomic::Ordering::Relaxed);
         tokio::spawn(async move {
             let _ = client.set_nodelay(true);
-            let direct = async {
-                if super::probe::is_unroutable(&b.ip) {
+            let connect = async {
+                if !direct && super::probe::is_unroutable(&b.ip) {
                     return Err(());
                 }
-                match tokio::time::timeout(Duration::from_secs(1), TcpStream::connect((b.ip.as_str(), b.port))).await {
+                let timeout = Duration::from_secs(if direct { 10 } else { 1 });
+                match tokio::time::timeout(timeout, TcpStream::connect((b.ip.as_str(), b.port))).await {
                     Ok(result) => Ok(result),
                     Err(_) => {
-                        super::probe::mark_unroutable(&b.ip);
+                        if !direct {
+                            super::probe::mark_unroutable(&b.ip);
+                        }
                         Err(())
                     }
                 }
             };
-            match direct.await {
+            match connect.await {
                 Ok(Ok(mut upstream)) => {
                     let _ = upstream.set_nodelay(true);
                     let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;

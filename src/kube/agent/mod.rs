@@ -199,6 +199,7 @@ impl<R: PodRuntime> Agent<R> {
             })
         });
         let _ = agent.proxy.in_pod.set(in_pod);
+        agent.proxy.direct.store(agent.rt.reaches_pods_directly(), Ordering::Relaxed);
         tokio::spawn(proxy::run(agent.proxy.clone(), agent.rt.clone()));
         let exits = agent.clone();
         tokio::spawn(async move {
@@ -539,11 +540,14 @@ impl<R: PodRuntime> Agent<R> {
         let (tx, rx) = mpsc::unbounded_channel();
         let fut = body(self.clone(), link.clone(), rx);
         let agent = self.clone();
+        // Hold the lock while spawning: a stream that ends at once must not
+        // remove its entry before it is inserted (it would never go away).
+        let mut streams = self.streams.lock().unwrap();
         let task = tokio::spawn(async move {
             fut.await;
             agent.streams.lock().unwrap().remove(&stream);
         });
-        self.streams.lock().unwrap().insert(stream, (tx, task));
+        streams.insert(stream, (tx, task));
     }
 }
 
