@@ -728,7 +728,12 @@ impl PodRuntime for CrunPods {
             let name = e.file_name().to_string_lossy().to_string();
             if let Some(volume) = name.strip_suffix(".labels") {
                 let labels: HashMap<String, String> = read_json(&e.path()).unwrap_or_default();
-                if labels.contains_key(label) {
+                // `key` or `key=value`, as Docker's label filter.
+                let matches = match label.split_once('=') {
+                    Some((k, v)) => labels.get(k).is_some_and(|x| x == v),
+                    None => labels.contains_key(label),
+                };
+                if matches {
                     out.push(volume.to_string());
                 }
             }

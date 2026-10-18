@@ -337,13 +337,16 @@ impl<R: PodRuntime> Agent<R> {
     async fn cleanup_orphans(self: &Arc<Self>) {
         let known: HashSet<String> = self.workers.lock().unwrap().keys().cloned().collect();
         let Ok(containers) = self.rt.list().await else { return };
-        for c in containers {
+        // Only this node's: a Docker daemon may run other nodes' pods too
+        // (and unlabelled ones are from an older agent, maybe another's).
+        let node = &self.config.node_name;
+        for c in containers.into_iter().filter(|c| c.labels.get(runtime::LABEL_NODE) == Some(node)) {
             let uid = c.labels.get(runtime::LABEL_POD_UID).cloned().unwrap_or_default();
             if !known.contains(&uid) {
                 let _ = self.rt.remove(&c.id).await;
             }
         }
-        if let Ok(volumes) = self.rt.list_volumes(runtime::LABEL_POD_UID).await {
+        if let Ok(volumes) = self.rt.list_volumes(&format!("{}={node}", runtime::LABEL_NODE)).await {
             for v in volumes {
                 if !known.iter().any(|uid| v.contains(&uid[..8.min(uid.len())])) {
                     let _ = self.rt.remove_volume(&v).await;

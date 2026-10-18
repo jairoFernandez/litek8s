@@ -37,6 +37,9 @@ pub const LABEL_CONTAINER: &str = "litek8s.container.name";
 pub const LABEL_ROLE: &str = "litek8s.role";
 pub const LABEL_ATTEMPT: &str = "litek8s.container.attempt";
 pub const LABEL_HASH: &str = "litek8s.container.hash";
+/// The node a pod container or volume belongs to. Several nodes can share
+/// one Docker daemon (development clusters); each only cleans up its own.
+pub const LABEL_NODE: &str = "litek8s.node";
 
 /// The network pods join, so they get an address of their own.
 const POD_NETWORK: &str = "litek8s-pods";
@@ -176,6 +179,7 @@ pub trait PodRuntime: Send + Sync + 'static {
     fn pull_image(&self, image: &str, always: bool) -> impl Future<Output = Result<()>> + Send;
     fn ensure_volume(&self, name: &str, labels: HashMap<String, String>) -> impl Future<Output = Result<bool>> + Send;
     fn remove_volume(&self, name: &str) -> impl Future<Output = Result<()>> + Send;
+    /// Volumes with a label: `key`, or `key=value`.
     fn list_volumes(&self, label: &str) -> impl Future<Output = Result<Vec<String>>> + Send;
     fn run_sandbox(&self, spec: &SandboxSpec) -> impl Future<Output = Result<SandboxInfo>> + Send;
     fn sandbox_ip(&self, id: &str) -> impl Future<Output = Result<Option<String>>> + Send;

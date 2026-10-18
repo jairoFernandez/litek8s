@@ -18,7 +18,7 @@ use tokio::time::Instant;
 use super::probe::{self, ProbeKind, ProbeResult, ProbeTarget};
 use super::protocol::Message;
 use super::runtime::{
-    ContainerSpec, LABEL_ATTEMPT, LABEL_CONTAINER, LABEL_HASH, LABEL_POD_NAME, LABEL_POD_NAMESPACE, LABEL_POD_UID, LABEL_ROLE,
+    ContainerSpec, LABEL_ATTEMPT, LABEL_CONTAINER, LABEL_HASH, LABEL_NODE, LABEL_POD_NAME, LABEL_POD_NAMESPACE, LABEL_POD_UID, LABEL_ROLE,
     MountSource, MountSpec, PodRuntime, SandboxInfo, SandboxSpec,
 };
 use super::volumes::{self, Prepared};
@@ -277,6 +277,7 @@ impl<R: PodRuntime> Worker<R> {
             (LABEL_POD_UID.to_string(), self.uid.clone()),
             (LABEL_POD_NAME.to_string(), self.name.clone()),
             (LABEL_POD_NAMESPACE.to_string(), self.ns.clone()),
+            (LABEL_NODE.to_string(), self.agent.config().node_name.clone()),
         ])
     }
 

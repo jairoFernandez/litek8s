@@ -16,7 +16,7 @@ use base64::Engine;
 use serde_json::Value;
 
 use super::Agent;
-use super::runtime::{LABEL_POD_UID, PodRuntime};
+use super::runtime::{LABEL_NODE, LABEL_POD_UID, PodRuntime};
 use crate::kube::quantity;
 
 #[derive(Debug, Clone)]
@@ -169,6 +169,10 @@ impl<R: PodRuntime> Agent<R> {
 
     /// Make every volume of `pod` available; errors read like the kubelet's
     /// (they end up in the pod's waiting reason).
+    fn volume_labels(&self, uid: &str) -> HashMap<String, String> {
+        HashMap::from([(LABEL_POD_UID.to_string(), uid.to_string()), (LABEL_NODE.to_string(), self.config().node_name.clone())])
+    }
+
     pub(crate) async fn prepare_volumes(&self, pod: &Value, pod_dir: &Path, node: &Value) -> Result<HashMap<String, Prepared>, String> {
         let ns = s(pod, "/metadata/namespace");
         let uid = s(pod, "/metadata/uid");
@@ -185,7 +189,7 @@ impl<R: PodRuntime> Agent<R> {
                     let v = empty_dir_volume(uid, &name);
                     let fresh = self
                         .runtime()
-                        .ensure_volume(&v, HashMap::from([(LABEL_POD_UID.to_string(), uid.to_string())]))
+                        .ensure_volume(&v, self.volume_labels(uid))
                         .await
                         .map_err(|e| format!("{e:#}"))?;
                     Prepared::Named { volume: v, fresh, empty_dir: true }
@@ -281,7 +285,7 @@ impl<R: PodRuntime> Agent<R> {
                 let v = empty_dir_volume(uid, &name);
                 let fresh = self
                     .runtime()
-                    .ensure_volume(&v, HashMap::from([(LABEL_POD_UID.to_string(), uid.to_string())]))
+                    .ensure_volume(&v, self.volume_labels(uid))
                     .await
                     .map_err(|e| format!("{e:#}"))?;
                 Prepared::Named { volume: v, fresh, empty_dir: true }
