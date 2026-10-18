@@ -1696,8 +1696,24 @@ impl ApiState {
                 if spec.get("replicas").is_none() {
                     spec["replicas"] = json!(1);
                 }
-                if spec.get("strategy").is_none() {
-                    spec["strategy"] = json!({"type": "RollingUpdate", "rollingUpdate": {"maxSurge": "25%", "maxUnavailable": "25%"}});
+                // As SetDefaults_Deployment: a RollingUpdate strategy always
+                // has both bounds (Helm's readiness check dereferences them).
+                if !spec.get("strategy").is_some_and(Value::is_object) {
+                    spec["strategy"] = json!({});
+                }
+                let strategy = &mut spec["strategy"];
+                if strategy.get("type").and_then(Value::as_str).is_none_or(str::is_empty) {
+                    strategy["type"] = json!("RollingUpdate");
+                }
+                if strategy["type"] == "RollingUpdate" {
+                    if !strategy.get("rollingUpdate").is_some_and(Value::is_object) {
+                        strategy["rollingUpdate"] = json!({});
+                    }
+                    for key in ["maxSurge", "maxUnavailable"] {
+                        if strategy["rollingUpdate"].get(key).is_none_or(Value::is_null) {
+                            strategy["rollingUpdate"][key] = json!("25%");
+                        }
+                    }
                 }
                 if spec.get("revisionHistoryLimit").is_none() {
                     spec["revisionHistoryLimit"] = json!(10);
