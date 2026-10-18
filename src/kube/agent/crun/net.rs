@@ -129,12 +129,15 @@ impl Ipam {
 
 /// The NAT and filter rules the bridge needs, for `iptables-restore
 /// --noflush` (declaring a chain flushes it, so reloading is idempotent).
-pub(crate) fn base_rules(subnet: &Subnet) -> String {
+/// Traffic to other pods of the cluster (over the overlay) keeps its pod
+/// source address; everything else leaving the node is masqueraded.
+pub(crate) fn base_rules(subnet: &Subnet, cluster: &Subnet) -> String {
     let cidr = subnet.cidr();
+    let cluster = cluster.cidr();
     format!(
         "*nat\n\
 :LITEK8S-POSTROUTING - [0:0]\n\
--A LITEK8S-POSTROUTING -s {cidr} ! -o {BRIDGE} -j MASQUERADE\n\
+-A LITEK8S-POSTROUTING -s {cidr} ! -d {cluster} ! -o {BRIDGE} -j MASQUERADE\n\
 -A LITEK8S-POSTROUTING -s {cidr} -o {BRIDGE} -m conntrack --ctstate DNAT -j MASQUERADE\n\
 COMMIT\n\
 *filter\n\
@@ -168,10 +171,10 @@ iptables -t nat -A $c -m addrtype --dst-type LOCAL -j LITEK8S-HOSTPORTS; done";
 /// `ip -batch` commands run inside a new pod network namespace: loopback
 /// up, a veth whose peer goes to the host (named `host_if`), the address
 /// and the default route.
-pub(crate) fn pod_link_commands(host_if: &str, ip: Ipv4Addr, subnet: &Subnet) -> String {
+pub(crate) fn pod_link_commands(host_if: &str, ip: Ipv4Addr, subnet: &Subnet, mtu: u32) -> String {
     format!(
         "link set lo up\n\
-link add eth0 type veth peer name {host_if} netns 1\n\
+link add eth0 mtu {mtu} type veth peer name {host_if} mtu {mtu} netns 1\n\
 addr add {ip}/{prefix} dev eth0\n\
 link set eth0 up\n\
 route add default via {gw} dev eth0\n",
@@ -239,10 +242,12 @@ mod tests {
     #[test]
     fn rules_render() {
         let s = Subnet::parse("10.42.0.0/24").unwrap();
-        assert!(base_rules(&s).contains("-A LITEK8S-POSTROUTING -s 10.42.0.0/24 ! -o litek8s0 -j MASQUERADE\n"));
+        let cluster = Subnet::parse("10.42.0.0/16").unwrap();
+        assert!(base_rules(&s, &cluster).contains("-A LITEK8S-POSTROUTING -s 10.42.0.0/24 ! -d 10.42.0.0/16 ! -o litek8s0 -j MASQUERADE\n"));
         let r = hostport_rules(&[(8080, "TCP".into(), "10.42.0.5".into(), 80)]);
         assert!(r.contains("-A LITEK8S-HOSTPORTS -p tcp -m tcp --dport 8080 -j DNAT --to-destination 10.42.0.5:80\n"));
-        let cmds = pod_link_commands("lk1234", Ipv4Addr::new(10, 42, 0, 5), &s);
+        let cmds = pod_link_commands("lk1234", Ipv4Addr::new(10, 42, 0, 5), &s, 1420);
+        assert!(cmds.contains("link add eth0 mtu 1420 type veth peer name lk1234 mtu 1420 netns 1\n"));
         assert!(cmds.contains("addr add 10.42.0.5/24 dev eth0\n") && cmds.contains("route add default via 10.42.0.1 dev eth0\n"));
     }
 }

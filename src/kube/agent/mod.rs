@@ -12,10 +12,16 @@
 //! HTTP connection to the same protocol and reconnects if it drops. Running
 //! pods survive reconnects: the server resends the node's pods and the agent
 //! reconciles.
+//!
+//! The agent sends a heartbeat every [`HEARTBEAT_INTERVAL`] (the server
+//! renews the node's Lease and answers), and drops a connection on which
+//! the server has been silent for [`SERVER_SILENCE`], so a half-open
+//! connection (after a laptop slept, or a NAT forgot it) is replaced quickly.
 
 mod crun;
 pub mod hub;
 mod kubelet;
+pub mod overlay;
 mod pod;
 mod probe;
 pub mod protocol;
@@ -41,6 +47,14 @@ use protocol::{Frame, Message, read_frame, write_frame};
 use runtime::{DockerPods, LogOptions, NodeRuntime, PodRuntime};
 
 pub use hub::AgentHub;
+
+/// How often an agent renews its node's Lease.
+pub const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
+/// A connection the server has been silent on for this long is dead.
+pub const SERVER_SILENCE: Duration = Duration::from_secs(35);
+/// Node annotation: this node's own heartbeat grace period, in seconds
+/// (e.g. a laptop that sleeps), used when longer than the cluster's.
+pub const ANNOTATION_GRACE_PERIOD: &str = "litek8s.dev/node-monitor-grace-period";
 
 /// `litek8s crun-shim ...`: the per-container shim of the crun runtime.
 pub fn crun_shim(args: &[String]) -> ! {
@@ -142,6 +156,7 @@ pub struct Agent<R: PodRuntime> {
     /// The address `host-gateway` stands for in pods (found once).
     gateway_ip: tokio::sync::OnceCell<Option<String>>,
     proxy: Arc<proxy::Proxy>,
+    overlay: Option<Arc<overlay::Overlay>>,
 }
 
 enum ImageState {
@@ -152,6 +167,10 @@ enum ImageState {
 
 impl<R: PodRuntime> Agent<R> {
     pub fn new(rt: R, config: AgentConfig) -> Arc<Self> {
+        Self::with_overlay(rt, config, None)
+    }
+
+    pub fn with_overlay(rt: R, config: AgentConfig, overlay: Option<overlay::Overlay>) -> Arc<Self> {
         let (link, _) = watch::channel(None);
         let agent = Arc::new(Self {
             rt: Arc::new(rt),
@@ -165,6 +184,7 @@ impl<R: PodRuntime> Agent<R> {
             images: Mutex::new(HashMap::new()),
             gateway_ip: tokio::sync::OnceCell::new(),
             proxy: Arc::new(proxy::Proxy::default()),
+            overlay: overlay.map(Arc::new),
         });
         let weak = Arc::downgrade(&agent);
         let in_pod: proxy::InPodDial = Arc::new(move |ip: String, port: u16| {
@@ -191,6 +211,11 @@ impl<R: PodRuntime> Agent<R> {
             }
         });
         agent
+    }
+
+    /// Whether pods here are on the cross-node WireGuard overlay.
+    pub fn has_overlay(&self) -> bool {
+        self.overlay.is_some()
     }
 
     pub(crate) fn link(&self) -> Option<Arc<Link>> {
@@ -359,9 +384,25 @@ impl<R: PodRuntime> Agent<R> {
             .ok()
             .context("connection closed")?;
         let link = Arc::new(Link { tx: tx.clone(), pending: Mutex::new(HashMap::new()), next_id: AtomicU64::new(1) });
+        let heartbeat_tx = tx.clone();
+        let heartbeat = tokio::spawn(async move {
+            let mut tick = tokio::time::interval(HEARTBEAT_INTERVAL);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                if heartbeat_tx.send(Frame::Control(Message::Heartbeat)).await.is_err() {
+                    return;
+                }
+            }
+        });
 
         let result = async {
-            while let Some(frame) = read_frame(&mut reader).await? {
+            loop {
+                let frame = match tokio::time::timeout(SERVER_SILENCE, read_frame(&mut reader)).await {
+                    Ok(frame) => frame?,
+                    Err(_) => bail!("no word from the server for {}s", SERVER_SILENCE.as_secs()),
+                };
+                let Some(frame) = frame else { break };
                 match frame {
                     Frame::Control(msg) => self.handle(&link, msg).await,
                     Frame::Data { stream, channel, bytes } => self.stream_input(stream, StreamInput::Data(channel, bytes)),
@@ -371,6 +412,7 @@ impl<R: PodRuntime> Agent<R> {
             Ok::<_, anyhow::Error>(())
         }
         .await;
+        heartbeat.abort();
         self.link.send_replace(None);
         writer_task.abort();
         for (_, (_, task)) in self.streams.lock().unwrap().drain() {
@@ -390,6 +432,19 @@ impl<R: PodRuntime> Agent<R> {
             Message::Welcome { api_host, api_port, cluster_dns, .. } => {
                 *self.api.lock().unwrap() = Some(ApiEndpoint { host: api_host, port: api_port, cluster_dns });
                 self.link.send_replace(Some(link.clone()));
+            }
+            Message::HeartbeatAck => {}
+            Message::Resync => {
+                self.link.send_replace(Some(link.clone()));
+            }
+            Message::Peers { peers } => {
+                if let Some(overlay) = self.overlay.clone() {
+                    tokio::spawn(async move {
+                        if let Err(e) = overlay.apply(&peers).await {
+                            eprintln!("node-agent: WireGuard peers not applied: {e:#}");
+                        }
+                    });
+                }
             }
             Message::PodUpsert { pod } => self.upsert(pod),
             Message::PodDelete { uid } => self.tell(&uid, pod::PodMsg::Delete),
@@ -678,10 +733,9 @@ async fn port_forward_stream<R: PodRuntime>(
 // Starting agents
 
 /// Describe this machine as a Node object.
-pub async fn describe_node<R: PodRuntime>(rt: &R, node_name: &str, node_ip: &str) -> Result<Value> {
+pub async fn describe_node<R: PodRuntime>(rt: &R, node_name: &str, node_ip: &str, pod_cidr: &str) -> Result<Value> {
     let runtime::MachineInfo { cpus, memory, arch, kernel, os, runtime_version } = rt.machine().await?;
     let mem_ki = memory / 1024;
-    let pod_cidr = crun::POD_CIDR;
     let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     let condition = |t: &str, status: &str, reason: &str, message: &str| {
         json!({"type": t, "status": status, "reason": reason, "message": message, "lastHeartbeatTime": now, "lastTransitionTime": now})
@@ -770,8 +824,42 @@ pub fn default_root_dir() -> PathBuf {
         .unwrap_or_else(|| std::env::temp_dir().join("litek8s-node-agent"))
 }
 
+/// What a node needs to know about its place in the cluster network.
+#[derive(Debug, Clone)]
+pub struct NodeNetwork {
+    /// This node's block of the cluster CIDR (from joining).
+    pub pod_cidr: String,
+    pub cluster_cidr: String,
+    /// The node's address (`InternalIP`, the WireGuard endpoint).
+    pub node_ip: String,
+    /// UDP port of the WireGuard overlay; `None` runs without one.
+    pub wireguard_port: Option<u16>,
+}
+
+/// The pod CIDR this node had at its last join (kept in `join.json`).
+pub fn saved_pod_cidr(node_dir: &std::path::Path) -> Option<String> {
+    let saved: crate::kube::join::JoinResponse = serde_json::from_slice(&std::fs::read(node_dir.join("join.json")).ok()?).ok()?;
+    Some(saved.pod_cidr)
+}
+
 /// Build an agent for this machine on the chosen runtime.
-pub async fn node_agent(choice: RuntimeChoice, node_name: Option<String>, root_dir: Option<PathBuf>) -> Result<Arc<Agent<NodeRuntime>>> {
+pub async fn node_agent(
+    choice: RuntimeChoice,
+    node_name: Option<String>,
+    root_dir: Option<PathBuf>,
+    network: NodeNetwork,
+) -> Result<Arc<Agent<NodeRuntime>>> {
+    node_agent_with(choice, node_name, root_dir, network, None).await
+}
+
+/// [`node_agent`], with this node's own heartbeat grace period.
+pub async fn node_agent_with(
+    choice: RuntimeChoice,
+    node_name: Option<String>,
+    root_dir: Option<PathBuf>,
+    network: NodeNetwork,
+    grace_period: Option<Duration>,
+) -> Result<Arc<Agent<NodeRuntime>>> {
     let root_dir = root_dir.unwrap_or_else(default_root_dir);
     std::fs::create_dir_all(&root_dir).with_context(|| format!("failed to create {}", root_dir.display()))?;
     let use_crun = match choice {
@@ -782,18 +870,45 @@ pub async fn node_agent(choice: RuntimeChoice, node_name: Option<String>, root_d
         RuntimeChoice::Docker => false,
         RuntimeChoice::Auto => crun::available().is_ok(),
     };
+    // Only crun puts pods on a routed bridge the overlay can carry; Docker
+    // pods stay on the node (single-node development, macOS).
+    let wireguard = network.wireguard_port.filter(|_| use_crun);
     let rt = if use_crun {
-        NodeRuntime::Crun(crun::CrunPods::new(&root_dir).await?)
+        let mtu = if wireguard.is_some() { overlay::MTU } else { 1500 };
+        NodeRuntime::Crun(crun::CrunPods::new(&root_dir, &network.pod_cidr, &network.cluster_cidr, mtu).await?)
     } else {
         let docker = crate::runtime::DockerRuntime::connect()?;
         docker.ping().await?;
         NodeRuntime::Docker(DockerPods::new(docker.client()))
     };
+    let overlay = match wireguard {
+        Some(port) => match overlay::Overlay::start(&root_dir, port, &network.pod_cidr, &network.cluster_cidr).await {
+            Ok(o) => Some(o),
+            Err(e) => {
+                eprintln!("node-agent: running without the pod overlay: {e:#}");
+                None
+            }
+        },
+        None => None,
+    };
     let node_name = node_name.unwrap_or_else(default_node_name);
-    let node_ip = local_ip();
-    let node = describe_node(&rt, &node_name, &node_ip).await?;
+    let node_ip = network.node_ip.clone();
+    let mut node = describe_node(&rt, &node_name, &node_ip, &network.pod_cidr).await?;
+    if let Some(o) = &overlay {
+        node["metadata"]["annotations"][overlay::ANNOTATION_PUBLIC_KEY] = json!(o.public_key());
+        node["metadata"]["annotations"][overlay::ANNOTATION_ENDPOINT] = json!(format!("{node_ip}:{}", o.port()));
+    }
+    if let Some(grace) = grace_period {
+        node["metadata"]["annotations"][ANNOTATION_GRACE_PERIOD] = json!(grace.as_secs().to_string());
+    }
+    let saved = crate::kube::join::JoinResponse {
+        pod_cidr: network.pod_cidr.clone(),
+        cluster_cidr: network.cluster_cidr.clone(),
+        service_cidr: crate::kube::join::SERVICE_CIDR.into(),
+    };
+    let _ = std::fs::write(root_dir.join("join.json"), serde_json::to_vec(&saved)?);
     eprintln!("node-agent: running pods with {}", node.pointer("/status/nodeInfo/containerRuntimeVersion").and_then(Value::as_str).unwrap_or("?"));
-    let agent = Agent::new(rt, AgentConfig { node_name, root_dir, node, node_ip });
+    let agent = Agent::with_overlay(rt, AgentConfig { node_name, root_dir, node, node_ip }, overlay);
     tokio::spawn(kubelet::serve(agent.clone(), kubelet::PORT));
     Ok(agent)
 }
@@ -802,7 +917,7 @@ pub async fn node_agent(choice: RuntimeChoice, node_name: Option<String>, root_d
 pub async fn run_local<R: PodRuntime>(api: Arc<crate::kube::ApiState>, agent: Arc<Agent<R>>, api_port: u16) {
     loop {
         let (server_end, agent_end) = tokio::io::duplex(1 << 20);
-        let server = tokio::spawn(AgentHub::serve_agent(api.clone(), server_end, "host-gateway".into(), api_port));
+        let server = tokio::spawn(AgentHub::serve_agent(api.clone(), server_end, "host-gateway".into(), api_port, None));
         if let Err(e) = agent.session(agent_end).await {
             eprintln!("node-agent: local session ended: {e:#}");
         }
@@ -812,46 +927,20 @@ pub async fn run_local<R: PodRuntime>(api: Arc<crate::kube::ApiState>, agent: Ar
 }
 
 /// Run an agent against a remote API server, reconnecting as needed.
-pub async fn run_remote<R: PodRuntime>(agent: Arc<Agent<R>>, server: &str) -> Result<()> {
-    let url = server.trim_end_matches('/');
-    let authority = url
-        .strip_prefix("http://")
-        .context("only http:// API server URLs are supported by the node agent for now")?;
+pub async fn run_remote<R: PodRuntime>(agent: Arc<Agent<R>>, mut client: crate::kube::join::Client) -> Result<()> {
     let mut backoff = Duration::from_millis(500);
     loop {
-        match connect(authority, &agent.config.node_name).await {
+        match client.connect().await {
             Ok(io) => {
                 backoff = Duration::from_millis(500);
-                eprintln!("node-agent: connected to {url}");
+                eprintln!("node-agent: connected to {}", client.server_host());
                 if let Err(e) = agent.session(io).await {
                     eprintln!("node-agent: session ended: {e:#}");
                 }
             }
-            Err(e) => eprintln!("node-agent: failed to connect to {url}: {e:#}"),
+            Err(e) => eprintln!("node-agent: failed to connect to {}: {e:#}", client.server_host()),
         }
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(Duration::from_secs(15));
     }
-}
-
-/// Open the agent connection: one HTTP request upgraded to the protocol.
-async fn connect(authority: &str, node: &str) -> Result<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>> {
-    let tcp = tokio::net::TcpStream::connect(authority).await?;
-    let _ = tcp.set_nodelay(true);
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(tcp)).await?;
-    tokio::spawn(async move {
-        let _ = conn.with_upgrades().await;
-    });
-    let req = hyper::Request::builder()
-        .uri(format!("/apis/agent.litek8s.dev/v1/connect?node={node}"))
-        .header(hyper::header::HOST, authority)
-        .header(hyper::header::CONNECTION, "Upgrade")
-        .header(hyper::header::UPGRADE, protocol::PROTOCOL_VERSION)
-        .body(http_body_util::Empty::<Bytes>::new())?;
-    let resp = sender.send_request(req).await?;
-    if resp.status() != hyper::StatusCode::SWITCHING_PROTOCOLS {
-        bail!("server answered {} instead of switching protocols", resp.status());
-    }
-    let upgraded = hyper::upgrade::on(resp).await?;
-    Ok(hyper_util::rt::TokioIo::new(upgraded))
 }

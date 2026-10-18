@@ -64,6 +64,11 @@ impl KeyPair {
         BASE64.encode(self.secret.to_bytes())
     }
 
+    /// The raw private key, for configuring a kernel WireGuard device.
+    pub fn secret_bytes(&self) -> [u8; KEY_LEN] {
+        self.secret.to_bytes()
+    }
+
     pub fn from_secret_base64(value: &str) -> Result<Self> {
         let decoded = BASE64
             .decode(value.trim())

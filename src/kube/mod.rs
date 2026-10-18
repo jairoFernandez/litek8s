@@ -9,6 +9,8 @@ pub mod controllers;
 pub mod defaults;
 pub mod discovery;
 pub mod dns;
+pub mod join;
+pub mod metrics;
 pub mod patch;
 mod pod_streams;
 pub mod protobuf;

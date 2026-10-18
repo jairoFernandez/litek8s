@@ -116,13 +116,29 @@ struct Wal {
     path: PathBuf,
     writer: BufWriter<File>,
     records: usize,
+    bytes: u64,
+}
+
+/// Sizes the store keeps, for `/metrics`.
+#[derive(Debug, Clone, Default)]
+pub struct StoreStats {
+    pub objects: usize,
+    pub resource_version: u64,
+    pub wal_records: usize,
+    pub wal_bytes: u64,
+    pub compactions: u64,
+    pub history_entries: usize,
+    pub history_bytes: usize,
+    pub feed_receivers: usize,
 }
 
 struct Inner {
     objects: BTreeMap<ObjectKey, Value>,
     rv: u64,
     history: VecDeque<HistoryEntry>,
+    history_bytes: usize,
     wal: Option<Wal>,
+    compactions: u64,
 }
 
 pub struct Store {
@@ -176,10 +192,26 @@ impl Store {
                 objects,
                 rv,
                 history: VecDeque::new(),
+                history_bytes: 0,
                 wal,
+                compactions: 0,
             }),
             events,
         })
+    }
+
+    pub fn stats(&self) -> StoreStats {
+        let inner = self.inner.lock().unwrap();
+        StoreStats {
+            objects: inner.objects.len(),
+            resource_version: inner.rv,
+            wal_records: inner.wal.as_ref().map_or(0, |w| w.records),
+            wal_bytes: inner.wal.as_ref().map_or(0, |w| w.bytes),
+            compactions: inner.compactions,
+            history_entries: inner.history.len(),
+            history_bytes: inner.history_bytes,
+            feed_receivers: self.events.receiver_count(),
+        }
     }
 
     pub fn current_rv(&self) -> u64 {
@@ -336,18 +368,24 @@ impl Store {
                 key: key.clone(),
                 obj: (event != EventType::Deleted).then(|| stored.clone()),
             };
-            let appended = serde_json::to_writer(&mut wal.writer, &record)
-                .map_err(anyhow::Error::from)
-                .and_then(|_| wal.writer.write_all(b"\n").map_err(Into::into))
-                .and_then(|_| wal.writer.flush().map_err(Into::into));
+            let line = serde_json::to_vec(&record).unwrap_or_default();
+            let appended = wal
+                .writer
+                .write_all(&line)
+                .and_then(|_| wal.writer.write_all(b"\n"))
+                .and_then(|_| wal.writer.flush());
             if let Err(error) = appended {
                 eprintln!("apiserver: failed to append to WAL: {error}");
             }
             wal.records += 1;
+            wal.bytes += line.len() as u64 + 1;
             if wal.records > object_count + WAL_COMPACT_SLACK {
                 let path = wal.path.clone();
                 match write_compacted(&path, &inner.objects, snapshot_rv) {
-                    Ok(fresh) => inner.wal = Some(fresh),
+                    Ok(fresh) => {
+                        inner.wal = Some(fresh);
+                        inner.compactions += 1;
+                    }
                     Err(error) => eprintln!("apiserver: WAL compaction failed: {error}"),
                 }
             }
@@ -359,14 +397,18 @@ impl Store {
             event,
             object: stored.clone(),
         });
+        let object = serde_json::to_vec(&event.object).unwrap_or_default();
+        inner.history_bytes += object.len();
         inner.history.push_back(HistoryEntry {
             rv,
             key: event.key.clone(),
             event: event.event,
-            object: serde_json::to_vec(&event.object).unwrap_or_default(),
+            object,
         });
         if inner.history.len() > HISTORY_CAPACITY {
-            inner.history.pop_front();
+            if let Some(old) = inner.history.pop_front() {
+                inner.history_bytes -= old.object.len();
+            }
         }
         // No receivers is fine; watchers come and go.
         let _ = self.events.send(event);
@@ -423,10 +465,12 @@ fn write_compacted(path: &Path, objects: &BTreeMap<ObjectKey, Value>, rv: u64) -
     std::fs::rename(&tmp, path)
         .with_context(|| format!("failed to replace {}", path.display()))?;
     let file = OpenOptions::new().append(true).open(path)?;
+    let bytes = file.metadata().map(|m| m.len()).unwrap_or(0);
     Ok(Wal {
         path: path.to_path_buf(),
         writer: BufWriter::new(file),
         records: objects.len(),
+        bytes,
     })
 }
 

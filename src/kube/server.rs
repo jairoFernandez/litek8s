@@ -37,6 +37,8 @@ use super::admission;
 use super::agent::AgentHub;
 use super::defaults;
 use super::discovery;
+use super::join;
+use super::metrics::{self, Metrics};
 use super::patch;
 use super::protobuf;
 use super::registry::{Registry, ResourceType};
@@ -73,6 +75,20 @@ pub struct ApiServerConfig {
     pub in_cluster_port: Option<u16>,
     /// The container runtime of the local node.
     pub runtime: super::agent::RuntimeChoice,
+    /// The local node's address (default: the source address of the
+    /// default route).
+    pub node_ip: Option<std::net::IpAddr>,
+    /// The address joining nodes use for this server (default: `node_ip`),
+    /// for the printed join command.
+    pub advertise_address: Option<String>,
+    /// Pod network: the cluster CIDR and the size of each node's block.
+    pub network: join::ClusterNetwork,
+    /// The join secret (or a whole token); default: kept in the data dir.
+    pub token: Option<String>,
+    /// Heartbeat grace and default eviction delays.
+    pub lifecycle: super::controllers::NodeLifecycle,
+    /// UDP port of the WireGuard pod overlay; `None` disables the overlay.
+    pub wireguard_port: Option<u16>,
 }
 
 pub struct ApiState {
@@ -91,6 +107,16 @@ pub struct ApiState {
     /// creates a chart's Services concurrently; each allocation looks at the
     /// stored Services, so without this two could get the same address.
     allocated: std::sync::Mutex<Vec<(String, std::time::Instant)>>,
+    /// The secret of join tokens; node agents authenticate with it.
+    join_secret: String,
+    /// Serializes pod CIDR allocation.
+    join_lock: std::sync::Mutex<()>,
+    pub(crate) network: join::ClusterNetwork,
+    pub(crate) lifecycle: super::controllers::NodeLifecycle,
+    pub(crate) metrics: Metrics,
+    /// Where pods on other nodes reach this server over the pod overlay
+    /// (the local node's pod gateway and the in-cluster port), once known.
+    pub(crate) overlay_endpoint: std::sync::OnceLock<(String, u16)>,
 }
 
 impl ApiState {
@@ -111,6 +137,12 @@ impl ApiState {
             cluster_dns: std::sync::atomic::AtomicBool::new(false),
             tls,
             allocated: std::sync::Mutex::default(),
+            join_secret: join::server_secret(data_dir, None)?,
+            join_lock: std::sync::Mutex::default(),
+            network: join::ClusterNetwork::default(),
+            lifecycle: super::controllers::NodeLifecycle::default(),
+            metrics: Metrics::default(),
+            overlay_endpoint: std::sync::OnceLock::new(),
         };
         state.bootstrap()?;
         Ok(state)
@@ -225,11 +257,20 @@ pub async fn serve(config: ApiServerConfig) -> Result<()> {
     } else {
         addr
     };
-    let state = Arc::new(ApiState::open(
-        config.data_dir.as_deref(),
-        client_addr.to_string(),
-        config.log_requests,
-    )?);
+    let mut state = ApiState::open(config.data_dir.as_deref(), client_addr.to_string(), config.log_requests)?;
+    if config.token.is_some() {
+        state.join_secret = join::server_secret(config.data_dir.as_deref(), config.token.as_deref())?;
+    }
+    state.network = config.network.clone();
+    state.lifecycle = config.lifecycle.clone();
+    let state = Arc::new(state);
+    let token = state.join_token();
+    if let Some(dir) = &config.data_dir {
+        // The whole token (with the CA hash); reading it back yields the secret.
+        let path = dir.join("join-token");
+        std::fs::write(&path, &token).with_context(|| format!("failed to write {}", path.display()))?;
+    }
+    let node_ip = config.node_ip.map(|ip| ip.to_string()).unwrap_or_else(super::agent::local_ip);
     if let Some(path) = &config.kubeconfig_out {
         write_kubeconfig(path, &format!("http://{client_addr}"))?;
         eprintln!("apiserver: wrote kubeconfig to {}", path.display());
@@ -244,7 +285,17 @@ pub async fn serve(config: ApiServerConfig) -> Result<()> {
             .node_dir
             .clone()
             .or_else(|| config.data_dir.as_ref().map(|d| d.join("node-agent")));
-        match super::agent::node_agent(config.runtime, config.node_name.clone(), node_dir).await {
+        let node_name = config.node_name.clone().unwrap_or_else(super::agent::default_node_name);
+        let previous = node_dir.as_deref().and_then(super::agent::saved_pod_cidr);
+        let pod_cidr = join::allocate_pod_cidr(&state, &node_name, previous.as_deref()).map_err(|e| anyhow::anyhow!("{e}"))?;
+        join::mark_control_plane(&state, &node_name);
+        let network = super::agent::NodeNetwork {
+            pod_cidr,
+            cluster_cidr: state.network.cluster_cidr.clone(),
+            node_ip: node_ip.clone(),
+            wireguard_port: config.wireguard_port,
+        };
+        match super::agent::node_agent(config.runtime, Some(node_name), node_dir, network).await {
             Ok(agent) => Some(agent),
             Err(error) => {
                 eprintln!("apiserver: not running a local node: {error:#}");
@@ -284,6 +335,15 @@ pub async fn serve(config: ApiServerConfig) -> Result<()> {
             tokio::spawn(serve_listener(state.clone(), extra));
         }
     }
+    // Pods on other nodes reach this server (and its DNS) through the
+    // overlay at the local node's pod gateway.
+    if let (Some(agent), Some(gw)) = (&agent, gateway) {
+        if agent.has_overlay() {
+            let _ = state.overlay_endpoint.set((gw.to_string(), pod_port));
+        }
+    }
+    let advertise = config.advertise_address.clone().unwrap_or_else(|| node_ip.clone());
+    eprintln!("apiserver: join nodes with: litek8s agent --join https://{advertise}:{} --token {token}", addr.port());
     if let Some(agent) = agent {
         eprintln!("apiserver: running local node {}", agent.config().node_name);
         tokio::spawn(super::agent::run_local(state.clone(), agent, pod_port));
@@ -637,6 +697,10 @@ async fn handle(state: Arc<ApiState>, mut req: Request<Incoming>) -> Response<Bo
         Ok(resp) => resp,
         Err(error) => error.into_response(),
     };
+    let watch = path.contains("/watch/") || matches!(req.q("watch"), Some("true" | "1"));
+    if !watch && !path.starts_with("/apis/agent.litek8s.dev/") && path != "/metrics" {
+        state.metrics.observe(Metrics::verb(&parts.method, false, request_names_object(&path)), started.elapsed());
+    }
     if state.log_requests {
         eprintln!(
             "apiserver: {} {}{} -> {} ({} µs)",
@@ -648,6 +712,23 @@ async fn handle(state: Arc<ApiState>, mut req: Request<Incoming>) -> Response<Bo
         );
     }
     resp
+}
+
+/// Whether a resource path names one object (`get`) rather than a
+/// collection (`list`): `.../<resource>/<name>[/<subresource>]`.
+fn request_names_object(path: &str) -> bool {
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let rest = match segs.as_slice() {
+        ["api", _, rest @ ..] => rest,
+        ["apis", _, _, rest @ ..] => rest,
+        _ => return false,
+    };
+    match rest {
+        ["namespaces", _, _, _, ..] => true,
+        ["namespaces", _] => true,
+        [first, _, ..] if *first != "namespaces" => true,
+        _ => false,
+    }
 }
 
 async fn route(state: &Arc<ApiState>, path: &str, req: &Req) -> Result<Response<Body>, ApiError> {
@@ -716,6 +797,25 @@ async fn route(state: &Arc<ApiState>, path: &str, req: &Req) -> Result<Response<
             &json!({"swagger": "2.0", "info": {"title": "Kubernetes", "version": discovery::KUBE_GIT_VERSION}, "paths": {}, "definitions": {}}),
         )),
         ["apis", "agent.litek8s.dev", "v1", "connect"] if get => agent_connect(state, req),
+        ["apis", "agent.litek8s.dev", "v1", "join"] if req.method == Method::POST => {
+            join::handle_join(state, req.header("authorization"), req.header(join::PASSWORD_HEADER), &req.body)
+                .map(|v| json_response(StatusCode::OK, &v))
+        }
+        // The cluster CA, public, so joining nodes can check it against the
+        // hash in their token (as k3s serves it).
+        ["cacerts"] if get => match state.tls() {
+            Some(tls) => {
+                let mut resp = Response::new(full(tls.ca_pem().to_string()));
+                resp.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("text/plain; charset=utf-8"));
+                Ok(resp)
+            }
+            None => Err(ApiError::not_found_path()),
+        },
+        ["metrics"] if get => {
+            let mut resp = Response::new(full(state.render_metrics()));
+            resp.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("text/plain; version=0.0.4"));
+            Ok(resp)
+        }
         ["api", "v1", rest @ ..] => resource_request(state, req, "", "v1", rest).await,
         ["apis", group, version, rest @ ..] => resource_request(state, req, group, version, rest).await,
         _ => Err(ApiError::not_found_path()),
@@ -862,17 +962,21 @@ fn agent_connect(state: &Arc<ApiState>, req: &Req) -> Result<Response<Body>, Api
     if !req.header("upgrade").eq_ignore_ascii_case(super::agent::protocol::PROTOCOL_VERSION) {
         return Err(ApiError::bad_request(format!("expected Upgrade: {}", super::agent::protocol::PROTOCOL_VERSION)));
     }
+    let node = req.q("node").unwrap_or_default().to_string();
+    join::authorize(state, req.header("authorization"), &node, req.header(join::PASSWORD_HEADER))?;
     let on_upgrade = req.take_upgrade().ok_or_else(|| ApiError::bad_request("connection cannot be upgraded"))?;
-    // Pods on that node reach this server at the address the agent used.
+    // Pods on that node reach this server over the pod overlay when there is
+    // one, else at the address the agent used.
     let host_header = req.header("host").to_string();
-    let (api_host, api_port) = match host_header.rsplit_once(':') {
-        Some((h, p)) => (h.trim_matches(['[', ']']).to_string(), p.parse().unwrap_or(6443)),
-        None => (host_header.clone(), 80),
+    let (api_host, api_port) = match (state.overlay_endpoint.get(), host_header.rsplit_once(':')) {
+        (Some((host, port)), _) => (host.clone(), *port),
+        (None, Some((h, p))) => (h.trim_matches(['[', ']']).to_string(), p.parse().unwrap_or(6443)),
+        (None, None) => (host_header.clone(), 80),
     };
     let state = state.clone();
     tokio::spawn(async move {
         let Ok(upgraded) = on_upgrade.await else { return };
-        if let Err(e) = AgentHub::serve_agent(state, TokioIo::new(upgraded), api_host, api_port).await {
+        if let Err(e) = AgentHub::serve_agent(state, TokioIo::new(upgraded), api_host, api_port, Some(node)).await {
             eprintln!("apiserver: agent connection failed: {e:#}");
         }
     });
@@ -1609,7 +1713,7 @@ impl ApiState {
                         .unwrap_or("default")
                         .to_string();
                     let sa = self.store.get(&ObjectKey::new("", "serviceaccounts", &ns, &sa_name));
-                    defaults::pod_on_create(obj, sa.as_ref(), &random_suffix());
+                    defaults::pod_on_create(obj, sa.as_ref(), &random_suffix(), (self.lifecycle.not_ready_toleration_secs, self.lifecycle.unreachable_toleration_secs));
                 }
             }
             ("", "PersistentVolumeClaim") => defaults::pvc(obj, old),
@@ -1875,8 +1979,10 @@ impl ApiState {
         let as_partial = req.wants_partial();
         let rt = rt.clone();
         let (tx, rx) = mpsc::channel::<Bytes>(64);
+        let open_watch = self.metrics.watch_started();
 
         tokio::spawn(async move {
+            let _open_watch = open_watch;
             let encode = |mut event: Value| -> Bytes {
                 if as_table && event["type"] != "BOOKMARK" {
                     let obj = event["object"].take();
@@ -2040,6 +2146,42 @@ impl ApiState {
 
     pub(crate) fn tls(&self) -> Option<&tls::ServerTls> {
         self.tls.as_ref()
+    }
+
+    pub(crate) fn join_secret(&self) -> &str {
+        &self.join_secret
+    }
+
+    pub(crate) fn join_lock(&self) -> &std::sync::Mutex<()> {
+        &self.join_lock
+    }
+
+    pub(crate) fn cluster_network(&self) -> &join::ClusterNetwork {
+        &self.network
+    }
+
+    /// A join token for this server.
+    pub fn join_token(&self) -> String {
+        join::Token::format(self.tls.as_ref().map(|t| t.ca_pem()), &self.join_secret)
+    }
+
+    /// `/metrics`
+    fn render_metrics(&self) -> String {
+        let mut out = String::new();
+        self.metrics.render(&mut out);
+        let st = self.store.stats();
+        metrics::gauge(&mut out, "litek8s_store_objects", st.objects);
+        metrics::gauge(&mut out, "litek8s_store_resource_version", st.resource_version);
+        metrics::gauge(&mut out, "litek8s_store_wal_records", st.wal_records);
+        metrics::gauge(&mut out, "litek8s_store_wal_bytes", st.wal_bytes);
+        metrics::gauge(&mut out, "litek8s_store_compactions_total", st.compactions);
+        metrics::gauge(&mut out, "litek8s_store_history_entries", st.history_entries);
+        metrics::gauge(&mut out, "litek8s_store_history_bytes", st.history_bytes);
+        metrics::gauge(&mut out, "litek8s_store_feed_receivers", st.feed_receivers);
+        metrics::gauge(&mut out, "litek8s_agent_connections", self.hub.connected_count());
+        metrics::gauge(&mut out, "litek8s_agent_streams", self.hub.stream_count());
+        metrics::gauge(&mut out, "litek8s_process_resident_bytes", metrics::rss_bytes());
+        out
     }
 }
 

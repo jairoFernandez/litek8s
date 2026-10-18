@@ -38,6 +38,9 @@ pub enum Message {
     /// Look up an object a pod needs (configmaps, secrets, claims, volumes)
     /// or mint a service account token (`resource: "token"`).
     Get { id: u64, resource: String, namespace: String, name: String },
+    /// Sent every few seconds: renews the node's Lease. The server answers
+    /// each with `HeartbeatAck`, so both ends notice a dead connection.
+    Heartbeat,
     /// A stream finished; for exec, with the command's exit code.
     StreamDone {
         stream: u32,
@@ -57,6 +60,12 @@ pub enum Message {
         #[serde(default)]
         cluster_dns: bool,
     },
+    HeartbeatAck,
+    /// The other nodes of the pod overlay (all of them, each time).
+    Peers { peers: Vec<super::overlay::NodePeer> },
+    /// The server lost track of this node for a while (its pods were marked
+    /// not ready): report every pod's status again.
+    Resync,
     /// A pod bound to this node was created or changed.
     PodUpsert { pod: Value },
     PodDelete { uid: String },

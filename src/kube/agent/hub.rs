@@ -4,6 +4,12 @@
 //! sync, then every change, straight from the store's change feed), applies
 //! the status the agent reports, answers its lookups, and relays log, exec
 //! and port-forward streams opened by API clients.
+//!
+//! Heartbeats renew the node's Lease in `kube-node-lease`. A dropped
+//! connection does not change the node's status by itself: the node
+//! lifecycle controller decides when a node whose Lease stopped is Unknown
+//! (after a grace period, so a laptop that sleeps or a node that restarts
+//! quickly keeps its pods).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -17,6 +23,7 @@ use tokio::io::{AsyncRead, AsyncWrite, BufReader, BufWriter};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
 
+use super::overlay::{ANNOTATION_ENDPOINT, ANNOTATION_PUBLIC_KEY, NodePeer};
 use super::protocol::{Frame, Message, read_frame, write_frame};
 use crate::kube::controllers::util;
 use crate::kube::server::ApiState;
@@ -96,9 +103,23 @@ impl Drop for StreamHandle {
     }
 }
 
+/// The server closes a connection the agent has been silent on this long
+/// (agents send a heartbeat every 10 s).
+const AGENT_SILENCE: std::time::Duration = std::time::Duration::from_secs(35);
+/// How long a node's Lease lasts without renewal (as the kubelet sets it).
+pub const LEASE_DURATION_SECS: i64 = 40;
+
 impl AgentHub {
     pub fn is_connected(&self, node: &str) -> bool {
         self.nodes.lock().unwrap().contains_key(node)
+    }
+
+    pub fn connected_count(&self) -> usize {
+        self.nodes.lock().unwrap().len()
+    }
+
+    pub fn stream_count(&self) -> usize {
+        self.nodes.lock().unwrap().values().map(|c| c.streams.lock().unwrap().len()).sum()
     }
 
     /// Open a stream on `node`. `request` builds the opening message from
@@ -121,23 +142,29 @@ impl AgentHub {
         Ok(handle)
     }
 
-    /// Serve one agent connection until it ends.
-    pub async fn serve_agent<IO>(api: Arc<ApiState>, io: IO, api_host: String, api_port: u16) -> Result<()>
+    /// Serve one agent connection until it ends. `authenticated` is the
+    /// node the connection's credentials are for (`None`: the in-process
+    /// local node).
+    pub async fn serve_agent<IO>(api: Arc<ApiState>, io: IO, api_host: String, api_port: u16, authenticated: Option<String>) -> Result<()>
     where
         IO: AsyncRead + AsyncWrite + Send + 'static,
     {
         let hub = api.hub.clone();
         let (reader, writer) = tokio::io::split(io);
         let mut reader = BufReader::new(reader);
-        let node = match read_frame(&mut reader).await? {
-            Some(Frame::Control(Message::Hello { node })) => node,
+        let node = match tokio::time::timeout(AGENT_SILENCE, read_frame(&mut reader)).await {
+            Ok(Ok(Some(Frame::Control(Message::Hello { node })))) => node,
             _ => bail!("agent did not say hello"),
         };
         let node_name = util::name(&node);
         if node_name.is_empty() {
             bail!("agent sent a Node without a name");
         }
+        if authenticated.as_ref().is_some_and(|n| *n != node_name) {
+            bail!("agent authenticated as {authenticated:?} but announced node {node_name}");
+        }
         register_node(&api, &node)?;
+        renew_lease(&api, &node_name);
 
         let (tx, mut rx) = mpsc::channel::<Frame>(1024);
         let streams: Arc<Mutex<HashMap<u32, mpsc::Sender<StreamEvent>>>> = Arc::default();
@@ -170,9 +197,22 @@ impl AgentHub {
             .await;
         let feed_task = tokio::spawn(feed_pods(api.clone(), node_name.clone(), tx.clone()));
 
+        let status = node.get("status").cloned().unwrap_or_else(|| json!({}));
         let result = async {
-            while let Some(frame) = read_frame(&mut reader).await? {
+            loop {
+                let frame = match tokio::time::timeout(AGENT_SILENCE, read_frame(&mut reader)).await {
+                    Ok(frame) => frame?,
+                    Err(_) => bail!("no heartbeat from node {node_name} for {}s", AGENT_SILENCE.as_secs()),
+                };
+                let Some(frame) = frame else { break };
                 match frame {
+                    Frame::Control(Message::Heartbeat) => {
+                        renew_lease(&api, &node_name);
+                        if ensure_ready(&api, &node_name, &status) {
+                            let _ = tx.send(Frame::Control(Message::Resync)).await;
+                        }
+                        let _ = tx.send(Frame::Control(Message::HeartbeatAck)).await;
+                    }
                     Frame::Control(msg) => handle_message(&api, &tx, &streams, msg).await,
                     Frame::Data { stream, channel, bytes } => {
                         let sender = streams.lock().unwrap().get(&stream).cloned();
@@ -198,7 +238,6 @@ impl AgentHub {
         }
         streams.lock().unwrap().clear();
         eprintln!("apiserver: node {node_name} disconnected");
-        mark_node_unknown(&api, &node_name);
         result
     }
 }
@@ -211,12 +250,21 @@ fn register_node(api: &ApiState, node: &Value) -> Result<()> {
     let current = match api.get_object("", "nodes", "", &name) {
         Some(existing) => {
             let mut updated = existing.clone();
-            if let Some(labels) = node.pointer("/metadata/labels").and_then(Value::as_object) {
-                if !updated["metadata"].get("labels").is_some_and(Value::is_object) {
-                    updated["metadata"]["labels"] = json!({});
+            for field in ["labels", "annotations"] {
+                if let Some(values) = node.pointer(&format!("/metadata/{field}")).and_then(Value::as_object) {
+                    if !updated["metadata"].get(field).is_some_and(Value::is_object) {
+                        updated["metadata"][field] = json!({});
+                    }
+                    for (k, v) in values {
+                        updated["metadata"][field][k] = v.clone();
+                    }
                 }
-                for (k, v) in labels {
-                    updated["metadata"]["labels"][k] = v.clone();
+            }
+            // A node's pod CIDR is the one it joined with.
+            if util::s(&updated, "/spec/podCIDR").is_empty() {
+                if let Some(cidr) = node.pointer("/spec/podCIDR") {
+                    updated["spec"]["podCIDR"] = cidr.clone();
+                    updated["spec"]["podCIDRs"] = json!([cidr]);
                 }
             }
             if updated != existing {
@@ -232,24 +280,82 @@ fn register_node(api: &ApiState, node: &Value) -> Result<()> {
     util::write_status(api, "", "nodes", &current, status).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
-fn mark_node_unknown(api: &ApiState, name: &str) {
-    for _ in 0..5 {
-        let Some(node) = api.get_object("", "nodes", "", name) else { return };
-        let mut status = node.get("status").cloned().unwrap_or_else(|| json!({}));
-        let mut conditions = util::conditions_of(&node);
-        util::set_condition(&mut conditions, "Ready", "Unknown", "NodeStatusUnknown", "Kubelet stopped posting node status.");
-        for c in conditions.iter_mut() {
-            if let Some(m) = c.as_object_mut() {
-                m.remove("lastUpdateTime");
-                m.insert("lastHeartbeatTime".into(), json!(util::rfc3339(util::now())));
+fn micro_time() -> String {
+    chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string()
+}
+
+/// Renew (or create) the node's Lease, as the kubelet does. The server's
+/// clock stamps it, so nodes with skewed clocks are judged fairly.
+pub(crate) fn renew_lease(api: &ApiState, node: &str) {
+    for _ in 0..3 {
+        let now = micro_time();
+        let result = match api.get_object("coordination.k8s.io", "leases", "kube-node-lease", node) {
+            Some(mut lease) => {
+                lease["spec"]["renewTime"] = json!(now);
+                lease["spec"]["holderIdentity"] = json!(node);
+                api.update_object("coordination.k8s.io", "leases", lease).map(|_| ())
             }
-        }
-        status["conditions"] = json!(conditions);
-        match util::write_status(api, "", "nodes", &node, status) {
-            Err(e) if e.is_conflict() => continue,
-            _ => return,
+            None => {
+                let owner = api.get_object("", "nodes", "", node).map(|n| {
+                    json!([{"apiVersion": "v1", "kind": "Node", "name": node, "uid": util::uid(&n)}])
+                });
+                let mut lease = json!({
+                    "apiVersion": "coordination.k8s.io/v1",
+                    "kind": "Lease",
+                    "metadata": {"name": node, "namespace": "kube-node-lease"},
+                    "spec": {"holderIdentity": node, "leaseDurationSeconds": LEASE_DURATION_SECS, "renewTime": now, "acquireTime": now},
+                });
+                if let Some(owner) = owner {
+                    lease["metadata"]["ownerReferences"] = owner;
+                }
+                api.create_object("coordination.k8s.io", "leases", Some("kube-node-lease"), lease).map(|_| ())
+            }
+        };
+        match result {
+            Err(e) if e.is_conflict() || e.is_already_exists() => continue,
+            Err(e) => return eprintln!("apiserver: lease of node {node}: {e}"),
+            Ok(()) => return,
         }
     }
+}
+
+/// A node that heartbeats is Ready: when the lifecycle controller had
+/// marked it otherwise (its Lease expired while the connection stayed up,
+/// e.g. the node slept), post the status it announced again. Returns
+/// whether it did, so the agent re-reports its pods.
+fn ensure_ready(api: &ApiState, node: &str, announced: &Value) -> bool {
+    let Some(current) = api.get_object("", "nodes", "", node) else { return false };
+    if util::condition_true(&current, "Ready") {
+        return false;
+    }
+    let mut status = announced.clone();
+    let now = util::rfc3339(util::now());
+    for c in status.get_mut("conditions").and_then(Value::as_array_mut).into_iter().flatten() {
+        c["lastHeartbeatTime"] = json!(now);
+        c["lastTransitionTime"] = json!(now);
+    }
+    util::write_status(api, "", "nodes", &current, status).is_ok()
+}
+
+/// Every node of the WireGuard overlay (with its key, endpoint and CIDR).
+fn overlay_peers(api: &ApiState) -> Vec<NodePeer> {
+    let (nodes, _) = api.store().list("", "nodes", None);
+    nodes
+        .iter()
+        .filter_map(|n| {
+            let annotation = |k: &str| n.pointer("/metadata/annotations").and_then(|a| a.get(k)).and_then(Value::as_str).map(str::to_string);
+            let pod_cidr = util::s(n, "/spec/podCIDR");
+            if pod_cidr.is_empty() {
+                return None;
+            }
+            Some(NodePeer {
+                name: util::name(n),
+                public_key: annotation(ANNOTATION_PUBLIC_KEY)?,
+                endpoint: annotation(ANNOTATION_ENDPOINT)?,
+                pod_cidr: pod_cidr.to_string(),
+            })
+        })
+        .collect()
 }
 
 /// The part of a pod the agent acts on; status changes are not resent.
@@ -270,6 +376,10 @@ async fn feed_pods(api: Arc<ApiState>, node: String, tx: mpsc::Sender<Frame>) {
         let mut sent: HashMap<String, Value> = HashMap::new();
         // Pods on this node per namespace, to forward only relevant changes.
         let mut namespaces: HashMap<String, usize> = HashMap::new();
+        let mut peers = overlay_peers(&api);
+        if tx.send(Frame::Control(Message::Peers { peers: peers.clone() })).await.is_err() {
+            return;
+        }
         let (pods, _) = api.store().list("", "pods", None);
         for pod in pods.iter().filter(|p| util::s(p, "/spec/nodeName") == node) {
             sent.insert(util::uid(pod), pod_fingerprint(pod));
@@ -317,6 +427,14 @@ async fn feed_pods(api: Arc<ApiState>, node: String, tx: mpsc::Sender<Frame>) {
                     }
                 }
                 ("", "services" | "endpoints") => service_update(&api, &event.key.namespace, &event.key.name),
+                ("", "nodes") => {
+                    let now = overlay_peers(&api);
+                    if now == peers {
+                        continue;
+                    }
+                    peers = now;
+                    Message::Peers { peers: peers.clone() }
+                }
                 ("", resource @ ("configmaps" | "secrets")) if event.event != EventType::Deleted => {
                     let ns = &event.key.namespace;
                     if !namespaces.get(ns).is_some_and(|n| *n > 0) {
