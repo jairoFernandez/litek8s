@@ -55,6 +55,18 @@ heartbeats stop is marked Unknown after --node-monitor-grace-period and its
 pods are evicted after their tolerationSeconds (default 300 s, see
 --default-unreachable-toleration-seconds).";
 
+const DEV_AFTER_HELP: &str = "\
+Examples:
+  litek8s dev up                 # API server, controllers, DNS, proxy and a node; kubectl context litek8s-dev
+  kubectl create deployment web --image=nginx && kubectl expose deployment web --type=NodePort --port 80
+  litek8s dev load myapp:dev     # from the local Docker/Podman, or a `docker save` archive
+  litek8s dev status | down | reset
+
+Linux: rootless by default, in namespaces of its own (no host iptables, interfaces or
+/run changes); needs crun, uidmap, pasta or slirp4netns (`litek8s dev setup` checks).
+macOS: a small Linux VM on Virtualization.framework; NodePorts and LoadBalancers appear
+on localhost and $HOME is shared at the same path for hostPath volumes.";
+
 const NODE_AGENT_AFTER_HELP: &str = "\
 Examples:
   litek8s agent --join https://192.168.1.10:6443 --token K10<hash>::<secret>
@@ -310,6 +322,15 @@ enum Command {
         wireguard_port: u16,
         #[arg(long, help = "Do not set up the WireGuard pod overlay (single node)")]
         no_wireguard: bool,
+    },
+    #[command(
+        about = "A local Kubernetes cluster for development (like kind/k3d), without Docker",
+        help_template = HELP_TEMPLATE,
+        after_help = DEV_AFTER_HELP
+    )]
+    Dev {
+        #[command(subcommand)]
+        command: crate::dev::DevCommand,
     },
     #[command(
         about = "Run a node agent that joins a remote litek8s API server",
@@ -1152,9 +1173,11 @@ pub async fn run() -> Result<()> {
                     unreachable_toleration_secs: default_unreachable_toleration_seconds,
                 },
                 wireguard_port: (!no_wireguard).then_some(wireguard_port),
+                listener: None,
             })
             .await
         }
+        Command::Dev { command } => crate::dev::run(command).await,
         Command::Agent { join: Some(join), token, node_name, node_ip, node_dir, runtime, wireguard_port, no_wireguard, node_grace_period, .. } => {
             let token = token.context("--token is required with --join")?;
             let node_name = node_name.unwrap_or_else(crate::kube::agent::default_node_name);

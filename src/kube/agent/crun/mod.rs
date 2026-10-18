@@ -116,7 +116,7 @@ pub struct CrunPods {
     inner: Arc<Inner>,
 }
 
-fn find_crun() -> Option<PathBuf> {
+pub(crate) fn find_crun() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("LITEK8S_CRUN") {
         return Some(PathBuf::from(p));
     }
@@ -244,6 +244,17 @@ impl CrunPods {
             }
         });
         Ok(pods)
+    }
+
+    /// Where image archives are staged before [`Self::import_images`].
+    pub fn image_staging_dir(&self) -> PathBuf {
+        self.inner.images.staging_dir()
+    }
+
+    /// Import the images of a `docker save`/OCI archive into the store.
+    pub async fn import_images(&self, archive: PathBuf) -> Result<Vec<String>> {
+        let pods = self.clone();
+        tokio::task::spawn_blocking(move || pods.inner.images.import_archive(&archive)).await?
     }
 
     fn container_dir(&self, id: &str) -> PathBuf {
@@ -520,7 +531,10 @@ impl CrunPods {
             std::fs::create_dir_all(dir.join(d))?;
         }
         let lowers: Vec<PathBuf> = image.layers.iter().rev().cloned().collect();
-        let options = sys::overlay_options(&lowers, &dir.join("upper"), &dir.join("work"))?;
+        let mut options = sys::overlay_options(&lowers, &dir.join("upper"), &dir.join("work"))?;
+        if sys::in_user_namespace() {
+            options.push_str(",userxattr");
+        }
         sys::mount_overlay(&dir.join("rootfs"), &options)?;
         // Users resolve against the image's own files (never through a
         // symlink, which would point at the node's).
@@ -960,6 +974,13 @@ impl PodRuntime for CrunPods {
 
     async fn exec(&self, id: &str, command: Vec<String>, tty: bool, stdin: bool) -> Result<ExecSession> {
         let meta = self.container_meta(id).context("container not found")?;
+        if command.is_empty() {
+            // `kubectl attach` / `run -i`: the shim owns the container's
+            // output (CRI log files), so attaching follows it; stdin is not
+            // connected (what kubectl's own fallback to logs gives too).
+            let output = self.logs(id, LogOptions { follow: true, tail_lines: None, timestamps: false, since_seconds: None });
+            return Ok(ExecSession { id: format!("attach-{}", image::random_hex(8)), output, input: Box::pin(tokio::io::sink()) });
+        }
         if self.shim_pid(id).is_none() {
             bail!("container {} is not running", meta.name);
         }

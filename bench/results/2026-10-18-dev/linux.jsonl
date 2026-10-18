@@ -1,0 +1,3 @@
+{"tool": "kind", "up_s": [31.62, 33.3, 30.13], "up_s_median": 31.62, "pod_s": [33.7, 36.65, 33.6], "pod_s_median": 33.7, "mem_mib": 526.3, "cpu_pct": 10.81, "mem5_mib": 579.5, "disk_mib": 1782.0}
+{"tool": "k3d", "up_s": [21.16, 11.05, 11.01], "up_s_median": 11.05, "pod_s": [28.07, 20.91, 18.92], "pod_s_median": 20.91, "mem_mib": 397.6, "cpu_pct": 5.11, "mem5_mib": 427.6, "disk_mib": 335.0}
+{"tool": "litek8s", "up_s": [0.21, 0.17, 0.17], "up_s_median": 0.17, "pod_s": [0.86, 0.82, 0.81], "pod_s_median": 0.82, "mem_mib": 46.8, "cpu_pct": 0.01, "mem5_mib": 71.1, "disk_mib": 105.0}

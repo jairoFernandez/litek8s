@@ -34,6 +34,17 @@ pub(crate) fn overlay_options(lowers: &[PathBuf], upper: &Path, work: &Path) -> 
     Ok(options)
 }
 
+/// Whether this process runs in a user namespace other than the initial
+/// one (the rootless dev cluster): overlayfs then keeps its metadata in
+/// `user.overlay.*` xattrs (`userxattr`), as `trusted.*` needs real root.
+pub(crate) fn in_user_namespace() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::fs::read_to_string("/proc/self/uid_map")
+            .is_ok_and(|m| m.split_whitespace().collect::<Vec<_>>() != ["0", "0", "4294967295"])
+    })
+}
+
 #[cfg(target_os = "linux")]
 pub(crate) use linux::*;
 

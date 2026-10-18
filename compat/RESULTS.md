@@ -4,14 +4,14 @@ Corpus: 101 cases in 5 tiers (see [README.md](README.md)); L4 grew from 20
 to 47 Helm charts on 2026-10-17. Run on 2026-10-17 with kubectl v1.33.9 and
 Helm v4.3.0 on an Apple M3 Max, Docker 29.8.2 under OrbStack.
 
-| tier | k3s (k3d, reference) | litek8s, 74-case corpus (main, e8a5de6) | litek8s, 101-case corpus (2026-10-17) | litek8s on crun, arm64 VM | litek8s on crun, x86_64 |
-|---|---|---|---|---|---|
-| L0 discovery | 7/7 | 7/7 | **7/7** | **7/7** | **7/7** |
-| L1 object API | 25/25 | 25/25 | **25/25** | **25/25** | **25/25** |
-| L2 workloads | 15/15 | 14/15 | **15/15** | **15/15** | **15/15** |
-| L3 networking | 7/7 | 6/7 | **7/7** | **7/7** | **7/7** |
-| L4 Helm charts (`--wait`) | 47/47 | 20/20 (of the first 20) | **47/47** | **47/47** | **47/47** |
-| **all** | **101/101 (100 %)** | **72/74 (97 %)** | **101/101 (100 %)** | **101/101 (100 %)** | **101/101 (100 %)** |
+| tier | k3s (k3d, reference) | litek8s, 74-case corpus (main, e8a5de6) | litek8s, 101-case corpus (2026-10-17) | litek8s on crun, arm64 VM | litek8s on crun, x86_64 | litek8s dev, Linux rootless | litek8s dev, macOS VM |
+|---|---|---|---|---|---|---|---|
+| L0 discovery | 7/7 | 7/7 | **7/7** | **7/7** | **7/7** | **7/7** | **7/7** |
+| L1 object API | 25/25 | 25/25 | **25/25** | **25/25** | **25/25** | **25/25** | **25/25** |
+| L2 workloads | 15/15 | 14/15 | **15/15** | **15/15** | **15/15** | **15/15** | **15/15** |
+| L3 networking | 7/7 | 6/7 | **7/7** | **7/7** | **7/7** | **7/7** | **7/7** |
+| L4 Helm charts (`--wait`) | 47/47 | 20/20 (of the first 20) | **47/47** | **47/47** | **47/47** | **47/47** | **47/47** |
+| **all** | **101/101 (100 %)** | **72/74 (97 %)** | **101/101 (100 %)** | **101/101 (100 %)** | **101/101 (100 %)** | **101/101 (100 %)** | **101/101 (100 %)** |
 
 - **Reference.** k3s v1.33.4+k3s1 via k3d (1 server + 1 agent, traefik and
   metrics-server disabled because L4 installs them),
@@ -37,6 +37,19 @@ Helm v4.3.0 on an Apple M3 Max, Docker 29.8.2 under OrbStack.
   namespace, mounts and cgroup subtree), 21.9 min. Both pulled every
   image cold through the node's own registry client; the slowest chart
   was Home Assistant on arm64 (228 s, a 1.5 GB zstd image).
+- **litek8s dev** (`litek8s dev up`, see `docs/dev.md`), code at `0fcc4d1`
+  (the macOS reruns also include the attach fix `2cce411`): `results/20261018-035609-litek8s-dev-linux-rootless/`,
+  the rootless sandbox (user/PID/network/mount/cgroup namespaces, pasta, crun)
+  in an Ubuntu 24.04 arm64 VM, run from inside the VM; and
+  `results/20261017-230137-litek8s-dev-macos-vm/`, the Virtualization.framework
+  VM on the Mac. Both: every case passes. Cases broken by the environment (the
+  Mac sleeping overnight mid-L4, the 11 GiB VM disk filling with chart images,
+  the Mac's own disk at 100 %) were rerun and merged; each directory's README
+  says which. Found and fixed on the way: pod templates were not defaulted
+  (JSON patches on `imagePullPolicy` failed), RollingUpdate strategies without
+  `rollingUpdate` lacked maxSurge/maxUnavailable (Helm 3.19 panics on them),
+  `kubectl attach`/`run -i` on crun, and pods with memory limits in a
+  delegated cgroup.
 - **Time.** The whole corpus took 12.3 min on litek8s (L4: 11.4 min, the
   slowest chart pihole at 62 s) against 50.6 min on k3s (L4: 47 min). The
   27 new charts alone: 6.0 min against 26.3 min. The k3s run shared the

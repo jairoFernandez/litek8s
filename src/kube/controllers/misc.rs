@@ -14,6 +14,12 @@ const SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
 /// The address of the first ready node, which LoadBalancer Services get as
 /// their ingress (like k3s's servicelb).
 fn node_address(api: &ApiState) -> Option<String> {
+    // The dev cluster exposes LoadBalancers on the developer's localhost.
+    if let Ok(ip) = std::env::var("LITEK8S_LOADBALANCER_IP") {
+        if !ip.is_empty() {
+            return Some(ip);
+        }
+    }
     let (nodes, _) = api.store().list("", "nodes", None);
     nodes
         .iter()

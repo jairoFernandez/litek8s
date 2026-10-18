@@ -283,6 +283,27 @@ fn columns_for(kind: &str) -> Vec<Column> {
                 },
             },
             Column {
+                name: "External-IP",
+                type_: "string",
+                format: "",
+                cell: |v| {
+                    let mut ips: Vec<String> = v
+                        .pointer("/status/loadBalancer/ingress")
+                        .and_then(Value::as_array)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|i| i.get("ip").or_else(|| i.get("hostname")).and_then(Value::as_str).map(str::to_string))
+                        .collect();
+                    ips.extend(v.pointer("/spec/externalIPs").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string));
+                    json!(match (ips.is_empty(), s(v, "/spec/type").as_str()) {
+                        (false, _) => ips.join(","),
+                        (true, "LoadBalancer") => "<pending>".to_string(),
+                        (true, "ExternalName") => s(v, "/spec/externalName"),
+                        _ => "<none>".to_string(),
+                    })
+                },
+            },
+            Column {
                 name: "Port(s)",
                 type_: "string",
                 format: "",
@@ -294,7 +315,10 @@ fn columns_for(kind: &str) -> Vec<Column> {
                             ps.iter()
                                 .map(|p| {
                                     let proto = p.get("protocol").and_then(Value::as_str).unwrap_or("TCP");
-                                    format!("{}/{proto}", int(p, "/port"))
+                                    match p.get("nodePort").and_then(Value::as_u64) {
+                                        Some(np) => format!("{}:{np}/{proto}", int(p, "/port")),
+                                        None => format!("{}/{proto}", int(p, "/port")),
+                                    }
                                 })
                                 .collect()
                         })

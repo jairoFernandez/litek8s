@@ -7,6 +7,7 @@ pub mod control_plane;
 #[cfg(feature = "llm")]
 pub mod coordinator;
 pub mod daemon;
+pub mod dev;
 #[cfg(feature = "llm")]
 pub mod gguf;
 pub mod infra;

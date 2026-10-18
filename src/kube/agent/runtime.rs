@@ -964,6 +964,38 @@ pub enum NodeRuntime {
     Crun(super::crun::CrunPods),
 }
 
+impl NodeRuntime {
+    /// Where image archives for [`Self::import_images`] are staged.
+    pub fn image_staging_dir(&self) -> std::path::PathBuf {
+        match self {
+            NodeRuntime::Crun(rt) => rt.image_staging_dir(),
+            NodeRuntime::Docker(_) => std::env::temp_dir(),
+        }
+    }
+
+    /// Load the images of an image archive (`docker save` output) so pods
+    /// can use them without a registry.
+    pub async fn import_images(&self, archive: std::path::PathBuf) -> Result<Vec<String>> {
+        match self {
+            NodeRuntime::Crun(rt) => rt.import_images(archive).await,
+            NodeRuntime::Docker(rt) => {
+                let body = Bytes::from(tokio::fs::read(&archive).await?);
+                let mut stream = rt.docker.import_image(bollard::image::ImportImageOptions { quiet: true }, body, None);
+                let mut names = Vec::new();
+                while let Some(item) = stream.next().await {
+                    let info = item.context("docker load failed")?;
+                    if let Some(line) = info.stream {
+                        if let Some(name) = line.trim().strip_prefix("Loaded image: ") {
+                            names.push(name.to_string());
+                        }
+                    }
+                }
+                Ok(names)
+            }
+        }
+    }
+}
+
 macro_rules! each {
     ($self:ident, $rt:ident => $body:expr) => {
         match $self {

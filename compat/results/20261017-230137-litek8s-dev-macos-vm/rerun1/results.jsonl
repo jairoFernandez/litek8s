@@ -1,0 +1,24 @@
+{"id": "helm_cnpg", "tier": "L4", "status": "fail", "seconds": 366, "detail": "context deadline exceeded"}
+{"id": "helm_headlamp", "tier": "L4", "status": "pass", "seconds": 23, "detail": "headlamp-0.46.0"}
+{"id": "helm_nats", "tier": "L4", "status": "pass", "seconds": 40, "detail": "nats-2.15.1"}
+{"id": "helm_vault", "tier": "L4", "status": "fail", "seconds": 196, "detail": "Error: INSTALLATION FAILED: Get \"https://helm.releases.hashicorp.com/vault-0.34.1.tgz\": context deadline exceeded (Client.Timeout exceeded while awaiting headers)"}
+{"id": "helm_minio_operator", "tier": "L4", "status": "pass", "seconds": 10, "detail": "operator-7.1.1"}
+{"id": "helm_external_dns", "tier": "L4", "status": "pass", "seconds": 61, "detail": "external-dns-1.23.0"}
+{"id": "helm_gitea", "tier": "L4", "status": "pass", "seconds": 34, "detail": "gitea-12.7.0"}
+{"id": "helm_loki", "tier": "L4", "status": "pass", "seconds": 70, "detail": "loki-7.3.0"}
+{"id": "helm_kps", "tier": "L4", "status": "pass", "seconds": 273, "detail": "kube-prometheus-stack-92.10.1"}
+{"id": "helm_vm_single", "tier": "L4", "status": "pass", "seconds": 15, "detail": "victoria-metrics-single-0.49.0"}
+{"id": "helm_alloy", "tier": "L4", "status": "fail", "seconds": 363, "detail": "context deadline exceeded"}
+{"id": "helm_haproxy", "tier": "L4", "status": "fail", "seconds": 362, "detail": "context deadline exceeded"}
+{"id": "helm_envoy_gateway", "tier": "L4", "status": "pass", "seconds": 18, "detail": "gateway-helm-1.9.2"}
+{"id": "helm_nginx_ingress", "tier": "L4", "status": "pass", "seconds": 18, "detail": "nginx-ingress-2.8.0"}
+{"id": "helm_metallb", "tier": "L4", "status": "fail", "seconds": 361, "detail": "context deadline exceeded"}
+{"id": "helm_openebs_local", "tier": "L4", "status": "pass", "seconds": 16, "detail": "localpv-provisioner-4.6.0"}
+{"id": "helm_redis_operator", "tier": "L4", "status": "pass", "seconds": 9, "detail": "redis-operator-0.27.0"}
+{"id": "helm_mariadb_op", "tier": "L4", "status": "pass", "seconds": 35, "detail": "mariadb-operator-26.10.1"}
+{"id": "helm_zalando_pg", "tier": "L4", "status": "pass", "seconds": 23, "detail": "postgres-operator-2.0.3"}
+{"id": "helm_valkey", "tier": "L4", "status": "pass", "seconds": 21, "detail": "valkey-0.12.0"}
+{"id": "helm_home_assistant", "tier": "L4", "status": "pass", "seconds": 108, "detail": "home-assistant-0.3.87"}
+{"id": "helm_jellyfin", "tier": "L4", "status": "pass", "seconds": 71, "detail": "jellyfin-3.2.0"}
+{"id": "helm_nextcloud", "tier": "L4", "status": "pass", "seconds": 138, "detail": "nextcloud-9.4.1"}
+{"id": "helm_uptime_kuma", "tier": "L4", "status": "fail", "seconds": 361, "detail": "context deadline exceeded"}

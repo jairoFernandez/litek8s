@@ -1,0 +1,16 @@
+{"id": "helm_cnpg", "tier": "L4", "status": "pass", "seconds": 26, "detail": "cloudnative-pg-0.29.1"}
+{"id": "helm_vault", "tier": "L4", "status": "pass", "seconds": 31, "detail": "vault-0.34.1"}
+{"id": "helm_alloy", "tier": "L4", "status": "pass", "seconds": 75, "detail": "alloy-1.13.1"}
+{"id": "helm_haproxy", "tier": "L4", "status": "pass", "seconds": 70, "detail": "kubernetes-ingress-1.54.3"}
+{"id": "helm_metallb", "tier": "L4", "status": "pass", "seconds": 74, "detail": "metallb-0.16.1"}
+{"id": "helm_uptime_kuma", "tier": "L4", "status": "pass", "seconds": 99, "detail": "uptime-kuma-4.2.0"}
+{"id": "helm_vaultwarden", "tier": "L4", "status": "pass", "seconds": 16, "detail": "vaultwarden-0.46.3"}
+{"id": "helm_pihole", "tier": "L4", "status": "pass", "seconds": 70, "detail": "pihole-2.38.0"}
+{"id": "helm_node_red", "tier": "L4", "status": "pass", "seconds": 41, "detail": "node-red-0.40.2"}
+{"id": "helm_homepage", "tier": "L4", "status": "pass", "seconds": 23, "detail": "homepage-2.1.0"}
+{"id": "helm_gatus", "tier": "L4", "status": "pass", "seconds": 5, "detail": "gatus-1.5.0"}
+{"id": "helm_zot", "tier": "L4", "status": "pass", "seconds": 23, "detail": "zot-0.1.128"}
+{"id": "helm_registry", "tier": "L4", "status": "pass", "seconds": 12, "detail": "docker-registry-3.0.0"}
+{"id": "helm_flux2", "tier": "L4", "status": "pass", "seconds": 72, "detail": "flux2-2.19.1"}
+{"id": "helm_argo_wf", "tier": "L4", "status": "pass", "seconds": 54, "detail": "argo-workflows-2.0.13"}
+{"id": "helm_trivy_operator", "tier": "L4", "status": "pass", "seconds": 16, "detail": "trivy-operator-0.37.0"}
