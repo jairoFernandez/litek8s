@@ -195,7 +195,24 @@ pub(crate) async fn run<R: PodRuntime>(
     if w.init.is_empty() {
         w.initialized = true;
     }
+    let finished = matches!(s(&w.pod, "/status/phase"), "Succeeded" | "Failed");
     w.adopt().await;
+    if finished && w.sandbox.is_none() {
+        // A pod that finished before this agent started (a node restart):
+        // like the kubelet, never run it again; its status stays as stored.
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                PodMsg::Delete => break,
+                PodMsg::Update(pod) if pod.pointer("/metadata/deletionTimestamp").is_some_and(|v| !v.is_null()) => {
+                    w.pod = pod;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        w.teardown().await;
+        return;
+    }
     let mut link = agent.subscribe_link();
     loop {
         if w.pod.pointer("/metadata/deletionTimestamp").is_some_and(|v| !v.is_null()) {

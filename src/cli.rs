@@ -44,6 +44,18 @@ same process, so pods run on this machine (`--no-node` to only serve).
 Plain HTTP serves kubectl; pods reach the same port over TLS. There is no
 authentication, so keep it on localhost or a trusted network.";
 
+const DEV_AFTER_HELP: &str = "\
+Examples:
+  litek8s dev up                 # API server, controllers, DNS, proxy and a node; kubectl context litek8s-dev
+  kubectl create deployment web --image=nginx && kubectl expose deployment web --type=NodePort --port 80
+  litek8s dev load myapp:dev     # from the local Docker/Podman, or a `docker save` archive
+  litek8s dev status | down | reset
+
+Linux: rootless by default, in namespaces of its own (no host iptables, interfaces or
+/run changes); needs crun, uidmap, pasta or slirp4netns (`litek8s dev setup` checks).
+macOS: a small Linux VM on Virtualization.framework; NodePorts and LoadBalancers appear
+on localhost and $HOME is shared at the same path for hostPath volumes.";
+
 const NODE_AGENT_AFTER_HELP: &str = "\
 Examples:
   litek8s node-agent --server http://192.168.1.10:6443
@@ -260,6 +272,15 @@ enum Command {
         in_cluster_port: u16,
         #[arg(long, value_enum, default_value = "auto", help = "Container runtime of the local node: auto (crun on Linux when installed, else Docker), crun or docker")]
         runtime: crate::kube::agent::RuntimeChoice,
+    },
+    #[command(
+        about = "A local Kubernetes cluster for development (like kind/k3d), without Docker",
+        help_template = HELP_TEMPLATE,
+        after_help = DEV_AFTER_HELP
+    )]
+    Dev {
+        #[command(subcommand)]
+        command: crate::dev::DevCommand,
     },
     #[command(
         about = "Run a node agent that joins a remote litek8s API server",
@@ -1073,9 +1094,11 @@ pub async fn run() -> Result<()> {
                 cluster_dns: (!no_cluster_dns).then_some(cluster_dns),
                 in_cluster_port: (in_cluster_port != 0).then_some(in_cluster_port),
                 runtime,
+                listener: None,
             })
             .await
         }
+        Command::Dev { command } => crate::dev::run(command).await,
         Command::NodeAgent { server, node_name, node_dir, runtime } => {
             let agent = crate::kube::agent::node_agent(runtime, node_name, node_dir).await?;
             crate::kube::agent::run_remote(agent, &server).await

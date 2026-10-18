@@ -116,7 +116,7 @@ pub struct CrunPods {
     inner: Arc<Inner>,
 }
 
-fn find_crun() -> Option<PathBuf> {
+pub(crate) fn find_crun() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("LITEK8S_CRUN") {
         return Some(PathBuf::from(p));
     }
@@ -242,6 +242,17 @@ impl CrunPods {
             }
         });
         Ok(pods)
+    }
+
+    /// Where image archives are staged before [`Self::import_images`].
+    pub fn image_staging_dir(&self) -> PathBuf {
+        self.inner.images.staging_dir()
+    }
+
+    /// Import the images of a `docker save`/OCI archive into the store.
+    pub async fn import_images(&self, archive: PathBuf) -> Result<Vec<String>> {
+        let pods = self.clone();
+        tokio::task::spawn_blocking(move || pods.inner.images.import_archive(&archive)).await?
     }
 
     fn container_dir(&self, id: &str) -> PathBuf {
@@ -518,7 +529,10 @@ impl CrunPods {
             std::fs::create_dir_all(dir.join(d))?;
         }
         let lowers: Vec<PathBuf> = image.layers.iter().rev().cloned().collect();
-        let options = sys::overlay_options(&lowers, &dir.join("upper"), &dir.join("work"))?;
+        let mut options = sys::overlay_options(&lowers, &dir.join("upper"), &dir.join("work"))?;
+        if sys::in_user_namespace() {
+            options.push_str(",userxattr");
+        }
         sys::mount_overlay(&dir.join("rootfs"), &options)?;
         // Users resolve against the image's own files (never through a
         // symlink, which would point at the node's).

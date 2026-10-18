@@ -173,6 +173,10 @@ struct IndexEntry {
     layers: Vec<String>,
     #[serde(default)]
     last_used: i64,
+    /// Imported from an archive (`litek8s dev load`), not pulled: there is
+    /// no registry to check, whatever the pull policy.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    loaded: bool,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -296,7 +300,7 @@ impl ImageStore {
         let existing = self.load_index().images.get(&key).cloned();
         if let Some(entry) = &existing {
             if let Some(found) = self.image_of(&reference, entry) {
-                if !always || reference.digest.is_some() {
+                if !always || reference.digest.is_some() || entry.loaded {
                     return Ok(found);
                 }
                 let mut session = Session::new(&reference);
@@ -354,6 +358,7 @@ impl ImageStore {
             config: config_digest,
             layers: diff_ids,
             last_used: chrono::Utc::now().timestamp(),
+            loaded: false,
         };
         self.update_index(|i| {
             i.images.insert(key.clone(), entry.clone());
@@ -393,6 +398,108 @@ impl ImageStore {
         .await;
         let _ = std::fs::remove_file(&tmp_file);
         result
+    }
+
+    /// Where archives being imported are staged (same filesystem as the
+    /// layers).
+    pub fn staging_dir(&self) -> PathBuf {
+        self.root.join("tmp")
+    }
+
+    /// Import the images of a `docker save` / `podman save` archive (Docker
+    /// or OCI layout, plain or gzip tar) for this host's platform. Returns
+    /// the names imported. Images keep their tags (`myapp:dev` is then
+    /// `docker.io/library/myapp:dev`, which is what a pod's `myapp:dev`
+    /// means) and are never pulled over afterwards.
+    pub fn import_archive(&self, archive: &Path) -> Result<Vec<String>> {
+        let dir = self.staging_dir().join(format!("import-{}", random_hex(8)));
+        let result = (|| {
+            extract_archive(archive, &dir)?;
+            let images = if dir.join("manifest.json").is_file() {
+                docker_archive_images(&dir)?
+            } else if dir.join("index.json").is_file() {
+                oci_layout_images(&dir)?
+            } else {
+                bail!("not an image archive (no manifest.json or index.json; use `docker save` or `podman save`)");
+            };
+            if images.is_empty() {
+                bail!("the archive has no tagged image for linux/{}", host_platform().0);
+            }
+            let mut names = Vec::new();
+            for img in images {
+                names.extend(self.import_one(&dir, img)?);
+            }
+            Ok(names)
+        })();
+        let _ = std::fs::remove_dir_all(&dir);
+        result
+    }
+
+    fn import_one(&self, dir: &Path, img: ArchiveImage) -> Result<Vec<String>> {
+        let config_bytes = std::fs::read(dir.join(&img.config)).with_context(|| format!("archive has no {}", img.config))?;
+        let config_digest = format!("sha256:{}", sha256_hex(&config_bytes));
+        let config: Value = serde_json::from_slice(&config_bytes).context("invalid image config")?;
+        let diff_ids: Vec<String> = config
+            .pointer("/rootfs/diff_ids")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+            .unwrap_or_default();
+        if diff_ids.len() != img.layers.len() {
+            bail!("image config and archive disagree on the layers ({} vs {})", diff_ids.len(), img.layers.len());
+        }
+        let mut layer_descs = Vec::new();
+        for (file, diff_id) in img.layers.iter().zip(&diff_ids) {
+            let path = dir.join(file);
+            let size = std::fs::metadata(&path).with_context(|| format!("archive has no layer {file}"))?.len();
+            let digest = match &img.layer_digests {
+                Some(d) => d[layer_descs.len()].clone(),
+                None => format!("sha256:{}", sha256_file(&path)?),
+            };
+            layer_descs.push(serde_json::json!({"mediaType": "application/vnd.oci.image.layer.v1.tar", "digest": digest, "size": size}));
+            let dest = self.layer_dir(diff_id);
+            if dest.is_dir() {
+                continue;
+            }
+            let tmp = self.staging_dir().join(random_hex(8));
+            unpack_layer(&path, &tmp, diff_id, self.owners).with_context(|| format!("failed to unpack layer {file}"))?;
+            if let Err(e) = std::fs::rename(&tmp, &dest) {
+                let _ = std::fs::remove_dir_all(&tmp);
+                if !dest.is_dir() {
+                    return Err(e.into());
+                }
+            }
+        }
+        self.put_blob(&config_bytes, &config_digest)?;
+        let manifest_bytes = match img.manifest {
+            Some(bytes) => bytes,
+            None => serde_json::to_vec(&serde_json::json!({
+                "schemaVersion": 2,
+                "mediaType": "application/vnd.oci.image.manifest.v1+json",
+                "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": config_digest, "size": config_bytes.len()},
+                "layers": layer_descs,
+            }))?,
+        };
+        let manifest_digest = format!("sha256:{}", sha256_hex(&manifest_bytes));
+        self.put_blob(&manifest_bytes, &manifest_digest)?;
+        let mut names = Vec::new();
+        for tag in &img.names {
+            let reference = Reference::parse(tag).with_context(|| format!("archive names an invalid image {tag:?}"))?;
+            names.push(reference.canonical());
+        }
+        let entry = IndexEntry {
+            top: manifest_digest.clone(),
+            manifest: manifest_digest,
+            config: config_digest,
+            layers: diff_ids,
+            last_used: chrono::Utc::now().timestamp(),
+            loaded: true,
+        };
+        self.update_index(|i| {
+            for n in &names {
+                i.images.insert(n.clone(), entry.clone());
+            }
+        })?;
+        Ok(names)
     }
 
     /// Drop layers no image uses and, when the disk is above 85 % full,
@@ -450,6 +557,113 @@ impl ImageStore {
         }
         Ok(())
     }
+}
+
+/// One image found in an archive: file paths relative to the extracted
+/// archive.
+struct ArchiveImage {
+    names: Vec<String>,
+    config: String,
+    layers: Vec<String>,
+    /// Compressed-layer digests, when the archive has a real manifest.
+    layer_digests: Option<Vec<String>>,
+    manifest: Option<Vec<u8>>,
+}
+
+fn sha256_file(path: &Path) -> Result<String> {
+    let mut f = std::fs::File::open(path)?;
+    let mut h = Sha256::new();
+    std::io::copy(&mut f, &mut h)?;
+    Ok(hex::encode(h.finalize()))
+}
+
+/// Unpack an image archive (regular files and directories only).
+fn extract_archive(archive: &Path, dest: &Path) -> Result<()> {
+    let mut file = std::fs::File::open(archive).with_context(|| format!("failed to open {}", archive.display()))?;
+    let mut magic = [0u8; 2];
+    let n = file.read(&mut magic)?;
+    let raw = std::io::Cursor::new(magic[..n].to_vec()).chain(file);
+    let reader: Box<dyn Read> = if magic == [0x1f, 0x8b] { Box::new(flate2::read::MultiGzDecoder::new(raw)) } else { Box::new(raw) };
+    std::fs::create_dir_all(dest)?;
+    let mut tar = tar::Archive::new(reader);
+    for entry in tar.entries().context("reading the archive")? {
+        let mut entry = entry.context("reading the archive")?;
+        let kind = entry.header().entry_type();
+        if !(kind.is_file() || kind.is_dir()) {
+            continue;
+        }
+        let path = entry.path()?.into_owned();
+        let rel = relative(&path).with_context(|| format!("unsafe path in archive: {}", path.display()))?;
+        let target = dest.join(&rel);
+        if kind.is_dir() {
+            std::fs::create_dir_all(&target)?;
+        } else {
+            if let Some(parent) = target.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let mut out = std::fs::File::create(&target)?;
+            std::io::copy(&mut entry, &mut out)?;
+        }
+    }
+    Ok(())
+}
+
+/// `docker save`'s manifest.json (also written by Docker 25+ next to its
+/// OCI layout, and by `podman save` in docker-archive format).
+fn docker_archive_images(dir: &Path) -> Result<Vec<ArchiveImage>> {
+    let manifest: Value = serde_json::from_slice(&std::fs::read(dir.join("manifest.json"))?).context("invalid manifest.json")?;
+    let mut out = Vec::new();
+    for m in manifest.as_array().context("manifest.json is not a list")? {
+        let names: Vec<String> = m["RepoTags"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+        let config = m["Config"].as_str().context("manifest.json entry without Config")?.to_string();
+        let layers: Vec<String> = m["Layers"].as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+        if names.is_empty() {
+            continue;
+        }
+        out.push(ArchiveImage { names, config, layers, layer_digests: None, manifest: None });
+    }
+    Ok(out)
+}
+
+/// An OCI image layout (`podman save --format oci-archive`, `skopeo`,
+/// `docker buildx --output type=oci`).
+fn oci_layout_images(dir: &Path) -> Result<Vec<ArchiveImage>> {
+    let blob = |digest: &str| -> Result<Vec<u8>> {
+        let hex = digest.strip_prefix("sha256:").context("unsupported digest")?;
+        std::fs::read(dir.join("blobs/sha256").join(hex)).with_context(|| format!("archive has no blob {digest}"))
+    };
+    let index: Value = serde_json::from_slice(&std::fs::read(dir.join("index.json"))?).context("invalid index.json")?;
+    let (arch, variant) = host_platform();
+    let mut out = Vec::new();
+    for desc in index["manifests"].as_array().into_iter().flatten() {
+        let ann = &desc["annotations"];
+        let name = ann["io.containerd.image.name"]
+            .as_str()
+            .or_else(|| ann["org.opencontainers.image.ref.name"].as_str().filter(|n| n.contains('/') || n.contains(':')));
+        let Some(name) = name else { continue };
+        let mut desc = desc.clone();
+        let mut bytes = blob(desc["digest"].as_str().unwrap_or_default())?;
+        let mut doc: Value = serde_json::from_slice(&bytes)?;
+        // An index: the manifest for this platform (if the archive has it).
+        if doc.get("manifests").is_some() {
+            let Some(m) = select_platform(&doc, arch, variant) else { continue };
+            desc = m.clone();
+            let Ok(b) = blob(desc["digest"].as_str().unwrap_or_default()) else { continue };
+            bytes = b;
+            doc = serde_json::from_slice(&bytes)?;
+        }
+        let config = doc["config"]["digest"].as_str().context("manifest without config")?;
+        let digests: Vec<String> = doc["layers"].as_array().into_iter().flatten().filter_map(|l| l["digest"].as_str()).map(str::to_string).collect();
+        let path = |d: &str| format!("blobs/sha256/{}", d.trim_start_matches("sha256:"));
+        out.push(ArchiveImage {
+            names: vec![name.to_string()],
+            config: path(config),
+            layers: digests.iter().map(|d| path(d)).collect(),
+            layer_digests: Some(digests),
+            manifest: Some(bytes),
+        });
+    }
+    Ok(out)
 }
 
 fn is_root() -> bool {
@@ -666,7 +880,7 @@ fn make_whiteout(path: &Path) -> Result<()> {
 #[cfg(target_os = "linux")]
 fn set_opaque(dir: &Path) -> Result<()> {
     let c = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes())?;
-    let name = c"trusted.overlay.opaque";
+    let name = if super::sys::in_user_namespace() { c"user.overlay.opaque" } else { c"trusted.overlay.opaque" };
     // SAFETY: valid path, name and a 1-byte value.
     if unsafe { libc::setxattr(c.as_ptr(), name.as_ptr(), b"y".as_ptr().cast(), 1, 0) } != 0 {
         return Err(std::io::Error::last_os_error()).with_context(|| format!("failed to mark {} opaque", dir.display()));
@@ -730,7 +944,7 @@ fn parse_url(url: &str) -> Result<Url> {
 
 async fn send(method: hyper::Method, url: &str, headers: &[(&str, String)]) -> Result<hyper::Response<hyper::body::Incoming>> {
     let u = parse_url(url)?;
-    let tcp = tokio::time::timeout(Duration::from_secs(30), tokio::net::TcpStream::connect((u.host.as_str(), u.port)))
+    let tcp = tokio::time::timeout(Duration::from_secs(30), tokio::net::TcpStream::connect((dial_host(&u.host), u.port)))
         .await
         .with_context(|| format!("timed out connecting to {}", u.host))?
         .with_context(|| format!("failed to connect to {}", u.host))?;
@@ -760,6 +974,16 @@ async fn send(method: hyper::Method, url: &str, headers: &[(&str, String)]) -> R
         .await
         .context("registry did not answer")?
         .map_err(Into::into)
+}
+
+/// Where to connect for `host`. In the dev sandbox (and the dev VM) the
+/// host machine's loopback is at another address (`LITEK8S_HOST_LOOPBACK`),
+/// so a registry at `localhost:5000` on the developer's machine still works.
+fn dial_host(host: &str) -> String {
+    match std::env::var("LITEK8S_HOST_LOOPBACK") {
+        Ok(alias) if !alias.is_empty() && matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]") => alias,
+        _ => host.to_string(),
+    }
 }
 
 /// Parse `Bearer realm="..",service="..",scope=".."`.

@@ -37,6 +37,9 @@ pub(crate) struct Proxy {
     services: Mutex<BTreeMap<(String, String), (Value, Option<Value>)>>,
     changed: Notify,
     node_ports: Mutex<HashMap<u16, JoinHandle<()>>>,
+    /// Listeners on the host's loopback when the node runs in the dev
+    /// sandbox (host port → task), see [`crate::dev::broker`].
+    host_ports: Mutex<HashMap<u16, JoinHandle<()>>>,
     pub(crate) in_pod: std::sync::OnceLock<InPodDial>,
 }
 
@@ -143,6 +146,34 @@ impl Proxy {
         }
         ports
     }
+
+    /// (host port, NodePort) pairs to expose on the host's loopback in the
+    /// dev sandbox: every NodePort, and a LoadBalancer's own ports (as
+    /// Docker Desktop's Kubernetes does on localhost).
+    fn wanted_host_ports(&self) -> Vec<(u16, u16)> {
+        let mut ports = Vec::new();
+        for (svc, _) in self.services.lock().unwrap().values() {
+            let kind = s(svc, "/spec/type");
+            if !matches!(kind, "NodePort" | "LoadBalancer") {
+                continue;
+            }
+            for port in svc.pointer("/spec/ports").and_then(Value::as_array).into_iter().flatten() {
+                if !matches!(s(port, "/protocol"), "" | "TCP") {
+                    continue;
+                }
+                let Some(np) = port.get("nodePort").and_then(Value::as_u64) else { continue };
+                ports.push((np as u16, np as u16));
+                if kind == "LoadBalancer" {
+                    if let Some(p) = port.get("port").and_then(Value::as_u64).filter(|p| *p != np) {
+                        ports.push((p as u16, np as u16));
+                    }
+                }
+            }
+        }
+        ports.sort();
+        ports.dedup_by_key(|(host, _)| *host);
+        ports
+    }
 }
 
 /// Keep the node's rules and listeners in line with the Services, forever.
@@ -189,6 +220,33 @@ fn sync_node_ports(proxy: &Arc<Proxy>) {
         let proxy = proxy.clone();
         listeners.insert(port, tokio::spawn(async move { serve_node_port(proxy, port).await }));
     }
+    drop(listeners);
+    if crate::dev::broker::installed() {
+        let wanted = proxy.wanted_host_ports();
+        let mut host = proxy.host_ports.lock().unwrap();
+        host.retain(|port, task| {
+            let keep = wanted.iter().any(|(h, _)| h == port);
+            if !keep {
+                task.abort();
+            }
+            keep
+        });
+        for (host_port, node_port) in wanted {
+            if host.contains_key(&host_port) {
+                continue;
+            }
+            let proxy = proxy.clone();
+            host.insert(
+                host_port,
+                tokio::spawn(async move {
+                    let bound = tokio::task::spawn_blocking(move || crate::dev::broker::bind_host_port(host_port)).await;
+                    if let Some(listener) = bound.ok().flatten().and_then(|l| TcpListener::from_std(l).ok()) {
+                        relay_node_port(proxy, listener, node_port).await;
+                    }
+                }),
+            );
+        }
+    }
 }
 
 async fn serve_node_port(proxy: Arc<Proxy>, port: u16) {
@@ -196,6 +254,12 @@ async fn serve_node_port(proxy: Arc<Proxy>, port: u16) {
         Ok(l) => l,
         Err(e) => return eprintln!("node-agent: NodePort {port} unavailable: {e}"),
     };
+    relay_node_port(proxy, listener, port).await
+}
+
+/// Accept on `listener` and relay each connection to a backend of
+/// `port`'s Service.
+async fn relay_node_port(proxy: Arc<Proxy>, listener: TcpListener, port: u16) {
     let mut next = 0usize;
     loop {
         let Ok((mut client, _)) = listener.accept().await else { continue };

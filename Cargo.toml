@@ -41,6 +41,15 @@ webpki-roots = "1"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 ruzstd = "0.9.1"
 
+# The macOS dev VM (`litek8s dev up` on a Mac) uses Apple's
+# Virtualization.framework.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2 = "0.6"
+dispatch2 = "0.3"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-virtualization = "0.3"
+
 [features]
 default = ["llm"]
 # The LLM/tensor-model stack: safetensors and GGUF loading, tokenizers

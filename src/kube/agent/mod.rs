@@ -47,6 +47,11 @@ pub fn crun_shim(args: &[String]) -> ! {
     crun::shim::main(args)
 }
 
+/// The crun binary the crun runtime would use, if installed.
+pub fn crun_binary() -> Option<PathBuf> {
+    crun::find_crun()
+}
+
 /// `litek8s crun-pause`: PID 1 of a pod's shared PID namespace.
 pub fn crun_pause(args: &[String]) -> ! {
     crun::shim::pause_main(args)
