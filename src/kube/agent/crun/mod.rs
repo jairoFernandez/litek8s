@@ -964,6 +964,13 @@ impl PodRuntime for CrunPods {
 
     async fn exec(&self, id: &str, command: Vec<String>, tty: bool, stdin: bool) -> Result<ExecSession> {
         let meta = self.container_meta(id).context("container not found")?;
+        if command.is_empty() {
+            // `kubectl attach` / `run -i`: the shim owns the container's
+            // output (CRI log files), so attaching follows it; stdin is not
+            // connected (what kubectl's own fallback to logs gives too).
+            let output = self.logs(id, LogOptions { follow: true, tail_lines: None, timestamps: false, since_seconds: None });
+            return Ok(ExecSession { id: format!("attach-{}", image::random_hex(8)), output, input: Box::pin(tokio::io::sink()) });
+        }
         if self.shim_pid(id).is_none() {
             bail!("container {} is not running", meta.name);
         }

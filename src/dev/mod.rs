@@ -336,28 +336,39 @@ async fn stop(state: &DevState) -> Result<()> {
 }
 
 async fn status() -> Result<()> {
+    use std::fmt::Write as _;
+    use std::io::Write as _;
+    let mut text = String::new();
+    // Collected and written at once: a closed pipe (`| head`) is not an error.
+    macro_rules! out {
+        ($($arg:tt)*) => {{
+            let _ = writeln!(text, $($arg)*);
+        }};
+    }
     let home = dev_home()?;
     let Some(state) = running(&home) else {
-        println!("litek8s-dev is not running (data: {})", home.display());
+        out!("litek8s-dev is not running (data: {})", home.display());
+        let _ = std::io::stdout().write_all(text.as_bytes());
         return Ok(());
     };
     let uptime = Duration::from_millis(now_ms().saturating_sub(state.started_unix_ms));
-    println!("litek8s-dev: running ({}), pid {}, up {}s", state.mode, state.pid, uptime.as_secs());
-    println!("  server:   http://127.0.0.1:{} (kubectl context {})", state.port, kubeconfig::CONTEXT);
+    out!("litek8s-dev: running ({}), pid {}, up {}s", state.mode, state.pid, uptime.as_secs());
+    out!("  server:   http://127.0.0.1:{} (kubectl context {})", state.port, kubeconfig::CONTEXT);
     if let Some(ip) = &state.vm_ip {
-        println!("  vm:       {ip}");
+        out!("  vm:       {ip}");
     }
     if let Ok((_, body)) = http(state.port, hyper::Method::GET, "/api/v1/pods", None).await {
         if let Ok(list) = serde_json::from_slice::<Value>(&body) {
             let pods = list["items"].as_array().cloned().unwrap_or_default();
             let running = pods.iter().filter(|p| p.pointer("/status/phase").and_then(Value::as_str) == Some("Running")).count();
-            println!("  pods:     {running} running, {} total", pods.len());
+            out!("  pods:     {running} running, {} total", pods.len());
         }
     }
     if let Some(mem) = memory_bytes(&state) {
-        println!("  memory:   {:.1} MiB (everything the cluster runs, pods included)", mem as f64 / 1048576.0);
+        out!("  memory:   {:.1} MiB (everything the cluster runs, pods included)", mem as f64 / 1048576.0);
     }
-    println!("  data:     {} ({:.1} MiB)", home.display(), dir_size(&home) as f64 / 1048576.0);
+    out!("  data:     {} ({:.1} MiB)", home.display(), dir_size(&home) as f64 / 1048576.0);
+    let _ = std::io::stdout().write_all(text.as_bytes());
     Ok(())
 }
 
