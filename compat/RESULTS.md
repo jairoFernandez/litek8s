@@ -246,10 +246,10 @@ endpoints on two nodes, a Deployment surviving a worker's hard power-off
 | L4 Helm charts | | **47/47** |
 
 - M1 litek8s: `results/20261017-205817-litek8s-3vm/`, power commands
-  `bench/vm.sh kill|start`. k3s: `results/20261017-211854-k3d-multi/` (4/5;
-  `multi_service_spreads` raced kube-proxy's rule sync, the case now retries)
-  then `20261017-212137-k3d-multi/` (pass); `211907` failed that case only
-  because the previous run's namespace was still terminating. k3d nodes are
+  `bench/vm.sh kill|start`. k3s: `results/20261017-211550-k3d-multi/` (4/5;
+  `multi_service_spreads` raced kube-proxy's rule sync, the case now retries,
+  `211854`: pass), then the whole tier again in `211907` (4/5: that case hit
+  the previous run's still-terminating namespace) and `212137` (pass). k3d nodes are
   killed with `docker kill|start`; the kubelet's disk eviction thresholds were
   lowered because OrbStack's disk was 94 % full.
 - L2–L4 litek8s: `results/20261017-211147-litek8s-3vm/` (L2, L3 and 23 of
