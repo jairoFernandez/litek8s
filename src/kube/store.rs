@@ -1,7 +1,10 @@
 //! Generic object store behind the Kubernetes API.
 //!
-//! Every object is kept as JSON in memory, keyed by (group, resource,
-//! namespace, name), with one cluster-wide `resourceVersion` counter. Each
+//! Every object is kept in memory as compact JSON bytes (parsed on read: a
+//! parsed `serde_json::Value` takes ~10x the space, which on a 1 GiB node is
+//! the difference between 15 and 150 MB for a few charts' CRDs), keyed by
+//! (group, resource, namespace, name), with one cluster-wide
+//! `resourceVersion` counter. Each
 //! mutation appends a record to an event history (for watches that resume from
 //! a resourceVersion) and is broadcast to live watchers. With a data directory
 //! the store is durable through an append-only write-ahead log that is
@@ -96,7 +99,8 @@ struct HistoryEntry {
     rv: u64,
     key: ObjectKey,
     event: EventType,
-    object: Vec<u8>,
+    /// Shared with the object map while this is the current version.
+    object: Arc<[u8]>,
 }
 
 impl HistoryEntry {
@@ -140,8 +144,25 @@ pub struct StoreStats {
     pub feed_receivers: usize,
 }
 
+/// An object as stored: its resourceVersion and its compact JSON.
+#[derive(Clone)]
+struct Stored {
+    rv: u64,
+    json: Arc<[u8]>,
+}
+
+impl Stored {
+    fn new(obj: &Value) -> Self {
+        Self { rv: resource_version(obj).unwrap_or(0), json: serde_json::to_vec(obj).unwrap_or_default().into() }
+    }
+
+    fn value(&self) -> Value {
+        serde_json::from_slice(&self.json).unwrap_or(Value::Null)
+    }
+}
+
 struct Inner {
-    objects: BTreeMap<ObjectKey, Value>,
+    objects: BTreeMap<ObjectKey, Stored>,
     rv: u64,
     history: VecDeque<HistoryEntry>,
     history_bytes: usize,
@@ -186,7 +207,7 @@ impl Store {
                         };
                         rv = rv.max(record.rv);
                         match record.obj {
-                            Some(obj) => objects.insert(record.key, obj),
+                            Some(obj) => objects.insert(record.key, Stored::new(&obj)),
                             None => objects.remove(&record.key),
                         };
                     }
@@ -227,24 +248,29 @@ impl Store {
     }
 
     pub fn get(&self, key: &ObjectKey) -> Option<Value> {
-        self.inner.lock().unwrap().objects.get(key).cloned()
+        // Copy the bytes out, parse outside the lock.
+        let json = self.inner.lock().unwrap().objects.get(key).map(|s| s.json.clone());
+        json.map(|j| serde_json::from_slice(&j).unwrap_or(Value::Null))
     }
 
     /// All objects of one resource, optionally restricted to a namespace, in
     /// key order, plus the resourceVersion the snapshot was taken at.
     pub fn list(&self, group: &str, resource: &str, namespace: Option<&str>) -> (Vec<Value>, u64) {
-        let inner = self.inner.lock().unwrap();
-        let items = inner
-            .objects
-            .range(range_start(group, resource, namespace)..)
-            .take_while(|(k, _)| {
-                k.group == group
-                    && k.resource == resource
-                    && namespace.is_none_or(|ns| k.namespace == ns)
-            })
-            .map(|(_, v)| v.clone())
-            .collect();
-        (items, inner.rv)
+        let (jsons, rv): (Vec<Arc<[u8]>>, u64) = {
+            let inner = self.inner.lock().unwrap();
+            let jsons = inner
+                .objects
+                .range(range_start(group, resource, namespace)..)
+                .take_while(|(k, _)| {
+                    k.group == group
+                        && k.resource == resource
+                        && namespace.is_none_or(|ns| k.namespace == ns)
+                })
+                .map(|(_, v)| v.json.clone())
+                .collect();
+            (jsons, inner.rv)
+        };
+        (jsons.iter().map(|j| serde_json::from_slice(j).unwrap_or(Value::Null)).collect(), rv)
     }
 
     /// Every key in a namespace, across all resources (namespace deletion).
@@ -265,7 +291,7 @@ impl Store {
             .objects
             .iter()
             .filter(|(k, _)| k.namespace == namespace)
-            .map(|(k, v)| (k.clone(), v.clone()))
+            .map(|(k, v)| (k.clone(), v.value()))
             .collect()
     }
 
@@ -299,10 +325,8 @@ impl Store {
         let Some(current) = inner.objects.get(&key) else {
             return Err(StoreError::NotFound);
         };
-        if let Some(expected) = expected_rv {
-            if resource_version(current) != Some(expected) {
-                return Err(StoreError::Conflict);
-            }
+        if expected_rv.is_some_and(|expected| current.rv != expected) {
+            return Err(StoreError::Conflict);
         }
         Ok(self.commit(&mut inner, key, Some(object), EventType::Modified))
     }
@@ -312,10 +336,8 @@ impl Store {
         let Some(current) = inner.objects.get(key) else {
             return Err(StoreError::NotFound);
         };
-        if let Some(expected) = expected_rv {
-            if resource_version(current) != Some(expected) {
-                return Err(StoreError::Conflict);
-            }
+        if expected_rv.is_some_and(|expected| current.rv != expected) {
+            return Err(StoreError::Conflict);
         }
         Ok(self.commit(&mut inner, key.clone(), None, EventType::Deleted))
     }
@@ -359,24 +381,21 @@ impl Store {
         let rv = inner.rv;
         let mut stored = match object {
             Some(obj) => obj,
-            None => inner.objects.remove(&key).unwrap_or(Value::Null),
+            None => inner.objects.remove(&key).map(|s| s.value()).unwrap_or(Value::Null),
         };
         if let Some(meta) = stored.get_mut("metadata").and_then(Value::as_object_mut) {
             meta.insert("resourceVersion".into(), Value::String(rv.to_string()));
         }
+        // Serialized once: the object map, the history and the WAL share it.
+        let json: Arc<[u8]> = serde_json::to_vec(&stored).unwrap_or_default().into();
         if event != EventType::Deleted {
-            inner.objects.insert(key.clone(), stored.clone());
+            inner.objects.insert(key.clone(), Stored { rv, json: json.clone() });
         }
 
         let object_count = inner.objects.len();
         let snapshot_rv = inner.rv;
         if let Some(wal) = inner.wal.as_mut() {
-            let record = WalRecord {
-                rv,
-                key: key.clone(),
-                obj: (event != EventType::Deleted).then(|| stored.clone()),
-            };
-            let line = serde_json::to_vec(&record).unwrap_or_default();
+            let line = wal_line(rv, &key, (event != EventType::Deleted).then_some(&json[..]));
             let appended = wal
                 .writer
                 .write_all(&line)
@@ -405,13 +424,12 @@ impl Store {
             event,
             object: stored.clone(),
         });
-        let object = serde_json::to_vec(&event.object).unwrap_or_default();
-        inner.history_bytes += object.len();
+        inner.history_bytes += json.len();
         inner.history.push_back(HistoryEntry {
             rv,
             key: event.key.clone(),
             event: event.event,
-            object,
+            object: json,
         });
         while inner.history.len() > HISTORY_CAPACITY || (inner.history_bytes > HISTORY_MAX_BYTES && inner.history.len() > 1) {
             let Some(old) = inner.history.pop_front() else { break };
@@ -436,34 +454,33 @@ pub fn resource_version(object: &Value) -> Option<u64> {
 
 /// Rewrite the WAL as one record per live object (via a temp file + rename)
 /// and return an appender positioned at its end.
-fn write_compacted(path: &Path, objects: &BTreeMap<ObjectKey, Value>, rv: u64) -> Result<Wal> {
+/// One WAL line, from the object's JSON as stored (`None`: a delete).
+fn wal_line(rv: u64, key: &ObjectKey, obj: Option<&[u8]>) -> Vec<u8> {
+    let key = serde_json::to_vec(key).unwrap_or_default();
+    let obj = obj.unwrap_or(b"null");
+    let mut line = Vec::with_capacity(obj.len() + key.len() + 40);
+    line.extend_from_slice(format!("{{\"rv\":{rv},\"key\":").as_bytes());
+    line.extend_from_slice(&key);
+    line.extend_from_slice(b",\"obj\":");
+    line.extend_from_slice(obj);
+    line.push(b'}');
+    line
+}
+
+fn write_compacted(path: &Path, objects: &BTreeMap<ObjectKey, Stored>, rv: u64) -> Result<Wal> {
     let tmp = path.with_extension("wal.tmp");
     {
         let mut out = BufWriter::new(
             File::create(&tmp).with_context(|| format!("failed to create {}", tmp.display()))?,
         );
         for (key, obj) in objects {
-            let record_rv = resource_version(obj).unwrap_or(rv);
-            serde_json::to_writer(
-                &mut out,
-                &WalRecord {
-                    rv: record_rv,
-                    key: key.clone(),
-                    obj: Some(obj.clone()),
-                },
-            )?;
+            let record_rv = if obj.rv > 0 { obj.rv } else { rv };
+            out.write_all(&wal_line(record_rv, key, Some(&obj.json)))?;
             out.write_all(b"\n")?;
         }
         // Keep the counter even when the newest change was a delete.
-        if objects.values().filter_map(resource_version).max() != Some(rv) && rv > 0 {
-            serde_json::to_writer(
-                &mut out,
-                &WalRecord {
-                    rv,
-                    key: ObjectKey::new("", "", "", ""),
-                    obj: None,
-                },
-            )?;
+        if objects.values().map(|o| o.rv).max() != Some(rv) && rv > 0 {
+            out.write_all(&wal_line(rv, &ObjectKey::new("", "", "", ""), None))?;
             out.write_all(b"\n")?;
         }
         out.flush()?;
@@ -569,4 +586,42 @@ mod tests {
         let c = store.create(key("c"), cm("c")).unwrap();
         assert_eq!(resource_version(&c), Some(4));
     }
+}
+
+/// Memory a store holding real objects takes: `LITEK8S_STORE_FIXTURE` is a
+/// file of JSON objects (one per line), loaded `LITEK8S_STORE_COPIES` times.
+/// `cargo test --release --lib store_memory -- --ignored --nocapture`
+#[cfg(test)]
+#[test]
+#[ignore]
+fn store_memory() {
+    let Ok(path) = std::env::var("LITEK8S_STORE_FIXTURE") else { return };
+    let copies: usize = std::env::var("LITEK8S_STORE_COPIES").ok().and_then(|c| c.parse().ok()).unwrap_or(1);
+    let rss = || {
+        let out = std::process::Command::new("ps").args(["-o", "rss=", "-p", &std::process::id().to_string()]).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).trim().parse::<u64>().unwrap_or(0) / 1024
+    };
+    let lines: Vec<String> = std::fs::read_to_string(&path).unwrap().lines().map(str::to_string).collect();
+    let bytes: usize = lines.iter().map(String::len).sum::<usize>() * copies;
+    let before = rss();
+    let store = Store::open(None).unwrap();
+    for c in 0..copies {
+        for (i, line) in lines.iter().enumerate() {
+            let obj: Value = serde_json::from_str(line).unwrap();
+            store.create(ObjectKey::new("x", "y", "", &format!("{c}-{i}")), obj).unwrap();
+        }
+    }
+    let (items, _) = store.list("x", "y", None);
+    drop(items);
+    eprintln!("{} objects, {} MiB of JSON: {} MiB resident over the baseline", lines.len() * copies, bytes >> 20, rss() - before);
+    // Steady state: the change feed has moved on to small objects.
+    for i in 0..FEED_CAPACITY * 2 {
+        store.create(ObjectKey::new("", "configmaps", "default", &format!("cm{i}")), serde_json::json!({"metadata": {"name": "cm"}})).unwrap();
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: no preconditions.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+    eprintln!("after {} more small changes: {} MiB", FEED_CAPACITY * 2, rss() - before);
 }
