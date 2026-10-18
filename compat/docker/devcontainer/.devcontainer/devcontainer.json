@@ -1,0 +1,15 @@
+{
+  // What VS Code / Cursor's Dev Containers do through the Docker API:
+  // build with a feature, run long-lived with labels and the workspace
+  // bind-mounted, exec as the remote user, copy files in.
+  "name": "litek8s-devcontainer",
+  "image": "mcr.microsoft.com/devcontainers/base:debian",
+  "features": {
+    "ghcr.io/devcontainers/features/github-cli:1": {}
+  },
+  "remoteUser": "vscode",
+  "containerEnv": { "LITEK8S_TEST": "devcontainer" },
+  "mounts": ["source=litek8s-devcontainer-cache,target=/home/vscode/.cache,type=volume"],
+  "forwardPorts": [3000],
+  "postCreateCommand": "id -u > /tmp/post-create && touch created-in-container.txt"
+}

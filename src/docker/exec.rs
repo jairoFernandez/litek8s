@@ -340,6 +340,15 @@ impl Engine {
                 (out, input)
             }
         };
+        // The stream ends once the exit code is known: clients inspect the
+        // exec right after its output ends.
+        let mut code_rx = inst.exit_code.subscribe();
+        let output = output
+            .chain(futures_util::stream::once(async move {
+                let _ = tokio::time::timeout(Duration::from_secs(10), code_rx.wait_for(|c| c.is_some())).await;
+            })
+            .filter_map(|_| async { None }))
+            .boxed();
         self.emit_container(&rec, &format!("exec_start: {}", strings(&inst.config["Cmd"]).join(" ")), &[("execID", id.to_string())]);
         let engine = self.clone();
         let inst2 = inst.clone();
