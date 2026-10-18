@@ -42,6 +42,10 @@ struct VmConfig {
     cpus: usize,
     port: Option<u16>,
     mac: String,
+    /// More Mac directories shared at the same path: (virtiofs tag, path).
+    /// /tmp and /var/folders, as Docker Desktop shares them.
+    #[serde(default)]
+    extra_shares: Vec<(String, PathBuf)>,
 }
 
 const ENTITLEMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -140,6 +144,11 @@ pub fn start(home: &Path, opts: &UpOptions) -> Result<u32> {
         cpus: opts.cpus.unwrap_or((ncpu / 2).clamp(1, 8)),
         port: opts.port,
         mac,
+        extra_shares: [("tmp", "/private/tmp"), ("folders", "/private/var/folders")]
+            .iter()
+            .filter(|(_, p)| Path::new(p).is_dir())
+            .map(|(t, p)| (t.to_string(), PathBuf::from(p)))
+            .collect(),
     };
     let config_path = state_dir.join("vm.json");
     std::fs::write(&config_path, serde_json::to_vec_pretty(&config)?)?;
@@ -193,11 +202,18 @@ fn pipe() -> (OwnedFd, OwnedFd) {
     }
 }
 
-fn kernel_cmdline(config: &VmConfig) -> String {
+fn kernel_cmdline(config: &VmConfig, rosetta: bool) -> String {
     let verbose = std::env::var_os("LITEK8S_DEV_VM_DEBUG").is_some();
     let mut cmdline = String::from(if verbose { "console=hvc0 loglevel=7 printk.time=1 rdinit=/init" } else { "console=hvc0 quiet loglevel=3 rdinit=/init" });
     if let Some(share) = &config.share {
         cmdline.push_str(&format!(" litek8s.share={}", share.display()));
+    }
+    if !config.extra_shares.is_empty() {
+        let list: Vec<String> = config.extra_shares.iter().map(|(t, p)| format!("{t}:{}", p.display())).collect();
+        cmdline.push_str(&format!(" litek8s.mounts={}", list.join(",")));
+    }
+    if rosetta {
+        cmdline.push_str(" litek8s.rosetta=1");
     }
     let mut seed = [0u8; 32];
     let _ = std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut seed));
@@ -240,9 +256,13 @@ fn vm_main_inner(args: &[String]) -> Result<Never> {
     // SAFETY: Virtualization.framework calls on the main thread with valid
     // objects; the file handles own the descriptors (closeOnDealloc).
     let vm = unsafe {
+        // Rosetta runs linux/amd64 binaries in the VM (binfmt_misc in the
+        // guest points at it), when it is installed on the Mac.
+        let rosetta = std::env::var_os("LITEK8S_DEV_NO_ROSETTA").is_none()
+            && VZLinuxRosettaDirectoryShare::availability() == VZLinuxRosettaAvailability::Installed;
         let boot = VZLinuxBootLoader::initWithKernelURL(VZLinuxBootLoader::alloc(), &url(&config.kernel));
         boot.setInitialRamdiskURL(Some(&url(&config.initrd)));
-        boot.setCommandLine(&NSString::from_str(&kernel_cmdline(&config)));
+        boot.setCommandLine(&NSString::from_str(&kernel_cmdline(&config, rosetta)));
 
         let vz = VZVirtualMachineConfiguration::new();
         vz.setBootLoader(Some(&boot));
@@ -277,12 +297,27 @@ fn vm_main_inner(args: &[String]) -> Result<Never> {
         vz.setMemoryBalloonDevices(&NSArray::from_retained_slice(&[Retained::into_super(
             VZVirtioTraditionalMemoryBalloonDeviceConfiguration::new(),
         )]));
-        if let Some(share) = &config.share {
-            let dir = VZSharedDirectory::initWithURL_readOnly(VZSharedDirectory::alloc(), &url(share), false);
+        let mut shares: Vec<Retained<VZDirectorySharingDeviceConfiguration>> = Vec::new();
+        let dirs = config.share.iter().map(|s| ("share".to_string(), s.clone())).chain(config.extra_shares.iter().cloned());
+        for (tag, path) in dirs {
+            let dir = VZSharedDirectory::initWithURL_readOnly(VZSharedDirectory::alloc(), &url(&path), false);
             let single = VZSingleDirectoryShare::initWithDirectory(VZSingleDirectoryShare::alloc(), &dir);
-            let fs = VZVirtioFileSystemDeviceConfiguration::initWithTag(VZVirtioFileSystemDeviceConfiguration::alloc(), &NSString::from_str("share"));
+            let fs = VZVirtioFileSystemDeviceConfiguration::initWithTag(VZVirtioFileSystemDeviceConfiguration::alloc(), &NSString::from_str(&tag));
             fs.setShare(Some(&single));
-            vz.setDirectorySharingDevices(&NSArray::from_retained_slice(&[Retained::into_super(fs)]));
+            shares.push(Retained::into_super(fs));
+        }
+        if rosetta {
+            match VZLinuxRosettaDirectoryShare::initWithError(VZLinuxRosettaDirectoryShare::alloc()) {
+                Ok(r) => {
+                    let fs = VZVirtioFileSystemDeviceConfiguration::initWithTag(VZVirtioFileSystemDeviceConfiguration::alloc(), &NSString::from_str("rosetta"));
+                    fs.setShare(Some(&r));
+                    shares.push(Retained::into_super(fs));
+                }
+                Err(e) => eprintln!("dev-vm: no Rosetta: {}", e.localizedDescription()),
+            }
+        }
+        if !shares.is_empty() {
+            vz.setDirectorySharingDevices(&NSArray::from_retained_slice(&shares));
         }
         vz.setSocketDevices(&NSArray::from_retained_slice(&[Retained::into_super(VZVirtioSocketDeviceConfiguration::new())]));
         vz.validateWithError().map_err(|e| anyhow::anyhow!("invalid VM configuration: {}", e.localizedDescription()))?;
@@ -433,6 +468,9 @@ impl Host {
                         eprintln!("dev-vm: guest up after {} ms; API on 127.0.0.1:{port}", now_ms() - self.started);
                         forwarders.push(tokio::spawn(forward_accepts(listener_take(&listener), self.vm, super::guest::GUEST_API_PORT)));
                         forwarders.push(tokio::spawn(expose_services(self.vm, port)));
+                        forwarders.push(tokio::spawn(serve_docker_socket(self.vm)));
+                        forwarders.push(tokio::spawn(expose_docker_ports(self.vm)));
+                        forwarders.push(tokio::spawn(forward_fs_events(self.vm)));
                     }
                     Some(GuestEvent::Vsock) => {}
                     Some(GuestEvent::Up { ip }) => {
@@ -449,6 +487,7 @@ impl Host {
             }
         }
         let _ = std::fs::remove_file(super::state_path(&self.config.home));
+        let _ = std::fs::remove_file(crate::docker::host_socket_path());
         eprintln!("dev-vm: stopped");
     }
 
@@ -491,6 +530,177 @@ async fn forward_accepts(listener: std::net::TcpListener, vm: VmHandle, port: u1
                 Err(e) => eprintln!("dev-vm: port {port}: {e:#}"),
             }
         });
+    }
+}
+
+/// The Docker API on the Mac: `~/.litek8s/docker.sock`, each connection
+/// relayed to the engine on the VM's loopback.
+async fn serve_docker_socket(vm: VmHandle) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = crate::docker::host_socket_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if tokio::net::UnixStream::connect(&path).await.is_ok() {
+        eprintln!("dev-vm: {} is in use; Docker API not exposed", path.display());
+        return;
+    }
+    let _ = std::fs::remove_file(&path);
+    let listener = match tokio::net::UnixListener::bind(&path) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("dev-vm: cannot listen on {}: {e}", path.display());
+            return;
+        }
+    };
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    eprintln!("dev-vm: Docker API on unix://{}", path.display());
+    loop {
+        let Ok((mut client, _)) = listener.accept().await else { continue };
+        tokio::spawn(async move {
+            match vm.dial(crate::docker::GUEST_PORT).await {
+                Ok(mut upstream) => {
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                }
+                Err(e) => eprintln!("dev-vm: docker: {e:#}"),
+            }
+        });
+    }
+}
+
+/// Keep a localhost listener (IPv4 and IPv6) for every port Docker
+/// containers publish, following the engine's port list.
+async fn expose_docker_ports(vm: VmHandle) {
+    use http_body_util::BodyExt;
+    let listeners: Arc<Mutex<HashMap<u16, Vec<tokio::task::JoinHandle<()>>>>> = Arc::default();
+    loop {
+        let result = async {
+            let stream = vm.dial(crate::docker::GUEST_PORT).await?;
+            let (mut sender, conn) = hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream)).await?;
+            tokio::spawn(async move {
+                let _ = conn.await;
+            });
+            let req = hyper::Request::builder()
+                .uri("/litek8s/v1/ports?watch=1")
+                .header(hyper::header::HOST, "docker")
+                .body(http_body_util::Empty::<hyper::body::Bytes>::new())?;
+            let mut body = sender.send_request(req).await?.into_body();
+            let mut buf = Vec::new();
+            while let Some(frame) = body.frame().await {
+                let Ok(data) = frame?.into_data() else { continue };
+                buf.extend_from_slice(&data);
+                while let Some(pos) = buf.iter().position(|b| *b == b'\n') {
+                    let line: Vec<u8> = buf.drain(..=pos).collect();
+                    let Ok(wanted) = serde_json::from_slice::<Vec<u16>>(&line) else { continue };
+                    let mut current = listeners.lock().unwrap();
+                    current.retain(|port, tasks| {
+                        let keep = wanted.contains(port);
+                        if !keep {
+                            tasks.iter().for_each(|t| t.abort());
+                        }
+                        keep
+                    });
+                    for port in wanted {
+                        if current.contains_key(&port) {
+                            continue;
+                        }
+                        let mut tasks = Vec::new();
+                        for addr in [std::net::SocketAddr::from(([127, 0, 0, 1], port)), std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port))] {
+                            match std::net::TcpListener::bind(addr) {
+                                Ok(l) => {
+                                    l.set_nonblocking(true).ok();
+                                    tasks.push(tokio::spawn(forward_accepts(l, vm, port)));
+                                }
+                                Err(e) if addr.is_ipv4() => eprintln!("dev-vm: localhost:{port} not exposed: {e}"),
+                                Err(_) => {}
+                            }
+                        }
+                        current.insert(port, tasks);
+                    }
+                }
+            }
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            if !format!("{e:#}").contains("vsock") {
+                eprintln!("dev-vm: docker ports: {e:#}");
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+}
+
+/// One request to the Docker engine in the VM; the response body.
+async fn docker_request(vm: VmHandle, method: hyper::Method, path: &str, body: Vec<u8>) -> Result<hyper::Response<hyper::body::Incoming>> {
+    let stream = vm.dial(crate::docker::GUEST_PORT).await?;
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream)).await?;
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    let req = hyper::Request::builder()
+        .method(method)
+        .uri(path)
+        .header(hyper::header::HOST, "docker")
+        .header(hyper::header::CONTENT_TYPE, "application/json")
+        .body(http_body_util::Full::new(hyper::body::Bytes::from(body)))?;
+    Ok(sender.send_request(req).await?)
+}
+
+/// Mac file changes under the directories running containers bind-mount,
+/// passed to the guest (see [`super::fsevents`]).
+async fn forward_fs_events(vm: VmHandle) {
+    use http_body_util::BodyExt;
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<(String, u32)>>();
+    // Sender of the paths: batches events and posts them to the guest.
+    tokio::spawn(async move {
+        let mut recent: HashMap<String, std::time::Instant> = HashMap::new();
+        while let Some(batch) = rx.recv().await {
+            let mut paths: Vec<String> = batch.into_iter().filter(|(_, f)| f & super::fsevents::CHANGE_FLAGS != 0).map(|(p, _)| p).collect();
+            // More of the same burst.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            while let Ok(more) = rx.try_recv() {
+                paths.extend(more.into_iter().filter(|(_, f)| f & super::fsevents::CHANGE_FLAGS != 0).map(|(p, _)| p));
+            }
+            let now = std::time::Instant::now();
+            recent.retain(|_, t| now.duration_since(*t) < Duration::from_millis(300));
+            paths.sort();
+            paths.dedup();
+            paths.retain(|p| recent.insert(p.clone(), now).is_none());
+            if paths.is_empty() {
+                continue;
+            }
+            let body = serde_json::to_vec(&paths).unwrap_or_default();
+            if let Err(e) = docker_request(vm, hyper::Method::POST, "/litek8s/v1/fsevents", body).await {
+                eprintln!("dev-vm: file events: {e:#}");
+            }
+        }
+    });
+    loop {
+        let result = async {
+            let mut body = docker_request(vm, hyper::Method::GET, "/litek8s/v1/binds?watch=1", Vec::new()).await?.into_body();
+            let mut watcher: Option<super::fsevents::Watcher> = None;
+            let mut buf = Vec::new();
+            while let Some(frame) = body.frame().await {
+                let Ok(data) = frame?.into_data() else { continue };
+                buf.extend_from_slice(&data);
+                while let Some(pos) = buf.iter().position(|b| *b == b'\n') {
+                    let line: Vec<u8> = buf.drain(..=pos).collect();
+                    let Ok(sources) = serde_json::from_slice::<Vec<String>>(&line) else { continue };
+                    let roots = super::fsevents::roots(&sources);
+                    watcher = super::fsevents::Watcher::new(&roots, tx.clone());
+                }
+            }
+            drop(watcher);
+            anyhow::Ok(())
+        }
+        .await;
+        if let Err(e) = result {
+            if !format!("{e:#}").contains("vsock") {
+                eprintln!("dev-vm: file events: {e:#}");
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
@@ -614,8 +824,10 @@ mod tests {
             cpus: 2,
             port: None,
             mac: random_mac(),
+            extra_shares: vec![("tmp".into(), "/private/tmp".into())],
         };
-        assert!(kernel_cmdline(&c).contains(" litek8s.share=/Users/me litek8s.seed="));
+        let line = kernel_cmdline(&c, true);
+        assert!(line.contains(" litek8s.share=/Users/me litek8s.mounts=tmp:/private/tmp litek8s.rosetta=1 litek8s.seed="), "{line}");
         assert_eq!(c.mac.len(), 17);
     }
 }

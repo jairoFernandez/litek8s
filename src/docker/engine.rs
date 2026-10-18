@@ -96,6 +96,9 @@ pub struct Engine {
     pub dns: Arc<RwLock<DnsTable>>,
     /// Host ports currently published (the Mac forwards these).
     pub published: watch::Sender<Vec<u16>>,
+    /// Bind mount sources of running containers (the Mac watches them for
+    /// file changes).
+    pub binds: watch::Sender<Vec<String>>,
     pub socket_aliases: Vec<String>,
     pub internal_socket: PathBuf,
     pub execs: Mutex<HashMap<String, Arc<super::exec::ExecInst>>>,
@@ -345,6 +348,7 @@ impl Engine {
             publisher: opts.publisher,
             dns,
             published: watch::channel(Vec::new()).0,
+            binds: watch::channel(Vec::new()).0,
             socket_aliases: opts.socket_aliases,
             internal_socket: opts.internal_socket,
             execs: Mutex::new(HashMap::new()),
@@ -1446,6 +1450,24 @@ impl Engine {
             .collect();
         ports.sort();
         ports.dedup();
+        let mut binds: Vec<String> = self
+            .list()
+            .iter()
+            .map(|c| c.record())
+            .filter(|r| r.state.running())
+            .flat_map(|r| r.mounts.into_iter().filter(|m| m.kind == "bind").map(|m| m.source))
+            .filter(|s| !s.starts_with("/run/"))
+            .collect();
+        binds.sort();
+        binds.dedup();
+        self.binds.send_if_modified(|v| {
+            if *v != binds {
+                *v = binds;
+                true
+            } else {
+                false
+            }
+        });
         self.published.send_if_modified(|v| {
             if *v != ports {
                 *v = ports;
@@ -1454,6 +1476,22 @@ impl Engine {
                 false
             }
         });
+    }
+
+    /// Files changed outside (the Mac): re-apply each one's mode so this
+    /// kernel tells inotify watchers (IN_ATTRIB on the file and in its
+    /// directory). A removed path signals its directory.
+    pub fn touch_paths(&self, paths: &[String]) {
+        for p in paths {
+            let path = Path::new(p);
+            let target = match std::fs::symlink_metadata(path) {
+                Ok(m) if !m.file_type().is_symlink() => Some((path.to_path_buf(), m)),
+                _ => path.parent().and_then(|d| std::fs::metadata(d).ok().map(|m| (d.to_path_buf(), m))),
+            };
+            if let Some((t, m)) = target {
+                let _ = std::fs::set_permissions(&t, m.permissions());
+            }
+        }
     }
 
     /// Copy the image's files into empty volumes mounted over them.

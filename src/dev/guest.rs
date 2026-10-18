@@ -40,6 +40,11 @@ pub struct BootOptions {
     /// Random bytes from the host, credited to the guest's entropy pool so
     /// getrandom() does not block early in boot (hex).
     pub seed: Option<Vec<u8>>,
+    /// More virtiofs shares: (tag, path to mount it at).
+    pub mounts: Vec<(String, String)>,
+    /// The Mac shares Rosetta (tag `rosetta`): run linux/amd64 binaries
+    /// with it.
+    pub rosetta: bool,
 }
 
 pub fn parse_cmdline(cmdline: &str) -> BootOptions {
@@ -51,6 +56,10 @@ pub fn parse_cmdline(cmdline: &str) -> BootOptions {
             o.disk = v.to_string();
         } else if let Some(v) = word.strip_prefix("litek8s.seed=") {
             o.seed = hex::decode(v).ok();
+        } else if let Some(v) = word.strip_prefix("litek8s.mounts=") {
+            o.mounts = v.split(',').filter_map(|m| m.split_once(':')).map(|(t, p)| (t.to_string(), p.to_string())).collect();
+        } else if word == "litek8s.rosetta=1" {
+            o.rosetta = true;
         }
     }
     o
@@ -206,6 +215,25 @@ mod init {
         let _ = std::io::copy(&mut tcp_r, &mut conn_w);
         let _ = conn_w.shutdown(std::net::Shutdown::Write);
         let _ = up.join();
+    }
+
+    /// Register Rosetta (shared by the Mac) as the interpreter of x86-64 ELF
+    /// binaries. `F` opens it now, so it works inside containers' mount
+    /// namespaces too.
+    fn setup_rosetta() {
+        const REGISTER: &str = r":rosetta:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\x3e\x00:\xff\xff\xff\xff\xff\xfe\xfe\x00\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/run/rosetta/rosetta:CF";
+        if let Err(e) = mount("rosetta", "/run/rosetta", "virtiofs", libc::MS_RDONLY, "") {
+            say(&format!("no Rosetta share: {e}"));
+            return;
+        }
+        let _ = std::process::Command::new("/sbin/modprobe").args(["-q", "binfmt_misc"]).status();
+        let _ = mount("binfmt_misc", "/proc/sys/fs/binfmt_misc", "binfmt_misc", libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC, "");
+        if std::path::Path::new("/proc/sys/fs/binfmt_misc/rosetta").exists() {
+            return;
+        }
+        if let Err(e) = std::fs::write("/proc/sys/fs/binfmt_misc/register", REGISTER) {
+            say(&format!("cannot register Rosetta with binfmt_misc: {e}"));
+        }
     }
 
     fn say(msg: &str) {
@@ -430,6 +458,14 @@ mod init {
                 say(&format!("cannot mount the shared directory at {share}: {e}"));
             }
         }
+        for (tag, path) in &opts.mounts {
+            if let Err(e) = mount(tag, path, "virtiofs", 0, "") {
+                say(&format!("cannot mount {tag} at {path}: {e}"));
+            }
+        }
+        if opts.rosetta {
+            setup_rosetta();
+        }
         let t_disk = started.elapsed().as_millis() - t_disk_start;
         if let Err(e) = serve_vsock() {
             say(&format!("no vsock ({e}); the host cannot reach the cluster"));
@@ -505,7 +541,10 @@ mod tests {
     #[test]
     fn parses_boot_options() {
         let o = parse_cmdline("console=hvc0 quiet litek8s.share=/Users/me litek8s.disk=/dev/vdb litek8s.seed=00ff");
-        assert_eq!(o, BootOptions { share: Some("/Users/me".into()), disk: "/dev/vdb".into(), seed: Some(vec![0, 255]) });
+        assert_eq!(o, BootOptions { share: Some("/Users/me".into()), disk: "/dev/vdb".into(), seed: Some(vec![0, 255]), ..Default::default() });
+        let o = parse_cmdline("litek8s.mounts=tmp:/private/tmp,folders:/private/var/folders litek8s.rosetta=1");
+        assert_eq!(o.mounts, vec![("tmp".to_string(), "/private/tmp".to_string()), ("folders".to_string(), "/private/var/folders".to_string())]);
+        assert!(o.rosetta);
         assert_eq!(parse_cmdline("console=hvc0").disk, "/dev/vda");
     }
 

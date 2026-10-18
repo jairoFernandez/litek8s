@@ -19,6 +19,8 @@ pub mod kubeconfig;
 pub mod sandbox;
 #[cfg(target_os = "macos")]
 pub mod vm;
+#[cfg(target_os = "macos")]
+pub mod fsevents;
 pub mod guest;
 
 use std::path::{Path, PathBuf};

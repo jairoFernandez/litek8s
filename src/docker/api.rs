@@ -220,6 +220,14 @@ async fn dispatch(engine: &Arc<Engine>, method: Method, s: &[&str], req: Request
         }
         (Method::GET, ["plugins"]) => Ok(json_resp(200, &json!([]))),
         (Method::GET, ["litek8s", "v1", "ports"]) => Ok(ports_watch(engine, qbool(&q, "watch"))),
+        (Method::GET, ["litek8s", "v1", "binds"]) => Ok(binds_watch(engine)),
+        (Method::POST, ["litek8s", "v1", "fsevents"]) => {
+            let body = body_json(req).await?;
+            let paths: Vec<String> = body.as_array().into_iter().flatten().filter_map(|p| p.as_str().map(str::to_string)).collect();
+            let engine = engine.clone();
+            tokio::task::spawn_blocking(move || engine.touch_paths(&paths));
+            Ok(no_content())
+        }
 
         // Containers
         (Method::GET, ["containers", "json"]) => Ok(json_resp(200, &list_containers(engine, &q))),
@@ -575,6 +583,18 @@ fn ports_watch(engine: &Engine, watch: bool) -> Response<Body> {
     if !watch {
         return json_resp(200, &json!(*rx.borrow()));
     }
+    let s = futures_util::stream::unfold((rx, true), |(mut rx, first)| async move {
+        if !first && rx.changed().await.is_err() {
+            return None;
+        }
+        let v = json!(*rx.borrow_and_update());
+        Some((Bytes::from(format!("{v}\n")), (rx, false)))
+    });
+    stream_resp("application/json", s)
+}
+
+fn binds_watch(engine: &Engine) -> Response<Body> {
+    let rx = engine.binds.subscribe();
     let s = futures_util::stream::unfold((rx, true), |(mut rx, first)| async move {
         if !first && rx.changed().await.is_err() {
             return None;
