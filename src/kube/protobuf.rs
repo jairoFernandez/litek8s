@@ -83,6 +83,8 @@ fn message_for(api_version: &str, kind: &str) -> Option<MessageDescriptor> {
         format!("k8s.io.api.{short}.{version}.{kind}"),
         // CustomResourceDefinition lives outside k8s.io/api.
         format!("k8s.io.{short}_apiserver.pkg.apis.{short}.{version}.{kind}"),
+        // So does APIService.
+        format!("k8s.io.kube_aggregator.pkg.apis.{short}.{version}.{kind}"),
         format!("{META}.{kind}"),
     ]
     .iter()
@@ -285,6 +287,7 @@ fn is_pointer(message: &str, field: &str) -> bool {
     let short = message
         .strip_prefix("k8s.io.api.")
         .or_else(|| message.strip_prefix("k8s.io.apimachinery.pkg.apis."))
+        .or_else(|| message.strip_prefix("k8s.io.kube_aggregator.pkg.apis."))
         .unwrap_or(message);
     super::proto_pointers::POINTER_FIELDS.binary_search(&format!("{short}.{field}").as_str()).is_ok()
 }
@@ -374,6 +377,29 @@ mod tests {
         assert_eq!(
             v,
             json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "app"}, "data": {"color": "blue"}})
+        );
+    }
+
+    #[test]
+    fn decodes_an_apiservice() {
+        let agg = "k8s.io.kube_aggregator.pkg.apis.apiregistration.v1";
+        let msg = |name: &str| DynamicMessage::new(pool().get_message_by_name(&format!("{agg}.{name}")).unwrap());
+        let mut svc = msg("ServiceReference");
+        svc.set_field_by_name("namespace", Pv::String("ns".into()));
+        svc.set_field_by_name("name", Pv::String("api".into()));
+        svc.set_field_by_name("port", Pv::I32(443));
+        let mut spec = msg("APIServiceSpec");
+        spec.set_field_by_name("service", Pv::Message(svc));
+        spec.set_field_by_name("group", Pv::String("wardle.example.com".into()));
+        spec.set_field_by_name("version", Pv::String("v1alpha1".into()));
+        spec.set_field_by_name("insecureSkipTLSVerify", Pv::Bool(false));
+        spec.set_field_by_name("groupPriorityMinimum", Pv::I32(2000));
+        let mut api = msg("APIService");
+        api.set_field_by_name("spec", Pv::Message(spec));
+        let v = decode(&envelope("apiregistration.k8s.io/v1", "APIService", api.encode_to_vec())).unwrap();
+        assert_eq!(
+            v["spec"],
+            json!({"service": {"namespace": "ns", "name": "api", "port": 443}, "group": "wardle.example.com", "version": "v1alpha1", "groupPriorityMinimum": 2000})
         );
     }
 

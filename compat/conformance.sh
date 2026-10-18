@@ -41,6 +41,8 @@ fi
 out="$dir/results/conformance-$(date +%Y%m%d-%H%M%S)-$target"
 mkdir -p "$out"
 kubeconfig=${KUBECONFIG:-$HOME/.kube/config}
+# ginkgo runs e2e.test from another directory.
+case $kubeconfig in /*) ;; *) kubeconfig=$PWD/$kubeconfig ;; esac
 e2e_args=(--kubeconfig="$kubeconfig" --provider=skeleton --disable-log-dump
     --dump-logs-on-failure=false)
 

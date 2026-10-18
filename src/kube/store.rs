@@ -22,7 +22,7 @@ use tokio::sync::broadcast;
 /// How many past events a watch can resume from before getting `410 Gone`
 /// (clients then relist). History keeps each version as compact JSON bytes,
 /// a quarter of the size of the parsed form.
-const HISTORY_CAPACITY: usize = 1024;
+const HISTORY_CAPACITY: usize = 4096;
 /// Live change-feed buffer. Every consumer drains it right away; one that
 /// falls this far behind resyncs. Kept small because each slot pins a parsed
 /// object version until it is overwritten.

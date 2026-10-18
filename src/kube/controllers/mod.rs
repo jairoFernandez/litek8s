@@ -263,6 +263,13 @@ impl Manager {
             ("", "services") => self.enqueue(Kind::Service, ns, name),
             // Hand-written Endpoints of selector-less Services are mirrored.
             ("", "endpoints") => self.enqueue(Kind::Service, ns, name),
+            // A deleted or edited slice of ours is put back.
+            ("discovery.k8s.io", "endpointslices") => {
+                let svc = obj.pointer("/metadata/labels/kubernetes.io~1service-name").and_then(Value::as_str).unwrap_or_default().to_string();
+                if !svc.is_empty() && util::s(obj, "/metadata/labels/endpointslice.kubernetes.io~1managed-by") == "endpointslice-controller.k8s.io" {
+                    self.enqueue(Kind::Service, ns, &svc);
+                }
+            }
             ("", "namespaces") if event.event != EventType::Deleted => self.enqueue(Kind::Namespace, "", name),
             // Deleted or edited: put the CA bundle back.
             ("", "configmaps") if name == super::defaults::ROOT_CA_CONFIGMAP => self.enqueue(Kind::Namespace, "", ns),

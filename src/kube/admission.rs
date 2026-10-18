@@ -517,7 +517,7 @@ pub(crate) async fn convert_objects(api: &ApiState, crd: &Value, objects: Vec<Va
 /// Where a webhook listens: `ip:port`, and for a Service endpoint the pod
 /// behind it and its node.
 #[derive(Default)]
-struct Backend {
+pub(crate) struct Backend {
     addr: String,
     node: String,
     pod_uid: String,
@@ -525,7 +525,7 @@ struct Backend {
 }
 
 /// A ready backend of a Service port.
-fn resolve_service(api: &ApiState, ns: &str, name: &str, port: i64) -> Result<Backend> {
+pub(crate) fn resolve_service(api: &ApiState, ns: &str, name: &str, port: i64) -> Result<Backend> {
     let svc = api.get_object("", "services", ns, name).with_context(|| format!("service \"{ns}/{name}\" not found"))?;
     let ports = svc.pointer("/spec/ports").and_then(Value::as_array).cloned().unwrap_or_default();
     let svc_port = ports
@@ -555,7 +555,7 @@ fn resolve_service(api: &ApiState, ns: &str, name: &str, port: i64) -> Result<Ba
     bail!("no ready endpoints for service \"{ns}/{name}\"")
 }
 
-trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+pub(crate) trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Io for T {}
 
 /// Addresses the API server could not reach directly; tunneled from then on.
@@ -609,8 +609,13 @@ async fn dial(api: &ApiState, backend: &Backend) -> Result<Box<dyn Io>> {
     Ok(Box::new(ours))
 }
 
-async fn post(api: &ApiState, backend: &Backend, server_name: &str, path: &str, body: Vec<u8>, ca: Option<Vec<u8>>) -> Result<Value> {
+/// A TLS connection to `backend` that verifies `server_name` against the
+/// CA bundle (the system roots without one), or nothing when `insecure`.
+pub(crate) async fn tls_dial(api: &ApiState, backend: &Backend, server_name: &str, ca: Option<Vec<u8>>, insecure: bool) -> Result<Box<dyn Io>> {
     let tcp = dial(api, backend).await?;
+    if insecure {
+        return Ok(Box::new(super::agent::probe::tls_connect_any(tcp, server_name).await?));
+    }
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let builder = rustls::ClientConfig::builder_with_provider(provider).with_safe_default_protocol_versions()?;
     let config = match ca.filter(|c| !c.is_empty()) {
@@ -629,7 +634,11 @@ async fn post(api: &ApiState, backend: &Backend, server_name: &str, path: &str, 
         }
     };
     let name = ServerName::try_from(server_name.to_string())?;
-    let tls = tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, tcp).await?;
+    Ok(Box::new(tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, tcp).await?))
+}
+
+async fn post(api: &ApiState, backend: &Backend, server_name: &str, path: &str, body: Vec<u8>, ca: Option<Vec<u8>>) -> Result<Value> {
+    let tls = tls_dial(api, backend, server_name, ca, false).await?;
     let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tls)).await?;
     tokio::spawn(async move {
         let _ = conn.await;
@@ -673,6 +682,7 @@ mod tests {
             has_scale: false,
             printer_columns: vec![],
             custom: true,
+            aggregated: false,
         }
     }
 

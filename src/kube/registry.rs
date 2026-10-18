@@ -32,6 +32,9 @@ pub struct ResourceType {
     pub printer_columns: Vec<PrinterColumn>,
     /// Defined by a CustomResourceDefinition (no strategic merge patch).
     pub custom: bool,
+    /// Served by an extension API server behind an APIService; listed in
+    /// discovery here, every request proxied (see `aggregator.rs`).
+    pub aggregated: bool,
 }
 
 impl ResourceType {
@@ -170,6 +173,7 @@ impl Registry {
                     has_scale,
                     printer_columns: Vec::new(),
                     custom: false,
+                    aggregated: false,
                 }
             })
             .collect();
@@ -252,6 +256,14 @@ impl Registry {
         Ok(())
     }
 
+    /// Replace the resources an extension API server serves for a group
+    /// version (none: it is gone or unavailable).
+    pub fn set_aggregated(&self, group: &str, version: &str, types: Vec<ResourceType>) {
+        let mut all = self.types.write().unwrap();
+        all.retain(|t| !(t.aggregated && t.group == group && t.version == version));
+        all.extend(types);
+    }
+
     pub fn unregister_crd(&self, group: &str, plural: &str) {
         self.types
             .write()
@@ -317,6 +329,7 @@ pub fn crd_types(crd: &Value) -> Result<Vec<ResourceType>> {
             has_scale: version.pointer("/subresources/scale").is_some(),
             printer_columns,
             custom: true,
+            aggregated: false,
         });
     }
     if types.is_empty() {

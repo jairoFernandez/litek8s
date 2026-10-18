@@ -80,7 +80,7 @@ pub struct ApiServerConfig {
 
 pub struct ApiState {
     store: Store,
-    registry: Registry,
+    pub(crate) registry: Registry,
     server_address: String,
     log_requests: bool,
     /// Node agents connected to this server; pod log/exec/port-forward
@@ -294,6 +294,7 @@ pub async fn serve(config: ApiServerConfig) -> Result<()> {
     }
     eprintln!("apiserver: listening on http://{addr} (and https for in-cluster clients; no authentication)");
     tokio::spawn(super::controllers::run(state.clone()));
+    tokio::spawn(super::aggregator::run(state.clone()));
 
     // The local node comes first: where pods reach this host (Docker's
     // host-gateway, crun's bridge address) decides where DNS and the in-cluster port can listen.
@@ -906,6 +907,10 @@ async fn resource_request(
     version: &str,
     rest: &[&str],
 ) -> Result<Response<Body>, ApiError> {
+    // A group version an APIService delegates to an extension API server.
+    if let Some(api) = super::aggregator::service_for(state, group, version) {
+        return super::aggregator::proxy(state, &api, &req.path, req).await;
+    }
     // Legacy `/api/v1/watch/...` form.
     let (legacy_watch, rest) = match rest {
         ["watch", tail @ ..] => (true, tail),
@@ -2903,9 +2908,33 @@ impl ApiState {
                                 }
                             }
                         }
-                        // Fell behind or the store went away: end the watch;
-                        // clients re-list and re-watch.
-                        Err(broadcast::error::RecvError::Lagged(_)) | Err(broadcast::error::RecvError::Closed) => return,
+                        // Fell behind the live feed (a burst of writes):
+                        // catch up from the history, or end the watch if it
+                        // no longer reaches back; clients then re-list.
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            let Ok(caught_up) = state.store.subscribe(Some(last_rv)) else { return };
+                            live = caught_up.live;
+                            for e in &caught_up.backlog {
+                                if e.rv <= last_rv {
+                                    continue;
+                                }
+                                last_rv = e.rv;
+                                let converted;
+                                let e = if rt.custom && e.key.resource == rt.plural && e.key.group == rt.group {
+                                    converted = view(e).await;
+                                    &converted
+                                } else {
+                                    &**e
+                                };
+                                if let Some(kind) = classify(e, &mut seen) {
+                                    let event = json!({"type": kind, "object": e.object});
+                                    if tx.send(encode(event)).await.is_err() {
+                                        return;
+                                    }
+                                }
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => return,
                     },
                 }
             }

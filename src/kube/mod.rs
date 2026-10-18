@@ -4,6 +4,7 @@
 //! See compat/ for the corpus that measures how compatible it is.
 
 mod admission;
+mod aggregator;
 pub mod agent;
 pub mod cel;
 pub mod controllers;

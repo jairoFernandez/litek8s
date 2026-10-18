@@ -4,8 +4,8 @@
 //! `omitempty`-like in JSON, so its zero value, which protobuf clients always
 //! send, is dropped when decoding (see `protobuf.rs`).
 //!
-//! Generated from the `types.go` files of k8s.io/api and
-//! k8s.io/apimachinery/pkg/apis (v0.37), sorted for binary search.
+//! Generated from the `types.go` files of k8s.io/api,
+//! k8s.io/apimachinery/pkg/apis (v0.37) and k8s.io/kube-aggregator, sorted for binary search.
 
 pub(crate) const POINTER_FIELDS: &[&str] = &[
     "admission.v1.AdmissionRequest.dryRun",
@@ -20,6 +20,7 @@ pub(crate) const POINTER_FIELDS: &[&str] = &[
     "admissionregistration.v1beta1.ServiceReference.port",
     "admissionregistration.v1beta1.ValidatingWebhook.timeoutSeconds",
     "admissionregistration.v1beta1.WebhookClientConfig.url",
+    "apiregistration.v1.ServiceReference.port",
     "apiserverinternal.v1alpha1.StorageVersionStatus.commonEncodingVersion",
     "apps.v1.DaemonSetSpec.revisionHistoryLimit",
     "apps.v1.DaemonSetStatus.collisionCount",
