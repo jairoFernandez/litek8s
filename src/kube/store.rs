@@ -23,12 +23,18 @@ use tokio::sync::broadcast;
 /// (clients then relist). History keeps each version as compact JSON bytes,
 /// a quarter of the size of the parsed form.
 const HISTORY_CAPACITY: usize = 1024;
+/// ... and at most this many bytes: a burst of large objects (a chart's
+/// CRDs are up to ~1 MB each) must not pin hundreds of MB.
+const HISTORY_MAX_BYTES: usize = 16 << 20;
 /// Live change-feed buffer. Every consumer drains it right away; one that
 /// falls this far behind resyncs. Kept small because each slot pins a parsed
 /// object version until it is overwritten.
 const FEED_CAPACITY: usize = 256;
 /// Compact the WAL once it holds this many records beyond one per object.
 const WAL_COMPACT_SLACK: usize = 20_000;
+/// ... or once it is this much larger than right after the last compaction
+/// (records of big objects add up long before the record count does).
+const WAL_COMPACT_BYTES: u64 = 64 << 20;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ObjectKey {
@@ -117,6 +123,8 @@ struct Wal {
     writer: BufWriter<File>,
     records: usize,
     bytes: u64,
+    /// Size right after the last compaction.
+    base_bytes: u64,
 }
 
 /// Sizes the store keeps, for `/metrics`.
@@ -379,7 +387,7 @@ impl Store {
             }
             wal.records += 1;
             wal.bytes += line.len() as u64 + 1;
-            if wal.records > object_count + WAL_COMPACT_SLACK {
+            if wal.records > object_count + WAL_COMPACT_SLACK || wal.bytes > wal.base_bytes + WAL_COMPACT_BYTES.max(wal.base_bytes * 2) {
                 let path = wal.path.clone();
                 match write_compacted(&path, &inner.objects, snapshot_rv) {
                     Ok(fresh) => {
@@ -405,10 +413,9 @@ impl Store {
             event: event.event,
             object,
         });
-        if inner.history.len() > HISTORY_CAPACITY {
-            if let Some(old) = inner.history.pop_front() {
-                inner.history_bytes -= old.object.len();
-            }
+        while inner.history.len() > HISTORY_CAPACITY || (inner.history_bytes > HISTORY_MAX_BYTES && inner.history.len() > 1) {
+            let Some(old) = inner.history.pop_front() else { break };
+            inner.history_bytes -= old.object.len();
         }
         // No receivers is fine; watchers come and go.
         let _ = self.events.send(event);
@@ -471,6 +478,7 @@ fn write_compacted(path: &Path, objects: &BTreeMap<ObjectKey, Value>, rv: u64) -
         writer: BufWriter::new(file),
         records: objects.len(),
         bytes,
+        base_bytes: bytes,
     })
 }
 
@@ -513,6 +521,36 @@ mod tests {
         let names: Vec<_> = sub.backlog.iter().map(|e| e.key.name.clone()).collect();
         assert_eq!(names, vec!["b"]);
         assert!(store.subscribe(Some(2)).unwrap().backlog.is_empty());
+    }
+
+    #[test]
+    fn history_is_bounded_by_bytes() {
+        let store = Store::open(None).unwrap();
+        let big = "x".repeat(1 << 20);
+        for i in 0..40 {
+            let mut obj = cm(&format!("c{i}"));
+            obj["data"] = json!({"blob": big});
+            store.create(key(&format!("c{i}")), obj).unwrap();
+        }
+        let st = store.stats();
+        assert!(st.history_bytes <= HISTORY_MAX_BYTES, "{} bytes kept", st.history_bytes);
+        assert!(st.history_entries < 40 && st.history_entries >= 15);
+    }
+
+    #[test]
+    fn wal_compacts_by_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(Some(dir.path())).unwrap();
+        let big = "y".repeat(1 << 20);
+        let mut obj = cm("big");
+        obj["data"] = json!({"blob": big});
+        store.create(key("big"), obj.clone()).unwrap();
+        for _ in 0..100 {
+            store.update(key("big"), obj.clone(), None).unwrap();
+        }
+        let st = store.stats();
+        assert!(st.compactions >= 1, "{st:?}");
+        assert!(st.wal_bytes < 80 << 20, "{st:?}");
     }
 
     #[test]

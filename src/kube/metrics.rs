@@ -96,6 +96,21 @@ pub fn gauge(out: &mut String, name: &str, value: impl std::fmt::Display) {
     let _ = writeln!(out, "# TYPE {name} gauge\n{name} {value}");
 }
 
+/// Give freed heap back to the OS now and then. glibc keeps what a burst
+/// (a Helm chart's CRDs, a big list) allocated; on a 1 GiB node that is the
+/// difference between ~40 MB and ~400 MB resident after an install.
+pub fn spawn_memory_trim() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    tokio::spawn(async {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+        loop {
+            tick.tick().await;
+            // SAFETY: malloc_trim has no preconditions.
+            let _ = tokio::task::spawn_blocking(|| unsafe { libc::malloc_trim(0) }).await;
+        }
+    });
+}
+
 /// This process's resident set size in bytes (Linux), else 0.
 pub fn rss_bytes() -> u64 {
     std::fs::read_to_string("/proc/self/status")

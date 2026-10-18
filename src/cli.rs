@@ -1180,6 +1180,7 @@ pub async fn run() -> Result<()> {
                 wireguard_port: (!no_wireguard).then_some(wireguard_port),
             };
             let agent = crate::kube::agent::node_agent_with(runtime, Some(node_name), Some(node_dir), network, node_grace_period).await?;
+            crate::kube::metrics::spawn_memory_trim();
             crate::kube::agent::run_remote(agent, client).await
         }
         Command::Serve {

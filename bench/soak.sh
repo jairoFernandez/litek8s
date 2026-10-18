@@ -163,7 +163,7 @@ EOF
 
 # One JSON sample of a node's litek8s processes and memory, taken on the node.
 NODE_SAMPLER='
-python3 - <<"PY"
+sudo python3 - <<"PY"
 import json, os, re
 hz = os.sysconf("SC_CLK_TCK")
 procs = {}
@@ -263,16 +263,33 @@ for n in json.load(sys.stdin)["items"]:
 print(json.dumps(out))' 2>/dev/null || echo '{}'
 }
 
+# The first line of stdin that is valid JSON, else {} (a sample line must
+# stay one line whatever a probe printed or failed with).
+first_json() {
+  python3 -c '
+import json, sys
+for line in sys.stdin:
+    try:
+        json.loads(line)
+    except ValueError:
+        continue
+    print(line.strip())
+    break
+else:
+    print("{}")'
+}
+
 take_sample() {
   local t node parts=()
   t=$(date +%s)
   for i in $(seq 1 "$NODES"); do
     node="lk$i"
-    parts+=("\"$node\": $(sample_node "$node")")
+    parts+=("\"$node\": $(sample_node "$node" | first_json)")
   done
   local IFS=,
   printf '{"t": %s, "nodes": {%s}, "metrics": %s, "latency": %s, "cluster": %s, "prober": %s, "node_status": %s}\n' \
-    "$t" "${parts[*]}" "$(metrics)" "$(api_latency)" "$(cluster_state)" "$(prober_stats)" "$(nodes_state)" >>"$SAMPLES"
+    "$t" "${parts[*]}" "$(metrics | first_json)" "$(api_latency | first_json)" "$(cluster_state | first_json)" \
+    "$(prober_stats | first_json)" "$(nodes_state | first_json)" >>"$SAMPLES"
 }
 
 ROLLOUTS=0

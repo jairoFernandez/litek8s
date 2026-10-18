@@ -277,6 +277,7 @@ pub async fn serve(config: ApiServerConfig) -> Result<()> {
     }
     eprintln!("apiserver: listening on http://{addr} (and https for in-cluster clients; no authentication)");
     tokio::spawn(super::controllers::run(state.clone()));
+    super::metrics::spawn_memory_trim();
 
     // The local node comes first: where pods reach this host (Docker's
     // host-gateway, crun's bridge address) decides where DNS and the in-cluster port can listen.
