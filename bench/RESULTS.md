@@ -221,6 +221,80 @@ shims 7.2), 665 MiB MemAvailable, idle CPU 0.23 % (0.08 % with no pods),
 apply → Ready 0.06 s median, disk after install 42.2 MiB (the binary grew
 0.6 MiB), object log 296 KB with the fixed measurement.
 
+## Local dev cluster: `litek8s dev` vs kind and k3d (2026-10-18)
+
+`litek8s dev up` ([docs/dev.md](../docs/dev.md)) against the two usual
+local-cluster tools, same protocol for all three
+([`dev-bench.sh`](dev-bench.sh), [`dev-bench-mac.sh`](dev-bench-mac.sh);
+raw output in [`results/2026-10-18-dev/`](results/2026-10-18-dev/)):
+three fresh clusters each (`dev reset` / `kind delete` / `k3d cluster delete`
+in between), node image and `nginx:alpine` already on the machine; then 60 s
+idle, then 5 nginx. Memory is `memory.current - inactive_file` of the
+cgroups everything the cluster runs in (litek8s: its systemd scope; kind/k3d:
+the node containers; the number `docker stats` shows).
+
+**Linux** (Ubuntu 24.04 arm64, qemu+HVF guests of 4 vCPU / 4 GiB on an M3
+Max, one fresh guest per tool; kind v0.30.0 with kindest/node v1.34.0, k3d
+v5.8.3 with k3s v1.33.4 minus traefik/metrics-server/servicelb, Docker 29.1;
+litek8s rootless, crun 1.14, pasta):
+
+| metric | **litek8s dev** | kind | k3d |
+|---|---|---|---|
+| `up` → node Ready (median of 3) | **0.17 s** | 31.6 s | 11.1 s |
+| `up` → first Ready pod (image loaded from a `docker save` archive) | **0.82 s** | 33.7 s | 20.9 s |
+| Idle memory, no workloads | **46.8 MiB** | 526 MiB | 398 MiB |
+| … plus the Docker engine it needs (dockerd + containerd, anon) | — | +73 MiB | +73 MiB |
+| Memory with 5 nginx | **71.1 MiB** | 580 MiB | 428 MiB |
+| Idle CPU over 60 s (% of one vCPU) | **0.01 %** | 10.8 % | 5.1 % |
+| Disk (binary + data incl. nginx / node image + writable layers) | **105 MiB** | 1782 MiB | 335 MiB |
+| Root needed | no (Ubuntu ≥ 23.10: `sudo litek8s dev setup` once, AppArmor) | docker group | docker group |
+
+**macOS** (M3 Max, macOS 27; kind and k3d on OrbStack as installed, used
+as is; litek8s in its own Virtualization.framework VM, 2 GiB / 7 vCPU):
+
+| metric | **litek8s dev** | kind on OrbStack | k3d on OrbStack |
+|---|---|---|---|
+| `up` → node Ready (fresh cluster, median of 3) | **1.28 s** | 34.3 s | 10.4 s |
+| `dev down` + `dev up` → pods Ready again | **1.1 s** | – | – |
+| `up` → first Ready pod | **2.15 s** | 40.2 s | 17.3 s |
+| Idle memory | **209 MiB** VM footprint on macOS (165 MiB used in the guest) | 586 MiB in OrbStack's VM | 431 MiB in OrbStack's VM |
+| Memory with 5 nginx | **247 MiB** footprint (196 MiB in the guest) | 639 MiB | 468 MiB |
+| Idle CPU over 60 s (% of one core) | **0.18 %** (the whole VM) | 12.0 % | 3.9 % |
+| Disk | 318 MiB (kernel 34 + initramfs 23 + binary 29 + signed copy 30 + data disk) | 973 MiB | 219 MiB |
+
+kind and k3d numbers exclude OrbStack's own VM, which is running anyway
+(here 3.0 GiB RSS shared with other work on this machine); the litek8s
+column is everything, VM included. Measured on a shared machine (load 10–25
+from other sessions), so timings are pessimistic for all three.
+
+**Read:** on Linux the whole cluster costs about what one kind control-plane
+component does: 47 MiB and no measurable idle CPU, against 400–530 MiB and
+5–11 % for k3d and kind (and their Docker engine), and it is ready before
+`kind create cluster` has pulled its first layer: 0.17 s to a Ready node,
+0.8 s to a Ready pod. There is nothing to boot: `dev up` forks a sandbox
+(user, PID, network, mount and cgroup namespaces; pasta for egress) and the
+API server, controllers and crun node start in-process. On macOS the price of
+Linux is a VM, and it is small: Alpine's `linux-virt` kernel and a 23 MiB
+initramfs reach the API server in ~0.5 s (the API and NodePorts go over
+vsock, so readiness does not wait for DHCP), 0.9–1.3 s end to end, and the
+VM's whole footprint is 209 MiB, below the in-VM usage of either Docker-based
+cluster alone.
+
+Caveats: the macOS memory is the VM process's physical footprint, which
+keeps pages the guest touched at boot (unpacking the initramfs) even after
+the guest frees them; a balloon "squeeze" to hand them back made it worse
+(the guest zeroes balloon pages). k3d on OrbStack ran with kubelet eviction
+thresholds lowered to 1 % because OrbStack's disk was 91 % full from other
+work (the default 10 % put the node in DiskPressure); kind ran before that.
+kind could not `load image-archive` Docker 29's default (multi-platform)
+`docker save` output, so every tool loaded `docker save --platform
+linux/arm64`; `litek8s dev load` takes both.
+
+Compatibility is the same as the plain API server's: the 101-case corpus
+passes 101/101 against `litek8s dev` both on Linux (rootless) and in the macOS
+VM ([compat/RESULTS.md](../compat/RESULTS.md); k3d is the 101/101 reference
+there). kind was not scored; it runs upstream Kubernetes.
+
 ## Remote node over SSH (litek8s only)
 
 Control plane in one guest, the node in a second guest of the same shape, reached through

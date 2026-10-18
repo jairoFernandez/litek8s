@@ -1,0 +1,3 @@
+{"tool": "kind", "up_s": [39.61, 34.27, 32.4], "up_s_median": 34.27, "pod_s": [42.74, 37.9, 40.21], "pod_s_median": 40.21, "mem": "586.3 MiB", "cpu_pct": 11.98, "mem5": "638.7 MiB", "disk_mib": 973.0}
+{"tool": "k3d", "up_s": [10.84, 10.33, 10.42], "up_s_median": 10.42, "pod_s": [17.6, 17.18, 17.29], "pod_s_median": 17.29, "mem": "431.1 MiB", "cpu_pct": 3.92, "mem5": "467.9 MiB", "disk_mib": 219.0}
+{"tool": "litek8s", "up_s": [1.51, 1.28, 1.19], "up_s_median": 1.28, "pod_s": [2.33, 2.15, 2.04], "pod_s_median": 2.15, "mem": "209.3 MiB footprint, 165.1 MiB used in the guest", "cpu_pct": 0.18, "mem5": "247.0 MiB footprint, 196.1 MiB used in the guest", "disk_mib": 318.0, "warm_up_s": [1.17, 1.17, 1.07]}

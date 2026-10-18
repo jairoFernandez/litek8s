@@ -38,14 +38,13 @@ pub async fn bind(addr: SocketAddr) -> Option<UdpSocket> {
 
 pub async fn serve(api: Arc<ApiState>, socket: UdpSocket) {
     let socket = Arc::new(socket);
-    let upstream = upstream_resolver();
     let mut buf = vec![0u8; 1500];
     loop {
         let Ok((n, peer)) = socket.recv_from(&mut buf).await else { continue };
         let query = buf[..n].to_vec();
         let (api, socket) = (api.clone(), socket.clone());
         tokio::spawn(async move {
-            if let Some(reply) = answer(&api, &query, upstream).await {
+            if let Some(reply) = answer(&api, &query).await {
                 let _ = socket.send_to(&reply, peer).await;
             }
         });
@@ -55,7 +54,6 @@ pub async fn serve(api: Arc<ApiState>, socket: UdpSocket) {
 /// DNS over TCP (length-prefixed messages) on the same address.
 pub async fn serve_tcp(api: Arc<ApiState>, listener: tokio::net::TcpListener) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let upstream = upstream_resolver();
     loop {
         let Ok((mut conn, _)) = listener.accept().await else { continue };
         let api = api.clone();
@@ -69,7 +67,7 @@ pub async fn serve_tcp(api: Arc<ApiState>, listener: tokio::net::TcpListener) {
                 if conn.read_exact(&mut query).await.is_err() {
                     return;
                 }
-                let Some(reply) = answer(&api, &query, upstream).await else { return };
+                let Some(reply) = answer(&api, &query).await else { return };
                 let mut out = (reply.len() as u16).to_be_bytes().to_vec();
                 out.extend_from_slice(&reply);
                 if conn.write_all(&out).await.is_err() {
@@ -80,13 +78,15 @@ pub async fn serve_tcp(api: Arc<ApiState>, listener: tokio::net::TcpListener) {
     }
 }
 
-async fn answer(api: &ApiState, query: &[u8], upstream: SocketAddr) -> Option<Vec<u8>> {
+async fn answer(api: &ApiState, query: &[u8]) -> Option<Vec<u8>> {
     let (name, qtype, end) = parse_question(query)?;
     if name.ends_with(DOMAIN) || reverse_ours(&name) {
         let records = resolve(api, &name, qtype);
         Some(build_reply(query, end, qtype, records))
     } else {
-        forward(query, upstream).await
+        // Read per query: the host's resolver can change (DHCP in the dev
+        // VM finishes after the API server starts, VPNs).
+        forward(query, upstream_resolver()).await
     }
 }
 

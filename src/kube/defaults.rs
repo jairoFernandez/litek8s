@@ -131,6 +131,27 @@ pub fn containers(list: &mut Value) {
     }
 }
 
+/// The defaults the API server gives a pod template (Deployment,
+/// ReplicaSet, StatefulSet, DaemonSet, Job, CronJob) at `ptr`, as for pods
+/// minus what admission adds to pods only (service account, tolerations).
+/// Clients rely on them: `kubectl patch` with a JSON patch `replace` of
+/// `.../containers/0/imagePullPolicy` needs the field to exist.
+pub fn pod_template(obj: &mut Value, ptr: &str) {
+    let Some(spec) = obj.pointer_mut(&format!("{ptr}/spec")).and_then(Value::as_object_mut) else { return };
+    set_default(spec, "restartPolicy", json!("Always"));
+    set_default(spec, "dnsPolicy", json!("ClusterFirst"));
+    set_default(spec, "schedulerName", json!("default-scheduler"));
+    set_default(spec, "terminationGracePeriodSeconds", json!(30));
+    set_default(spec, "securityContext", json!({}));
+    for field in ["initContainers", "containers"] {
+        if let Some(containers) = spec.get_mut(field).and_then(Value::as_array_mut) {
+            for c in containers {
+                container(c);
+            }
+        }
+    }
+}
+
 fn container(c: &mut Value) {
     let Some(m) = c.as_object_mut() else { return };
     let image = m.get("image").and_then(Value::as_str).unwrap_or_default().to_string();
@@ -261,11 +282,37 @@ pub fn cronjob(obj: &mut Value) {
     set_default(spec, "failedJobsHistoryLimit", json!(1));
 }
 
+/// Fill in a RollingUpdate strategy's parameters (`defaults`) when the
+/// object names the type, or the whole strategy when it names nothing.
+fn rolling_update(spec: &mut Map<String, Value>, field: &str, defaults: Value) {
+    let strategy = spec.entry(field).or_insert_with(|| json!({}));
+    if !strategy.is_object() {
+        *strategy = json!({});
+    }
+    let s = strategy.as_object_mut().unwrap();
+    if s.get("type").and_then(Value::as_str).is_none_or(str::is_empty) {
+        s.insert("type".into(), json!("RollingUpdate"));
+    }
+    if s.get("type").and_then(Value::as_str) != Some("RollingUpdate") {
+        return;
+    }
+    let ru = s.entry("rollingUpdate").or_insert_with(|| json!({}));
+    if !ru.is_object() {
+        *ru = json!({});
+    }
+    let ru = ru.as_object_mut().unwrap();
+    for (k, v) in defaults.as_object().into_iter().flatten() {
+        if ru.get(k).is_none_or(Value::is_null) {
+            ru.insert(k.clone(), v.clone());
+        }
+    }
+}
+
 pub fn statefulset(obj: &mut Value) {
     let spec = obj_entry(obj, "spec");
     set_default(spec, "replicas", json!(1));
     set_default(spec, "podManagementPolicy", json!("OrderedReady"));
-    set_default(spec, "updateStrategy", json!({"type": "RollingUpdate", "rollingUpdate": {"partition": 0}}));
+    rolling_update(spec, "updateStrategy", json!({"partition": 0}));
     set_default(spec, "revisionHistoryLimit", json!(10));
     set_default(
         spec,
@@ -276,11 +323,7 @@ pub fn statefulset(obj: &mut Value) {
 
 pub fn daemonset(obj: &mut Value) {
     let spec = obj_entry(obj, "spec");
-    set_default(
-        spec,
-        "updateStrategy",
-        json!({"type": "RollingUpdate", "rollingUpdate": {"maxUnavailable": 1, "maxSurge": 0}}),
-    );
+    rolling_update(spec, "updateStrategy", json!({"maxUnavailable": 1, "maxSurge": 0}));
     set_default(spec, "revisionHistoryLimit", json!(10));
 }
 

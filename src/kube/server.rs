@@ -76,6 +76,17 @@ pub struct ApiServerConfig {
     pub in_cluster_port: Option<u16>,
     /// The container runtime of the local node.
     pub runtime: super::agent::RuntimeChoice,
+    /// Serve on this already-bound listener instead of binding `listen`
+    /// (the dev sandbox binds it on the host before entering its network
+    /// namespace).
+    pub listener: Option<std::net::TcpListener>,
+}
+
+/// Loads an image archive into the local node (`litek8s dev load`).
+pub(crate) struct ImageLoader {
+    /// Where uploads are staged (on the image store's filesystem).
+    pub staging: PathBuf,
+    pub load: Box<dyn Fn(PathBuf) -> futures_util::future::BoxFuture<'static, Result<Vec<String>>> + Send + Sync>,
 }
 
 pub struct ApiState {
@@ -98,6 +109,8 @@ pub struct ApiState {
     signer: super::sa_token::TokenSigner,
     /// The port pods on this host reach the API at (the in-cluster one).
     pod_port: std::sync::atomic::AtomicU16,
+    /// Imports image archives into the local node, when there is one.
+    pub(crate) image_loader: std::sync::OnceLock<ImageLoader>,
 }
 
 impl ApiState {
@@ -120,6 +133,7 @@ impl ApiState {
             allocated: std::sync::Mutex::default(),
             signer: super::sa_token::TokenSigner::load_or_create(data_dir)?,
             pod_port: std::sync::atomic::AtomicU16::new(0),
+            image_loader: std::sync::OnceLock::new(),
         };
         state.bootstrap()?;
         Ok(state)
@@ -273,10 +287,16 @@ impl ApiState {
     }
 }
 
-pub async fn serve(config: ApiServerConfig) -> Result<()> {
-    let listener = TcpListener::bind(config.listen)
-        .await
-        .with_context(|| format!("failed to bind apiserver on {}", config.listen))?;
+pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
+    let listener = match config.listener.take() {
+        Some(l) => {
+            l.set_nonblocking(true)?;
+            TcpListener::from_std(l)?
+        }
+        None => TcpListener::bind(config.listen)
+            .await
+            .with_context(|| format!("failed to bind apiserver on {}", config.listen))?,
+    };
     let addr = listener.local_addr()?;
     let client_addr = if addr.ip().is_unspecified() {
         SocketAddr::new([127, 0, 0, 1].into(), addr.port())
@@ -364,6 +384,14 @@ pub async fn serve(config: ApiServerConfig) -> Result<()> {
     }
     if let Some(agent) = agent {
         eprintln!("apiserver: running local node {}", agent.config().node_name);
+        let rt = agent.runtime().clone();
+        let _ = state.image_loader.set(ImageLoader {
+            staging: rt.image_staging_dir(),
+            load: Box::new(move |path| {
+                let rt = rt.clone();
+                Box::pin(async move { rt.import_images(path).await })
+            }),
+        });
         tokio::spawn(super::agent::run_local(state.clone(), agent, pod_port));
     }
     serve_listener(state, listener).await
@@ -740,6 +768,9 @@ async fn handle(state: Arc<ApiState>, mut req: Request<Incoming>) -> Response<Bo
         .then(|| hyper::upgrade::on(&mut req));
     let (parts, body) = req.into_parts();
     let path = parts.uri.path().to_string();
+    if path == IMAGES_PATH && parts.method == Method::POST {
+        return load_images(&state, body).await;
+    }
     let header = |name| {
         parts
             .headers
@@ -781,6 +812,40 @@ async fn handle(state: Arc<ApiState>, mut req: Request<Incoming>) -> Response<Bo
         );
     }
     resp
+}
+
+/// litek8s's own endpoint for loading image archives into the local node
+/// (`litek8s dev load`), like `kind load image-archive`.
+pub const IMAGES_PATH: &str = "/litek8s/v1/images";
+
+/// Stream an uploaded image archive to disk (it can be far larger than an
+/// API request body) and import it.
+async fn load_images(state: &Arc<ApiState>, mut body: Incoming) -> Response<Body> {
+    use tokio::io::AsyncWriteExt;
+    let Some(loader) = state.image_loader.get() else {
+        return ApiError::new(StatusCode::NOT_FOUND, "NotFound", "this server runs no local node to load images into").into_response();
+    };
+    let _ = std::fs::create_dir_all(&loader.staging);
+    let mut name = [0u8; 8];
+    OsRng.fill_bytes(&mut name);
+    let path = loader.staging.join(format!("upload-{}.tar", hex::encode(name)));
+    let result: Result<Vec<String>> = async {
+        let mut file = tokio::fs::File::create(&path).await.with_context(|| format!("failed to create {}", path.display()))?;
+        while let Some(frame) = body.frame().await {
+            if let Ok(data) = frame?.into_data() {
+                file.write_all(&data).await?;
+            }
+        }
+        file.flush().await?;
+        drop(file);
+        (loader.load)(path.clone()).await
+    }
+    .await;
+    let _ = tokio::fs::remove_file(&path).await;
+    match result {
+        Ok(images) => json_response(StatusCode::OK, &json!({"images": images})),
+        Err(e) => ApiError::new(StatusCode::BAD_REQUEST, "BadRequest", &format!("{e:#}")).into_response(),
+    }
 }
 
 async fn route(state: &Arc<ApiState>, path: &str, req: &Req) -> Result<Response<Body>, ApiError> {
@@ -2428,16 +2493,42 @@ impl ApiState {
                     obj["status"] = json!({"phase": if obj.pointer("/spec/claimRef").is_some() { "Bound" } else { "Available" }});
                 }
             }
-            ("batch", "Job") => defaults::job(obj, old),
-            ("batch", "CronJob") => defaults::cronjob(obj),
-            ("apps", "DaemonSet") => defaults::daemonset(obj),
+            ("batch", "Job") => {
+                defaults::job(obj, old);
+                defaults::pod_template(obj, "/spec/template");
+            }
+            ("batch", "CronJob") => {
+                defaults::cronjob(obj);
+                defaults::pod_template(obj, "/spec/jobTemplate/spec/template");
+            }
+            ("apps", "DaemonSet") => {
+                defaults::daemonset(obj);
+                defaults::pod_template(obj, "/spec/template");
+            }
             ("apps", "Deployment") => {
+                defaults::pod_template(obj, "/spec/template");
                 let spec = obj.as_object_mut().unwrap().entry("spec").or_insert_with(|| json!({}));
                 if spec.get("replicas").is_none() {
                     spec["replicas"] = json!(1);
                 }
-                if spec.get("strategy").is_none() {
-                    spec["strategy"] = json!({"type": "RollingUpdate", "rollingUpdate": {"maxSurge": "25%", "maxUnavailable": "25%"}});
+                // As SetDefaults_Deployment: a RollingUpdate strategy always
+                // has both bounds (Helm's readiness check dereferences them).
+                if !spec.get("strategy").is_some_and(Value::is_object) {
+                    spec["strategy"] = json!({});
+                }
+                let strategy = &mut spec["strategy"];
+                if strategy.get("type").and_then(Value::as_str).is_none_or(str::is_empty) {
+                    strategy["type"] = json!("RollingUpdate");
+                }
+                if strategy["type"] == "RollingUpdate" {
+                    if !strategy.get("rollingUpdate").is_some_and(Value::is_object) {
+                        strategy["rollingUpdate"] = json!({});
+                    }
+                    for key in ["maxSurge", "maxUnavailable"] {
+                        if strategy["rollingUpdate"].get(key).is_none_or(Value::is_null) {
+                            strategy["rollingUpdate"][key] = json!("25%");
+                        }
+                    }
                 }
                 if spec.get("revisionHistoryLimit").is_none() {
                     spec["revisionHistoryLimit"] = json!(10);
@@ -2446,8 +2537,12 @@ impl ApiState {
                     spec["progressDeadlineSeconds"] = json!(600);
                 }
             }
-            ("apps", "StatefulSet") => defaults::statefulset(obj),
+            ("apps", "StatefulSet") => {
+                defaults::statefulset(obj);
+                defaults::pod_template(obj, "/spec/template");
+            }
             ("", "ReplicationController") => {
+                defaults::pod_template(obj, "/spec/template");
                 let spec = obj.as_object_mut().unwrap().entry("spec").or_insert_with(|| json!({}));
                 if spec.get("replicas").is_none() {
                     spec["replicas"] = json!(1);
@@ -2460,6 +2555,7 @@ impl ApiState {
                 }
             }
             ("apps", "ReplicaSet") => {
+                defaults::pod_template(obj, "/spec/template");
                 let spec = obj.as_object_mut().unwrap().entry("spec").or_insert_with(|| json!({}));
                 if spec.get("replicas").is_none() {
                     spec["replicas"] = json!(1);

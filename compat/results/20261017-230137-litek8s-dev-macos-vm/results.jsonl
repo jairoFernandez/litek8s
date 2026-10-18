@@ -1,0 +1,101 @@
+{"id": "version", "tier": "L0", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "healthz", "tier": "L0", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "api_versions", "tier": "L0", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "api_resources_core", "tier": "L0", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "api_resources_apps", "tier": "L0", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "default_namespaces", "tier": "L0", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "openapi_v3", "tier": "L0", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "ns_lifecycle", "tier": "L1", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "cm_create_get", "tier": "L1", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "cm_metadata", "tier": "L1", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "apply_idempotent", "tier": "L1", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "apply_update", "tier": "L1", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "apply_server_side", "tier": "L1", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "patch_merge", "tier": "L1", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "patch_json", "tier": "L1", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "patch_strategic", "tier": "L1", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "label_annotate", "tier": "L1", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "field_selector", "tier": "L1", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "secret_generic", "tier": "L1", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "replace_put", "tier": "L1", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "update_conflict", "tier": "L1", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "generate_name", "tier": "L1", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "already_exists", "tier": "L1", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "not_found", "tier": "L1", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "watch_events", "tier": "L1", "status": "pass", "seconds": 3, "detail": "/private/tmp/claude-501/-Users-jairo-workspace-personal-litek8s--claude-worktrees-focused-grothendieck-bb71d1/6f17f67f-8185-4086-9d66-10fcabc0cf6d/scratchpad/lkdev-corpus/cases/L1-objects.sh: line 182: 33377 Terminated: 15          with_timeout 30 kubectl -n \"$NS\" get cm -w --output-watch-events > \""}
+{"id": "watch_from_rv", "tier": "L1", "status": "pass", "seconds": 6, "detail": ""}
+{"id": "ns_cascade", "tier": "L1", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "dry_run_server", "tier": "L1", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "list_all_namespaces", "tier": "L1", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "table_output", "tier": "L1", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "crd_roundtrip", "tier": "L1", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "serviceaccount_default", "tier": "L1", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "deploy_ready", "tier": "L2", "status": "pass", "seconds": 8, "detail": ""}
+{"id": "deploy_scale", "tier": "L2", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "deploy_rollout_undo", "tier": "L2", "status": "pass", "seconds": 17, "detail": ""}
+{"id": "pod_logs", "tier": "L2", "status": "pass", "seconds": 4, "detail": ""}
+{"id": "pod_exec", "tier": "L2", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "port_forward", "tier": "L2", "status": "pass", "seconds": 2, "detail": ""}
+{"id": "job_complete", "tier": "L2", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "cronjob_schedules", "tier": "L2", "status": "pass", "seconds": 34, "detail": ""}
+{"id": "statefulset_ordinals", "tier": "L2", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "daemonset_all_nodes", "tier": "L2", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "multi_container_pod", "tier": "L2", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "config_injection", "tier": "L2", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "http_readiness", "tier": "L2", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "restart_on_crash", "tier": "L2", "status": "pass", "seconds": 2, "detail": ""}
+{"id": "pvc_local", "tier": "L2", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "svc_clusterip", "tier": "L3", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "svc_dns", "tier": "L3", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "svc_endpoints", "tier": "L3", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "svc_headless", "tier": "L3", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "svc_nodeport", "tier": "L3", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "pod_to_pod", "tier": "L3", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "api_from_pod", "tier": "L3", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "helm_podinfo", "tier": "L4", "status": "pass", "seconds": 16, "detail": "podinfo-6.15.0"}
+{"id": "helm_traefik", "tier": "L4", "status": "pass", "seconds": 17, "detail": "traefik-42.0.0"}
+{"id": "helm_cert_manager", "tier": "L4", "status": "pass", "seconds": 38, "detail": "cert-manager-v1.21.2"}
+{"id": "helm_metrics_server", "tier": "L4", "status": "pass", "seconds": 63, "detail": "metrics-server-3.14.0"}
+{"id": "helm_node_exporter", "tier": "L4", "status": "pass", "seconds": 16, "detail": "prometheus-node-exporter-4.60.0"}
+{"id": "helm_ksm", "tier": "L4", "status": "pass", "seconds": 22, "detail": "kube-state-metrics-8.6.0"}
+{"id": "helm_grafana", "tier": "L4", "status": "pass", "seconds": 57, "detail": "grafana-10.5.15"}
+{"id": "helm_kyverno", "tier": "L4", "status": "pass", "seconds": 65, "detail": "kyverno-3.9.1"}
+{"id": "helm_ext_secrets", "tier": "L4", "status": "pass", "seconds": 46, "detail": "external-secrets-2.13.0"}
+{"id": "helm_reloader", "tier": "L4", "status": "pass", "seconds": 17, "detail": "reloader-2.2.18"}
+{"id": "helm_keda", "tier": "L4", "status": "pass", "seconds": 60, "detail": "keda-2.21.0"}
+{"id": "helm_argo_cd", "tier": "L4", "status": "pass", "seconds": 81, "detail": "argo-cd-10.10.5"}
+{"id": "helm_cnpg", "tier": "L4", "status": "pass", "seconds": 26, "detail": "passed on rerun 2; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_headlamp", "tier": "L4", "status": "pass", "seconds": 23, "detail": "passed on rerun 1; first run: timeout ()"}
+{"id": "helm_nats", "tier": "L4", "status": "pass", "seconds": 40, "detail": "passed on rerun 1; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_vault", "tier": "L4", "status": "pass", "seconds": 31, "detail": "passed on rerun 2; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_minio_operator", "tier": "L4", "status": "pass", "seconds": 10, "detail": "passed on rerun 1; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_external_dns", "tier": "L4", "status": "pass", "seconds": 61, "detail": "passed on rerun 1; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_gitea", "tier": "L4", "status": "pass", "seconds": 34, "detail": "passed on rerun 1; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_loki", "tier": "L4", "status": "pass", "seconds": 70, "detail": "passed on rerun 1; first run: timeout ()"}
+{"id": "helm_kps", "tier": "L4", "status": "pass", "seconds": 273, "detail": "passed on rerun 1; first run: timeout ()"}
+{"id": "helm_vm_single", "tier": "L4", "status": "pass", "seconds": 15, "detail": "passed on rerun 1; first run: timeout ()"}
+{"id": "helm_alloy", "tier": "L4", "status": "pass", "seconds": 75, "detail": "passed on rerun 2; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_haproxy", "tier": "L4", "status": "pass", "seconds": 70, "detail": "passed on rerun 2; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_envoy_gateway", "tier": "L4", "status": "pass", "seconds": 18, "detail": "passed on rerun 1; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_nginx_ingress", "tier": "L4", "status": "pass", "seconds": 18, "detail": "passed on rerun 1; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_metallb", "tier": "L4", "status": "pass", "seconds": 74, "detail": "passed on rerun 2; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_openebs_local", "tier": "L4", "status": "pass", "seconds": 16, "detail": "passed on rerun 1; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_redis_operator", "tier": "L4", "status": "pass", "seconds": 9, "detail": "passed on rerun 1; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_mariadb_op", "tier": "L4", "status": "pass", "seconds": 35, "detail": "passed on rerun 1; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_zalando_pg", "tier": "L4", "status": "pass", "seconds": 23, "detail": "passed on rerun 1; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_valkey", "tier": "L4", "status": "pass", "seconds": 21, "detail": "passed on rerun 1; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_home_assistant", "tier": "L4", "status": "pass", "seconds": 108, "detail": "passed on rerun 1; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_jellyfin", "tier": "L4", "status": "pass", "seconds": 71, "detail": "passed on rerun 1; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_nextcloud", "tier": "L4", "status": "pass", "seconds": 138, "detail": "passed on rerun 1; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_uptime_kuma", "tier": "L4", "status": "pass", "seconds": 99, "detail": "passed on rerun 2; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_vaultwarden", "tier": "L4", "status": "pass", "seconds": 16, "detail": "passed on rerun 2; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_pihole", "tier": "L4", "status": "pass", "seconds": 70, "detail": "passed on rerun 2; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_node_red", "tier": "L4", "status": "pass", "seconds": 41, "detail": "passed on rerun 2; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_homepage", "tier": "L4", "status": "pass", "seconds": 23, "detail": "passed on rerun 2; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_gatus", "tier": "L4", "status": "pass", "seconds": 5, "detail": "passed on rerun 2; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_zot", "tier": "L4", "status": "pass", "seconds": 23, "detail": "passed on rerun 2; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_registry", "tier": "L4", "status": "pass", "seconds": 12, "detail": "passed on rerun 2; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_flux2", "tier": "L4", "status": "pass", "seconds": 72, "detail": "passed on rerun 2; first run: timeout (Error: INSTALLATION FAILED: context canceled)"}
+{"id": "helm_argo_wf", "tier": "L4", "status": "pass", "seconds": 54, "detail": "passed on rerun 2; first run: fail (Error: INSTALLATION FAILED: looks like \"https://argoproj.github.io/argo-helm\" is)"}
+{"id": "helm_descheduler", "tier": "L4", "status": "pass", "seconds": 2, "detail": "descheduler-0.37.0"}
+{"id": "helm_trivy_operator", "tier": "L4", "status": "pass", "seconds": 16, "detail": "passed on rerun 2; first run: timeout ()"}
