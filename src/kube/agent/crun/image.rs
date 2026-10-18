@@ -234,8 +234,6 @@ pub(crate) struct Image {
     /// Layer directories, bottom first.
     pub layers: Vec<PathBuf>,
     pub config: ImageConfig,
-    /// The config blob's digest (Docker's image ID).
-    pub config_digest: String,
 }
 
 pub(crate) struct ImageStore {
@@ -316,7 +314,6 @@ impl ImageStore {
             id: format!("{}/{}@{}", reference.registry, reference.repository, entry.manifest),
             layers,
             config: ImageConfig::from_blob(&config),
-            config_digest: entry.config.clone(),
         })
     }
 
@@ -900,6 +897,107 @@ fn disk_usage(path: &Path) -> Option<f64> {
     Some(1.0 - (s.f_bavail as f64 / s.f_blocks as f64))
 }
 
+/// Write an unpacked layer (overlay format: 0/0 character devices for
+/// whiteouts, an `overlay.opaque` xattr on opaque directories) as a Docker
+/// layer tar (`.wh.` files), entries sorted, hard links kept.
+pub(crate) fn write_layer_tar(dir: &Path, out: impl std::io::Write) -> Result<()> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let mut b = tar::Builder::new(out);
+    b.follow_symlinks(false);
+    let mut links: HashMap<(u64, u64), PathBuf> = HashMap::new();
+    let mut stack: Vec<PathBuf> = vec![PathBuf::new()];
+    let empty_file = |name: &Path, mtime: u64| -> tar::Header {
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Regular);
+        h.set_size(0);
+        h.set_mode(0o644);
+        h.set_mtime(mtime);
+        let _ = h.set_path(name);
+        h.set_cksum();
+        h
+    };
+    while let Some(rel) = stack.pop() {
+        let full = dir.join(&rel);
+        let mut entries: Vec<_> = std::fs::read_dir(&full)?.flatten().map(|e| e.file_name()).collect();
+        entries.sort();
+        // Depth-first in sorted order: push in reverse.
+        let mut subdirs = Vec::new();
+        if !rel.as_os_str().is_empty() && is_opaque(&full) {
+            let meta = std::fs::symlink_metadata(&full)?;
+            let mut h = empty_file(&rel.join(OPAQUE_MARKER), meta.mtime() as u64);
+            b.append(&mut h, std::io::empty())?;
+        }
+        for name in entries {
+            let path = rel.join(&name);
+            let abs = dir.join(&path);
+            let meta = std::fs::symlink_metadata(&abs)?;
+            let ft = meta.file_type();
+            if ft.is_char_device() && meta.rdev() == 0 {
+                let mut h = empty_file(&rel.join(format!("{WHITEOUT_PREFIX}{}", name.to_string_lossy())), meta.mtime() as u64);
+                b.append(&mut h, std::io::empty())?;
+                continue;
+            }
+            if ft.is_file() && meta.nlink() > 1 {
+                let key = (meta.dev(), meta.ino());
+                if let Some(first) = links.get(&key) {
+                    let mut h = tar::Header::new_gnu();
+                    h.set_entry_type(tar::EntryType::Link);
+                    h.set_size(0);
+                    h.set_metadata(&meta);
+                    h.set_entry_type(tar::EntryType::Link);
+                    h.set_size(0);
+                    b.append_link(&mut h, &path, first)?;
+                    continue;
+                }
+                links.insert(key, path.clone());
+            }
+            b.append_path_with_name(&abs, &path)?;
+            if ft.is_dir() {
+                subdirs.push(path);
+            }
+        }
+        for d in subdirs.into_iter().rev() {
+            stack.push(d);
+        }
+    }
+    b.into_inner()?.flush()?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn is_opaque(dir: &Path) -> bool {
+    let Ok(c) = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()) else { return false };
+    ["trusted.overlay.opaque", "user.overlay.opaque"].iter().any(|attr| {
+        let a = std::ffi::CString::new(*attr).unwrap();
+        let mut buf = [0u8; 4];
+        // SAFETY: valid strings and buffer.
+        let n = unsafe { libc::lgetxattr(c.as_ptr(), a.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+        n == 1 && buf[0] == b'y'
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_opaque(_: &Path) -> bool {
+    false
+}
+
+/// The diff ID (sha256 of the uncompressed tar) of an unpacked layer.
+pub(crate) fn layer_diff_id(dir: &Path) -> Result<String> {
+    struct HashWriter(Sha256);
+    impl std::io::Write for HashWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.update(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut w = HashWriter(Sha256::new());
+    write_layer_tar(dir, &mut w)?;
+    Ok(format!("sha256:{}", hex::encode(w.0.finalize())))
+}
+
 /// Bytes of the files under `dir` (hard links once).
 pub(crate) fn dir_bytes(dir: &Path) -> u64 {
     use std::os::unix::fs::MetadataExt;
@@ -1177,7 +1275,7 @@ fn parse_url(url: &str) -> Result<Url> {
     Ok(Url { https, host, port, path: path.to_string() })
 }
 
-async fn send(method: hyper::Method, url: &str, headers: &[(&str, String)]) -> Result<hyper::Response<hyper::body::Incoming>> {
+pub(crate) async fn send(method: hyper::Method, url: &str, headers: &[(&str, String)]) -> Result<hyper::Response<hyper::body::Incoming>> {
     let u = parse_url(url)?;
     let tcp = tokio::time::timeout(Duration::from_secs(30), tokio::net::TcpStream::connect((dial_host(&u.host), u.port)))
         .await

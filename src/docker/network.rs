@@ -41,7 +41,7 @@ pub fn mac_for(ip: Ipv4Addr) -> String {
     format!("02:42:{:02x}:{:02x}:{:02x}:{:02x}", o[0], o[1], o[2], o[3])
 }
 
-pub fn ipam_for(root: &Path, network_id: &str, subnet: &str) -> Result<Ipam> {
+pub(crate) fn ipam_for(root: &Path, network_id: &str, subnet: &str) -> Result<Ipam> {
     Ipam::open(&root.join("ipam").join(network_id), Subnet::parse(subnet)?)
 }
 

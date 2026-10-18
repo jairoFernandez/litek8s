@@ -99,7 +99,6 @@ pub struct Engine {
     pub socket_aliases: Vec<String>,
     pub internal_socket: PathBuf,
     pub execs: Mutex<HashMap<String, Arc<super::exec::ExecInst>>>,
-    pub build_lock: tokio::sync::Mutex<()>,
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
@@ -349,7 +348,6 @@ impl Engine {
             socket_aliases: opts.socket_aliases,
             internal_socket: opts.internal_socket,
             execs: Mutex::new(HashMap::new()),
-            build_lock: tokio::sync::Mutex::new(()),
             root,
         });
         std::fs::create_dir_all(&engine.crun_root)?;
@@ -745,7 +743,9 @@ impl Engine {
         ep.interface = format!("eth{index}");
         Ok(LinkPlan {
             interface: ep.interface.clone(),
-            host_if: format!("vd{}{index}", &id[..8]),
+            // Unique per run: the previous run's namespace (and the veth in
+            // it) is torn down asynchronously by the kernel.
+            host_if: format!("vd{}{index}", random_hex(4)),
             ip,
             prefix,
             gateway,
