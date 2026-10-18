@@ -595,8 +595,8 @@ fn sandbox_listener() -> Result<(Option<std::net::TcpListener>, std::net::Socket
 async fn inner_apiserver(data_dir: PathBuf) -> Result<()> {
     let guest = std::env::var("LITEK8S_DEV_GUEST").is_ok_and(|v| v == "1");
     let (listener, listen): (Option<std::net::TcpListener>, std::net::SocketAddr) = if guest {
-        // In the VM: the Mac forwards its localhost to this port.
-        (None, std::net::SocketAddr::from(([0, 0, 0, 0], guest::GUEST_API_PORT)))
+        // In the VM: the Mac reaches it over vsock (see guest::VSOCK_PORT).
+        (None, std::net::SocketAddr::from(([127, 0, 0, 1], guest::GUEST_API_PORT)))
     } else {
         sandbox_listener()?
     };

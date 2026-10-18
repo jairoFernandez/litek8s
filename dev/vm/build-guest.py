@@ -11,7 +11,7 @@ build-guest-binary.sh), which runs the cluster as PID 1.
     dev/vm/build-guest.py --litek8s target/guest-musl-arm64/release/litek8s --out <dir>
 
 writes <dir>/Image and <dir>/initramfs.gz (what `litek8s dev up` boots; it
-looks in ~/Library/Application Support/dev.civojairo.litek8s/dev/vm/ or
+looks in ~/Library/Application Support/dev.civojairo.litek8s/vm/ or
 $LITEK8S_DEV_VM_ASSETS).
 """
 

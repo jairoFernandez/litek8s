@@ -119,7 +119,7 @@ fn remove_cgroup(dir: &Path) {
 
 /// The userspace network of the sandbox's network namespace.
 enum Network {
-    Pasta { pid_file: PathBuf },
+    Pasta { pid_file: PathBuf, netns_file: Option<PathBuf> },
     Slirp { child: std::process::Child, _exit: OwnedFd },
     None,
 }
@@ -129,18 +129,28 @@ impl Network {
         if let Some(pasta) = which("pasta") {
             let pid_file = home.join("pasta.pid");
             let _ = std::fs::remove_file(&pid_file);
-            let out = std::process::Command::new(pasta)
-                .args(["--config-net", "--quiet", "-t", "none", "-u", "none", "-T", "none", "-U", "none"])
+            let mut cmd = std::process::Command::new(pasta);
+            cmd.args(["--config-net", "--quiet", "-t", "none", "-u", "none", "-T", "none", "-U", "none"])
                 .args(["--dns-forward", sandbox::DNS_FORWARD])
                 .arg("--pid")
-                .arg(&pid_file)
-                .arg(pid1.to_string())
-                .output()
-                .context("failed to run pasta")?;
+                .arg(&pid_file);
+            let mut netns_file = None;
+            if rootless {
+                // pasta joins the sandbox's user and network namespaces.
+                cmd.arg(pid1.to_string());
+            } else {
+                // As root pasta drops its privileges first and may then not
+                // open /proc/<pid>/ns/net; a bind mount of it it can.
+                let file = home.join("netns");
+                bind_netns(pid1, &file)?;
+                cmd.args(["--runas", "0:0", "--netns"]).arg(&file);
+                netns_file = Some(file);
+            }
+            let out = cmd.output().context("failed to run pasta")?;
             if !out.status.success() {
                 bail!("pasta failed: {}", String::from_utf8_lossy(&out.stderr).trim());
             }
-            return Ok(Network::Pasta { pid_file });
+            return Ok(Network::Pasta { pid_file, netns_file });
         }
         if let Some(slirp) = which("slirp4netns") {
             let (exit_r, exit_w) = pipe()?;
@@ -169,12 +179,15 @@ impl Network {
 
     fn stop(self) {
         match self {
-            Network::Pasta { pid_file } => {
+            Network::Pasta { pid_file, netns_file } => {
                 if let Some(pid) = std::fs::read_to_string(&pid_file).ok().and_then(|p| p.trim().parse::<i32>().ok()) {
                     // SAFETY: plain signal.
                     unsafe { libc::kill(pid, libc::SIGTERM) };
                 }
                 let _ = std::fs::remove_file(pid_file);
+                if let Some(file) = netns_file {
+                    unbind_netns(&file);
+                }
             }
             Network::Slirp { mut child, _exit } => {
                 drop(_exit);
@@ -184,6 +197,26 @@ impl Network {
             Network::None => {}
         }
     }
+}
+
+/// Bind-mount `pid`'s network namespace at `file` (root mode).
+fn bind_netns(pid: u32, file: &Path) -> Result<()> {
+    unbind_netns(file);
+    std::fs::File::create(file)?;
+    let (src, dst) = (std::ffi::CString::new(format!("/proc/{pid}/ns/net"))?, std::ffi::CString::new(file.as_os_str().as_encoded_bytes())?);
+    // SAFETY: valid strings.
+    if unsafe { libc::mount(src.as_ptr(), dst.as_ptr(), std::ptr::null(), libc::MS_BIND, std::ptr::null()) } != 0 {
+        return Err(std::io::Error::last_os_error()).context("failed to bind the sandbox network namespace");
+    }
+    Ok(())
+}
+
+fn unbind_netns(file: &Path) {
+    if let Ok(c) = std::ffi::CString::new(file.as_os_str().as_encoded_bytes()) {
+        // SAFETY: valid string; failure (not mounted) is fine.
+        unsafe { libc::umount2(c.as_ptr(), libc::MNT_DETACH) };
+    }
+    let _ = std::fs::remove_file(file);
 }
 
 fn bind_api(port: Option<u16>) -> Result<std::net::TcpListener> {
@@ -257,6 +290,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             let _ = stage1.kill();
             let _ = stage1.wait();
             if !rootless {
+                let _ = std::fs::write("/sys/fs/cgroup/cgroup.procs", std::process::id().to_string());
                 remove_cgroup(&cgroup);
             }
             return Err(e);
@@ -307,9 +341,11 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     network.stop();
     let _ = std::fs::remove_file(super::state_path(&home));
     if !rootless {
-        // Let the kernel finish tearing down the PID namespace first.
+        // Let the kernel finish tearing down the PID namespace first, then
+        // leave the cluster's cgroup so all of it can go.
         tokio::time::sleep(Duration::from_millis(200)).await;
-        remove_cgroup(&cgroup.join("sandbox"));
+        let _ = std::fs::write("/sys/fs/cgroup/cgroup.procs", std::process::id().to_string());
+        remove_cgroup(&cgroup);
     }
     eprintln!("dev: stopped ({:?})", status.ok().and_then(|r| r.ok()).and_then(|s| s.code()));
     Ok(())

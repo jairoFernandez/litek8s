@@ -979,11 +979,15 @@ async fn send(method: hyper::Method, url: &str, headers: &[(&str, String)]) -> R
 /// Where to connect for `host`. In the dev sandbox (and the dev VM) the
 /// host machine's loopback is at another address (`LITEK8S_HOST_LOOPBACK`),
 /// so a registry at `localhost:5000` on the developer's machine still works.
+/// The variable may also name a file holding the address (the dev VM
+/// learns it by DHCP after its API server started).
 fn dial_host(host: &str) -> String {
-    match std::env::var("LITEK8S_HOST_LOOPBACK") {
-        Ok(alias) if !alias.is_empty() && matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]") => alias,
-        _ => host.to_string(),
+    if !matches!(host, "localhost" | "127.0.0.1" | "::1" | "[::1]") {
+        return host.to_string();
     }
+    let alias = std::env::var("LITEK8S_HOST_LOOPBACK").unwrap_or_default();
+    let alias = if alias.starts_with('/') { std::fs::read_to_string(&alias).unwrap_or_default().trim().to_string() } else { alias };
+    if alias.is_empty() { host.to_string() } else { alias }
 }
 
 /// Parse `Bearer realm="..",service="..",scope=".."`.

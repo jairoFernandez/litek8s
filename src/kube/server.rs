@@ -1678,10 +1678,20 @@ impl ApiState {
                 }
             }
             ("", "PersistentVolumeClaim") => defaults::pvc(obj, old),
-            ("batch", "Job") => defaults::job(obj, old),
-            ("batch", "CronJob") => defaults::cronjob(obj),
-            ("apps", "DaemonSet") => defaults::daemonset(obj),
+            ("batch", "Job") => {
+                defaults::job(obj, old);
+                defaults::pod_template(obj, "/spec/template");
+            }
+            ("batch", "CronJob") => {
+                defaults::cronjob(obj);
+                defaults::pod_template(obj, "/spec/jobTemplate/spec/template");
+            }
+            ("apps", "DaemonSet") => {
+                defaults::daemonset(obj);
+                defaults::pod_template(obj, "/spec/template");
+            }
             ("apps", "Deployment") => {
+                defaults::pod_template(obj, "/spec/template");
                 let spec = obj.as_object_mut().unwrap().entry("spec").or_insert_with(|| json!({}));
                 if spec.get("replicas").is_none() {
                     spec["replicas"] = json!(1);
@@ -1696,8 +1706,12 @@ impl ApiState {
                     spec["progressDeadlineSeconds"] = json!(600);
                 }
             }
-            ("apps", "StatefulSet") => defaults::statefulset(obj),
+            ("apps", "StatefulSet") => {
+                defaults::statefulset(obj);
+                defaults::pod_template(obj, "/spec/template");
+            }
             ("apps", "ReplicaSet") => {
+                defaults::pod_template(obj, "/spec/template");
                 let spec = obj.as_object_mut().unwrap().entry("spec").or_insert_with(|| json!({}));
                 if spec.get("replicas").is_none() {
                     spec["replicas"] = json!(1);

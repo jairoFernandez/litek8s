@@ -36,7 +36,6 @@ pub async fn bind(addr: SocketAddr) -> Option<UdpSocket> {
 
 pub async fn serve(api: Arc<ApiState>, socket: UdpSocket) {
     let socket = Arc::new(socket);
-    let upstream = upstream_resolver();
     let mut buf = vec![0u8; 1500];
     loop {
         let Ok((n, peer)) = socket.recv_from(&mut buf).await else { continue };
@@ -48,7 +47,9 @@ pub async fn serve(api: Arc<ApiState>, socket: UdpSocket) {
                     let answers = resolve(&api, &name);
                     Some(build_reply(&query, end, qtype, answers))
                 }
-                Some(_) => forward(&query, upstream).await,
+                // Read per query: the host's resolver can change (DHCP in the
+                // dev VM finishes after the API server starts, VPNs).
+                Some(_) => forward(&query, upstream_resolver()).await,
                 None => None,
             };
             if let Some(reply) = reply {

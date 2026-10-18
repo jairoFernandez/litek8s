@@ -124,6 +124,27 @@ fn inject_service_account_token(spec: &mut Map<String, Value>, suffix: &str) {
     }
 }
 
+/// The defaults the API server gives a pod template (Deployment,
+/// ReplicaSet, StatefulSet, DaemonSet, Job, CronJob) at `ptr`, as for pods
+/// minus what admission adds to pods only (service account, tolerations).
+/// Clients rely on them: `kubectl patch` with a JSON patch `replace` of
+/// `.../containers/0/imagePullPolicy` needs the field to exist.
+pub fn pod_template(obj: &mut Value, ptr: &str) {
+    let Some(spec) = obj.pointer_mut(&format!("{ptr}/spec")).and_then(Value::as_object_mut) else { return };
+    set_default(spec, "restartPolicy", json!("Always"));
+    set_default(spec, "dnsPolicy", json!("ClusterFirst"));
+    set_default(spec, "schedulerName", json!("default-scheduler"));
+    set_default(spec, "terminationGracePeriodSeconds", json!(30));
+    set_default(spec, "securityContext", json!({}));
+    for field in ["initContainers", "containers"] {
+        if let Some(containers) = spec.get_mut(field).and_then(Value::as_array_mut) {
+            for c in containers {
+                container(c);
+            }
+        }
+    }
+}
+
 fn container(c: &mut Value) {
     let Some(m) = c.as_object_mut() else { return };
     let image = m.get("image").and_then(Value::as_str).unwrap_or_default().to_string();

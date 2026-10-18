@@ -740,6 +740,12 @@ pub async fn describe_node<R: PodRuntime>(rt: &R, node_name: &str, node_ip: &str
 /// The address other machines reach this one at (the source address of the
 /// default route), or loopback.
 pub fn local_ip() -> String {
+    // The dev VM pins it (its own address arrives by DHCP after startup).
+    if let Ok(ip) = std::env::var("LITEK8S_NODE_IP") {
+        if !ip.is_empty() {
+            return ip;
+        }
+    }
     std::net::UdpSocket::bind("0.0.0.0:0")
         .and_then(|s| {
             s.connect("10.255.255.255:9")?;

@@ -20,6 +20,16 @@ pub const GUEST_API_PORT: u16 = 6443;
 /// Where the data disk is mounted in the VM.
 pub const DATA_DIR: &str = "/var/lib/litek8s";
 
+/// The vsock port the guest forwards from: the host connects, sends
+/// `tcp <port>\n` and is spliced to 127.0.0.1:<port> in the VM (the API
+/// server, NodePorts). The API then needs neither the VM's address nor its
+/// network, and listens on the VM's loopback only.
+pub const VSOCK_PORT: u32 = 1024;
+
+/// Written by init once DHCP has found the Mac's address on the VM network
+/// (see `LITEK8S_HOST_LOOPBACK`).
+pub const HOST_ADDRESS_FILE: &str = "/run/litek8s-host-address";
+
 /// Kernel command line options init understands.
 #[derive(Debug, Default, PartialEq)]
 pub struct BootOptions {
@@ -121,6 +131,7 @@ pub use init::main;
 mod init {
     use std::ffi::CString;
     use std::io::{BufRead, Read, Write};
+    use std::os::fd::FromRawFd;
     use std::time::{Duration, Instant};
 
     use super::*;
@@ -130,8 +141,72 @@ mod init {
     const MODULES: &[&str] = &[
         "virtio_net", "virtio_blk", "virtiofs", "overlay", "ext4", "bridge", "veth", "br_netfilter", "nf_conntrack", "nf_nat",
         "xt_MASQUERADE", "xt_addrtype", "xt_statistic", "xt_conntrack", "xt_comment", "xt_mark", "xt_tcpudp", "nft_compat",
-        "nft_chain_nat", "iptable_nat", "iptable_filter", "hw_random_virtio", "virtio_balloon",
+        "nft_chain_nat", "iptable_nat", "iptable_filter", "hw_random_virtio", "virtio_balloon", "vmw_vsock_virtio_transport",
     ];
+
+    /// Accept host connections on vsock and splice each to the local TCP
+    /// port its first line names.
+    fn serve_vsock() -> std::io::Result<()> {
+        // SAFETY: plain socket calls with a sockaddr_vm we own.
+        let fd = unsafe {
+            let fd = libc::socket(libc::AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            let mut addr: libc::sockaddr_vm = std::mem::zeroed();
+            addr.svm_family = libc::AF_VSOCK as libc::sa_family_t;
+            addr.svm_port = VSOCK_PORT;
+            addr.svm_cid = libc::VMADDR_CID_ANY;
+            if libc::bind(fd, (&addr as *const libc::sockaddr_vm).cast(), std::mem::size_of::<libc::sockaddr_vm>() as libc::socklen_t) != 0
+                || libc::listen(fd, 128) != 0
+            {
+                let e = std::io::Error::last_os_error();
+                libc::close(fd);
+                return Err(e);
+            }
+            fd
+        };
+        std::thread::spawn(move || {
+            loop {
+                // SAFETY: accept on our listening socket.
+                let conn = unsafe { libc::accept4(fd, std::ptr::null_mut(), std::ptr::null_mut(), libc::SOCK_CLOEXEC) };
+                if conn < 0 {
+                    continue;
+                }
+                // SAFETY: we own the accepted descriptor.
+                let conn = unsafe { std::os::unix::net::UnixStream::from_raw_fd(conn) };
+                std::thread::spawn(move || splice_vsock(conn));
+            }
+        });
+        Ok(())
+    }
+
+    fn splice_vsock(conn: std::os::unix::net::UnixStream) {
+        // Read the request line byte by byte so nothing after it is lost.
+        let mut line = Vec::new();
+        let mut byte = [0u8; 1];
+        let mut reader = &conn;
+        while line.len() < 64 {
+            match reader.read(&mut byte) {
+                Ok(1) if byte[0] == b'\n' => break,
+                Ok(1) => line.push(byte[0]),
+                _ => return,
+            }
+        }
+        let text = String::from_utf8_lossy(&line);
+        let Some(port) = text.strip_prefix("tcp ").and_then(|p| p.trim().parse::<u16>().ok()) else { return };
+        let Ok(tcp) = std::net::TcpStream::connect(("127.0.0.1", port)) else { return };
+        let _ = tcp.set_nodelay(true);
+        let (Ok(mut conn_r), Ok(mut tcp_w)) = (conn.try_clone(), tcp.try_clone()) else { return };
+        let up = std::thread::spawn(move || {
+            let _ = std::io::copy(&mut conn_r, &mut tcp_w);
+            let _ = tcp_w.shutdown(std::net::Shutdown::Write);
+        });
+        let (mut tcp_r, mut conn_w) = (tcp, conn);
+        let _ = std::io::copy(&mut tcp_r, &mut conn_w);
+        let _ = conn_w.shutdown(std::net::Shutdown::Write);
+        let _ = up.join();
+    }
 
     fn say(msg: &str) {
         let mut out = std::io::stdout();
@@ -254,13 +329,13 @@ mod init {
         Some((ip, gw))
     }
 
-    fn spawn_apiserver(gateway: &str) -> Option<libc::pid_t> {
+    fn spawn_apiserver() -> Option<libc::pid_t> {
         let mut cmd = std::process::Command::new("/init");
         cmd.args(["dev", "__apiserver", "--data-dir", &format!("{DATA_DIR}/dev")]);
         cmd.env("LITEK8S_DEV_GUEST", "1").env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin").env("HOME", "/root");
-        if !gateway.is_empty() {
-            cmd.env("LITEK8S_HOST_LOOPBACK", gateway);
-        }
+        // The node's address is the pod bridge's: the VM's own comes by
+        // DHCP, which the API server does not wait for.
+        cmd.env("LITEK8S_NODE_IP", "10.42.0.1").env("LITEK8S_HOST_LOOPBACK", HOST_ADDRESS_FILE);
         match cmd.spawn() {
             Ok(child) => Some(child.id() as libc::pid_t),
             Err(e) => {
@@ -356,8 +431,15 @@ mod init {
             }
         }
         let t_disk = started.elapsed().as_millis() - t_disk_start;
+        if let Err(e) = serve_vsock() {
+            say(&format!("no vsock ({e}); the host cannot reach the cluster"));
+        }
+        let mut main = spawn_apiserver();
+        say(&format!("booted in {} ms (mounts {t_mounts}, modules {}, disk+share {t_disk})", started.elapsed().as_millis(), t_modules - t_mounts));
+        println!("LITEK8S_GUEST vsock={VSOCK_PORT}");
+        let _ = std::io::stdout().flush();
+
         let lease = dhcp_thread.join().ok().flatten();
-        let t_dhcp = started.elapsed().as_millis();
         let (ip, gw) = match &lease {
             Some(l) => (l.ip.to_string(), l.router.map(|r| r.to_string()).unwrap_or_default()),
             None => {
@@ -366,6 +448,7 @@ mod init {
                 eth0_ipv4().unwrap_or_default()
             }
         };
+        let _ = std::fs::write(HOST_ADDRESS_FILE, &gw);
         // busybox renews the lease from here on (the hook leaves an
         // unchanged address alone).
         if !ip.is_empty() {
@@ -375,15 +458,10 @@ mod init {
                 .stderr(std::process::Stdio::null())
                 .spawn();
         }
-        say(&format!(
-            "booted in {} ms (mounts {t_mounts}, modules {}, disk+share {t_disk}, network ready at {t_dhcp})",
-            started.elapsed().as_millis(),
-            t_modules - t_mounts
-        ));
+        say(&format!("network up at {} ms", started.elapsed().as_millis()));
         println!("LITEK8S_GUEST ip={ip} gw={gw}");
         let _ = std::io::stdout().flush();
 
-        let mut main = spawn_apiserver(&gw);
         let mut restarts = 0u32;
         // Console commands from the host, read on a thread; PID 1 reaps.
         let (tx, rx) = std::sync::mpsc::channel::<String>();
@@ -413,7 +491,7 @@ mod init {
                     restarts += 1;
                     say(&format!("API server exited ({status}); restarting ({restarts})"));
                     std::thread::sleep(Duration::from_secs(1));
-                    main = spawn_apiserver(&gw);
+                    main = spawn_apiserver();
                 }
             }
         }

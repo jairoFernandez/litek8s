@@ -2,6 +2,13 @@
 
 `litek8s` is a Docker-backed orchestrator demo written in Rust. It keeps the UX close to `kubectl` while staying intentionally small: one binary, a local daemon over a Unix socket, a strict reduced `Deployment` manifest, SSH-backed remote nodes, and a reconciler that recreates containers if they disappear.
 
+## Local Kubernetes for development
+
+`litek8s dev up` starts a single-node Kubernetes cluster (the real API, for
+kubectl and Helm) in about a second, rootless on Linux and in a small
+Virtualization.framework VM on macOS, and points kubectl at it (context
+`litek8s-dev`). See [docs/dev.md](docs/dev.md).
+
 ## Commands
 
 ```bash

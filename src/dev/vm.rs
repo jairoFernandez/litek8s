@@ -49,8 +49,12 @@ const ENTITLEMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict><key>com.apple.security.virtualization</key><true/></dict></plist>
 "#;
 
+/// The guest kernel and initramfs: an installation, not cluster data, so
+/// next to the dev data directory rather than in it (`dev reset` keeps them).
 fn assets_dir(home: &Path) -> PathBuf {
-    std::env::var_os("LITEK8S_DEV_VM_ASSETS").map(PathBuf::from).unwrap_or_else(|| home.join("vm"))
+    std::env::var_os("LITEK8S_DEV_VM_ASSETS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.parent().unwrap_or(home).join("vm"))
 }
 
 fn has_entitlement(path: &Path) -> bool {
@@ -280,6 +284,7 @@ fn vm_main_inner(args: &[String]) -> Result<Never> {
             fs.setShare(Some(&single));
             vz.setDirectorySharingDevices(&NSArray::from_retained_slice(&[Retained::into_super(fs)]));
         }
+        vz.setSocketDevices(&NSArray::from_retained_slice(&[Retained::into_super(VZVirtioSocketDeviceConfiguration::new())]));
         vz.validateWithError().map_err(|e| anyhow::anyhow!("invalid VM configuration: {}", e.localizedDescription()))?;
         let vm = VZVirtualMachine::initWithConfiguration(VZVirtualMachine::alloc(), &vz);
         let done = block2::RcBlock::new(|err: *mut objc2_foundation::NSError| {
@@ -293,7 +298,7 @@ fn vm_main_inner(args: &[String]) -> Result<Never> {
     };
     eprintln!("dev-vm: starting the VM ({} CPUs, {} MiB)", config.cpus, config.memory_mib);
 
-    let host = Host { config: config.clone(), started, before };
+    let host = Host { config: config.clone(), started, before, vm: VmHandle(Retained::as_ptr(&vm)) };
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().expect("tokio runtime");
         rt.block_on(host.run(listener, guest_in_w, guest_out_r));
@@ -311,9 +316,67 @@ struct Host {
     config: VmConfig,
     started: u64,
     before: Vec<u32>,
+    vm: VmHandle,
+}
+
+/// The VM object, for the calls the main queue makes on it (it lives as
+/// long as the process).
+#[derive(Clone, Copy)]
+struct VmHandle(*const objc2_virtualization::VZVirtualMachine);
+// SAFETY: only dereferenced on the main queue, which owns the VM.
+unsafe impl Send for VmHandle {}
+unsafe impl Sync for VmHandle {}
+
+impl VmHandle {
+    /// A connection to the guest's vsock `port` (made on the main queue,
+    /// as the framework requires).
+    async fn connect(self, port: u32) -> Result<OwnedFd> {
+        let (tx, rx) = tokio::sync::oneshot::channel::<std::result::Result<OwnedFd, String>>();
+        let tx = Mutex::new(Some(tx));
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            let this = self;
+            let reply = move |r| {
+                if let Some(tx) = tx.lock().unwrap().take() {
+                    let _ = tx.send(r);
+                }
+            };
+            // SAFETY: on the main queue; the VM outlives the run loop.
+            unsafe {
+                let devices = (*this.0).socketDevices();
+                let Some(dev) = devices.iter().next().and_then(|d| d.downcast::<objc2_virtualization::VZVirtioSocketDevice>().ok()) else {
+                    return reply(Err("the VM has no vsock device".into()));
+                };
+                let reply = std::cell::RefCell::new(Some(reply));
+                let done = block2::RcBlock::new(move |conn: *mut objc2_virtualization::VZVirtioSocketConnection, err: *mut objc2_foundation::NSError| {
+                    let Some(reply) = reply.borrow_mut().take() else { return };
+                    match conn.as_ref() {
+                        Some(conn) => {
+                            let fd = libc::dup(conn.fileDescriptor());
+                            reply(if fd >= 0 { Ok(OwnedFd::from_raw_fd(fd)) } else { Err("dup failed".into()) });
+                        }
+                        None => reply(Err(err.as_ref().map(|e| e.localizedDescription().to_string()).unwrap_or_default())),
+                    }
+                });
+                dev.connectToPort_completionHandler(port, &done);
+            }
+        });
+        rx.await?.map_err(|e| anyhow::anyhow!("vsock connect: {e}"))
+    }
+
+    /// A stream to 127.0.0.1:`tcp_port` inside the VM.
+    async fn dial(self, tcp_port: u16) -> Result<tokio::net::UnixStream> {
+        use tokio::io::AsyncWriteExt;
+        let fd = self.connect(super::guest::VSOCK_PORT).await?;
+        let std = std::os::unix::net::UnixStream::from(fd);
+        std.set_nonblocking(true)?;
+        let mut stream = tokio::net::UnixStream::from_std(std)?;
+        stream.write_all(format!("tcp {tcp_port}\n").as_bytes()).await?;
+        Ok(stream)
+    }
 }
 
 enum GuestEvent {
+    Vsock,
     Up { ip: String },
     Halted,
 }
@@ -328,6 +391,10 @@ impl Host {
                 let line = String::from_utf8_lossy(&line).trim_end().to_string();
                 eprintln!("vm: {line}");
                 if let Some(rest) = line.strip_prefix("LITEK8S_GUEST ") {
+                    if rest.starts_with("vsock=") {
+                        let _ = tx.send(GuestEvent::Vsock);
+                        continue;
+                    }
                     let ip = rest.split_whitespace().find_map(|w| w.strip_prefix("ip=")).unwrap_or_default().to_string();
                     let _ = tx.send(GuestEvent::Up { ip });
                 } else if line.contains("litek8s-guest: halted") || line.contains("reboot: Power down") {
@@ -346,29 +413,35 @@ impl Host {
         })
         .expect("listener");
         let mut forwarders: Vec<tokio::task::JoinHandle<()>> = Vec::new();
+        let mut state = DevState {
+            pid: std::process::id(),
+            port,
+            mode: "vm".into(),
+            started_unix_ms: self.started,
+            cgroup: None,
+            vm_ip: None,
+            helper_pid: None,
+        };
         loop {
             tokio::select! {
                 ev = rx.recv() => match ev {
-                    Some(GuestEvent::Up { ip }) if !ip.is_empty() && forwarders.is_empty() => {
-                        let helper = helper_pids().into_iter().find(|p| !self.before.contains(p));
-                        let state = DevState {
-                            pid: std::process::id(),
-                            port,
-                            mode: "vm".into(),
-                            started_unix_ms: self.started,
-                            cgroup: None,
-                            vm_ip: Some(ip.clone()),
-                            helper_pid: helper,
-                        };
+                    Some(GuestEvent::Vsock) if forwarders.is_empty() => {
+                        state.helper_pid = helper_pids().into_iter().find(|p| !self.before.contains(p));
                         if let Err(e) = write_state(&self.config.home, &state) {
                             eprintln!("dev-vm: {e:#}");
                         }
-                        eprintln!("dev-vm: guest up at {ip} after {} ms; API on 127.0.0.1:{port}", now_ms() - self.started);
-                        let target = format!("{ip}:{}", super::guest::GUEST_API_PORT);
-                        forwarders.push(tokio::spawn(forward_accepts(listener_take(&listener), target)));
-                        forwarders.push(tokio::spawn(expose_services(ip.clone())));
+                        eprintln!("dev-vm: guest up after {} ms; API on 127.0.0.1:{port}", now_ms() - self.started);
+                        forwarders.push(tokio::spawn(forward_accepts(listener_take(&listener), self.vm, super::guest::GUEST_API_PORT)));
+                        forwarders.push(tokio::spawn(expose_services(self.vm, port)));
                     }
-                    Some(GuestEvent::Up { .. }) => {}
+                    Some(GuestEvent::Vsock) => {}
+                    Some(GuestEvent::Up { ip }) => {
+                        eprintln!("dev-vm: guest network up at {ip} after {} ms", now_ms() - self.started);
+                        state.vm_ip = Some(ip).filter(|ip| !ip.is_empty());
+                        if !forwarders.is_empty() {
+                            let _ = write_state(&self.config.home, &state);
+                        }
+                    }
                     Some(GuestEvent::Halted) | None => break,
                 },
                 _ = term.recv() => { self.power_off(&mut console, &mut rx).await; break }
@@ -404,16 +477,18 @@ fn listener_take(listener: &tokio::net::TcpListener) -> std::net::TcpListener {
     l
 }
 
-async fn forward_accepts(listener: std::net::TcpListener, target: String) {
+/// Relay connections on a localhost listener to `port` inside the VM.
+async fn forward_accepts(listener: std::net::TcpListener, vm: VmHandle, port: u16) {
     let Ok(listener) = tokio::net::TcpListener::from_std(listener) else { return };
     loop {
         let Ok((mut client, _)) = listener.accept().await else { continue };
-        let target = target.clone();
         tokio::spawn(async move {
             let _ = client.set_nodelay(true);
-            if let Ok(mut upstream) = tokio::net::TcpStream::connect(&target).await {
-                let _ = upstream.set_nodelay(true);
-                let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+            match vm.dial(port).await {
+                Ok(mut upstream) => {
+                    let _ = tokio::io::copy_bidirectional(&mut client, &mut upstream).await;
+                }
+                Err(e) => eprintln!("dev-vm: port {port}: {e:#}"),
             }
         });
     }
@@ -447,8 +522,8 @@ fn wanted_ports(services: &Value) -> Vec<(u16, u16)> {
 
 /// Keep a localhost listener for every NodePort / LoadBalancer port,
 /// following the Services through a watch.
-async fn expose_services(ip: String) {
-    let api = format!("{ip}:{}", super::guest::GUEST_API_PORT);
+async fn expose_services(vm: VmHandle, api_port: u16) {
+    let api = format!("127.0.0.1:{api_port}");
     let listeners: Arc<Mutex<HashMap<u16, tokio::task::JoinHandle<()>>>> = Arc::default();
     loop {
         let list = get(&api, "/api/v1/services").await;
@@ -469,7 +544,7 @@ async fn expose_services(ip: String) {
                 match std::net::TcpListener::bind(("127.0.0.1", host)) {
                     Ok(l) => {
                         l.set_nonblocking(true).ok();
-                        current.insert(host, tokio::spawn(forward_accepts(l, format!("{ip}:{node}"))));
+                        current.insert(host, tokio::spawn(forward_accepts(l, vm, node)));
                     }
                     Err(e) => eprintln!("dev-vm: localhost:{host} not exposed: {e}"),
                 }
