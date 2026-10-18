@@ -255,9 +255,13 @@ fn walk_known(v: &Value, desc: &MessageDescriptor, path: &str, root: bool, out: 
     let Value::Object(map) = v else { return };
     let mut fields = Vec::new();
     json_fields(desc, &mut fields);
+    // A whole object embedded in another (a StatefulSet's
+    // volumeClaimTemplates) carries TypeMeta too; kinds are the messages
+    // with a List.
+    let typed = root || pool().get_message_by_name(&format!("{}List", desc.full_name())).is_some();
     for (k, child) in map {
         let p = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
-        if root && (k == "apiVersion" || k == "kind") {
+        if typed && (k == "apiVersion" || k == "kind") {
             continue;
         }
         let Some((_, f)) = fields.iter().find(|(name, _)| name == k) else {
@@ -422,6 +426,11 @@ mod tests {
             unknown_fields("apps/v1", "Deployment", &dep),
             Some(vec!["metadata.unknownMeta".to_string(), "spec.template.spec.containers[0].bogus".into(), "spec.unknownField".into()])
         );
+        // Embedded objects may carry apiVersion/kind; templates may not.
+        let sts = json!({"apiVersion": "apps/v1", "kind": "StatefulSet", "metadata": {"name": "a"}, "spec": {
+            "template": {"kind": "Pod", "spec": {"containers": []}},
+            "volumeClaimTemplates": [{"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": {"name": "data"}}]}});
+        assert_eq!(unknown_fields("apps/v1", "StatefulSet", &sts), Some(vec!["spec.template.kind".to_string()]));
         let mut sel = DynamicMessage::new(pool.get_message_by_name("k8s.io.api.core.v1.ConfigMapKeySelector").unwrap());
         let mut lor = DynamicMessage::new(pool.get_message_by_name("k8s.io.api.core.v1.LocalObjectReference").unwrap());
         lor.set_field_by_name("name", Pv::String("cm".into()));
