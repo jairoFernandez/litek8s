@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, bail};
-use base64::Engine;
 use hyper::body::Bytes;
 use serde_json::{Value, json};
 use tokio::io::{AsyncRead, AsyncWrite, BufReader, BufWriter};
@@ -310,6 +309,20 @@ async fn feed_pods(api: Arc<ApiState>, node: String, tx: mpsc::Sender<Frame>) {
                         if sent.get(&uid) == Some(&fp) {
                             continue;
                         }
+                        // Kubelet admission: a new pod whose hostPort another
+                        // pod on this node holds is rejected.
+                        // A pod that finished before this node ran it (rejected) is not run.
+                        if !sent.contains_key(&uid) && util::is_terminal(&event.object) {
+                            continue;
+                        }
+                        if !sent.contains_key(&uid) && host_port_conflict(&api, &node, &event.object) {
+                            let mut status = event.object.get("status").cloned().unwrap_or_else(|| json!({}));
+                            status["phase"] = json!("Failed");
+                            status["reason"] = json!("NodePorts");
+                            status["message"] = json!("Pod was rejected: node didn't have free ports for the requested pod ports");
+                            let _ = util::write_status(&api, "", "pods", &event.object, status);
+                            continue;
+                        }
                         if sent.insert(uid, fp).is_none() {
                             *namespaces.entry(ns).or_default() += 1;
                         }
@@ -344,6 +357,44 @@ async fn feed_pods(api: Arc<ApiState>, node: String, tx: mpsc::Sender<Frame>) {
     }
 }
 
+/// Whether `pod` wants a (hostIP, hostPort, protocol) another active pod on
+/// the node already holds.
+fn host_port_conflict(api: &ApiState, node: &str, pod: &Value) -> bool {
+    let ports = |p: &Value| -> Vec<(String, u64, String)> {
+        p.pointer("/spec/containers")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .flat_map(|c| c.get("ports").and_then(Value::as_array).cloned().unwrap_or_default())
+            .filter_map(|port| {
+                let hp = port.get("hostPort").and_then(Value::as_u64).filter(|h| *h > 0)?;
+                let ip = match util::s(&port, "/hostIP") {
+                    "" => "0.0.0.0".to_string(),
+                    ip => ip.to_string(),
+                };
+                let proto = match util::s(&port, "/protocol") {
+                    "" => "TCP".to_string(),
+                    p => p.to_string(),
+                };
+                Some((ip, hp, proto))
+            })
+            .collect()
+    };
+    let wanted = ports(pod);
+    if wanted.is_empty() {
+        return false;
+    }
+    let uid = util::uid(pod);
+    let (pods, _) = api.store().list("", "pods", None);
+    pods.iter()
+        .filter(|p| util::s(p, "/spec/nodeName") == node && util::uid(p) != uid && util::is_active(p))
+        .filter(|p| util::s(p, "/metadata/creationTimestamp") <= util::s(pod, "/metadata/creationTimestamp"))
+        .flat_map(|p| ports(p))
+        .any(|(ip, hp, proto)| {
+            wanted.iter().any(|(wip, whp, wproto)| *whp == hp && *wproto == proto && (ip == "0.0.0.0" || *wip == "0.0.0.0" || ip == *wip))
+        })
+}
+
 fn service_update(api: &ApiState, ns: &str, name: &str) -> Message {
     Message::ServiceUpdate {
         namespace: ns.to_string(),
@@ -363,6 +414,7 @@ async fn handle_message(
         Message::PodStatus { namespace, name, uid, status } => {
             apply_pod_status(api, &namespace, &name, &uid, status);
         }
+        Message::PodTerminated { namespace, name, uid } => api.finish_pod_deletion(&namespace, &name, &uid),
         Message::Get { id, resource, namespace, name } => {
             let object = lookup(api, &resource, &namespace, &name);
             let _ = tx.send(Frame::Control(Message::GetResult { id, object })).await;
@@ -385,32 +437,29 @@ fn lookup(api: &ApiState, resource: &str, namespace: &str, name: &str) -> Option
             api.get_object("", resource, namespace, name)
         }
         "persistentvolumes" => api.get_object("", resource, "", name),
-        "token" => Some(json!({"token": service_account_token(namespace, name)})),
+        // `name` is the service account, or JSON {"sa", "pod", "audience", "expirationSeconds"}.
+        "token" => {
+            let (sa, pod, aud, exp) = match serde_json::from_str::<Value>(name) {
+                Ok(v) if v.is_object() => (
+                    util::s(&v, "/sa").to_string(),
+                    util::s(&v, "/pod").to_string(),
+                    util::s(&v, "/audience").to_string(),
+                    v.get("expirationSeconds").and_then(Value::as_i64),
+                ),
+                _ => (name.to_string(), String::new(), String::new(), None),
+            };
+            let audiences = if aud.is_empty() { Vec::new() } else { vec![aud] };
+            let bound = (!pod.is_empty()).then_some(("Pod", pod.as_str()));
+            // Like --service-account-extend-token-expiration: the kubelet's
+            // default-lifetime tokens stay valid for a year.
+            let exp = match exp.unwrap_or(3607) {
+                3607 => 365 * 24 * 3600,
+                e => e.max(600),
+            };
+            api.mint_token(namespace, &sa, audiences, exp, bound).ok().map(|(token, _)| json!({"token": token}))
+        }
         _ => None,
     }
-}
-
-/// A JWT-shaped service account token. Nothing verifies it yet (there is no
-/// authentication), but clients that decode tokens find the usual claims.
-pub fn service_account_token(namespace: &str, service_account: &str) -> String {
-    let b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let now = chrono::Utc::now().timestamp();
-    let header = json!({"alg": "RS256", "kid": "litek8s"});
-    let claims = json!({
-        "aud": ["https://kubernetes.default.svc.cluster.local", "k3s"],
-        "exp": now + 365 * 24 * 3600,
-        "iat": now,
-        "iss": "https://kubernetes.default.svc.cluster.local",
-        "kubernetes.io": {"namespace": namespace, "serviceaccount": {"name": service_account}},
-        "nbf": now,
-        "sub": format!("system:serviceaccount:{namespace}:{service_account}"),
-    });
-    format!(
-        "{}.{}.{}",
-        b64.encode(header.to_string()),
-        b64.encode(claims.to_string()),
-        b64.encode(b"unsigned")
-    )
 }
 
 /// Store a pod status reported by its node, keeping conditions owned by the

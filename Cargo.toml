@@ -21,6 +21,7 @@ libc = "0.2"
 memmap2 = { version = "0.9.10", optional = true }
 openraft = { version = "=0.9.21", features = ["serde", "storage-v2"] }
 prost-reflect = "0.16.5"
+ring = "0.17"
 rcgen = { version = "0.13", default-features = false, features = ["ring", "pem"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rand_core = { version = "0.6", features = ["getrandom"] }

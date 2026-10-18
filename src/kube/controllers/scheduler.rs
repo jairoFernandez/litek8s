@@ -59,6 +59,78 @@ fn tolerates(spec: &Value, taint: &Value) -> bool {
     })
 }
 
+/// The toleration of `spec` matching `taint`, if any.
+fn toleration_for<'a>(spec: &'a Value, taint: &Value) -> Option<&'a Value> {
+    let (key, value, effect) = (s(taint, "/key"), s(taint, "/value"), s(taint, "/effect"));
+    spec.get("tolerations")?.as_array()?.iter().find(|t| {
+        let t_effect = s(t, "/effect");
+        if !t_effect.is_empty() && t_effect != effect {
+            return false;
+        }
+        let t_key = s(t, "/key");
+        match s(t, "/operator") {
+            "Exists" => t_key.is_empty() || t_key == key,
+            _ => t_key == key && s(t, "/value") == value,
+        }
+    })
+}
+
+/// NoExecute taints: evict pods on `node` that do not tolerate one (now, or
+/// once their `tolerationSeconds` since the taint was added have passed).
+pub(crate) fn evict_for_taints(api: &ApiState, node_name: &str) -> Result<super::Requeue, ApiError> {
+    let Some(node) = api.get_object("", "nodes", "", node_name) else { return Ok(None) };
+    let taints: Vec<Value> = node
+        .pointer("/spec/taints")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|t| s(t, "/effect") == "NoExecute")
+        .cloned()
+        .collect();
+    if taints.is_empty() {
+        return Ok(None);
+    }
+    let now = util::now();
+    let mut requeue: Option<std::time::Duration> = None;
+    let (pods, _) = api.store().list("", "pods", None);
+    for pod in pods.iter().filter(|p| s(p, "/spec/nodeName") == node_name && util::is_active(p)) {
+        let spec = pod.get("spec").cloned().unwrap_or_default();
+        let mut evict_in: Option<i64> = None;
+        for taint in &taints {
+            let wait = match toleration_for(&spec, taint) {
+                None => 0,
+                Some(t) => match t.get("tolerationSeconds").and_then(Value::as_i64) {
+                    None => continue,
+                    Some(secs) => {
+                        let added = s(taint, "/timeAdded");
+                        let since = util::parse_time(added).map(|t| (now - t).num_seconds()).unwrap_or(0);
+                        (secs - since).max(0)
+                    }
+                },
+            };
+            evict_in = Some(evict_in.map_or(wait, |w| w.min(wait)));
+        }
+        match evict_in {
+            Some(0) => {
+                let mut status = pod.get("status").cloned().unwrap_or_else(|| json!({}));
+                let mut conditions = util::conditions_of(pod);
+                util::set_condition(&mut conditions, "DisruptionTarget", "True", "DeletionByTaintManager", "Taint manager: deleting due to NoExecute taint");
+                status["conditions"] = json!(conditions);
+                let _ = util::write_status(api, "", "pods", pod, status);
+                util::record_event(api, pod, "Normal", "TaintManagerEviction", &format!("Marking for deletion Pod {}", util::name(pod)), "taint-eviction-controller");
+                let (ns, name) = util::ns_name(pod);
+                let _ = api.delete_named("", "pods", &ns, &name);
+            }
+            Some(secs) => {
+                let d = std::time::Duration::from_secs(secs as u64);
+                requeue = Some(requeue.map_or(d, |r| r.min(d)));
+            }
+            None => {}
+        }
+    }
+    Ok(requeue)
+}
+
 fn expression_matches(expr: &Value, value: Option<&str>) -> bool {
     let values: Vec<&str> = expr
         .get("values")
@@ -221,6 +293,7 @@ pub(crate) fn schedule(api: &ApiState, ns: &str, name: &str) -> Result<Outcome, 
         reasons.sort();
         reasons.dedup();
         let message = format!("0/{} nodes are available: {}.", nodes.len(), reasons.join(", "));
+        preempt(api, &pod, &nodes, &pods, pinned.as_deref())?;
         return unschedulable(api, &pod, &message);
     };
 
@@ -230,13 +303,75 @@ pub(crate) fn schedule(api: &ApiState, ns: &str, name: &str) -> Result<Outcome, 
     let mut bound = pod.clone();
     bound["spec"]["nodeName"] = json!(node);
     let bound = api.update_object("", "pods", bound)?;
+    util::record_event(api, &bound, "Normal", "Scheduled", &format!("Successfully assigned {ns}/{name} to {node}"), "default-scheduler");
     set_scheduled(api, bound, "True", "", "")?;
     Ok(Outcome::Done)
 }
 
 fn unschedulable(api: &ApiState, pod: &Value, message: &str) -> Result<Outcome, ApiError> {
+    let first = util::condition(pod, "PodScheduled").is_none_or(|c| s(c, "/message") != message);
     set_scheduled(api, pod.clone(), "False", "Unschedulable", message)?;
+    if first {
+        util::record_event(api, pod, "Warning", "FailedScheduling", message, "default-scheduler");
+    }
     Ok(Outcome::Unschedulable)
+}
+
+fn priority(pod: &Value) -> i64 {
+    util::i(pod, "/spec/priority").unwrap_or(0)
+}
+
+/// Preemption: on a node where evicting lower-priority pods makes room,
+/// evict the fewest (lowest priority first) and nominate the node.
+fn preempt(api: &ApiState, pod: &Value, nodes: &[Value], pods: &[Value], pinned: Option<&str>) -> Result<(), ApiError> {
+    if s(pod, "/spec/preemptionPolicy") == "Never" || !s(pod, "/status/nominatedNodeName").is_empty() {
+        return Ok(());
+    }
+    let spec = pod.get("spec").cloned().unwrap_or_else(|| json!({}));
+    let (want_cpu, want_mem) = pod_requests(&spec);
+    let mine = priority(pod);
+    let mut best: Option<(String, Vec<&Value>)> = None;
+    for node in nodes {
+        let node_name = util::name(node);
+        if pinned.is_some_and(|p| p != node_name) || node_fits_constraints(&spec, node, false).is_err() {
+            continue;
+        }
+        let alloc = |res: &str| node.pointer(&format!("/status/allocatable/{res}")).and_then(quantity::milli_of);
+        let mut on_node: Vec<&Value> = pods.iter().filter(|p| s(p, "/spec/nodeName") == node_name && util::is_active(p)).collect();
+        let fits = |on: &[&Value]| {
+            let (cpu, mem) = on.iter().map(|p| pod_requests(p.get("spec").unwrap_or(&Value::Null))).fold((0, 0), |(a, b), (c, d)| (a + c, b + d));
+            alloc("pods").is_none_or(|m| (on.len() as i128 + 1) * 1000 <= m)
+                && alloc("cpu").is_none_or(|c| cpu + want_cpu <= c)
+                && alloc("memory").is_none_or(|m| (mem + want_mem) * 1000 <= m)
+        };
+        on_node.sort_by_key(|p| priority(p));
+        let mut victims = Vec::new();
+        let mut kept = on_node.clone();
+        while !fits(&kept) {
+            let Some(pos) = kept.iter().position(|p| priority(p) < mine) else { break };
+            victims.push(kept.remove(pos));
+        }
+        if fits(&kept) && !victims.is_empty() && best.as_ref().is_none_or(|(_, v)| victims.len() < v.len()) {
+            best = Some((node_name, victims));
+        }
+    }
+    let Some((node, victims)) = best else { return Ok(()) };
+    for victim in victims {
+        let mut status = victim.get("status").cloned().unwrap_or_else(|| json!({}));
+        let mut conditions = util::conditions_of(victim);
+        util::set_condition(&mut conditions, "DisruptionTarget", "True", "PreemptionByScheduler", &format!("{}: preempting to accommodate a higher priority pod", "default-scheduler"));
+        status["conditions"] = json!(conditions);
+        let _ = util::write_status(api, "", "pods", victim, status);
+        util::record_event(api, victim, "Normal", "Preempted", &format!("Preempted by pod {}", util::uid(pod)), "default-scheduler");
+        let (vns, vname) = util::ns_name(victim);
+        let _ = api.delete_named("", "pods", &vns, &vname);
+    }
+    if let Some(current) = api.get_object("", "pods", &util::ns_name(pod).0, &util::name(pod)) {
+        let mut status = current.get("status").cloned().unwrap_or_else(|| json!({}));
+        status["nominatedNodeName"] = json!(node);
+        let _ = util::write_status(api, "", "pods", &current, status);
+    }
+    Ok(())
 }
 
 fn set_scheduled(api: &ApiState, mut pod: Value, status: &str, reason: &str, message: &str) -> Result<(), ApiError> {

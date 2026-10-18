@@ -101,6 +101,16 @@ pub(crate) async fn run<R: PodRuntime>(
     }
 }
 
+/// Run a lifecycle hook handler (`postStart`/`preStop`: exec, httpGet,
+/// tcpSocket or sleep); true when it succeeded.
+pub(crate) async fn run_handler<R: PodRuntime>(rt: &R, handler: &Value, target: &ProbeTarget) -> bool {
+    if let Some(seconds) = handler.pointer("/sleep/seconds").and_then(Value::as_u64) {
+        tokio::time::sleep(Duration::from_secs(seconds)).await;
+        return true;
+    }
+    check(rt, handler, target).await
+}
+
 async fn check<R: PodRuntime>(rt: &R, probe: &Value, target: &ProbeTarget) -> bool {
     if let Some(command) = probe.pointer("/exec/command").and_then(Value::as_array) {
         let command: Vec<String> = command.iter().filter_map(Value::as_str).map(str::to_string).collect();

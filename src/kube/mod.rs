@@ -5,21 +5,27 @@
 
 mod admission;
 pub mod agent;
+pub mod cel;
 pub mod controllers;
 pub mod defaults;
 pub mod discovery;
 pub mod dns;
+pub mod fields;
 pub mod patch;
 mod pod_streams;
 pub mod protobuf;
+mod proxy;
+pub mod quota;
 pub mod quantity;
 pub mod registry;
+pub mod sa_token;
 pub mod selector;
 pub mod server;
 mod spdy;
 pub mod store;
 pub mod table;
 pub mod tls;
+pub mod validation;
 mod ws;
 
 pub use server::{ApiServerConfig, ApiState, serve, serve_listener, write_kubeconfig};

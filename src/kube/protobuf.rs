@@ -172,11 +172,117 @@ fn to_json(msg: &DynamicMessage) -> Value {
                 if v == json!("") || v.is_null() {
                     continue;
                 }
-                out.insert(field.name().to_string(), v);
+                // Embedded Go structs (`json:",inline"`) are a nested message
+                // on the wire but flattened into the parent in JSON.
+                if let (Pv::Message(m), Value::Object(inner)) = (value, &v)
+                    && is_inline(field.name(), m.descriptor().name())
+                {
+                    out.extend(inner.clone());
+                    continue;
+                }
+                out.insert(json_name(field.name()).to_string(), v);
             }
             Value::Object(out)
         }
     }
+}
+
+/// The JSON name of a protobuf field. They match except for a few fields
+/// whose generated.proto name is the Go field name.
+fn json_name(proto: &str) -> &str {
+    match proto {
+        "Webhooks" => "webhooks",
+        "Expression" => "expression",
+        "Name" => "name",
+        "aPIGroup" => "apiGroup",
+        "uID" => "uid",
+        other => other,
+    }
+}
+
+/// Paths of fields in `obj` that its built-in type does not have
+/// (`spec.unknownField`, `spec.containers[0].foo`); `None` when no schema is
+/// known for the type.
+pub fn unknown_fields(api_version: &str, kind: &str, obj: &Value) -> Option<Vec<String>> {
+    let desc = message_for(api_version, kind)?;
+    let mut out = Vec::new();
+    walk_known(obj, &desc, "", true, &mut out);
+    Some(out)
+}
+
+/// Types whose JSON form is not their message's fields.
+fn opaque(desc: &MessageDescriptor) -> bool {
+    let name = desc.full_name();
+    name.starts_with(APIEXT)
+        || name == "k8s.io.apimachinery.pkg.util.intstr.IntOrString"
+        || name == "k8s.io.apimachinery.pkg.api.resource.Quantity"
+        || name == "k8s.io.apimachinery.pkg.runtime.RawExtension"
+        || [format!("{META}.Time"), format!("{META}.MicroTime"), format!("{META}.Duration"), format!("{META}.FieldsV1")].iter().any(|n| n == name)
+}
+
+/// JSON key -> field, with embedded (inline) structs flattened.
+fn json_fields(desc: &MessageDescriptor, out: &mut Vec<(String, prost_reflect::FieldDescriptor)>) {
+    for f in desc.fields() {
+        if let prost_reflect::Kind::Message(m) = f.kind() {
+            if !f.is_list() && !f.is_map() && is_inline(f.name(), m.name()) {
+                json_fields(&m, out);
+                continue;
+            }
+        }
+        out.push((json_name(f.name()).to_string(), f));
+    }
+}
+
+fn walk_known(v: &Value, desc: &MessageDescriptor, path: &str, root: bool, out: &mut Vec<String>) {
+    if opaque(desc) {
+        return;
+    }
+    let Value::Object(map) = v else { return };
+    let mut fields = Vec::new();
+    json_fields(desc, &mut fields);
+    for (k, child) in map {
+        let p = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
+        if root && (k == "apiVersion" || k == "kind") {
+            continue;
+        }
+        let Some((_, f)) = fields.iter().find(|(name, _)| name == k) else {
+            out.push(p);
+            continue;
+        };
+        let prost_reflect::Kind::Message(m) = f.kind() else { continue };
+        if f.is_map() {
+            let value_field = m.map_entry_value_field();
+            if let (prost_reflect::Kind::Message(vm), Value::Object(entries)) = (value_field.kind(), child) {
+                for (ek, ev) in entries {
+                    walk_known(ev, &vm, &format!("{p}.{ek}"), false, out);
+                }
+            }
+        } else if f.is_list() {
+            for (i, item) in child.as_array().into_iter().flatten().enumerate() {
+                walk_known(item, &m, &format!("{p}[{i}]"), false, out);
+            }
+        } else {
+            walk_known(child, &m, &p, false, out);
+        }
+    }
+}
+
+/// Embedded struct fields in k8s.io/api (`json:",inline"` or `json:""`):
+/// protobuf field name and message type.
+fn is_inline(field: &str, message: &str) -> bool {
+    matches!(
+        (field, message),
+        ("localObjectReference", "LocalObjectReference")
+            | ("volumeSource", "VolumeSource")
+            | ("persistentVolumeSource", "PersistentVolumeSource")
+            | ("handler", "ProbeHandler")
+            | ("ephemeralContainerCommon", "EphemeralContainerCommon")
+            | ("ingressRuleValue", "IngressRuleValue")
+            | ("rule", "Rule")
+            | ("ruleWithOperations", "RuleWithOperations")
+            | ("deviceConfiguration", "DeviceConfiguration")
+            | ("typeMeta", "TypeMeta")
+    )
 }
 
 fn scalar_or_nested(value: &Pv) -> Value {
@@ -259,6 +365,21 @@ mod tests {
         port.set_field_by_name("port", Pv::I32(80));
         port.set_field_by_name("targetPort", Pv::Message(ios));
         assert_eq!(to_json(&port), json!({"port": 80, "targetPort": "http"}));
+        // Embedded structs flatten: configMapKeyRef.localObjectReference.name -> configMapKeyRef.name.
+        let dep = json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "a", "unknownMeta": 1},
+            "spec": {"unknownField": 1, "replicas": 1, "template": {"spec": {"containers": [{"name": "c", "image": "x",
+            "resources": {"limits": {"cpu": "1"}}, "env": [{"name": "A", "valueFrom": {"configMapKeyRef": {"name": "cm", "key": "k"}}}],
+            "livenessProbe": {"exec": {"command": ["true"]}}, "bogus": 2}], "volumes": [{"name": "v", "emptyDir": {}}]}}}});
+        assert_eq!(
+            unknown_fields("apps/v1", "Deployment", &dep),
+            Some(vec!["metadata.unknownMeta".to_string(), "spec.template.spec.containers[0].bogus".into(), "spec.unknownField".into()])
+        );
+        let mut sel = DynamicMessage::new(pool.get_message_by_name("k8s.io.api.core.v1.ConfigMapKeySelector").unwrap());
+        let mut lor = DynamicMessage::new(pool.get_message_by_name("k8s.io.api.core.v1.LocalObjectReference").unwrap());
+        lor.set_field_by_name("name", Pv::String("cm".into()));
+        sel.set_field_by_name("localObjectReference", Pv::Message(lor));
+        sel.set_field_by_name("key", Pv::String("k".into()));
+        assert_eq!(to_json(&sel), json!({"name": "cm", "key": "k"}));
         assert!(message_for("apps/v1", "Deployment").is_some());
         assert!(message_for("networking.k8s.io/v1", "Ingress").is_some());
         assert!(message_for("v1", "DeleteOptions").is_some());

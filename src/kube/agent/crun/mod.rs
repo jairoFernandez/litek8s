@@ -659,6 +659,10 @@ impl PodRuntime for CrunPods {
         "crun"
     }
 
+    fn writes_pod_files(&self) -> bool {
+        true
+    }
+
     async fn machine(&self) -> Result<MachineInfo> {
         let mem_kb: i64 = std::fs::read_to_string("/proc/meminfo")
             .unwrap_or_default()
@@ -723,7 +727,11 @@ impl PodRuntime for CrunPods {
             let name = e.file_name().to_string_lossy().to_string();
             if let Some(volume) = name.strip_suffix(".labels") {
                 let labels: HashMap<String, String> = read_json(&e.path()).unwrap_or_default();
-                if labels.contains_key(label) {
+                let hit = match label.split_once('=') {
+                    Some((k, v)) => labels.get(k).is_some_and(|x| x == v),
+                    None => labels.contains_key(label),
+                };
+                if hit {
                     out.push(volume.to_string());
                 }
             }
@@ -766,7 +774,7 @@ impl PodRuntime for CrunPods {
             let ip = if spec.host_network { None } else { Some(self.inner.ipam.lock().unwrap().allocate(&id)?) };
             let host_if = format!("lk{short}");
             let batch = ip.map(|ip| net::pod_link_commands(&host_if, ip, &self.inner.subnet));
-            sys::create_namespaces(meta.netns.as_ref().map(PathBuf::from), PathBuf::from(&meta.ipc), batch, Vec::new())?;
+            sys::create_namespaces(meta.netns.as_ref().map(PathBuf::from), PathBuf::from(&meta.ipc), batch, spec.sysctls.clone())?;
             if ip.is_some() {
                 sys::bridge_attach(net::BRIDGE, &host_if)?;
             }

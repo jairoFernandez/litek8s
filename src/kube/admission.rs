@@ -27,6 +27,7 @@ use rustls::pki_types::{CertificateDer, ServerName};
 use serde_json::{Value, json};
 
 use super::agent::hub::StreamEvent;
+use super::cel;
 use super::agent::protocol::Message;
 use super::controllers::util;
 use super::patch;
@@ -79,10 +80,42 @@ fn rule_matches(rule: &Value, a: &Attributes) -> bool {
     }
 }
 
+/// The CEL variables of an admission request.
+fn cel_env(a: &Attributes<'_>, obj: &Value) -> cel::Env {
+    let mut env = cel::Env::default();
+    env.vars.insert("object".into(), if a.operation == "DELETE" { cel::Val::Null } else { cel::Val::from_json(obj) });
+    env.vars.insert("oldObject".into(), a.old.map(cel::Val::from_json).unwrap_or(cel::Val::Null));
+    env.vars.insert(
+        "request".into(),
+        cel::Val::from_json(&json!({
+            "operation": a.operation,
+            "namespace": a.namespace,
+            "name": a.name,
+            "kind": {"group": a.rt.group, "version": a.rt.version, "kind": a.rt.kind},
+            "resource": {"group": a.rt.group, "version": a.rt.version, "resource": a.rt.plural},
+            "subResource": a.sub.unwrap_or_default(),
+            "userInfo": {"username": "system:admin", "groups": ["system:masters", "system:authenticated"]},
+            "dryRun": a.dry_run,
+        })),
+    );
+    env
+}
+
 fn webhook_matches(api: &ApiState, hook: &Value, a: &Attributes, obj: &Value) -> bool {
     let rules = hook.get("rules").and_then(Value::as_array).cloned().unwrap_or_default();
     if !rules.iter().any(|r| rule_matches(r, a)) {
         return false;
+    }
+    // matchConditions: every one must be true (an error still calls).
+    let conds = hook.get("matchConditions").and_then(Value::as_array).filter(|c| !c.is_empty());
+    if let Some(conds) = conds {
+        let env = cel_env(a, obj);
+        for c in conds {
+            let r = cel::compile(util::s(c, "/expression")).and_then(|p| p.eval(&env));
+            if r == Ok(cel::Val::Bool(false)) {
+                return false;
+            }
+        }
     }
     if let Some(sel) = hook.get("objectSelector").filter(|s| !s.is_null()) {
         let selector = LabelSelector::from_object(Some(sel)).unwrap_or_default();
@@ -140,14 +173,23 @@ pub(crate) async fn admit(api: &Arc<ApiState>, a: &Attributes<'_>, mut obj: Valu
                 match call(api, hook, a, &obj).await {
                     Ok(response) => {
                         if response.get("allowed").and_then(Value::as_bool) != Some(true) {
+                            // The API server's wording (webhookerrors.ToStatusErr).
                             let status = response.get("status").cloned().unwrap_or_default();
-                            let code = status.get("code").and_then(Value::as_u64).unwrap_or(403) as u16;
-                            let message = status.get("message").and_then(Value::as_str).unwrap_or("denied");
-                            return Err(ApiError::new(
-                                StatusCode::from_u16(code).unwrap_or(StatusCode::FORBIDDEN),
-                                "Forbidden",
-                                format!("admission webhook \"{hook_name}\" denied the request: {message}"),
-                            ));
+                            let code = status.get("code").and_then(Value::as_u64).filter(|c| *c >= 400).unwrap_or(400) as u16;
+                            let text = |k: &str| status.get(k).and_then(Value::as_str).filter(|m| !m.is_empty());
+                            let message = match (text("message"), text("reason")) {
+                                (Some(m), _) | (None, Some(m)) => format!("admission webhook \"{hook_name}\" denied the request: {m}"),
+                                (None, None) => format!("admission webhook \"{hook_name}\" denied the request without explanation"),
+                            };
+                            let code = StatusCode::from_u16(code).unwrap_or(StatusCode::BAD_REQUEST);
+                            let reason = match code {
+                                StatusCode::FORBIDDEN => "Forbidden",
+                                StatusCode::UNPROCESSABLE_ENTITY => "Invalid",
+                                StatusCode::NOT_FOUND => "NotFound",
+                                StatusCode::CONFLICT => "Conflict",
+                                _ => "BadRequest",
+                            };
+                            return Err(ApiError::new(code, reason, message));
                         }
                         if mutating {
                             if let Some(p) = response.get("patch").and_then(Value::as_str) {
@@ -180,7 +222,159 @@ pub(crate) async fn admit(api: &Arc<ApiState>, a: &Attributes<'_>, mut obj: Valu
             }
         }
     }
+    validating_policies(api, a, &obj)?;
     Ok(obj)
+}
+
+/// ValidatingAdmissionPolicies: every binding whose policy matches the
+/// request evaluates the policy's CEL validations; a failed one with the
+/// `Deny` action rejects the request.
+fn validating_policies(api: &ApiState, a: &Attributes<'_>, obj: &Value) -> Result<(), ApiError> {
+    const GROUP: &str = "admissionregistration.k8s.io";
+    let (bindings, _) = api.store().list(GROUP, "validatingadmissionpolicybindings", None);
+    if bindings.is_empty() {
+        return Ok(());
+    }
+    let ns_obj = if a.rt.namespaced { api.get_object("", "namespaces", "", a.namespace) } else { None };
+    let matches = |constraints: Option<&Value>| -> bool {
+        let Some(c) = constraints.filter(|c| c.is_object()) else { return true };
+        let as_hook = json!({
+            "rules": c.get("resourceRules").cloned().unwrap_or(json!([{"operations": ["*"], "apiGroups": ["*"], "apiVersions": ["*"], "resources": ["*"]}])),
+            "namespaceSelector": c.get("namespaceSelector").cloned().unwrap_or(Value::Null),
+            "objectSelector": c.get("objectSelector").cloned().unwrap_or(Value::Null),
+        });
+        if !webhook_matches(api, &as_hook, a, obj) {
+            return false;
+        }
+        let excluded = c.get("excludeResourceRules").and_then(Value::as_array).is_some_and(|rules| rules.iter().any(|r| rule_matches(r, a)));
+        !excluded
+    };
+    for binding in &bindings {
+        let policy_name = util::s(binding, "/spec/policyName");
+        let Some(policy) = api.get_object(GROUP, "validatingadmissionpolicies", "", policy_name) else { continue };
+        if !matches(policy.pointer("/spec/matchConstraints")) || !matches(binding.pointer("/spec/matchResources")) {
+            continue;
+        }
+        let actions = strings(binding.pointer("/spec/validationActions"));
+        let deny = actions.is_empty() || actions.contains(&"Deny");
+        let fail_open = util::s(&policy, "/spec/failurePolicy") == "Ignore";
+        let reject = |message: String, reason: &str| -> ApiError {
+            let message = format!(
+                "ValidatingAdmissionPolicy '{policy_name}' with binding '{}' denied request: {message}",
+                util::name(binding)
+            );
+            match reason {
+                "Forbidden" => ApiError::new(StatusCode::FORBIDDEN, "Forbidden", message),
+                "Unauthorized" => ApiError::new(StatusCode::UNAUTHORIZED, "Unauthorized", message),
+                "RequestEntityTooLarge" => ApiError::new(StatusCode::PAYLOAD_TOO_LARGE, "RequestEntityTooLarge", message),
+                _ => ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "Invalid", message),
+            }
+        };
+        let mut env = cel::Env::default();
+        let val = |v: Option<&Value>| v.map(cel::Val::from_json).unwrap_or(cel::Val::Null);
+        env.vars.insert("object".into(), if a.operation == "DELETE" { cel::Val::Null } else { cel::Val::from_json(obj) });
+        env.vars.insert("oldObject".into(), val(a.old));
+        env.vars.insert("namespaceObject".into(), val(ns_obj.as_ref()));
+        env.vars.insert(
+            "request".into(),
+            cel::Val::from_json(&json!({
+                "operation": a.operation,
+                "namespace": a.namespace,
+                "name": a.name,
+                "kind": {"group": a.rt.group, "version": a.rt.version, "kind": a.rt.kind},
+                "resource": {"group": a.rt.group, "version": a.rt.version, "resource": a.rt.plural},
+                "subResource": a.sub.unwrap_or_default(),
+                "userInfo": {"username": "system:admin", "groups": ["system:masters", "system:authenticated"]},
+                "dryRun": a.dry_run,
+            })),
+        );
+        // Parameters: the object `paramRef` names, of kind `paramKind`.
+        let mut params = cel::Val::Null;
+        if let Some(kind) = policy.pointer("/spec/paramKind").filter(|k| k.is_object()) {
+            let (group, version) = util::s(kind, "/apiVersion").rsplit_once('/').map_or(("", util::s(kind, "/apiVersion")), |(g, v)| (g, v));
+            let _ = version;
+            let rt = api.resource_for_kind(group, util::s(kind, "/kind"));
+            let pref = binding.pointer("/spec/paramRef");
+            let pname = pref.map(|p| util::s(p, "/name")).unwrap_or_default();
+            let pns = match pref.map(|p| util::s(p, "/namespace")).unwrap_or_default() {
+                "" if rt.as_ref().is_some_and(|r| r.namespaced) => a.namespace,
+                other => other,
+            };
+            let found = rt.and_then(|rt| api.get_object(&rt.group, &rt.plural, if rt.namespaced { pns } else { "" }, pname));
+            match found {
+                Some(p) => params = cel::Val::from_json(&p),
+                None if pref.is_some_and(|p| util::s(p, "/parameterNotFoundAction") == "Allow") => continue,
+                None => {
+                    if deny {
+                        return Err(reject(format!("failed to configure binding: no params found for policy binding with `Deny` parameterNotFoundAction"), "Invalid"));
+                    }
+                    continue;
+                }
+            }
+        }
+        env.vars.insert("params".into(), params);
+        let eval = |src: &str, env: &cel::Env| cel::compile(src).and_then(|p| p.eval(env));
+        let mut failure = None;
+        let mut variables = std::collections::BTreeMap::new();
+        for var in policy.pointer("/spec/variables").and_then(Value::as_array).into_iter().flatten() {
+            env.vars.insert("variables".into(), cel::Val::Map(variables.clone()));
+            match eval(util::s(var, "/expression"), &env) {
+                Ok(v) => {
+                    variables.insert(util::s(var, "/name").to_string(), v);
+                }
+                Err(e) => {
+                    failure.get_or_insert(format!("variable '{}' resulted in error: {e}", util::s(var, "/name")));
+                }
+            }
+        }
+        env.vars.insert("variables".into(), cel::Val::Map(variables));
+        // matchConditions: all must be true for the policy to apply.
+        let mut applies = true;
+        for cond in policy.pointer("/spec/matchConditions").and_then(Value::as_array).into_iter().flatten() {
+            match eval(util::s(cond, "/expression"), &env) {
+                Ok(cel::Val::Bool(true)) => {}
+                Ok(_) => applies = false,
+                Err(e) => {
+                    failure.get_or_insert(format!("matchCondition '{}' resulted in error: {e}", util::s(cond, "/name")));
+                }
+            }
+        }
+        if !applies {
+            continue;
+        }
+        for v in policy.pointer("/spec/validations").and_then(Value::as_array).into_iter().flatten() {
+            let expr = util::s(v, "/expression");
+            let outcome = match eval(expr, &env) {
+                Ok(cel::Val::Bool(true)) => continue,
+                Ok(cel::Val::Bool(false)) => Ok(()),
+                Ok(other) => Err(format!("expression '{expr}' resulted in a {} instead of a bool", other)),
+                Err(e) => Err(format!("expression '{expr}' resulted in error: {e}")),
+            };
+            match outcome {
+                Ok(()) => {
+                    let message = match eval(util::s(v, "/messageExpression"), &env) {
+                        Ok(cel::Val::Str(m)) if !m.trim().is_empty() && !util::s(v, "/messageExpression").is_empty() => m,
+                        _ => match util::s(v, "/message") {
+                            "" => format!("failed expression: {expr}"),
+                            m => m.to_string(),
+                        },
+                    };
+                    if deny {
+                        return Err(reject(message, util::s(v, "/reason")));
+                    }
+                }
+                Err(e) => {
+                    failure.get_or_insert(e);
+                }
+            }
+        }
+        if let Some(e) = failure {
+            if deny && !fail_open {
+                return Err(reject(e, "Invalid"));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn call(api: &ApiState, hook: &Value, a: &Attributes<'_>, obj: &Value) -> Result<Value> {
@@ -232,9 +426,92 @@ async fn call(api: &ApiState, hook: &Value, a: &Attributes<'_>, obj: &Value) -> 
             (backend, format!("{svc_name}.{svc_ns}.svc"), path)
         }
     };
+    // Like the API server, tell the webhook how long it has.
+    let path = format!("{path}{}timeout={}s", if path.contains('?') { '&' } else { '?' }, timeout.as_secs().max(1));
+    let url = format!("https://{server_name}:{}{path}", backend.addr.rsplit_once(':').map(|(_, p)| p).unwrap_or("443"));
     let body = serde_json::to_vec(&review)?;
-    let response = tokio::time::timeout(timeout, post(api, &backend, &server_name, &path, body, ca)).await.context("webhook timed out")??;
+    let response = match tokio::time::timeout(timeout, post(api, &backend, &server_name, &path, body, ca)).await {
+        Ok(r) => r.with_context(|| format!("failed to call webhook: Post \"{url}\""))?,
+        Err(_) => bail!("failed to call webhook: Post \"{url}\": context deadline exceeded"),
+    };
     response.get("response").cloned().context("webhook returned no response")
+}
+
+/// Convert custom resources to `desired` (`group/version`) as their CRD's
+/// `spec.conversion` says: `None` only relabels them, `Webhook` asks the
+/// conversion webhook (a ConversionReview).
+pub(crate) async fn convert_objects(api: &ApiState, crd: &Value, objects: Vec<Value>, desired: &str) -> Result<Vec<Value>, ApiError> {
+    let pending: Vec<usize> = (0..objects.len()).filter(|i| util::s(&objects[*i], "/apiVersion") != desired).collect();
+    if pending.is_empty() {
+        return Ok(objects);
+    }
+    let mut objects = objects;
+    if util::s(crd, "/spec/conversion/strategy") != "Webhook" {
+        for i in pending {
+            objects[i]["apiVersion"] = json!(desired);
+        }
+        return Ok(objects);
+    }
+    let failed = |e: anyhow::Error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "InternalError", format!("conversion webhook for {} failed: {e:#}", util::name(crd)));
+    let config = crd.pointer("/spec/conversion/webhook/clientConfig").cloned().unwrap_or_default();
+    let ca = config.get("caBundle").and_then(Value::as_str).and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok());
+    let (backend, server_name, path) = match config.get("url").and_then(Value::as_str) {
+        Some(url) => {
+            let rest = url.strip_prefix("https://").ok_or_else(|| failed(anyhow::anyhow!("webhook URL must be https")))?;
+            let (authority, path) = rest.split_once('/').map(|(a, p)| (a, format!("/{p}"))).unwrap_or((rest, "/".into()));
+            let host = authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority).to_string();
+            let addr = if authority.contains(':') { authority.to_string() } else { format!("{authority}:443") };
+            (Backend { addr, ..Default::default() }, host, path)
+        }
+        None => {
+            let ns = util::s(&config, "/service/namespace").to_string();
+            let name = util::s(&config, "/service/name").to_string();
+            let port = config.pointer("/service/port").and_then(Value::as_i64).unwrap_or(443);
+            let path = match util::s(&config, "/service/path") {
+                "" => "/".to_string(),
+                p => p.to_string(),
+            };
+            (resolve_service(api, &ns, &name, port).map_err(failed)?, format!("{name}.{ns}.svc"), path)
+        }
+    };
+    let review_versions = crd.pointer("/spec/conversion/webhook/conversionReviewVersions").and_then(Value::as_array).cloned().unwrap_or_default();
+    let version = if review_versions.iter().any(|v| v == "v1") { "apiextensions.k8s.io/v1" } else { "apiextensions.k8s.io/v1beta1" };
+    let review = json!({
+        "apiVersion": version,
+        "kind": "ConversionReview",
+        "request": {
+            "uid": format!("{:032x}", rand_u128()),
+            "desiredAPIVersion": desired,
+            "objects": pending.iter().map(|i| objects[*i].clone()).collect::<Vec<_>>(),
+        },
+    });
+    let body = serde_json::to_vec(&review).map_err(|e| failed(e.into()))?;
+    let response = tokio::time::timeout(Duration::from_secs(30), post(api, &backend, &server_name, &path, body, ca))
+        .await
+        .map_err(|_| failed(anyhow::anyhow!("timed out")))?
+        .map_err(failed)?;
+    let result = response.pointer("/response/result/status").and_then(Value::as_str).unwrap_or("Success");
+    if result != "Success" {
+        let msg = response.pointer("/response/result/message").and_then(Value::as_str).unwrap_or("conversion failed");
+        return Err(failed(anyhow::anyhow!("{msg}")));
+    }
+    let converted = response.pointer("/response/convertedObjects").and_then(Value::as_array).cloned().unwrap_or_default();
+    if converted.len() != pending.len() {
+        return Err(failed(anyhow::anyhow!("returned {} objects for {}", converted.len(), pending.len())));
+    }
+    for (i, obj) in pending.into_iter().zip(converted) {
+        // The webhook may not change identity or bookkeeping metadata.
+        let meta = objects[i]["metadata"].clone();
+        let mut obj = obj;
+        obj["metadata"] = meta;
+        for k in ["labels", "annotations"] {
+            if let Some(v) = objects[i].pointer(&format!("/metadata/{k}")) {
+                obj["metadata"][k] = v.clone();
+            }
+        }
+        objects[i] = obj;
+    }
+    Ok(objects)
 }
 
 /// Where a webhook listens: `ip:port`, and for a Service endpoint the pod
@@ -344,12 +621,12 @@ async fn post(api: &ApiState, backend: &Backend, server_name: &str, path: &str, 
             }
             builder.with_root_certificates(roots).with_no_client_auth()
         }
-        // Without a CA bundle there is nothing to verify against; Kubernetes
-        // would use the system roots, which never sign in-cluster webhooks.
-        None => builder
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(NoVerify))
-            .with_no_client_auth(),
+        // Without a CA bundle the system roots apply, as in Kubernetes: an
+        // in-cluster webhook's own certificate then fails verification.
+        None => {
+            let roots = rustls::RootCertStore { roots: webpki_roots::TLS_SERVER_ROOTS.to_vec() };
+            builder.with_root_certificates(roots).with_no_client_auth()
+        }
     };
     let name = ServerName::try_from(server_name.to_string())?;
     let tls = tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, tcp).await?;
@@ -376,41 +653,6 @@ fn rand_u128() -> u128 {
     let mut b = [0u8; 16];
     rand_core::OsRng.fill_bytes(&mut b);
     u128::from_le_bytes(b)
-}
-
-#[derive(Debug)]
-struct NoVerify;
-
-impl rustls::client::danger::ServerCertVerifier for NoVerify {
-    fn verify_server_cert(
-        &self,
-        _: &CertificateDer<'_>,
-        _: &[CertificateDer<'_>],
-        _: &ServerName<'_>,
-        _: &[u8],
-        _: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-    fn verify_tls12_signature(
-        &self,
-        _: &[u8],
-        _: &CertificateDer<'_>,
-        _: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-    fn verify_tls13_signature(
-        &self,
-        _: &[u8],
-        _: &CertificateDer<'_>,
-        _: &rustls::DigitallySignedStruct,
-    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
-    }
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        rustls::crypto::ring::default_provider().signature_verification_algorithms.supported_schemes()
-    }
 }
 
 #[cfg(test)]

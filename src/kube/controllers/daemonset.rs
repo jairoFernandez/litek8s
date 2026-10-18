@@ -41,6 +41,11 @@ pub(crate) fn reconcile(api: &ApiState, ns: &str, name: &str) -> Result<Requeue,
     }
     let template = ds.pointer("/spec/template").cloned().unwrap_or_else(|| json!({}));
     let hash = util::hash_of(&template);
+    let in_use: Vec<String> = util::owned(api, "", "pods", ns, &ds)
+        .iter()
+        .filter_map(|p| util::labels_of(p).get(REVISION_LABEL).and_then(Value::as_str).map(|h| format!("{name}-{h}")))
+        .collect();
+    super::history::sync(api, &ds, &template, &hash, &in_use)?;
     let min_ready = i(&ds, "/spec/minReadySeconds").unwrap_or(0);
     let mut probe_spec = template.get("spec").cloned().unwrap_or_else(|| json!({}));
     daemon_tolerations(&mut probe_spec);

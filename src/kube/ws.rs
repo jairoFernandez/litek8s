@@ -113,6 +113,10 @@ impl<W: AsyncWrite + Unpin> Writer<W> {
         self.frame(0x2, payload).await
     }
 
+    pub async fn text(&mut self, payload: &[u8]) -> Result<()> {
+        self.frame(0x1, payload).await
+    }
+
     pub async fn close(&mut self) -> Result<()> {
         self.frame(0x8, &1000u16.to_be_bytes()).await
     }

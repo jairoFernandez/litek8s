@@ -185,7 +185,7 @@ impl<R: PodRuntime> Agent<R> {
                     let v = empty_dir_volume(uid, &name);
                     let fresh = self
                         .runtime()
-                        .ensure_volume(&v, HashMap::from([(LABEL_POD_UID.to_string(), uid.to_string())]))
+                        .ensure_volume(&v, HashMap::from([(LABEL_POD_UID.to_string(), uid.to_string()), (super::runtime::LABEL_NODE.to_string(), self.config().node_name.clone())]))
                         .await
                         .map_err(|e| format!("{e:#}"))?;
                     Prepared::Named { volume: v, fresh, empty_dir: true }
@@ -265,8 +265,15 @@ impl<R: PodRuntime> Agent<R> {
                         self.write_downward(&stage, pod, da.get("items"), mode, node)?;
                     } else if let Some(tok) = source.get("serviceAccountToken") {
                         let sa = s(pod, "/spec/serviceAccountName");
+                        let request = serde_json::json!({
+                            "sa": if sa.is_empty() { "default" } else { sa },
+                            "pod": s(pod, "/metadata/name"),
+                            "audience": s(tok, "/audience"),
+                            "expirationSeconds": tok.get("expirationSeconds").and_then(Value::as_i64),
+                        })
+                        .to_string();
                         let token = self
-                            .lookup("token", ns, if sa.is_empty() { "default" } else { sa })
+                            .lookup("token", ns, &request)
                             .await?
                             .and_then(|t| t.get("token").and_then(Value::as_str).map(str::to_string))
                             .ok_or("failed to get a service account token")?;
@@ -281,7 +288,7 @@ impl<R: PodRuntime> Agent<R> {
                 let v = empty_dir_volume(uid, &name);
                 let fresh = self
                     .runtime()
-                    .ensure_volume(&v, HashMap::from([(LABEL_POD_UID.to_string(), uid.to_string())]))
+                    .ensure_volume(&v, HashMap::from([(LABEL_POD_UID.to_string(), uid.to_string()), (super::runtime::LABEL_NODE.to_string(), self.config().node_name.clone())]))
                     .await
                     .map_err(|e| format!("{e:#}"))?;
                 Prepared::Named { volume: v, fresh, empty_dir: true }
@@ -377,9 +384,9 @@ fn apply_fs_group(dir: &Path, gid: u32) {
             if let Ok(meta) = std::fs::metadata(&path) {
                 let mode = meta.permissions().mode() & 0o777;
                 // Owner too: VM-backed Docker shows bind-mounted files as
-                // owned by whoever reads them.
+                // owned by whoever reads them (so there, owner bits suffice).
                 let group = (mode >> 3) & 0o7;
-                let widened = mode | (group << 6) | group;
+                let widened = if cfg!(target_os = "linux") { mode | (group << 6) | group } else { mode | (group << 6) };
                 let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(widened));
             }
         }
