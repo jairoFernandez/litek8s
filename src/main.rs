@@ -8,6 +8,8 @@ fn main() -> anyhow::Result<()> {
         Some("crun-pause") => litek8s::kube::agent::crun_pause(&args[2..]),
         #[cfg(target_os = "linux")]
         Some("dev-sandbox") => litek8s::dev::sandbox::main(&args[2..]),
+        #[cfg(target_os = "macos")]
+        Some("dev-vm") => litek8s::dev::vm::vm_main(&args[2..]),
         // PID 1 of the macOS dev VM.
         #[cfg(target_os = "linux")]
         None if args[0] == "/init" && std::process::id() == 1 => litek8s::dev::guest::main(),

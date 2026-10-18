@@ -126,9 +126,22 @@ pub fn main(args: &[String]) -> ! {
         std::process::exit(code);
     }
 
+    // The supervisor moved us into the sandbox cgroup: it becomes the root
+    // of the new cgroup namespace.
+    let host_cgroup = own_cgroup();
     let flags = libc::CLONE_NEWNS | libc::CLONE_NEWNET | libc::CLONE_NEWCGROUP | libc::CLONE_NEWPID | libc::CLONE_NEWUTS | libc::CLONE_NEWIPC;
     // SAFETY: single-threaded process.
     check(unsafe { libc::unshare(flags) }, "failed to create the sandbox namespaces");
+    // cgroup v2 allows processes only in leaves of a cgroup that hands
+    // controllers down: this process leaves the root for /stage1 (PID 1
+    // moves on to /init), so the root can enable them for the pods.
+    if let Some(cg) = host_cgroup {
+        let leaf = cg.join("stage1");
+        let _ = std::fs::create_dir_all(&leaf);
+        if let Err(e) = std::fs::write(leaf.join("cgroup.procs"), "0") {
+            let _ = writeln!(output, "W leaving the sandbox cgroup root: {e}");
+        }
+    }
     // SAFETY: single-threaded; the child continues as PID 1.
     let pid = unsafe { libc::fork() };
     match pid {

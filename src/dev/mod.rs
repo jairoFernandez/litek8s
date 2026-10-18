@@ -90,6 +90,9 @@ pub struct DevState {
     /// The VM's address on the host's virtual network (macOS).
     #[serde(default)]
     pub vm_ip: Option<String>,
+    /// Virtualization.framework's process running the VM (macOS).
+    #[serde(default)]
+    pub helper_pid: Option<u32>,
 }
 
 pub fn dev_home() -> Result<PathBuf> {
@@ -134,6 +137,7 @@ pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
 
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub(crate) fn which(program: &str) -> Option<PathBuf> {
     let path = std::env::var("PATH").unwrap_or_default();
     std::env::split_paths(&path)
@@ -365,7 +369,7 @@ fn memory_bytes(state: &DevState) -> Option<u64> {
     }
     #[cfg(target_os = "macos")]
     if state.mode == "vm" {
-        return vm::footprint(state.pid);
+        return vm::footprint(state);
     }
     None
 }

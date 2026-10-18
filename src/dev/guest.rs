@@ -27,6 +27,9 @@ pub struct BootOptions {
     pub share: Option<String>,
     /// Data disk device.
     pub disk: String,
+    /// Random bytes from the host, credited to the guest's entropy pool so
+    /// getrandom() does not block early in boot (hex).
+    pub seed: Option<Vec<u8>>,
 }
 
 pub fn parse_cmdline(cmdline: &str) -> BootOptions {
@@ -36,9 +39,79 @@ pub fn parse_cmdline(cmdline: &str) -> BootOptions {
             o.share = Some(v.to_string());
         } else if let Some(v) = word.strip_prefix("litek8s.disk=") {
             o.disk = v.to_string();
+        } else if let Some(v) = word.strip_prefix("litek8s.seed=") {
+            o.seed = hex::decode(v).ok();
         }
     }
     o
+}
+
+
+/// A DHCPv4 lease, as the in-init client gets it (vmnet's DHCP server
+/// answers in ~10 ms; busybox udhcpc retries only every second, which made
+/// some boots take seconds longer).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Lease {
+    pub ip: std::net::Ipv4Addr,
+    pub prefix: u8,
+    pub router: Option<std::net::Ipv4Addr>,
+    pub dns: Vec<std::net::Ipv4Addr>,
+    pub server: std::net::Ipv4Addr,
+}
+
+const DHCP_MAGIC: [u8; 4] = [99, 130, 83, 99];
+
+/// A DHCPDISCOVER (`request` None) or DHCPREQUEST for (address, server).
+pub fn dhcp_packet(xid: u32, mac: [u8; 6], request: Option<(std::net::Ipv4Addr, std::net::Ipv4Addr)>) -> Vec<u8> {
+    let mut p = vec![0u8; 236];
+    p[0] = 1; // BOOTREQUEST
+    p[1] = 1; // ethernet
+    p[2] = 6;
+    p[4..8].copy_from_slice(&xid.to_be_bytes());
+    p[10] = 0x80; // broadcast replies: we have no address yet
+    p[28..34].copy_from_slice(&mac);
+    p.extend_from_slice(&DHCP_MAGIC);
+    match request {
+        None => p.extend_from_slice(&[53, 1, 1]),
+        Some((ip, server)) => {
+            p.extend_from_slice(&[53, 1, 3, 50, 4]);
+            p.extend_from_slice(&ip.octets());
+            p.extend_from_slice(&[54, 4]);
+            p.extend_from_slice(&server.octets());
+        }
+    }
+    p.extend_from_slice(&[55, 4, 1, 3, 6, 51, 255]);
+    p
+}
+
+/// (message type, lease) of a reply to `xid`.
+pub fn parse_dhcp_reply(buf: &[u8], xid: u32) -> Option<(u8, Lease)> {
+    if buf.len() < 240 || buf[0] != 2 || buf[4..8] != xid.to_be_bytes() || buf[236..240] != DHCP_MAGIC {
+        return None;
+    }
+    let ip = std::net::Ipv4Addr::new(buf[16], buf[17], buf[18], buf[19]);
+    let mut lease = Lease { ip, prefix: 24, router: None, dns: Vec::new(), server: std::net::Ipv4Addr::UNSPECIFIED };
+    let mut kind = 0;
+    let mut i = 240;
+    while i + 1 < buf.len() && buf[i] != 255 {
+        if buf[i] == 0 {
+            i += 1;
+            continue;
+        }
+        let (code, len) = (buf[i], buf[i + 1] as usize);
+        let v = buf.get(i + 2..i + 2 + len)?;
+        let addr = |o: usize| std::net::Ipv4Addr::new(v[o], v[o + 1], v[o + 2], v[o + 3]);
+        match code {
+            53 if len == 1 => kind = v[0],
+            1 if len == 4 => lease.prefix = u32::from_be_bytes([v[0], v[1], v[2], v[3]]).count_ones() as u8,
+            3 if len >= 4 => lease.router = Some(addr(0)),
+            6 => lease.dns = (0..len / 4).map(|k| addr(k * 4)).collect(),
+            54 if len == 4 => lease.server = addr(0),
+            _ => {}
+        }
+        i += 2 + len;
+    }
+    Some((kind, lease))
 }
 
 #[cfg(target_os = "linux")]
@@ -100,6 +173,77 @@ mod init {
             && u16::from_le_bytes(buf) == 0xEF53
     }
 
+    /// Get and configure a lease for eth0, retransmitting every 100 ms.
+    fn dhcp(iface: &str) -> Option<Lease> {
+        use std::os::fd::AsRawFd;
+        let mac_text = std::fs::read_to_string(format!("/sys/class/net/{iface}/address")).ok()?;
+        let mut mac = [0u8; 6];
+        for (i, part) in mac_text.trim().split(':').enumerate().take(6) {
+            mac[i] = u8::from_str_radix(part, 16).ok()?;
+        }
+        let sock = socket2::Socket::new(socket2::Domain::IPV4, socket2::Type::DGRAM, None).ok()?;
+        sock.set_reuse_address(true).ok()?;
+        sock.set_broadcast(true).ok()?;
+        let name = cstr(iface);
+        // SAFETY: SO_BINDTODEVICE with a NUL-terminated name.
+        unsafe {
+            libc::setsockopt(sock.as_raw_fd(), libc::SOL_SOCKET, libc::SO_BINDTODEVICE, name.as_ptr().cast(), iface.len() as libc::socklen_t + 1);
+        }
+        sock.bind(&std::net::SocketAddr::from(([0, 0, 0, 0], 68)).into()).ok()?;
+        let sock: std::net::UdpSocket = sock.into();
+        sock.set_read_timeout(Some(Duration::from_millis(100))).ok()?;
+        let xid = u32::from_le_bytes(mac[2..6].try_into().ok()?) ^ std::process::id() ^ (Instant::now().elapsed().subsec_nanos());
+        let dest = std::net::SocketAddr::from(([255, 255, 255, 255], 67));
+        let mut buf = [0u8; 1500];
+        let mut offer: Option<Lease> = None;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while Instant::now() < deadline {
+            let packet = dhcp_packet(xid, mac, offer.as_ref().map(|o| (o.ip, o.server)));
+            let _ = sock.send_to(&packet, dest);
+            let until = Instant::now() + Duration::from_millis(100);
+            while Instant::now() < until {
+                let Ok((n, _)) = sock.recv_from(&mut buf) else { break };
+                match parse_dhcp_reply(&buf[..n], xid) {
+                    Some((2, lease)) if offer.is_none() => {
+                        offer = Some(lease);
+                        break;
+                    }
+                    Some((5, lease)) => {
+                        let lease = Lease { server: offer.map(|o| o.server).unwrap_or(lease.server), ..lease };
+                        run("ip", &["addr", "replace", &format!("{}/{}", lease.ip, lease.prefix), "dev", iface]);
+                        if let Some(r) = lease.router {
+                            run("ip", &["route", "replace", "default", "via", &r.to_string(), "dev", iface]);
+                        }
+                        let resolv: String = lease.dns.iter().map(|d| format!("nameserver {d}\n")).collect();
+                        let _ = std::fs::write("/etc/resolv.conf", resolv);
+                        return Some(lease);
+                    }
+                    Some((6, _)) => offer = None, // NAK: start over
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
+    /// Credit the host's seed to the entropy pool (RNDADDENTROPY).
+    fn seed_entropy(seed: &[u8]) {
+        #[repr(C)]
+        struct PoolInfo {
+            entropy_count: libc::c_int,
+            buf_size: libc::c_int,
+            buf: [u8; 64],
+        }
+        let mut info = PoolInfo { entropy_count: (seed.len().min(64) * 8) as libc::c_int, buf_size: seed.len().min(64) as libc::c_int, buf: [0; 64] };
+        info.buf[..seed.len().min(64)].copy_from_slice(&seed[..seed.len().min(64)]);
+        const RNDADDENTROPY: libc::c_ulong = 0x4008_5203;
+        if let Ok(f) = std::fs::OpenOptions::new().write(true).open("/dev/urandom") {
+            use std::os::fd::AsRawFd;
+            // SAFETY: the ioctl reads the struct we own.
+            unsafe { libc::ioctl(f.as_raw_fd(), RNDADDENTROPY as _, &info) };
+        }
+    }
+
     fn eth0_ipv4() -> Option<(String, String)> {
         let out = std::process::Command::new("ip").args(["-4", "-o", "addr", "show", "eth0"]).output().ok()?;
         let text = String::from_utf8_lossy(&out.stdout);
@@ -155,6 +299,23 @@ mod init {
 
     pub fn main() -> ! {
         let started = Instant::now();
+        // SAFETY: single-threaded so far; the kernel starts init without PATH.
+        unsafe {
+            std::env::set_var("PATH", "/usr/sbin:/usr/bin:/sbin:/bin");
+            std::env::set_var("HOME", "/root");
+        }
+        // The initramfs is the kernel's rootfs, which pivot_root (crun's
+        // way into a container) refuses as the current root. A bind mount
+        // of it moved over / and chrooted into is an ordinary mount.
+        if let Err(e) = (|| -> std::io::Result<()> {
+            mount("/", "/newroot", "", libc::MS_BIND | libc::MS_REC, "")?;
+            std::env::set_current_dir("/newroot")?;
+            mount("/newroot", "/", "", libc::MS_MOVE, "")?;
+            std::os::unix::fs::chroot(".")?;
+            std::env::set_current_dir("/")
+        })() {
+            say(&format!("cannot leave the initramfs root ({e}); containers will not start"));
+        }
         let nosuid = libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC;
         let _ = mount("proc", "/proc", "proc", nosuid, "");
         let _ = mount("sysfs", "/sys", "sysfs", nosuid, "");
@@ -170,17 +331,18 @@ mod init {
             libc::setsid();
         }
         let opts = parse_cmdline(&std::fs::read_to_string("/proc/cmdline").unwrap_or_default());
-        for m in MODULES {
-            let _ = std::process::Command::new("/sbin/modprobe").arg("-q").arg(m).status();
+        if let Some(seed) = &opts.seed {
+            seed_entropy(seed);
         }
+        let t_mounts = started.elapsed().as_millis();
+        let _ = std::process::Command::new("/sbin/modprobe").arg("-qa").args(MODULES).status();
+        let t_modules = started.elapsed().as_millis();
         let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1");
         let _ = run("ip", &["link", "set", "lo", "up"]);
         let _ = run("ip", &["link", "set", "eth0", "up"]);
-        // DHCP in the background while the disk is prepared.
-        let dhcp = std::process::Command::new("/bin/busybox")
-            .args(["udhcpc", "-i", "eth0", "-q", "-n", "-t", "20", "-T", "1", "-s", "/usr/share/udhcpc/default.script"])
-            .stdout(std::process::Stdio::null())
-            .spawn();
+        // DHCP on a thread while the disk is prepared.
+        let dhcp_thread = std::thread::spawn(|| dhcp("eth0"));
+        let t_disk_start = started.elapsed().as_millis();
         if !has_ext4(&opts.disk) {
             say(&format!("formatting {} (first boot)", opts.disk));
             run("mkfs.ext4", &["-q", "-F", "-L", "litek8s", "-E", "lazy_itable_init=1,lazy_journal_init=1", &opts.disk]);
@@ -193,11 +355,31 @@ mod init {
                 say(&format!("cannot mount the shared directory at {share}: {e}"));
             }
         }
-        if let Ok(mut child) = dhcp {
-            let _ = child.wait();
+        let t_disk = started.elapsed().as_millis() - t_disk_start;
+        let lease = dhcp_thread.join().ok().flatten();
+        let t_dhcp = started.elapsed().as_millis();
+        let (ip, gw) = match &lease {
+            Some(l) => (l.ip.to_string(), l.router.map(|r| r.to_string()).unwrap_or_default()),
+            None => {
+                say("no DHCP lease; trying udhcpc");
+                run("/bin/busybox", &["udhcpc", "-i", "eth0", "-q", "-n", "-t", "10", "-s", "/usr/share/udhcpc/default.script"]);
+                eth0_ipv4().unwrap_or_default()
+            }
+        };
+        // busybox renews the lease from here on (the hook leaves an
+        // unchanged address alone).
+        if !ip.is_empty() {
+            let _ = std::process::Command::new("/bin/busybox")
+                .args(["udhcpc", "-i", "eth0", "-f", "-S", "-r", &ip, "-s", "/usr/share/udhcpc/default.script"])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn();
         }
-        let (ip, gw) = eth0_ipv4().unwrap_or_default();
-        say(&format!("booted in {} ms", started.elapsed().as_millis()));
+        say(&format!(
+            "booted in {} ms (mounts {t_mounts}, modules {}, disk+share {t_disk}, network ready at {t_dhcp})",
+            started.elapsed().as_millis(),
+            t_modules - t_mounts
+        ));
         println!("LITEK8S_GUEST ip={ip} gw={gw}");
         let _ = std::io::stdout().flush();
 
@@ -244,8 +426,30 @@ mod tests {
 
     #[test]
     fn parses_boot_options() {
-        let o = parse_cmdline("console=hvc0 quiet litek8s.share=/Users/me litek8s.disk=/dev/vdb");
-        assert_eq!(o, BootOptions { share: Some("/Users/me".into()), disk: "/dev/vdb".into() });
+        let o = parse_cmdline("console=hvc0 quiet litek8s.share=/Users/me litek8s.disk=/dev/vdb litek8s.seed=00ff");
+        assert_eq!(o, BootOptions { share: Some("/Users/me".into()), disk: "/dev/vdb".into(), seed: Some(vec![0, 255]) });
         assert_eq!(parse_cmdline("console=hvc0").disk, "/dev/vda");
+    }
+
+    #[test]
+    fn dhcp_round_trip() {
+        let mac = [2, 0, 0, 0, 0, 1];
+        let d = dhcp_packet(7, mac, None);
+        assert_eq!((d[0], d[10], &d[28..34]), (1, 0x80, &mac[..]));
+        assert_eq!(&d[240..243], &[53, 1, 1]);
+        // An ACK as vmnet sends it.
+        let mut ack = vec![0u8; 236];
+        ack[0] = 2;
+        ack[4..8].copy_from_slice(&7u32.to_be_bytes());
+        ack[16..20].copy_from_slice(&[192, 168, 64, 3]);
+        ack.extend_from_slice(&DHCP_MAGIC);
+        ack.extend_from_slice(&[53, 1, 5, 1, 4, 255, 255, 255, 0, 3, 4, 192, 168, 64, 1, 6, 4, 192, 168, 64, 1, 54, 4, 192, 168, 64, 1, 255]);
+        let (kind, lease) = parse_dhcp_reply(&ack, 7).unwrap();
+        assert_eq!(kind, 5);
+        assert_eq!(lease.ip.to_string(), "192.168.64.3");
+        assert_eq!((lease.prefix, lease.router.unwrap().to_string()), (24, "192.168.64.1".to_string()));
+        assert!(parse_dhcp_reply(&ack, 8).is_none());
+        let r = dhcp_packet(7, mac, Some((lease.ip, lease.server)));
+        assert_eq!(&r[240..248], &[53, 1, 3, 50, 4, 192, 168, 64]);
     }
 }

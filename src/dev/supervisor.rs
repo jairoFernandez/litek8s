@@ -271,6 +271,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             started_unix_ms: started,
             cgroup: Some(cgroup.clone()),
             vm_ip: None,
+            helper_pid: None,
         },
     )?;
     eprintln!("dev: sandbox up in {} ms, API on 127.0.0.1:{port}", now_ms() - started);
