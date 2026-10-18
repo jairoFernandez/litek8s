@@ -18,12 +18,12 @@
 //! images, address reservations) and `/run/litek8s` (crun's state, the IPC
 //! namespace files, console sockets); network namespaces are in /run/netns.
 
-mod image;
-mod logs;
-mod net;
+pub(crate) mod image;
+pub(crate) mod logs;
+pub(crate) mod net;
 pub(crate) mod shim;
-mod spec;
-mod sys;
+pub(crate) mod spec;
+pub(crate) mod sys;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::os::fd::OwnedFd;
@@ -101,7 +101,7 @@ struct Inner {
     root: PathBuf,
     crun: PathBuf,
     state_root: PathBuf,
-    images: image::ImageStore,
+    images: Arc<image::ImageStore>,
     ipam: Mutex<net::Ipam>,
     subnet: net::Subnet,
     exits_tx: mpsc::UnboundedSender<String>,
@@ -216,7 +216,7 @@ impl CrunPods {
             inner: Arc::new(Inner {
                 crun: find_crun().context("crun not found")?,
                 state_root: run.join("crun"),
-                images: image::ImageStore::open(&root.join("images"))?,
+                images: Arc::new(image::ImageStore::open(&root.join("images"))?),
                 ipam: Mutex::new(net::Ipam::open(&root.join("ipam"), subnet)?),
                 subnet,
                 exits_tx,
@@ -242,6 +242,11 @@ impl CrunPods {
             }
         });
         Ok(pods)
+    }
+
+    /// The node's image store (shared with the Docker API, see `crate::docker`).
+    pub(crate) fn image_store(&self) -> Arc<image::ImageStore> {
+        self.inner.images.clone()
     }
 
     /// Where image archives are staged before [`Self::import_images`].

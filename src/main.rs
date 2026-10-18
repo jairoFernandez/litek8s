@@ -6,6 +6,7 @@ fn main() -> anyhow::Result<()> {
     match args.get(1).map(String::as_str) {
         Some("crun-shim") => litek8s::kube::agent::crun_shim(&args[2..]),
         Some("crun-pause") => litek8s::kube::agent::crun_pause(&args[2..]),
+        Some("docker-fs") => litek8s::docker::fs::main(&args[2..]),
         #[cfg(target_os = "linux")]
         Some("dev-sandbox") => litek8s::dev::sandbox::main(&args[2..]),
         #[cfg(target_os = "macos")]

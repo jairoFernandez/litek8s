@@ -77,6 +77,8 @@ pub struct ApiServerConfig {
     /// (the dev sandbox binds it on the host before entering its network
     /// namespace).
     pub listener: Option<std::net::TcpListener>,
+    /// Serve the Docker API with the local node's crun runtime.
+    pub docker: Option<crate::docker::Settings>,
 }
 
 /// Loads an image archive into the local node (`litek8s dev load`).
@@ -302,6 +304,15 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
         // Pods cannot reach a loopback-only listener on a Linux host.
         if let Ok(extra) = TcpListener::bind(SocketAddr::new(ip, addr.port())).await {
             tokio::spawn(serve_listener(state.clone(), extra));
+        }
+    }
+    if let (Some(agent), Some(settings)) = (&agent, config.docker.take()) {
+        match agent.runtime().image_store() {
+            Some(images) => match crate::docker::start(settings, images).await {
+                Ok(_) => eprintln!("apiserver: Docker API ready"),
+                Err(e) => eprintln!("apiserver: Docker API disabled: {e:#}"),
+            },
+            None => eprintln!("apiserver: Docker API disabled: it needs the crun runtime"),
         }
     }
     if let Some(agent) = agent {

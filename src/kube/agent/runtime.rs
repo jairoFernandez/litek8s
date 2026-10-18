@@ -962,6 +962,14 @@ pub enum NodeRuntime {
 
 impl NodeRuntime {
     /// Where image archives for [`Self::import_images`] are staged.
+    /// The crun runtime's image store (the Docker API shares it).
+    pub(crate) fn image_store(&self) -> Option<std::sync::Arc<super::crun::image::ImageStore>> {
+        match self {
+            NodeRuntime::Crun(rt) => Some(rt.image_store()),
+            NodeRuntime::Docker(_) => None,
+        }
+    }
+
     pub fn image_staging_dir(&self) -> std::path::PathBuf {
         match self {
             NodeRuntime::Crun(rt) => rt.image_staging_dir(),

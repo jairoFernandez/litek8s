@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 pub mod cli;
 pub mod cluster;
 pub mod cluster_manifest;
@@ -8,6 +9,7 @@ pub mod control_plane;
 pub mod coordinator;
 pub mod daemon;
 pub mod dev;
+pub mod docker;
 #[cfg(feature = "llm")]
 pub mod gguf;
 pub mod infra;

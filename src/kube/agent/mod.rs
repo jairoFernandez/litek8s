@@ -13,7 +13,7 @@
 //! pods survive reconnects: the server resends the node's pods and the agent
 //! reconciles.
 
-mod crun;
+pub(crate) mod crun;
 pub mod hub;
 mod kubelet;
 mod pod;

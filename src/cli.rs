@@ -272,6 +272,8 @@ enum Command {
         in_cluster_port: u16,
         #[arg(long, value_enum, default_value = "auto", help = "Container runtime of the local node: auto (crun on Linux when installed, else Docker), crun or docker")]
         runtime: crate::kube::agent::RuntimeChoice,
+        #[arg(long, help = "Also serve the Docker Engine API on this Unix socket (crun runtime; published ports bind on 127.0.0.1)")]
+        docker_socket: Option<PathBuf>,
     },
     #[command(
         about = "A local Kubernetes cluster for development (like kind/k3d), without Docker",
@@ -1082,7 +1084,25 @@ pub async fn run() -> Result<()> {
             no_cluster_dns,
             in_cluster_port,
             runtime,
+            docker_socket,
         } => {
+            let docker = match &docker_socket {
+                Some(path) => {
+                    let _ = std::fs::remove_file(path);
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    let listener = std::os::unix::net::UnixListener::bind(path).with_context(|| format!("failed to listen on {}", path.display()))?;
+                    Some(crate::docker::Settings {
+                        root: data_dir.clone().unwrap_or_else(|| std::env::temp_dir().join("litek8s")).join("docker"),
+                        listener: Some(listener),
+                        tcp: None,
+                        publisher: crate::docker::Publisher::Local,
+                        socket_aliases: vec![path.to_string_lossy().to_string()],
+                    })
+                }
+                None => None,
+            };
             crate::kube::serve(crate::kube::ApiServerConfig {
                 listen,
                 data_dir,
@@ -1095,6 +1115,7 @@ pub async fn run() -> Result<()> {
                 in_cluster_port: (in_cluster_port != 0).then_some(in_cluster_port),
                 runtime,
                 listener: None,
+                docker,
             })
             .await
         }

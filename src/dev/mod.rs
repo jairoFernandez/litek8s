@@ -613,6 +613,7 @@ async fn inner_apiserver(data_dir: PathBuf) -> Result<()> {
     };
     // SAFETY: set before any other thread reads the environment.
     unsafe { std::env::set_var("LITEK8S_LOADBALANCER_IP", "127.0.0.1") };
+    let docker = docker_settings(guest, &data_dir);
     crate::kube::serve(crate::kube::ApiServerConfig {
         listen,
         data_dir: Some(data_dir.join("state")),
@@ -625,6 +626,49 @@ async fn inner_apiserver(data_dir: PathBuf) -> Result<()> {
         in_cluster_port: Some(443),
         runtime: crate::kube::agent::RuntimeChoice::Crun,
         listener,
+        docker,
     })
     .await
+}
+
+/// The Docker API of the dev cluster: on the socket the supervisor bound
+/// (Linux) or on the VM's loopback, where the Mac forwards its socket.
+fn docker_settings(guest: bool, data_dir: &Path) -> Option<crate::docker::Settings> {
+    let root = data_dir.join("docker");
+    if guest {
+        // The Mac's socket path is under the shared home directory.
+        let share = parse_share();
+        return Some(crate::docker::Settings {
+            root,
+            listener: None,
+            tcp: Some(std::net::SocketAddr::from(([127, 0, 0, 1], crate::docker::GUEST_PORT))),
+            publisher: crate::docker::Publisher::Local,
+            socket_aliases: share.map(|s| format!("{s}/.litek8s/docker.sock")).into_iter().collect(),
+        });
+    }
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::FromRawFd;
+        // SAFETY: F_GETFD only checks the descriptor exists.
+        if unsafe { libc::fcntl(sandbox::FD_DOCKER, libc::F_GETFD) } < 0 {
+            return None;
+        }
+        // SAFETY: the supervisor passes the Docker socket as this descriptor.
+        let listener = unsafe { std::os::unix::net::UnixListener::from_raw_fd(sandbox::FD_DOCKER) };
+        // SAFETY: as above; not inherited by what the API server starts.
+        unsafe { libc::fcntl(sandbox::FD_DOCKER, libc::F_SETFD, libc::FD_CLOEXEC) };
+        Some(crate::docker::Settings {
+            root,
+            listener: Some(listener),
+            tcp: None,
+            publisher: crate::docker::Publisher::Broker,
+            socket_aliases: vec![crate::docker::host_socket_path().to_string_lossy().to_string()],
+        })
+    }
+    #[cfg(not(target_os = "linux"))]
+    None
+}
+
+fn parse_share() -> Option<String> {
+    guest::parse_cmdline(&std::fs::read_to_string("/proc/cmdline").ok()?).share
 }

@@ -24,6 +24,17 @@ const TTL: u32 = 5;
 const TYPE_A: u16 = 1;
 const CLASS_IN: u16 = 1;
 
+/// Answers some clients get before cluster names and the upstream
+/// resolver (Docker containers' names on their networks, see
+/// `crate::docker::network::DnsTable`): `None` passes.
+pub type ExtraResolver = Box<dyn Fn(std::net::IpAddr, &str) -> Option<Vec<Ipv4Addr>> + Send + Sync>;
+
+static EXTRA_RESOLVER: std::sync::OnceLock<ExtraResolver> = std::sync::OnceLock::new();
+
+pub fn set_extra_resolver(r: ExtraResolver) {
+    let _ = EXTRA_RESOLVER.set(r);
+}
+
 pub async fn bind(addr: SocketAddr) -> Option<UdpSocket> {
     match UdpSocket::bind(addr).await {
         Ok(s) => Some(s),
@@ -42,7 +53,12 @@ pub async fn serve(api: Arc<ApiState>, socket: UdpSocket) {
         let query = buf[..n].to_vec();
         let (api, socket) = (api.clone(), socket.clone());
         tokio::spawn(async move {
+            let extra = parse_question(&query).and_then(|(name, qtype, end)| {
+                let answers = EXTRA_RESOLVER.get()?(peer.ip(), &name)?;
+                Some(build_reply(&query, end, qtype, Some(answers)))
+            });
             let reply = match parse_question(&query) {
+                _ if extra.is_some() => extra,
                 Some((name, qtype, end)) if name.ends_with(DOMAIN) => {
                     let answers = resolve(&api, &name);
                     Some(build_reply(&query, end, qtype, answers))

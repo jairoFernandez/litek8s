@@ -43,6 +43,8 @@ pub const FD_CONTROL_IN: RawFd = 3;
 pub const FD_CONTROL_OUT: RawFd = 4;
 pub const FD_API_LISTENER: RawFd = 5;
 pub const FD_BROKER: RawFd = 6;
+/// The Docker API socket, bound on the host (see `crate::docker`).
+pub const FD_DOCKER: RawFd = 7;
 
 /// Hostname (and node name) inside the sandbox.
 pub const HOSTNAME: &str = "litek8s-dev";
@@ -111,6 +113,10 @@ pub fn main(args: &[String]) -> ! {
                 fail("failed to become root in the user namespace");
             }
             libc::setgroups(0, std::ptr::null());
+            // Root here is a subordinate id outside, which makes the kernel
+            // clear the dumpable flag; without it the supervisor's helpers
+            // (pasta) may not open our namespaces.
+            libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0);
         }
     }
     if args.first().map(String::as_str) == Some("--rm") {
@@ -149,10 +155,45 @@ pub fn main(args: &[String]) -> ! {
         0 => pid1(input, output, args),
         child => {
             let _ = writeln!(output, "P {child}");
+            // With the user's own id mapped to itself, root in here is a
+            // subordinate id, whose /proc entries the user's pasta may not
+            // open: it attaches through a process of the sandbox that runs
+            // as the user instead.
+            if let Some(helper) = netns_holder() {
+                let _ = writeln!(output, "N {helper}");
+            }
             drop(output);
             drop(input);
             wait_forwarding(child)
         }
+    }
+}
+
+/// Fork a process that stays in the sandbox's namespaces as the user's own
+/// uid and gid (`LITEK8S_DEV_HOLDER_IDS=uid:gid`); its pid as the host sees it.
+fn netns_holder() -> Option<libc::pid_t> {
+    let ids = std::env::var("LITEK8S_DEV_HOLDER_IDS").ok()?;
+    let (uid, gid) = ids.split_once(':')?;
+    let (uid, gid): (u32, u32) = (uid.parse().ok()?, gid.parse().ok()?);
+    // SAFETY: single-threaded; the child only makes plain calls and pauses.
+    match unsafe { libc::fork() } {
+        -1 => None,
+        0 => unsafe {
+            libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+            libc::setgroups(0, std::ptr::null());
+            if libc::setresgid(gid, gid, gid) != 0 || libc::setresuid(uid, uid, uid) != 0 {
+                libc::_exit(1);
+            }
+            libc::prctl(libc::PR_SET_DUMPABLE, 1, 0, 0, 0);
+            let null = libc::open(c"/dev/null".as_ptr(), libc::O_RDWR);
+            for fd in 0..3 {
+                libc::dup2(null, fd);
+            }
+            loop {
+                libc::pause();
+            }
+        },
+        pid => Some(pid),
     }
 }
 
