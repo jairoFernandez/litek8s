@@ -103,6 +103,9 @@ must match `false`). What it took from there, by area:
 Raw results (JUnit XML of the `[Conformance]` specs, the gzipped ginkgo
 log, `summary.md`) are in `results/conformance-*`.
 
+Compatibility corpus on this branch, merged with main (79bef74): 101/101
+(`results/20261018-174352-litek8s-conformance-merged/`).
+
 ## Setup
 
 - **Runner.** `compat/conformance.sh` downloads `kubernetes-test` for the
