@@ -462,6 +462,27 @@ fn lookup(api: &ApiState, resource: &str, namespace: &str, name: &str) -> Option
     }
 }
 
+/// (name, image) of containers whose running instance is new in `status`.
+fn newly_started(pod: &Value, status: &Value) -> Vec<(String, String)> {
+    let started = |st: &Value, name: &str| -> Option<String> {
+        ["containerStatuses", "initContainerStatuses", "ephemeralContainerStatuses"]
+            .iter()
+            .flat_map(|f| st.get(*f).and_then(Value::as_array).cloned().unwrap_or_default())
+            .find(|c| util::s(c, "/name") == name)
+            .and_then(|c| c.pointer("/state/running/startedAt").and_then(Value::as_str).map(str::to_string))
+    };
+    let old = pod.get("status").cloned().unwrap_or_default();
+    ["containerStatuses", "initContainerStatuses", "ephemeralContainerStatuses"]
+        .iter()
+        .flat_map(|f| status.get(*f).and_then(Value::as_array).cloned().unwrap_or_default())
+        .filter_map(|c| {
+            let name = util::s(&c, "/name").to_string();
+            let now = started(status, &name)?;
+            (started(&old, &name).as_deref() != Some(now.as_str())).then(|| (name, util::s(&c, "/image").to_string()))
+        })
+        .collect()
+}
+
 /// Store a pod status reported by its node, keeping conditions owned by the
 /// control plane (PodScheduled, DisruptionTarget).
 fn apply_pod_status(api: &ApiState, ns: &str, name: &str, uid: &str, mut status: Value) {
@@ -486,7 +507,17 @@ fn apply_pod_status(api: &ApiState, ns: &str, name: &str, uid: &str, mut status:
                 status["qosClass"] = q.clone();
             }
         }
+        let started = newly_started(&pod, &status);
         match util::write_status(api, "", "pods", &pod, status.clone()) {
+            Ok(()) => {
+                // The kubelet's events for containers that just started.
+                for (name, image) in started {
+                    util::record_event(api, &pod, "Normal", "Pulled", &format!("Container image \"{image}\" already present on machine"), "kubelet");
+                    util::record_event(api, &pod, "Normal", "Created", &format!("Created container: {name}"), "kubelet");
+                    util::record_event(api, &pod, "Normal", "Started", &format!("Started container {name}"), "kubelet");
+                }
+                return;
+            }
             Err(e) if e.is_conflict() => continue,
             Err(e) if !e.is_not_found() => {
                 eprintln!("apiserver: pod status {ns}/{name}: {e}");

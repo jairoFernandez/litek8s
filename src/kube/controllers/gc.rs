@@ -85,6 +85,7 @@ fn delete(api: &ApiState, key: &ObjectKey, obj: &Value) {
 }
 
 const FOREGROUND: &str = "foregroundDeletion";
+const ORPHAN: &str = "orphan";
 
 /// Foreground deletion of the object `group|resource|name` in `ns`: delete
 /// its dependents (dropping only our reference from those with another live
@@ -99,10 +100,41 @@ pub(crate) fn foreground(api: &ApiState, ns: &str, encoded: &str) -> Result<supe
         .and_then(Value::as_array)
         .map(|f| f.iter().filter_map(Value::as_str).map(str::to_string).collect())
         .unwrap_or_default();
-    if !util::is_deleting(&owner) || !finalizers.iter().any(|f| f == FOREGROUND) {
+    if !util::is_deleting(&owner) {
         return Ok(None);
     }
     let uid = util::uid(&owner);
+    // Orphan: dependents (also ones created meanwhile) just lose the
+    // reference, then the owner goes.
+    if finalizers.iter().any(|f| f == ORPHAN) {
+        let mut namespaces = vec![ns.to_string()];
+        if ns.is_empty() {
+            namespaces.extend(api.store().keys_of_resource("", "namespaces").into_iter().map(|k| k.name));
+        }
+        for dns in &namespaces {
+            for (key, mut obj) in api.store().objects_in_namespace(dns) {
+                let Some(refs) = obj.pointer_mut("/metadata/ownerReferences").and_then(Value::as_array_mut) else { continue };
+                let before = refs.len();
+                refs.retain(|r| r.get("uid").and_then(Value::as_str) != Some(uid.as_str()));
+                if refs.len() != before {
+                    let rv = resource_version(&obj);
+                    let _ = api.store().update(key, obj, rv);
+                }
+            }
+        }
+        let mut done = owner.clone();
+        if let Some(f) = done.pointer_mut("/metadata/finalizers").and_then(Value::as_array_mut) {
+            f.retain(|x| x.as_str() != Some(ORPHAN));
+        }
+        return match api.update_object(group, resource, done) {
+            Ok(_) => Ok(None),
+            Err(e) if e.is_not_found() => Ok(None),
+            Err(e) => Err(e),
+        };
+    }
+    if !finalizers.iter().any(|f| f == FOREGROUND) {
+        return Ok(None);
+    }
     let mut namespaces = vec![ns.to_string()];
     if ns.is_empty() {
         namespaces.extend(api.store().keys_of_resource("", "namespaces").into_iter().map(|k| k.name));

@@ -115,6 +115,12 @@ fn valid_sysctl_name(name: &str) -> bool {
     name.len() <= 253 && name.split(['.', '/']).all(segment_ok)
 }
 
+/// `resources.<kind>.<res>` of a container (not a JSON pointer: extended
+/// resource names contain '/').
+fn resource<'a>(c: &'a Value, kind: &str, res: &str) -> Option<&'a Value> {
+    c.get("resources")?.get(kind)?.get(res)
+}
+
 /// LimitRanger: fill missing container requests and limits from the
 /// namespace's `Container` LimitRanges, then enforce their min and max.
 /// Requests that are still missing default to the limits, as the API server's
@@ -150,14 +156,14 @@ pub fn apply_limit_ranges(pod: &mut Value, ranges: &[Value]) -> Vec<String> {
                 for (res, min) in item.get("min").and_then(Value::as_object).into_iter().flatten() {
                     let min_v = min.as_str().and_then(quantity::parse_milli);
                     for kind in ["requests", "limits"] {
-                        let v = c.pointer(&format!("/resources/{kind}/{res}")).and_then(Value::as_str).and_then(quantity::parse_milli);
+                        let v = resource(c, kind, res).and_then(Value::as_str).and_then(quantity::parse_milli);
                         if let (Some(v), Some(m)) = (v, min_v) {
                             if v < m {
                                 errs.push(format!(
                                     "minimum {res} usage per Container is {}, but {} is {}",
                                     min.as_str().unwrap_or_default(),
                                     if kind == "requests" { "request" } else { "limit" },
-                                    c.pointer(&format!("/resources/{kind}/{res}")).and_then(Value::as_str).unwrap_or_default()
+                                    resource(c, kind, res).and_then(Value::as_str).unwrap_or_default()
                                 ));
                             }
                         }
@@ -165,13 +171,13 @@ pub fn apply_limit_ranges(pod: &mut Value, ranges: &[Value]) -> Vec<String> {
                 }
                 for (res, max) in item.get("max").and_then(Value::as_object).into_iter().flatten() {
                     let max_v = max.as_str().and_then(quantity::parse_milli);
-                    let limit = c.pointer(&format!("/resources/limits/{res}")).and_then(Value::as_str).and_then(quantity::parse_milli);
+                    let limit = resource(c, "limits", res).and_then(Value::as_str).and_then(quantity::parse_milli);
                     match (limit, max_v) {
                         (None, Some(_)) => errs.push(format!("maximum {res} usage per Container is {}. No limit is specified", max.as_str().unwrap_or_default())),
                         (Some(l), Some(m)) if l > m => errs.push(format!(
                             "maximum {res} usage per Container is {}, but limit is {}",
                             max.as_str().unwrap_or_default(),
-                            c.pointer(&format!("/resources/limits/{res}")).and_then(Value::as_str).unwrap_or_default()
+                            resource(c, "limits", res).and_then(Value::as_str).unwrap_or_default()
                         )),
                         _ => {}
                     }

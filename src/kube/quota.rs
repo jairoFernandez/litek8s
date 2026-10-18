@@ -87,23 +87,21 @@ fn scoped(quota: &Value) -> bool {
 
 /// Sum of a pod's container requests (or limits) of `res`, in milli-units.
 fn pod_resource(pod: &Value, kind: &str, res: &str) -> i128 {
+    // Not a JSON pointer: extended resource names contain '/'.
+    let get = |c: &Value, kind: &str| c.get("resources").and_then(|r| r.get(kind)).and_then(|m| m.get(res)).and_then(quantity::milli_of);
     let sum: i128 = pod
         .pointer("/spec/containers")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|c| {
-            c.pointer(&format!("/resources/{kind}/{res}"))
-                .or_else(|| (kind == "requests").then(|| c.pointer(&format!("/resources/limits/{res}"))).flatten())
-                .and_then(quantity::milli_of)
-        })
+        .filter_map(|c| get(c, kind).or_else(|| if kind == "requests" { get(c, "limits") } else { None }))
         .sum();
     let init_max = pod
         .pointer("/spec/initContainers")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .filter_map(|c| c.pointer(&format!("/resources/{kind}/{res}")).and_then(quantity::milli_of))
+        .filter_map(|c| get(c, kind))
         .max()
         .unwrap_or(0);
     sum.max(init_max)
@@ -123,12 +121,10 @@ pub fn usage_of(quota: &Value, group: &str, plural: &str, obj: &Value, resource:
         return if g == group && p == plural { 1000 } else { 0 };
     }
     match (group, plural, resource) {
-        ("", "pods", "cpu" | "requests.cpu") => pod_resource(obj, "requests", "cpu"),
-        ("", "pods", "memory" | "requests.memory") => pod_resource(obj, "requests", "memory"),
-        ("", "pods", "ephemeral-storage" | "requests.ephemeral-storage") => pod_resource(obj, "requests", "ephemeral-storage"),
-        ("", "pods", "limits.cpu") => pod_resource(obj, "limits", "cpu"),
-        ("", "pods", "limits.memory") => pod_resource(obj, "limits", "memory"),
-        ("", "pods", "limits.ephemeral-storage") => pod_resource(obj, "limits", "ephemeral-storage"),
+        ("", "pods", "cpu" | "memory" | "ephemeral-storage") => pod_resource(obj, "requests", resource),
+        // requests.cpu, limits.memory, requests.example.com/dongle, ...
+        ("", "pods", r) if r.starts_with("requests.") && r != "requests.storage" => pod_resource(obj, "requests", &r["requests.".len()..]),
+        ("", "pods", r) if r.starts_with("limits.") => pod_resource(obj, "limits", &r["limits.".len()..]),
         ("", "services", "services.nodeports") => {
             if matches!(s(obj, "/spec/type"), "NodePort" | "LoadBalancer") {
                 obj.pointer("/spec/ports").and_then(Value::as_array).map_or(0, |p| p.len() as i128 * 1000)
@@ -164,7 +160,7 @@ fn sources(resource: &str) -> Vec<(String, String)> {
     let plain = |p: &str| vec![(String::new(), p.to_string())];
     if resource.starts_with("services.") {
         plain("services")
-    } else if resource.contains("storage.k8s.io") || resource == "requests.storage" {
+    } else if resource.contains(".storageclass.storage.k8s.io/") || resource == "requests.storage" {
         plain("persistentvolumeclaims")
     } else {
         plain("pods")
@@ -250,6 +246,8 @@ mod tests {
         let pod = json!({"spec": {"containers": [{"resources": {"requests": {"cpu": "500m"}}}]}, "status": {"phase": "Running"}});
         assert_eq!(usage_of(&quota, "", "pods", &pod, "pods"), 1000);
         assert_eq!(usage_of(&quota, "", "pods", &pod, "requests.cpu"), 500);
+        let dongle = json!({"spec": {"containers": [{"resources": {"requests": {"example.com/dongle": "2"}}}]}});
+        assert_eq!(usage_of(&quota, "", "pods", &dongle, "requests.example.com/dongle"), 2000);
         let done = json!({"spec": {}, "status": {"phase": "Succeeded"}});
         assert_eq!(usage_of(&quota, "", "pods", &done, "pods"), 0);
         let svc = json!({"spec": {"type": "NodePort", "ports": [{"port": 80}]}});

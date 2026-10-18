@@ -159,7 +159,16 @@ fn to_json(msg: &DynamicMessage) -> Value {
                         None => other.to_string(),
                     },
                 };
-                out.insert(key, scalar_or_nested(value));
+                let v = scalar_or_nested(value);
+                // Non-pointer bools are always on the wire; JSON omits false.
+                let omit_false = matches!(
+                    key.as_str(),
+                    "x-kubernetes-embedded-resource" | "x-kubernetes-int-or-string" | "uniqueItems" | "exclusiveMaximum" | "exclusiveMinimum" | "nullable"
+                );
+                if (omit_false && v == json!(false)) || v == json!("") || v.is_null() {
+                    continue;
+                }
+                out.insert(key, v);
             }
             Value::Object(out)
         }
@@ -170,6 +179,10 @@ fn to_json(msg: &DynamicMessage) -> Value {
                 // gogo-protobuf always writes non-pointer strings, even empty
                 // ones; JSON omits them, and absent == "" for every field.
                 if v == json!("") || v.is_null() {
+                    continue;
+                }
+                // Zero scalars of non-pointer Go fields: JSON leaves them out.
+                if (v == json!(false) || v == json!(0)) && !field.is_list() && !field.is_map() && !is_pointer(msg.descriptor().full_name(), json_name(field.name())) {
                     continue;
                 }
                 // Embedded Go structs (`json:",inline"`) are a nested message
@@ -265,6 +278,15 @@ fn walk_known(v: &Value, desc: &MessageDescriptor, path: &str, root: bool, out: 
             walk_known(child, &m, &p, false, out);
         }
     }
+}
+
+/// Whether a scalar field is a pointer in Go (zero values are meaningful).
+fn is_pointer(message: &str, field: &str) -> bool {
+    let short = message
+        .strip_prefix("k8s.io.api.")
+        .or_else(|| message.strip_prefix("k8s.io.apimachinery.pkg.apis."))
+        .unwrap_or(message);
+    super::proto_pointers::POINTER_FIELDS.binary_search(&format!("{short}.{field}").as_str()).is_ok()
 }
 
 /// Embedded struct fields in k8s.io/api (`json:",inline"` or `json:""`):

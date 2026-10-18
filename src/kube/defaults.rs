@@ -152,10 +152,12 @@ fn container(c: &mut Value) {
     }
     for probe in ["readinessProbe", "livenessProbe", "startupProbe"] {
         if let Some(p) = m.get_mut(probe).and_then(Value::as_object_mut) {
-            set_default(p, "timeoutSeconds", json!(1));
-            set_default(p, "periodSeconds", json!(10));
-            set_default(p, "successThreshold", json!(1));
-            set_default(p, "failureThreshold", json!(3));
+            // 0 is "unset" too: protobuf clients send these non-pointer fields.
+            for (k, v) in [("timeoutSeconds", 1), ("periodSeconds", 10), ("successThreshold", 1), ("failureThreshold", 3)] {
+                if p.get(k).is_none_or(|x| *x == json!(0)) {
+                    p.insert(k.into(), json!(v));
+                }
+            }
             if let Some(h) = p.get_mut("httpGet").and_then(Value::as_object_mut) {
                 set_default(h, "scheme", json!("HTTP"));
                 set_default(h, "path", json!("/"));

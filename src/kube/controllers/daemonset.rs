@@ -123,7 +123,8 @@ pub(crate) fn reconcile(api: &ApiState, ns: &str, name: &str) -> Result<Requeue,
     // Rolling update within maxUnavailable, unavailable outdated pods first.
     if s(&ds, "/spec/updateStrategy/type") != "OnDelete" && !outdated.is_empty() {
         let max_unavailable = util::int_or_percent(ds.pointer("/spec/updateStrategy/rollingUpdate/maxUnavailable"), desired, true, 1).max(1);
-        let unavailable = current - available;
+        // Nodes whose pod is being replaced count as unavailable too.
+        let unavailable = (eligible.len() as i64 - available).max(current - available);
         outdated.sort();
         let mut budget = max_unavailable - unavailable;
         for (is_available, pod) in outdated {

@@ -180,6 +180,18 @@ fn sync_endpoints(api: &ApiState, svc: &Value, pods: &[&Value]) -> Result<(), Ap
         })
         .collect();
     for (ps, members) in &groups {
+        // EndpointSlice ports always carry a name (kubectl relies on it).
+        let ps: Vec<Value> = ps
+            .iter()
+            .map(|p| {
+                let mut p = p.clone();
+                if p.get("name").is_none() {
+                    p["name"] = json!("");
+                }
+                p
+            })
+            .collect();
+        let ps = &ps;
         let endpoints: Vec<Value> = members
             .iter()
             .map(|p| {

@@ -14,6 +14,7 @@ pub mod fields;
 pub mod patch;
 mod pod_streams;
 pub mod protobuf;
+mod proto_pointers;
 mod proxy;
 pub mod quota;
 pub mod quantity;

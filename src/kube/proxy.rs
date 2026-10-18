@@ -21,8 +21,16 @@ use super::server::{ApiError, ApiState, Body, Req, full};
 
 const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 
+trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
+impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Io for T {}
+
 fn unavailable(message: impl Into<String>) -> ApiError {
     ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailable", message)
+}
+
+/// Whether the proxy URL names the `https` scheme (`https:name:port`).
+fn wants_tls(raw: &str) -> bool {
+    raw.starts_with("https:")
 }
 
 /// `name`, `name:port` or `scheme:name:port` as the proxy URL carries it.
@@ -66,7 +74,7 @@ pub(crate) async fn pod(state: &Arc<ApiState>, ns: &str, name_port: &str, path: 
         .get_object("", "pods", ns, &name)
         .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "NotFound", format!("pods \"{name}\" not found")))?;
     let port = pod_port(&pod, &port).ok_or_else(|| ApiError::bad_request(format!("no such port {port} on pod {name}")))?;
-    relay(state, &pod, port, path, req, &format!("/api/v1/namespaces/{ns}/pods/{name_port}/proxy")).await
+    relay(state, &pod, port, path, req, &format!("/api/v1/namespaces/{ns}/pods/{name_port}/proxy"), wants_tls(name_port)).await
 }
 
 pub(crate) async fn service(state: &Arc<ApiState>, ns: &str, name_port: &str, path: &str, req: &Req) -> Result<Response<Body>, ApiError> {
@@ -106,14 +114,14 @@ pub(crate) async fn service(state: &Arc<ApiState>, ns: &str, name_port: &str, pa
                 other => other,
             };
             if let Some(pod) = state.get_object("", "pods", pod_ns, pod_name) {
-                return relay(state, &pod, target as u16, path, req, &format!("/api/v1/namespaces/{ns}/services/{name_port}/proxy")).await;
+                return relay(state, &pod, target as u16, path, req, &format!("/api/v1/namespaces/{ns}/services/{name_port}/proxy"), wants_tls(name_port)).await;
             }
         }
     }
     Err(unavailable(format!("no endpoints available for service \"{name}\"")))
 }
 
-async fn relay(state: &Arc<ApiState>, pod: &Value, port: u16, path: &str, req: &Req, prefix: &str) -> Result<Response<Body>, ApiError> {
+async fn relay(state: &Arc<ApiState>, pod: &Value, port: u16, path: &str, req: &Req, prefix: &str, tls: bool) -> Result<Response<Body>, ApiError> {
     let node = util::s(pod, "/spec/nodeName").to_string();
     if node.is_empty() || !state.hub.is_connected(&node) {
         return Err(unavailable(format!("pod {} is not running on a connected node", util::name(pod))));
@@ -157,7 +165,13 @@ async fn relay(state: &Arc<ApiState>, pod: &Value, port: u16, path: &str, req: &
         let _ = to_client.shutdown().await;
     });
     let result = async {
-        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(client_side)).await?;
+        let io: Box<dyn Io> = if tls {
+            let host = util::s(pod, "/status/podIP").to_string();
+            Box::new(super::agent::probe::tls_connect_any(client_side, if host.is_empty() { "pod" } else { &host }).await?)
+        } else {
+            Box::new(client_side)
+        };
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(io)).await?;
         tokio::spawn(conn);
         let target = if req.raw_query().is_empty() { path.to_string() } else { format!("{path}?{}", req.raw_query()) };
         let mut builder = Request::builder().method(req.method().clone()).uri(target);

@@ -506,8 +506,14 @@ impl<R: PodRuntime> Worker<R> {
                 State::Terminated { exit_code, .. } => policy == "Always" || (policy == "OnFailure" && *exit_code != 0),
             };
             if wants_start {
+                let first = c.attempts == 0 && !c.ephemeral;
                 if c.due() {
-                    self.start(false, i).await;
+                    // Like the kubelet, containers first start in order: one
+                    // still pulling its image holds back the ones after it.
+                    let pulling = |c: &Container| matches!(&c.state, State::Waiting { reason, .. } if reason == "ContainerCreating");
+                    if !self.start(false, i).await && first && pulling(&self.main[i]) {
+                        break;
+                    }
                 } else {
                     self.wake_until(false, i);
                 }
@@ -579,9 +585,9 @@ impl<R: PodRuntime> Worker<R> {
         let mut hosts = String::from("# Kubernetes-managed hosts file.\n127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n");
         hosts.push_str("fe00::0\tip6-localnet\nfe00::0\tip6-mcastprefix\nfe00::1\tip6-allnodes\nfe00::2\tip6-allrouters\n");
         if let Some(ip) = ip {
-            match s(&self.pod, "/spec/subdomain") {
-                "" => hosts.push_str(&format!("{ip}\t{}\n", spec.hostname)),
-                sub => hosts.push_str(&format!("{ip}\t{}.{sub}.{}.svc.{}\t{}\n", spec.hostname, self.ns, crate::kube::dns::DOMAIN, spec.hostname)),
+            match &spec.fqdn {
+                None => hosts.push_str(&format!("{ip}\t{}\n", spec.hostname)),
+                Some(fqdn) => hosts.push_str(&format!("{ip}\t{fqdn}\t{}\n", spec.hostname)),
             }
         }
         let mut aliases = String::new();
@@ -702,6 +708,10 @@ impl<R: PodRuntime> Worker<R> {
         }
         let spec = SandboxSpec {
             name: format!("k8s_POD_{}_{}_{}", self.name, self.ns, &self.uid[..8.min(self.uid.len())]),
+            fqdn: match s(&self.pod, "/spec/subdomain") {
+                "" => None,
+                sub => Some(format!("{hostname}.{sub}.{}.svc.{}", self.ns, crate::kube::dns::DOMAIN)),
+            },
             hostname,
             labels,
             host_network: self.host_network(),
@@ -1241,7 +1251,6 @@ impl<R: PodRuntime> Worker<R> {
                     }
                     MountSource::Volume { name: volume.clone(), subpath: (!sub.is_empty()).then_some(sub.clone()) }
                 }
-                Prepared::Tmpfs => MountSource::Tmpfs,
                 Prepared::HostPath(path) => {
                     let p = if sub.is_empty() { path.clone() } else { format!("{}/{sub}", path.trim_end_matches('/')) };
                     MountSource::Bind(p)
@@ -1353,6 +1362,13 @@ impl<R: PodRuntime> Worker<R> {
             });
         if all_done {
             return if regular().all(|c| c.exit_code() == Some(0)) { "Succeeded" } else { "Failed" };
+        }
+        // The kubelet publishes a new pod's status after its first sync,
+        // which pulls every image: while one is still being pulled for the
+        // first time, the pod is Pending even if others already started.
+        let first_pull = |c: &Container| c.attempts == 0 && matches!(&c.state, State::Waiting { reason, .. } if reason == "ContainerCreating");
+        if regular().any(first_pull) {
+            return "Pending";
         }
         if regular().any(|c| c.running() || c.exit_code().is_some()) {
             "Running"

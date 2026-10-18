@@ -328,6 +328,20 @@ pub async fn serve(config: ApiServerConfig) -> Result<()> {
         }
         if let Some(socket) = socket {
             state.cluster_dns.store(true, std::sync::atomic::Ordering::Relaxed);
+            if let Ok(addr) = socket.local_addr() {
+                // macOS's mDNSResponder holds tcp *:53; a loopback bind is
+                // more specific (a VM-backed Docker forwards pods there).
+                let mut tcp = TcpListener::bind(addr).await;
+                if tcp.is_err() && addr.ip().is_unspecified() {
+                    tcp = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], addr.port()))).await;
+                }
+                match tcp {
+                    Ok(tcp) => {
+                        tokio::spawn(super::dns::serve_tcp(state.clone(), tcp));
+                    }
+                    Err(e) => eprintln!("apiserver: cluster DNS over TCP disabled: cannot listen on tcp {addr}: {e}"),
+                }
+            }
             tokio::spawn(super::dns::serve(state.clone(), socket));
         }
     }
@@ -575,6 +589,36 @@ impl ApiError {
             format!("{} \"{name}\" is invalid: {}", qualified(rt), message.into()),
         );
         e.details = Some(json!({"name": name, "group": rt.group, "kind": rt.kind}));
+        e
+    }
+
+    /// 422 Invalid with one cause per field error (`path: Reason: detail`),
+    /// which kubectl prints.
+    fn invalid_fields(rt: &ResourceType, name: &str, errs: &[String]) -> Self {
+        let mut e = Self::invalid(rt, name, super::validation::join(errs));
+        let causes: Vec<Value> = errs
+            .iter()
+            .map(|err| {
+                let (field, message) = err.split_once(": ").unwrap_or(("", err.as_str()));
+                let reason = if message.starts_with("Required value") {
+                    "FieldValueRequired"
+                } else if message.starts_with("Unsupported value") {
+                    "FieldValueNotSupported"
+                } else if message.starts_with("Forbidden") {
+                    "FieldValueForbidden"
+                } else if message.starts_with("Too long") {
+                    "FieldValueTooLong"
+                } else if message.starts_with("Too many") {
+                    "FieldValueTooMany"
+                } else {
+                    "FieldValueInvalid"
+                };
+                json!({"reason": reason, "message": message, "field": field})
+            })
+            .collect();
+        if let Some(d) = e.details.as_mut() {
+            d["causes"] = json!(causes);
+        }
         e
     }
 
@@ -964,7 +1008,7 @@ async fn resource_request(
             }
             state.create(rt, ns, req).await
         }
-        (&Method::DELETE, None, None) => state.delete_collection(rt, ns, req),
+        (&Method::DELETE, None, None) => state.delete_collection(rt, ns, req).await,
         (&Method::GET, Some(name), None | Some("status")) => state.get(rt, ns, name, req).await,
         (&Method::GET, Some(name), Some("ephemeralcontainers")) if is_pods(rt) => state.get(rt, ns, name, req).await,
         (&Method::PUT, Some(name), None | Some("status") | Some("finalize")) => {
@@ -1050,6 +1094,13 @@ fn agent_connect(state: &Arc<ApiState>, req: &Req) -> Result<Response<Body>, Api
 
 // ---------------------------------------------------------------------------
 // Verbs
+
+/// A 429 eviction refusal with the DisruptionBudget cause clients look for.
+fn disruption_error(message: String) -> ApiError {
+    let mut e = ApiError::new(StatusCode::TOO_MANY_REQUESTS, "TooManyRequests", message.clone());
+    e.details = Some(json!({"causes": [{"reason": "DisruptionBudget", "message": message}]}));
+    e
+}
 
 fn now_rfc3339() -> String {
     chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string()
@@ -1285,6 +1336,8 @@ impl ApiState {
         if !rt.custom {
             return Ok(obj);
         }
+        let mut obj = obj;
+        self.prune_custom(rt, &mut obj);
         match self.storage_version(rt) {
             Some((crd, version)) if version != rt.api_version() => {
                 let mut out = admission::convert_objects(self, &crd, vec![obj], &version).await?;
@@ -1548,12 +1601,11 @@ impl ApiState {
         }
         let policy = opts.get("propagationPolicy").and_then(Value::as_str).or(req.q("propagationPolicy"));
         let orphan = policy == Some("Orphan") || opts.get("orphanDependents").and_then(Value::as_bool) == Some(true);
-        if orphan {
-            self.orphan_dependents(&old);
-        }
         // Foreground: the object stays, marked, until the garbage collector
-        // has deleted its blocking dependents.
-        if policy == Some("Foreground") && !is_pods(rt) {
+        // has deleted its blocking dependents. Orphan: until it has dropped
+        // the dependents' references (also of ones created meanwhile).
+        let finalizer = if policy == Some("Foreground") { Some("foregroundDeletion") } else if orphan { Some("orphan") } else { None };
+        if let (Some(finalizer), false) = (finalizer, is_pods(rt)) {
             let mut marked = old.clone();
             if !meta(&marked).contains_key("deletionTimestamp") {
                 marked["metadata"]["deletionTimestamp"] = json!(now_rfc3339());
@@ -1561,8 +1613,8 @@ impl ApiState {
             }
             let fins = marked["metadata"].as_object_mut().unwrap().entry("finalizers").or_insert_with(|| json!([]));
             if let Some(list) = fins.as_array_mut() {
-                if !list.iter().any(|f| f == "foregroundDeletion") {
-                    list.push(json!("foregroundDeletion"));
+                if !list.iter().any(|f| f == finalizer) {
+                    list.push(json!(finalizer));
                 }
             }
             let stored = self.store.update(key, marked, expected).map_err(|e| ApiError::from_store(e, rt, name))?;
@@ -1572,18 +1624,23 @@ impl ApiState {
             .get("gracePeriodSeconds")
             .and_then(Value::as_i64)
             .or_else(|| req.q("gracePeriodSeconds").and_then(|g| g.parse().ok()));
+        if orphan {
+            self.orphan_dependents(&old);
+        }
         let result = self
             .delete_object_grace(rt, &key, old, expected, grace)
             .map_err(|e| ApiError::from_store(e, rt, name))?;
         Ok(json_response(StatusCode::OK, &result))
     }
 
-    fn delete_collection(&self, rt: &ResourceType, ns: Option<&str>, req: &Req) -> Result<Response<Body>, ApiError> {
+    async fn delete_collection(&self, rt: &ResourceType, ns: Option<&str>, req: &Req) -> Result<Response<Body>, ApiError> {
         let labels = LabelSelector::parse(req.q("labelSelector").unwrap_or_default())
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
         let fields = FieldSelector::parse(req.q("fieldSelector").unwrap_or_default())
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
         let (items, _) = self.store.list(&rt.group, &rt.plural, if rt.namespaced { ns } else { None });
+        // Custom resources are selected as the requested version.
+        let items = if rt.custom { self.served_as(rt, items).await? } else { items };
         let mut deleted = Vec::new();
         for obj in items.into_iter().filter(|o| labels.matches(o) && fields.matches(o)) {
             if req.dry_run() {
@@ -1752,43 +1809,56 @@ impl ApiState {
         req: &Req,
     ) -> Result<Response<Body>, ApiError> {
         let key = key_for(rt, ns, name);
-        let old = self
-            .store
-            .get(&key)
-            .ok_or_else(|| ApiError::from_store(StoreError::NotFound, rt, name))?;
-        let current = scale_of(&old);
-        let desired = match *method {
-            Method::GET => return Ok(json_response(StatusCode::OK, &current)),
-            Method::PUT => parse_body(req)?,
-            Method::PATCH => {
-                let body: Value = serde_json::from_slice(&req.body)
-                    .map_err(|e| ApiError::bad_request(format!("invalid patch: {e}")))?;
-                let mut s = current.clone();
-                if req.content_type.starts_with("application/json-patch+json") {
-                    patch::json_patch(&mut s, &body).map_err(|e| ApiError::bad_request(e.to_string()))?;
-                } else {
-                    patch::merge_patch(&mut s, &body);
+        // Like GuaranteedUpdate, an unconditional change retries while
+        // controllers keep writing the object.
+        for attempt in 0..64 {
+            let old = self
+                .store
+                .get(&key)
+                .ok_or_else(|| ApiError::from_store(StoreError::NotFound, rt, name))?;
+            let current = scale_of(&old);
+            let desired = match *method {
+                Method::GET => return Ok(json_response(StatusCode::OK, &current)),
+                Method::PUT => parse_body(req)?,
+                Method::PATCH => {
+                    let body: Value = serde_json::from_slice(&req.body)
+                        .map_err(|e| ApiError::bad_request(format!("invalid patch: {e}")))?;
+                    let mut s = current.clone();
+                    if req.content_type.starts_with("application/json-patch+json") {
+                        patch::json_patch(&mut s, &body).map_err(|e| ApiError::bad_request(e.to_string()))?;
+                    } else {
+                        patch::merge_patch(&mut s, &body);
+                    }
+                    s
                 }
-                s
+                _ => {
+                    return Err(ApiError::new(StatusCode::METHOD_NOT_ALLOWED, "MethodNotAllowed", "unsupported verb on scale"));
+                }
+            };
+            let replicas = desired
+                .pointer("/spec/replicas")
+                .and_then(Value::as_i64)
+                .ok_or_else(|| ApiError::bad_request("scale needs spec.replicas"))?;
+            let mut updated = old.clone();
+            updated["spec"]["replicas"] = json!(replicas);
+            let new = self.prepare_update(rt, &old, updated, None, name)?;
+            if req.dry_run() {
+                return Ok(json_response(StatusCode::OK, &scale_of(&new)));
             }
-            _ => {
-                return Err(ApiError::new(StatusCode::METHOD_NOT_ALLOWED, "MethodNotAllowed", "unsupported verb on scale"));
+            // A resourceVersion in the request is a precondition; without one
+            // the change applies to whatever is current.
+            let explicit = desired
+                .pointer("/metadata/resourceVersion")
+                .and_then(Value::as_str)
+                .filter(|v| !v.is_empty() && *method == Method::PUT)
+                .and_then(|v| v.parse::<u64>().ok());
+            match self.commit_update(rt, key.clone(), new, explicit.or(resource_version(&old))) {
+                Ok(stored) => return Ok(json_response(StatusCode::OK, &scale_of(&stored))),
+                Err(StoreError::Conflict) if explicit.is_none() && attempt < 63 => continue,
+                Err(e) => return Err(ApiError::from_store(e, rt, name)),
             }
-        };
-        let replicas = desired
-            .pointer("/spec/replicas")
-            .and_then(Value::as_i64)
-            .ok_or_else(|| ApiError::bad_request("scale needs spec.replicas"))?;
-        let mut updated = old.clone();
-        updated["spec"]["replicas"] = json!(replicas);
-        let new = self.prepare_update(rt, &old, updated, None, name)?;
-        if req.dry_run() {
-            return Ok(json_response(StatusCode::OK, &scale_of(&new)));
         }
-        let stored = self
-            .commit_update(rt, key, new, resource_version(&old))
-            .map_err(|e| ApiError::from_store(e, rt, name))?;
-        Ok(json_response(StatusCode::OK, &scale_of(&stored)))
+        Err(ApiError::from_store(StoreError::Conflict, rt, name))
     }
 
     // -----------------------------------------------------------------------
@@ -1877,7 +1947,7 @@ impl ApiState {
         self.enforce_crd_schema(rt, obj)?;
         let errs = super::validation::validate(&rt.group, &rt.kind, obj, None);
         if !errs.is_empty() {
-            return Err(ApiError::invalid(rt, &name_of(obj), super::validation::join(&errs)));
+            return Err(ApiError::invalid_fields(rt, &name_of(obj), &errs));
         }
         if let (true, Some(ns)) = (rt.namespaced, ns) {
             if let Some(msg) = super::quota::exceeded(&self.store, &rt.group, &rt.plural, ns, obj) {
@@ -1986,7 +2056,7 @@ impl ApiState {
         self.enforce_crd_schema(rt, &mut new)?;
         let errs = super::validation::validate(&rt.group, &rt.kind, &new, Some(old));
         if !errs.is_empty() {
-            return Err(ApiError::invalid(rt, url_name, super::validation::join(&errs)));
+            return Err(ApiError::invalid_fields(rt, url_name, &errs));
         }
         Ok(new)
     }
@@ -2102,6 +2172,14 @@ impl ApiState {
         self.signer.jwks()
     }
 
+    /// Custom resources lose fields their schema does not declare (also
+    /// those mutating webhooks added) before they are stored.
+    fn prune_custom(&self, rt: &ResourceType, obj: &mut Value) {
+        if let Some(schema) = self.crd_schema(rt) {
+            super::fields::prune(obj, &schema);
+        }
+    }
+
     /// Eviction: refuse when a PodDisruptionBudget covering the pod allows
     /// no more disruptions; otherwise use one of its allowed disruptions.
     fn check_disruption_budgets(&self, ns: &str, pod: &Value) -> Result<(), ApiError> {
@@ -2128,7 +2206,7 @@ impl ApiState {
                 continue;
             }
             if allowed <= 0 {
-                return Err(too_many(format!(
+                return Err(disruption_error(format!(
                     "Cannot evict pod as it would violate the pod's disruption budget. The disruption budget {} needs {} healthy pods and has {} currently",
                     name_of(&pdb),
                     pdb.pointer("/status/desiredHealthy").and_then(Value::as_i64).unwrap_or(0),
@@ -2169,7 +2247,7 @@ impl ApiState {
         super::fields::apply_defaults(obj, &schema);
         let errs = super::fields::schema_errors(obj, &schema);
         if !errs.is_empty() {
-            return Err(ApiError::invalid(rt, &name_of(obj), super::validation::join(&errs)));
+            return Err(ApiError::invalid_fields(rt, &name_of(obj), &errs));
         }
         Ok(())
     }
@@ -2431,7 +2509,8 @@ impl ApiState {
                 if port.get("protocol").is_none() {
                     port["protocol"] = json!("TCP");
                 }
-                if port.get("targetPort").is_none() {
+                // Unset, 0 or "" (protobuf clients always send one) means the port.
+                if port.get("targetPort").is_none_or(|t| *t == json!(0) || *t == json!("")) {
                     port["targetPort"] = port.get("port").cloned().unwrap_or(Value::Null);
                 }
             }
@@ -2626,10 +2705,11 @@ impl ApiState {
         let selective = !labels.is_empty() || req.q("fieldSelector").is_some();
         // With a selector, an object that stops matching is DELETED for the
         // watcher and one that starts matching is ADDED: track which match.
+        let resumed = since.is_some();
         let classify = {
             let (group, plural, labels, fields, filter_ns) =
                 (rt.group.clone(), rt.plural.clone(), labels.clone(), fields.clone(), filter_ns.clone());
-            move |e: &WatchEvent, seen: &mut std::collections::HashSet<String>| -> Option<&'static str> {
+            move |e: &WatchEvent, seen: &mut std::collections::HashMap<String, bool>| -> Option<&'static str> {
                 if e.key.group != group || e.key.resource != plural || filter_ns.as_ref().is_some_and(|ns| &e.key.namespace != ns) {
                     return None;
                 }
@@ -2638,30 +2718,38 @@ impl ApiState {
                     return now.then(|| e.event.as_str());
                 }
                 let id = format!("{}/{}", e.key.namespace, e.key.name);
-                let before = seen.contains(&id);
+                // Resumed from a resourceVersion, the state back then is
+                // unknown: take an object's first event at face value.
+                let before = seen.get(&id).copied().unwrap_or(resumed && now);
                 match (e.event, before, now) {
                     (super::store::EventType::Deleted, _, _) => {
-                        seen.remove(&id);
+                        seen.insert(id, false);
                         (before || now).then_some("DELETED")
                     }
                     (_, false, true) => {
-                        seen.insert(id);
+                        seen.insert(id, true);
                         Some("ADDED")
                     }
-                    (_, true, true) => Some(e.event.as_str()),
+                    (_, true, true) => {
+                        seen.insert(id, true);
+                        Some(e.event.as_str())
+                    }
                     (_, true, false) => {
-                        seen.remove(&id);
+                        seen.insert(id, false);
                         Some("DELETED")
                     }
-                    (_, false, false) => None,
+                    (_, false, false) => {
+                        seen.insert(id, false);
+                        None
+                    }
                 }
             }
         };
-        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        if selective {
+        let mut seen: std::collections::HashMap<String, bool> = std::collections::HashMap::new();
+        if selective && !resumed {
             let (items, _) = self.store.list(&rt.group, &rt.plural, filter_ns.as_deref());
             for o in items.iter().filter(|o| labels.matches(o) && fields.matches(o)) {
-                seen.insert(item_cursor(o));
+                seen.insert(item_cursor(o), true);
             }
         }
 
@@ -2730,7 +2818,7 @@ impl ApiState {
                             continue;
                         }
                         if selective {
-                            seen.insert(item_cursor(&obj));
+                            seen.insert(item_cursor(&obj), true);
                         }
                         ev["object"] = obj;
                     }

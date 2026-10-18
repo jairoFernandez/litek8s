@@ -2,7 +2,8 @@
 //!
 //! - `emptyDir` and persistent volumes are runtime volumes (they live where
 //!   the containers run, keep ownership semantics, and work the same on a
-//!   Linux host and on a VM-backed Docker); `medium: Memory` is a tmpfs.
+//!   Linux host and on a VM-backed Docker); `medium: Memory` is a
+//!   tmpfs-backed one (with Docker), shared by the pod's containers.
 //! - `configMap`, `secret`, `downwardAPI` and `projected` (which carries the
 //!   service account token) are files written under the agent's directory
 //!   and bind-mounted read-only.
@@ -25,7 +26,6 @@ pub(crate) enum Prepared {
     Dir(PathBuf),
     /// A runtime volume; `fresh` when just created (needs `chmod 0777`).
     Named { volume: String, fresh: bool, empty_dir: bool },
-    Tmpfs,
     HostPath(String),
 }
 
@@ -179,13 +179,15 @@ impl<R: PodRuntime> Agent<R> {
             let dir = pod_dir.join("volumes").join(&name);
             let default_mode = |src: &Value| src.get("defaultMode").and_then(Value::as_u64).map(|m| m as u32).unwrap_or(0o644);
             let prepared = if let Some(ed) = volume.get("emptyDir") {
-                if s(ed, "/medium") == "Memory" {
-                    Prepared::Tmpfs
-                } else {
+                {
                     let v = empty_dir_volume(uid, &name);
+                    let mut labels = HashMap::from([(LABEL_POD_UID.to_string(), uid.to_string()), (super::runtime::LABEL_NODE.to_string(), self.config().node_name.clone())]);
+                    if s(ed, "/medium") == "Memory" {
+                        labels.insert(super::runtime::LABEL_TMPFS.to_string(), "true".to_string());
+                    }
                     let fresh = self
                         .runtime()
-                        .ensure_volume(&v, HashMap::from([(LABEL_POD_UID.to_string(), uid.to_string()), (super::runtime::LABEL_NODE.to_string(), self.config().node_name.clone())]))
+                        .ensure_volume(&v, labels)
                         .await
                         .map_err(|e| format!("{e:#}"))?;
                     Prepared::Named { volume: v, fresh, empty_dir: true }

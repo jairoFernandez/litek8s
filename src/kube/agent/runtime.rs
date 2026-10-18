@@ -40,6 +40,8 @@ pub const LABEL_HASH: &str = "litek8s.container.hash";
 /// The node whose agent made a container or volume (several agents may
 /// share one runtime).
 pub const LABEL_NODE: &str = "litek8s.node";
+/// A volume backed by memory (`emptyDir.medium: Memory`).
+pub const LABEL_TMPFS: &str = "litek8s.tmpfs";
 
 /// The network pods join, so they get an address of their own.
 const POD_NETWORK: &str = "litek8s-pods";
@@ -69,6 +71,9 @@ pub struct MountSpec {
 pub struct SandboxSpec {
     pub name: String,
     pub hostname: String,
+    /// `<hostname>.<subdomain>.<ns>.svc.<domain>` when the pod has a
+    /// subdomain: listed before the hostname in `/etc/hosts`.
+    pub fqdn: Option<String>,
     pub labels: HashMap<String, String>,
     pub host_network: bool,
     /// `name:ip` entries for `/etc/hosts` (`ip` may be `host-gateway`).
@@ -520,8 +525,15 @@ impl PodRuntime for DockerPods {
         if self.docker.inspect_volume(name).await.is_ok() {
             return Ok(false);
         }
+        // `medium: Memory` emptyDirs: a tmpfs-backed volume, so every
+        // container of the pod (and each restart) sees the same files.
+        let driver_opts = if labels.get(LABEL_TMPFS).is_some_and(|v| v == "true") {
+            HashMap::from([("type".to_string(), "tmpfs".to_string()), ("device".to_string(), "tmpfs".to_string()), ("o".to_string(), "mode=1777".to_string())])
+        } else {
+            HashMap::new()
+        };
         self.docker
-            .create_volume(CreateVolumeOptions { name: name.to_string(), driver: "local".to_string(), labels, ..Default::default() })
+            .create_volume(CreateVolumeOptions { name: name.to_string(), driver: "local".to_string(), labels, driver_opts })
             .await
             .with_context(|| format!("failed to create volume {name}"))?;
         Ok(true)

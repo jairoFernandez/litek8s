@@ -17,6 +17,26 @@ pub(crate) enum Outcome {
     Unschedulable,
 }
 
+/// Requests of extended resources (anything but cpu, memory, storage and
+/// hugepages), in milli-units: (name, amount).
+pub(crate) fn extended_requests(spec: &Value) -> Vec<(String, i128)> {
+    let mut out: Vec<(String, i128)> = Vec::new();
+    for c in spec.get("containers").and_then(Value::as_array).into_iter().flatten() {
+        let reqs = c.pointer("/resources/requests").or_else(|| c.pointer("/resources/limits")).and_then(Value::as_object);
+        for (k, v) in reqs.into_iter().flatten() {
+            if matches!(k.as_str(), "cpu" | "memory" | "ephemeral-storage") || k.starts_with("hugepages-") {
+                continue;
+            }
+            let q = quantity::milli_of(v).unwrap_or(0);
+            match out.iter_mut().find(|(n, _)| n == k) {
+                Some((_, total)) => *total += q,
+                None => out.push((k.clone(), q)),
+            }
+        }
+    }
+    out
+}
+
 /// Requested (milli-cpu, memory bytes) of a pod: the sum over containers,
 /// or the largest init container if that is bigger.
 pub(crate) fn pod_requests(spec: &Value) -> (i128, i128) {
@@ -248,6 +268,7 @@ pub(crate) fn schedule(api: &ApiState, ns: &str, name: &str) -> Result<Outcome, 
     let (nodes, _) = api.store().list("", "nodes", None);
     let (pods, _) = api.store().list("", "pods", None);
     let (want_cpu, want_mem) = pod_requests(&spec);
+    let want_ext = extended_requests(&spec);
     let mut reasons: Vec<String> = Vec::new();
     let mut best: Option<(f64, String)> = None;
     for node in &nodes {
@@ -260,7 +281,7 @@ pub(crate) fn schedule(api: &ApiState, ns: &str, name: &str) -> Result<Outcome, 
             reasons.push(reason);
             continue;
         }
-        let alloc = |res: &str| node.pointer(&format!("/status/allocatable/{res}")).and_then(quantity::milli_of);
+        let alloc = |res: &str| node.pointer("/status/allocatable").and_then(|m| m.get(res)).and_then(quantity::milli_of);
         let on_node: Vec<&Value> = pods
             .iter()
             .filter(|p| s(p, "/spec/nodeName") == node_name && util::is_active(p))
@@ -282,6 +303,16 @@ pub(crate) fn schedule(api: &ApiState, ns: &str, name: &str) -> Result<Outcome, 
         }
         if alloc("memory").is_some_and(|cap| (used_mem + want_mem) * 1000 > cap) {
             reasons.push("Insufficient memory".into());
+            continue;
+        }
+        // Extended resources (device plugins, fake test resources): what the
+        // node advertises, absent meaning none.
+        let short = want_ext.iter().find(|(res, want)| {
+            let used: i128 = on_node.iter().flat_map(|p| extended_requests(p.get("spec").unwrap_or(&Value::Null))).filter(|(n, _)| n == res).map(|(_, q)| q).sum();
+            used + want > alloc(res).unwrap_or(0)
+        });
+        if let Some((res, _)) = short {
+            reasons.push(format!("Insufficient {res}"));
             continue;
         }
         let load = cpu_cap.map(|cap| (used_cpu + want_cpu) as f64 / cap.max(1) as f64).unwrap_or(0.0);
@@ -336,13 +367,18 @@ fn preempt(api: &ApiState, pod: &Value, nodes: &[Value], pods: &[Value], pinned:
         if pinned.is_some_and(|p| p != node_name) || node_fits_constraints(&spec, node, false).is_err() {
             continue;
         }
-        let alloc = |res: &str| node.pointer(&format!("/status/allocatable/{res}")).and_then(quantity::milli_of);
+        let alloc = |res: &str| node.pointer("/status/allocatable").and_then(|m| m.get(res)).and_then(quantity::milli_of);
         let mut on_node: Vec<&Value> = pods.iter().filter(|p| s(p, "/spec/nodeName") == node_name && util::is_active(p)).collect();
+        let want_ext = extended_requests(&spec);
         let fits = |on: &[&Value]| {
             let (cpu, mem) = on.iter().map(|p| pod_requests(p.get("spec").unwrap_or(&Value::Null))).fold((0, 0), |(a, b), (c, d)| (a + c, b + d));
             alloc("pods").is_none_or(|m| (on.len() as i128 + 1) * 1000 <= m)
                 && alloc("cpu").is_none_or(|c| cpu + want_cpu <= c)
                 && alloc("memory").is_none_or(|m| (mem + want_mem) * 1000 <= m)
+                && want_ext.iter().all(|(res, want)| {
+                    let used: i128 = on.iter().flat_map(|p| extended_requests(p.get("spec").unwrap_or(&Value::Null))).filter(|(n, _)| n == res).map(|(_, q)| q).sum();
+                    used + want <= alloc(res).unwrap_or(0)
+                })
         };
         on_node.sort_by_key(|p| priority(p));
         let mut victims = Vec::new();

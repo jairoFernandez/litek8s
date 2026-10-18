@@ -196,7 +196,7 @@ impl Manager {
         }
         if event.event != EventType::Deleted
             && util::is_deleting(obj)
-            && obj.pointer("/metadata/finalizers").and_then(Value::as_array).is_some_and(|f| f.iter().any(|x| x == "foregroundDeletion"))
+            && obj.pointer("/metadata/finalizers").and_then(Value::as_array).is_some_and(|f| f.iter().any(|x| x == "foregroundDeletion" || x == "orphan"))
         {
             self.enqueue(Kind::Foreground, ns, &format!("{}|{}|{}", key.group, key.resource, name));
         }

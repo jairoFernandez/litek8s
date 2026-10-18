@@ -23,7 +23,18 @@ pub(crate) fn list(api: &ApiState, ns: &str, owner: &Value) -> Vec<Value> {
 /// `revisionHistoryLimit` (keeping `in_use`).
 pub(crate) fn sync(api: &ApiState, owner: &Value, template: &Value, hash: &str, in_use: &[String]) -> Result<Revision, ApiError> {
     let (ns, owner_name) = util::ns_name(owner);
-    let data = json!({"spec": {"template": template}});
+    // The data is the strategic-merge patch the controllers record (clients
+    // compare it byte for byte with their own): the template, replaced
+    // whole, with keys in order and the creationTimestamp Go always writes.
+    let mut t = template.clone();
+    if !t.get("metadata").is_some_and(Value::is_object) {
+        t["metadata"] = json!({});
+    }
+    if t["metadata"].get("creationTimestamp").is_none() {
+        t["metadata"]["creationTimestamp"] = Value::Null;
+    }
+    t["$patch"] = json!("replace");
+    let data = json!({"spec": {"template": t}});
     let revs = list(api, &ns, owner);
     let max = revs.iter().filter_map(|r| r.get("revision").and_then(Value::as_i64)).max().unwrap_or(0);
     let same: Vec<&Value> = revs.iter().filter(|r| r.get("data") == Some(&data)).collect();
@@ -75,5 +86,9 @@ pub(crate) fn sync(api: &ApiState, owner: &Value, template: &Value, hash: &str, 
 
 /// The template a named revision recorded.
 pub(crate) fn template_of(api: &ApiState, ns: &str, name: &str) -> Option<Value> {
-    api.get_object("apps", "controllerrevisions", ns, name)?.pointer("/data/spec/template").cloned()
+    let mut t = api.get_object("apps", "controllerrevisions", ns, name)?.pointer("/data/spec/template").cloned()?;
+    if let Some(m) = t.as_object_mut() {
+        m.remove("$patch");
+    }
+    Some(t)
 }

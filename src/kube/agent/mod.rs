@@ -17,7 +17,7 @@ mod crun;
 pub mod hub;
 mod kubelet;
 mod pod;
-mod probe;
+pub(crate) mod probe;
 pub mod protocol;
 mod proxy;
 pub mod runtime;

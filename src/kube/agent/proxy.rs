@@ -155,6 +155,7 @@ impl Proxy {
     }
 
     /// NodePort → backends, for the userspace listeners.
+    #[cfg(test)]
     fn node_port_backends(&self, node_port: u16) -> Vec<Backend> {
         self.node_port_target(node_port).0
     }

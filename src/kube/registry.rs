@@ -283,7 +283,7 @@ pub fn crd_types(crd: &Value) -> Result<Vec<ResourceType>> {
         .context("CRD spec.versions is required")?;
     let mut types = Vec::new();
     for version in versions {
-        if version.get("served").and_then(Value::as_bool) == Some(false) {
+        if version.get("served").and_then(Value::as_bool) != Some(true) {
             continue;
         }
         let Some(name) = s(version, "/name") else {

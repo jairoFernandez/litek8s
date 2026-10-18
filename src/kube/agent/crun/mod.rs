@@ -73,6 +73,9 @@ struct SandboxMeta {
     netns: Option<String>,
     ipc: String,
     host_ports: Vec<(u16, u16, String)>,
+    /// The hostIP of each host port ("" for every address).
+    #[serde(default)]
+    host_port_ips: Vec<String>,
     /// (target in the old sandbox container, directory on the node) of the
     /// pod's runtime volumes.
     volumes: Vec<(String, String)>,
@@ -381,8 +384,9 @@ impl CrunPods {
         let mut ports = Vec::new();
         for s in self.sandboxes().iter().filter(|s| Self::sandbox_running(s)) {
             if let Some(ip) = &s.ip {
-                for (container_port, host_port, proto) in &s.host_ports {
-                    ports.push((*host_port, proto.clone(), ip.clone(), *container_port));
+                for (i, (container_port, host_port, proto)) in s.host_ports.iter().enumerate() {
+                    let host_ip = s.host_port_ips.get(i).cloned().unwrap_or_default();
+                    ports.push((*host_port, proto.clone(), ip.clone(), *container_port, host_ip));
                 }
             }
         }
@@ -423,7 +427,10 @@ impl CrunPods {
             hosts.push_str("# Kubernetes-managed hosts file.\n127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n");
             hosts.push_str("fe00::0\tip6-localnet\nff00::0\tip6-mcastprefix\nff02::1\tip6-allnodes\nff02::2\tip6-allrouters\n");
             if let Some(ip) = ip {
-                hosts.push_str(&format!("{ip}\t{}\n", spec.hostname));
+                match &spec.fqdn {
+                    None => hosts.push_str(&format!("{ip}\t{}\n", spec.hostname)),
+                    Some(fqdn) => hosts.push_str(&format!("{ip}\t{fqdn}\t{}\n", spec.hostname)),
+                }
             }
         }
         for entry in &spec.extra_hosts {
@@ -757,6 +764,7 @@ impl PodRuntime for CrunPods {
             netns: (!spec.host_network).then(|| format!("{}/litek8s-{short}", net::NETNS_DIR)),
             ipc: format!("{RUN_DIR}/ipc/{short}"),
             host_ports: spec.host_ports.clone(),
+            host_port_ips: spec.host_port_ips.clone(),
             volumes: spec
                 .mounts
                 .iter()

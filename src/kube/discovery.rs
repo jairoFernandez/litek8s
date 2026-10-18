@@ -238,7 +238,7 @@ fn crd_schemas(crds: &[Value]) -> Vec<(String, String, String, Value)> {
         let s = |p: &str| crd.pointer(p).and_then(Value::as_str).unwrap_or_default().to_string();
         let (group, kind) = (s("/spec/group"), s("/spec/names/kind"));
         for v in crd.pointer("/spec/versions").and_then(Value::as_array).into_iter().flatten() {
-            if v.get("served").and_then(Value::as_bool) == Some(false) {
+            if v.get("served").and_then(Value::as_bool) != Some(true) {
                 continue;
             }
             let Some(schema) = v.pointer("/schema/openAPIV3Schema").filter(|s| s.is_object()) else { continue };
@@ -294,11 +294,28 @@ fn object_meta_schema() -> Value {
     })
 }
 
+fn strip_preserve(v: &mut Value) {
+    match v {
+        Value::Object(m) => {
+            m.remove("x-kubernetes-preserve-unknown-fields");
+            for child in m.values_mut() {
+                strip_preserve(child);
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(strip_preserve),
+        _ => {}
+    }
+}
+
 /// `/openapi/v2` as JSON: the definitions of custom resources.
 pub fn openapi_v2(crds: &[Value]) -> Value {
     let mut defs = serde_json::Map::new();
     defs.insert(META_DEF.into(), object_meta_schema());
     for (g, v, k, schema) in crd_schemas(crds) {
+        // OpenAPI v2 has no x-kubernetes-preserve-unknown-fields: it is
+        // dropped there (v3 keeps it).
+        let mut schema = schema;
+        strip_preserve(&mut schema);
         defs.insert(definition_name(&g, &v, &k), published_schema(&schema, &g, &v, &k, &format!("#/definitions/{META_DEF}"), false));
     }
     json!({"swagger": "2.0", "info": {"title": "Kubernetes", "version": KUBE_GIT_VERSION}, "paths": {}, "definitions": defs})

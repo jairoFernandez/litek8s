@@ -297,6 +297,15 @@ async fn read_status_line<S: AsyncReadExt + Unpin>(s: &mut S, buf: &mut [u8]) ->
 
 /// Kubernetes does not verify certificates of HTTPS probes; neither do we.
 async fn tls_connect(tcp: TcpStream, host: &str) -> std::io::Result<tokio_rustls::client::TlsStream<TcpStream>> {
+    tls_connect_any(tcp, host).await
+}
+
+/// TLS over any stream without verifying the peer (probes, the API
+/// server's `https:` pod proxy).
+pub(crate) async fn tls_connect_any<IO>(tcp: IO, host: &str) -> std::io::Result<tokio_rustls::client::TlsStream<IO>>
+where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
     use rustls::{DigitallySignedStruct, SignatureScheme};
