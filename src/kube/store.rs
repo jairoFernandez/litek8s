@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -84,7 +84,7 @@ pub struct WatchEvent {
     pub object: Value,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StoreError {
     NotFound,
     AlreadyExists,
@@ -92,6 +92,39 @@ pub enum StoreError {
     Conflict,
     /// A watch asked to resume from a resourceVersion older than the history.
     Gone,
+    /// A replicated store could not commit the change (no leader, no
+    /// quorum, timed out); it may or may not have been applied.
+    Unavailable(String),
+}
+
+/// What a mutation does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MutationKind {
+    Create,
+    Update,
+    Delete,
+}
+
+/// One store mutation, self-contained: its preconditions are checked when
+/// it is applied. In HA mode this is what the Raft log carries, so every
+/// server applies the same mutations in the same order and assigns the same
+/// resourceVersions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Mutation {
+    pub kind: MutationKind,
+    pub key: ObjectKey,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_rv: Option<u64>,
+    /// The object to store (create/update), as compact JSON.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<Box<serde_json::value::RawValue>>,
+}
+
+/// Takes the store's mutations elsewhere (the Raft log) instead of applying
+/// them here; the replicated state machine applies them back with
+/// [`Store::apply`]. Blocks until the mutation is applied locally.
+pub trait Replicator: Send + Sync {
+    fn replicate(&self, mutation: Mutation) -> Result<Value, StoreError>;
 }
 
 /// A past change, kept for watches that resume from a resourceVersion.
@@ -169,11 +202,17 @@ struct Inner {
     history_bytes: usize,
     wal: Option<Wal>,
     compactions: u64,
+    /// The live change feed. Replaced (ending every subscription) when a
+    /// snapshot replaces the whole state.
+    events: broadcast::Sender<Arc<WatchEvent>>,
 }
 
 pub struct Store {
     inner: Mutex<Inner>,
-    events: broadcast::Sender<Arc<WatchEvent>>,
+    /// Set in HA mode: mutations go through the Raft log.
+    replicator: OnceLock<Arc<dyn Replicator>>,
+    /// Woken on every commit (waits for a resourceVersion).
+    committed: tokio::sync::Notify,
 }
 
 /// One watch subscription: the backlog to replay first, then the live feed.
@@ -225,9 +264,38 @@ impl Store {
                 history_bytes: 0,
                 wal,
                 compactions: 0,
+                events,
             }),
-            events,
+            replicator: OnceLock::new(),
+            committed: tokio::sync::Notify::new(),
         })
+    }
+
+    /// Send every mutation through `replicator` from now on (HA mode).
+    pub fn set_replicator(&self, replicator: Arc<dyn Replicator>) {
+        let _ = self.replicator.set(replicator);
+    }
+
+    pub fn is_replicated(&self) -> bool {
+        self.replicator.get().is_some()
+    }
+
+    /// Objects of a WAL file (one record per line, as written by a
+    /// single-server store), for moving a single server to HA.
+    pub fn read_wal(path: &Path) -> Result<(Vec<(ObjectKey, Value)>, u64)> {
+        let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+        let mut objects = BTreeMap::new();
+        let mut rv = 0;
+        for line in BufReader::new(file).lines() {
+            let line = line?;
+            let Ok(record) = serde_json::from_str::<WalRecord>(&line) else { continue };
+            rv = rv.max(record.rv);
+            match record.obj {
+                Some(obj) => objects.insert(record.key, obj),
+                None => objects.remove(&record.key),
+            };
+        }
+        Ok((objects.into_iter().collect(), rv))
     }
 
     pub fn stats(&self) -> StoreStats {
@@ -240,7 +308,7 @@ impl Store {
             compactions: inner.compactions,
             history_entries: inner.history.len(),
             history_bytes: inner.history_bytes,
-            feed_receivers: self.events.receiver_count(),
+            feed_receivers: inner.events.receiver_count(),
         }
     }
 
@@ -251,6 +319,19 @@ impl Store {
     pub fn get(&self, key: &ObjectKey) -> Option<Value> {
         // Copy the bytes out, parse outside the lock.
         let json = self.inner.lock().unwrap().objects.get(key).map(|s| s.json.clone());
+        json.map(|j| serde_json::from_slice(&j).unwrap_or(Value::Null))
+    }
+
+    /// The version of `key` written at `rv`, while the object or the history
+    /// still has it (a deduplicated retry's answer).
+    pub fn lookup_version(&self, key: &ObjectKey, rv: u64) -> Option<Value> {
+        let json = {
+            let inner = self.inner.lock().unwrap();
+            match inner.objects.get(key).filter(|s| s.rv == rv) {
+                Some(s) => Some(s.json.clone()),
+                None => inner.history.iter().rev().find(|e| e.rv == rv && &e.key == key).map(|e| e.object.clone()),
+            }
+        };
         json.map(|j| serde_json::from_slice(&j).unwrap_or(Value::Null))
     }
 
@@ -312,11 +393,7 @@ impl Store {
     }
 
     pub fn create(&self, key: ObjectKey, object: Value) -> Result<Value, StoreError> {
-        let mut inner = self.inner.lock().unwrap();
-        if inner.objects.contains_key(&key) {
-            return Err(StoreError::AlreadyExists);
-        }
-        Ok(self.commit(&mut inner, key, Some(object), EventType::Added))
+        self.mutate(MutationKind::Create, key, Some(object), None)
     }
 
     /// Replace an object. `expected_rv` is the caller's resourceVersion
@@ -327,25 +404,98 @@ impl Store {
         object: Value,
         expected_rv: Option<u64>,
     ) -> Result<Value, StoreError> {
-        let mut inner = self.inner.lock().unwrap();
-        let Some(current) = inner.objects.get(&key) else {
-            return Err(StoreError::NotFound);
-        };
-        if expected_rv.is_some_and(|expected| current.rv != expected) {
-            return Err(StoreError::Conflict);
-        }
-        Ok(self.commit(&mut inner, key, Some(object), EventType::Modified))
+        self.mutate(MutationKind::Update, key, Some(object), expected_rv)
     }
 
     pub fn delete(&self, key: &ObjectKey, expected_rv: Option<u64>) -> Result<Value, StoreError> {
-        let mut inner = self.inner.lock().unwrap();
-        let Some(current) = inner.objects.get(key) else {
-            return Err(StoreError::NotFound);
-        };
-        if expected_rv.is_some_and(|expected| current.rv != expected) {
-            return Err(StoreError::Conflict);
+        self.mutate(MutationKind::Delete, key.clone(), None, expected_rv)
+    }
+
+    fn mutate(&self, kind: MutationKind, key: ObjectKey, object: Option<Value>, expected_rv: Option<u64>) -> Result<Value, StoreError> {
+        match self.replicator.get() {
+            Some(replicator) => {
+                let object = object
+                    .map(|o| serde_json::value::to_raw_value(&o).map_err(|e| StoreError::Unavailable(format!("unencodable object: {e}"))))
+                    .transpose()?;
+                replicator.replicate(Mutation { kind, key, expected_rv, object })
+            }
+            None => self.apply_local(kind, key, object, expected_rv),
         }
-        Ok(self.commit(&mut inner, key.clone(), None, EventType::Deleted))
+    }
+
+    /// Apply a replicated mutation (the state machine's side of
+    /// [`Replicator`]). Deterministic: the same mutations in the same order
+    /// give the same objects and resourceVersions on every server.
+    pub fn apply(&self, mutation: &Mutation) -> Result<Value, StoreError> {
+        let object = match &mutation.object {
+            Some(raw) => Some(serde_json::from_str(raw.get()).unwrap_or(Value::Null)),
+            None => None,
+        };
+        self.apply_local(mutation.kind, mutation.key.clone(), object, mutation.expected_rv)
+    }
+
+    fn apply_local(&self, kind: MutationKind, key: ObjectKey, object: Option<Value>, expected_rv: Option<u64>) -> Result<Value, StoreError> {
+        let mut inner = self.inner.lock().unwrap();
+        let result = match kind {
+            MutationKind::Create => {
+                if inner.objects.contains_key(&key) {
+                    return Err(StoreError::AlreadyExists);
+                }
+                self.commit(&mut inner, key, Some(object.unwrap_or(Value::Null)), EventType::Added)
+            }
+            MutationKind::Update | MutationKind::Delete => {
+                let Some(current) = inner.objects.get(&key) else {
+                    return Err(StoreError::NotFound);
+                };
+                if expected_rv.is_some_and(|expected| current.rv != expected) {
+                    return Err(StoreError::Conflict);
+                }
+                if kind == MutationKind::Update {
+                    self.commit(&mut inner, key, Some(object.unwrap_or(Value::Null)), EventType::Modified)
+                } else {
+                    self.commit(&mut inner, key, None, EventType::Deleted)
+                }
+            }
+        };
+        drop(inner);
+        self.committed.notify_waiters();
+        Ok(result)
+    }
+
+    /// Wait until the store has reached resourceVersion `rv` (a replica
+    /// catching up), for at most `timeout`. Returns whether it did.
+    pub async fn wait_for_rv(&self, rv: u64, timeout: std::time::Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let notified = self.committed.notified();
+            if self.current_rv() >= rv {
+                return true;
+            }
+            if tokio::time::timeout_at(deadline, notified).await.is_err() {
+                return self.current_rv() >= rv;
+            }
+        }
+    }
+
+    /// The whole state, for a snapshot: every object's key, resourceVersion
+    /// and JSON (shared, not copied), and the store's resourceVersion.
+    pub fn export(&self) -> (Vec<(ObjectKey, u64, Arc<[u8]>)>, u64) {
+        let inner = self.inner.lock().unwrap();
+        (inner.objects.iter().map(|(k, v)| (k.clone(), v.rv, v.json.clone())).collect(), inner.rv)
+    }
+
+    /// Replace the whole state (a snapshot was installed). The history is
+    /// dropped and every live subscription ends: watchers resume from a
+    /// resourceVersion the history no longer has, get `410 Gone` and re-list.
+    pub fn restore(&self, objects: Vec<(ObjectKey, Value)>, rv: u64) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.objects = objects.into_iter().map(|(k, v)| (k, Stored::new(&v))).collect();
+        inner.rv = rv;
+        inner.history.clear();
+        inner.history_bytes = 0;
+        inner.events = broadcast::channel(FEED_CAPACITY).0;
+        drop(inner);
+        self.committed.notify_waiters();
     }
 
     /// Subscribe to changes after `since`. With `None`, only future events are
@@ -361,7 +511,7 @@ impl Store {
     pub fn subscribe_for(&self, since: Option<u64>, wanted: impl Fn(&ObjectKey) -> bool) -> Result<Subscription, StoreError> {
         let (live, entries) = {
             let inner = self.inner.lock().unwrap();
-            let live = self.events.subscribe();
+            let live = inner.events.subscribe();
             let entries: Vec<HistoryEntry> = match since {
                 None => Vec::new(),
                 Some(rv) if rv >= inner.rv => Vec::new(),
@@ -449,7 +599,7 @@ impl Store {
             inner.history_bytes -= old.object.len();
         }
         // No receivers is fine; watchers come and go.
-        let _ = self.events.send(event);
+        let _ = inner.events.send(event);
         stored
     }
 }
@@ -465,10 +615,9 @@ pub fn resource_version(object: &Value) -> Option<u64> {
         .and_then(|s| s.parse().ok())
 }
 
-/// Rewrite the WAL as one record per live object (via a temp file + rename)
-/// and return an appender positioned at its end.
 /// One WAL line, from the object's JSON as stored (`None`: a delete).
-fn wal_line(rv: u64, key: &ObjectKey, obj: Option<&[u8]>) -> Vec<u8> {
+/// Snapshots of a replicated store use the same records.
+pub(crate) fn wal_line(rv: u64, key: &ObjectKey, obj: Option<&[u8]>) -> Vec<u8> {
     let key = serde_json::to_vec(key).unwrap_or_default();
     let obj = obj.unwrap_or(b"null");
     let mut line = Vec::with_capacity(obj.len() + key.len() + 40);
@@ -480,6 +629,15 @@ fn wal_line(rv: u64, key: &ObjectKey, obj: Option<&[u8]>) -> Vec<u8> {
     line
 }
 
+/// A WAL (or snapshot) line: key, resourceVersion and the object (`None`:
+/// a delete, or the record that only carries the store's resourceVersion).
+pub(crate) fn parse_wal_line(line: &str) -> Option<(ObjectKey, u64, Option<Value>)> {
+    let record: WalRecord = serde_json::from_str(line).ok()?;
+    Some((record.key, record.rv, record.obj))
+}
+
+/// Rewrite the WAL as one record per live object (via a temp file + rename)
+/// and return an appender positioned at its end.
 fn write_compacted(path: &Path, objects: &BTreeMap<ObjectKey, Stored>, rv: u64) -> Result<Wal> {
     let tmp = path.with_extension("wal.tmp");
     {

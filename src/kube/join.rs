@@ -518,12 +518,7 @@ impl Client {
                 pem
             }
         };
-        let mut roots = rustls::RootCertStore::empty();
-        for cert in pem_certificates(&pem) {
-            roots.add(cert)?;
-        }
-        let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider()).build()?;
-        self.tls = Some(client_config(Arc::new(PinnedCa(verifier)))?);
+        self.tls = Some(pinned_client_config(&pem)?);
         Ok(())
     }
 
@@ -591,6 +586,40 @@ impl Client {
         }
         let upgraded = hyper::upgrade::on(resp).await?;
         Ok(hyper_util::rt::TokioIo::new(upgraded))
+    }
+}
+
+/// A TLS client configuration that trusts only the cluster CA `ca_pem`
+/// (checked for the name every serving certificate carries).
+pub(crate) fn pinned_client_config(ca_pem: &str) -> Result<Arc<rustls::ClientConfig>> {
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in pem_certificates(ca_pem) {
+        roots.add(cert)?;
+    }
+    let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider()).build()?;
+    client_config(Arc::new(PinnedCa(verifier)))
+}
+
+/// The name TLS clients check server certificates for.
+pub(crate) const SERVER_NAME: &str = "kubernetes.default.svc";
+
+/// Fetch the cluster CA from `authority` (`host:port`) and check it against
+/// the token's hash.
+pub(crate) async fn fetch_ca(authority: &str, token: &Token) -> Result<String> {
+    let any = client_config(Arc::new(AnyCert(provider())))?;
+    let tcp = tokio::time::timeout(std::time::Duration::from_secs(10), tokio::net::TcpStream::connect(authority))
+        .await
+        .with_context(|| format!("timed out connecting to {authority}"))??;
+    let name = rustls::pki_types::ServerName::try_from(SERVER_NAME)?;
+    let io = tokio_rustls::TlsConnector::from(any).connect(name, tcp).await?;
+    let (status, body) = request(Box::new(io), authority, "GET", "/cacerts", &[], Vec::new()).await?;
+    if status != 200 {
+        bail!("GET /cacerts answered {status}");
+    }
+    let pem = String::from_utf8(body).context("CA is not text")?;
+    match &token.ca_hash {
+        Some(hash) if *hash != sha256_hex(&pem) => bail!("the server's CA does not match the join token (wrong server, or a man in the middle)"),
+        _ => Ok(pem),
     }
 }
 

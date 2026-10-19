@@ -13,6 +13,7 @@ pub mod defaults;
 pub mod discovery;
 pub mod dns;
 pub mod fields;
+pub mod ha;
 pub mod join;
 pub mod managed;
 pub mod metrics;

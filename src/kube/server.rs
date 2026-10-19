@@ -98,6 +98,12 @@ pub struct ApiServerConfig {
     pub listener: Option<std::net::TcpListener>,
     /// Serve the Docker API with the local node's crun runtime.
     pub docker: Option<crate::docker::Settings>,
+    /// Start a new HA cluster with this server as its first member (moving
+    /// a single server's objects into it).
+    pub cluster_init: bool,
+    /// Join the HA cluster of this server (`https://host:port`); needs the
+    /// cluster's token.
+    pub join_server: Option<String>,
 }
 
 /// Loads an image archive into the local node (`litek8s dev load`).
@@ -108,7 +114,9 @@ pub(crate) struct ImageLoader {
 }
 
 pub struct ApiState {
-    store: Store,
+    store: Arc<Store>,
+    /// Set in HA mode: this server's part of the replicated control plane.
+    ha: std::sync::OnceLock<Arc<super::ha::Cluster>>,
     pub(crate) registry: Registry,
     server_address: String,
     log_requests: bool,
@@ -156,6 +164,14 @@ struct CachedCrd {
 
 impl ApiState {
     pub fn open(data_dir: Option<&Path>, server_address: String, log_requests: bool) -> Result<Self> {
+        let state = Self::open_with(Arc::new(Store::open(data_dir)?), data_dir, server_address, log_requests)?;
+        state.bootstrap()?;
+        Ok(state)
+    }
+
+    /// Open the state around `store` without writing the objects every
+    /// cluster has (an HA server's leader does that, once Raft runs).
+    pub fn open_with(store: Arc<Store>, data_dir: Option<&Path>, server_address: String, log_requests: bool) -> Result<Self> {
         let tls = match tls::ServerTls::load_or_create(data_dir) {
             Ok(tls) => Some(tls),
             Err(error) => {
@@ -164,7 +180,8 @@ impl ApiState {
             }
         };
         let state = Self {
-            store: Store::open(data_dir)?,
+            store,
+            ha: std::sync::OnceLock::new(),
             registry: Registry::with_builtins(),
             server_address,
             log_requests,
@@ -184,12 +201,11 @@ impl ApiState {
             request_metrics: Default::default(),
             crd_cache: Default::default(),
         };
-        state.bootstrap()?;
         Ok(state)
     }
 
-    /// Re-register stored CRDs and create the objects every cluster has.
-    fn bootstrap(&self) -> Result<()> {
+    /// Register the stored CRDs' resource types.
+    pub(crate) fn register_stored_crds(&self) {
         let (crds, _) = self
             .store
             .list("apiextensions.k8s.io", "customresourcedefinitions", None);
@@ -198,6 +214,11 @@ impl ApiState {
                 eprintln!("apiserver: skipping stored CRD: {error:#}");
             }
         }
+    }
+
+    /// Re-register stored CRDs and create the objects every cluster has.
+    fn bootstrap(&self) -> Result<()> {
+        self.register_stored_crds();
         let ns_type = self.builtin("", "namespaces");
         for ns in ["default", "kube-system", "kube-public", "kube-node-lease"] {
             self.ensure(&ns_type, None, json!({"metadata": {"name": ns}}))?;
@@ -256,7 +277,13 @@ impl ApiState {
     /// The `default/kubernetes` Endpoints and EndpointSlice: where pods reach
     /// this API server. Also the default ServiceCIDR.
     fn publish_api_endpoints(&self, ip: &str, port: u16) -> Result<()> {
-        let subsets = json!([{"addresses": [{"ip": ip}], "ports": [{"name": "https", "port": port, "protocol": "TCP"}]}]);
+        self.publish_api_endpoints_of(&[ip.to_string()], port)
+    }
+
+    /// [`publish_api_endpoints`] for several API servers (HA).
+    fn publish_api_endpoints_of(&self, ips: &[String], port: u16) -> Result<()> {
+        let addresses: Vec<Value> = ips.iter().map(|ip| json!({"ip": ip})).collect();
+        let subsets = json!([{"addresses": addresses, "ports": [{"name": "https", "port": port, "protocol": "TCP"}]}]);
         let key = ObjectKey::new("", "endpoints", "default", "kubernetes");
         match self.store.get(&key) {
             Some(cur) if cur.get("subsets") == Some(&subsets) => {}
@@ -274,7 +301,7 @@ impl ApiState {
         let slice = json!({
             "metadata": {"name": "kubernetes", "labels": {"kubernetes.io/service-name": "kubernetes", "endpointslice.kubernetes.io/managed-by": "endpointslice-controller.k8s.io"}},
             "addressType": "IPv4",
-            "endpoints": [{"addresses": [ip], "conditions": {"ready": true, "serving": true, "terminating": false}}],
+            "endpoints": ips.iter().map(|ip| json!({"addresses": [ip], "conditions": {"ready": true, "serving": true, "terminating": false}})).collect::<Vec<_>>(),
             "ports": [{"name": "https", "port": port, "protocol": "TCP"}],
         });
         let skey = ObjectKey::new("discovery.k8s.io", "endpointslices", "default", "kubernetes");
@@ -352,8 +379,23 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
     } else {
         addr
     };
-    let mut state = ApiState::open(config.data_dir.as_deref(), client_addr.to_string(), config.log_requests)?;
-    if config.token.is_some() {
+    let ha_mode = config.cluster_init || config.join_server.is_some() || config.data_dir.as_deref().is_some_and(super::ha::is_member);
+    if ha_mode && config.data_dir.is_none() {
+        anyhow::bail!("--cluster-init and --server need --data-dir (the Raft log and snapshots live there)");
+    }
+    if let (Some(server), Some(dir)) = (&config.join_server, &config.data_dir) {
+        if !super::ha::is_member(dir) {
+            let token = config.token.as_deref().context("--server needs the cluster's --token")?;
+            super::ha::fetch_bootstrap(dir, server, token).await?;
+            eprintln!("apiserver: got the cluster's certificates and keys from {server}");
+        }
+    }
+    let mut state = if ha_mode {
+        ApiState::open_with(Arc::new(Store::open(None)?), config.data_dir.as_deref(), client_addr.to_string(), config.log_requests)?
+    } else {
+        ApiState::open(config.data_dir.as_deref(), client_addr.to_string(), config.log_requests)?
+    };
+    if config.token.is_some() && !(ha_mode && config.join_server.is_some()) {
         state.join_secret = join::server_secret(config.data_dir.as_deref(), config.token.as_deref())?;
     }
     state.network = config.network.clone();
@@ -371,10 +413,53 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
         eprintln!("apiserver: wrote kubeconfig to {}", path.display());
     }
     eprintln!("apiserver: listening on http://{addr} (and https for in-cluster clients; no authentication)");
-    tokio::spawn(super::controllers::run(state.clone()));
+    let node_name = config.node_name.clone().unwrap_or_else(super::agent::default_node_name);
+    let mut main_listener = Some(listener);
+    let mut serving = None;
+    if ha_mode {
+        let dir = config.data_dir.clone().unwrap_or_default();
+        let advertise = config.advertise_address.clone().unwrap_or_else(|| node_ip.clone());
+        let opts = super::ha::Options {
+            data_dir: dir,
+            name: node_name.clone(),
+            advertise: if advertise.contains(':') && !advertise.starts_with('[') && advertise.matches(':').count() == 1 {
+                advertise
+            } else {
+                format!("{advertise}:{}", addr.port())
+            },
+            cluster_init: config.cluster_init,
+            join: config.join_server.clone(),
+        };
+        let ca = state.tls().map(|t| t.ca_pem().to_string()).context("HA needs TLS between servers, and TLS is disabled")?;
+        let cluster = super::ha::Cluster::start(&opts, state.store_arc(), &ca, state.join_secret()).await?;
+        state.store.set_replicator(cluster.clone());
+        let _ = state.ha.set(cluster.clone());
+        // The other servers reach our Raft endpoints through the API port:
+        // serve before asking to join.
+        serving = Some(tokio::spawn(serve_listener(state.clone(), main_listener.take().unwrap())));
+        if let Some(server) = &opts.join {
+            cluster.join(server).await?;
+        }
+        eprintln!("apiserver: HA member {} ({:x}) at {}; catching up", cluster.name, cluster.id, cluster.addr);
+        loop {
+            match cluster.read_barrier().await {
+                Ok(()) => break,
+                Err(e) => {
+                    eprintln!("apiserver: waiting for the cluster: {e}");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
+        }
+        state.register_stored_crds();
+        tokio::spawn(follow_crds(state.clone()));
+        let leader_state = state.clone();
+        tokio::spawn(cluster.clone().run_while_leader(move || leader_tasks(leader_state.clone())));
+    } else {
+        tokio::spawn(super::controllers::run(state.clone()));
+        tokio::spawn(expire_events(state.clone()));
+    }
     super::metrics::spawn_memory_trim();
     tokio::spawn(super::aggregator::run(state.clone()));
-    tokio::spawn(expire_events(state.clone()));
 
     // The local node comes first: where pods reach this host (Docker's
     // host-gateway, crun's bridge address) decides where DNS and the in-cluster port can listen.
@@ -383,9 +468,9 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
             .node_dir
             .clone()
             .or_else(|| config.data_dir.as_ref().map(|d| d.join("node-agent")));
-        let node_name = config.node_name.clone().unwrap_or_else(super::agent::default_node_name);
+        let node_name = node_name.clone();
         let previous = node_dir.as_deref().and_then(super::agent::saved_pod_cidr);
-        let pod_cidr = join::allocate_pod_cidr(&state, &node_name, previous.as_deref()).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let pod_cidr = state.allocate_local_pod_cidr(&node_name, previous.as_deref()).await?;
         join::mark_control_plane(&state, &node_name);
         let network = super::agent::NodeNetwork {
             pod_cidr,
@@ -467,7 +552,12 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
     }
     state.pod_port.store(pod_port, std::sync::atomic::Ordering::Relaxed);
     let api_ip = gateway.map(|g| g.to_string()).unwrap_or_else(super::agent::local_ip);
-    if let Err(e) = state.publish_api_endpoints(&api_ip, pod_port) {
+    if state.ha().is_some() {
+        // Pods on other nodes reach this server over the overlay, else at
+        // the node's address.
+        let ip = state.overlay_endpoint.get().map(|(ip, _)| ip.clone()).unwrap_or_else(|| node_ip.clone());
+        tokio::spawn(renew_server_lease(state.clone(), ip, pod_port));
+    } else if let Err(e) = state.publish_api_endpoints(&api_ip, pod_port) {
         eprintln!("apiserver: failed to publish the kubernetes endpoints: {e:#}");
     }
     if let Some(agent) = agent {
@@ -482,7 +572,113 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
         });
         tokio::spawn(super::agent::run_local(state.clone(), agent, pod_port));
     }
-    serve_listener(state, listener).await
+    match (serving, main_listener) {
+        (Some(task), _) => task.await?,
+        (None, Some(listener)) => serve_listener(state, listener).await,
+        (None, None) => Ok(()),
+    }
+}
+
+/// What only the leader runs (HA): the objects every cluster has, the
+/// controllers, Event expiry and the `kubernetes` Service's endpoints.
+async fn leader_tasks(state: Arc<ApiState>) {
+    if let Err(e) = state.bootstrap() {
+        eprintln!("apiserver: bootstrap objects: {e:#}");
+    }
+    tokio::join!(super::controllers::run(state.clone()), expire_events(state.clone()), publish_server_endpoints(state.clone()));
+}
+
+/// Each server's Lease in kube-system: where pods reach it (HA).
+const SERVER_LEASE_PREFIX: &str = "litek8s-apiserver-";
+const SERVER_ENDPOINT_ANNOTATION: &str = "litek8s.dev/pod-endpoint";
+const SERVER_LEASE_SECS: i64 = 30;
+
+/// Keep this server's Lease fresh (HA), as kube-apiserver's identity leases.
+async fn renew_server_lease(state: Arc<ApiState>, ip: String, port: u16) {
+    let Some(cluster) = state.ha() else { return };
+    let name = format!("{SERVER_LEASE_PREFIX}{}", cluster.name);
+    let mut tick = tokio::time::interval(Duration::from_secs(10));
+    loop {
+        tick.tick().await;
+        let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+        let endpoint = format!("{ip}:{port}");
+        let result = match state.get_object("coordination.k8s.io", "leases", "kube-system", &name) {
+            Some(mut lease) => {
+                lease["spec"]["renewTime"] = json!(now);
+                lease["metadata"]["annotations"][SERVER_ENDPOINT_ANNOTATION] = json!(endpoint);
+                state.update_object("coordination.k8s.io", "leases", lease).map(|_| ())
+            }
+            None => {
+                let lease = json!({
+                    "apiVersion": "coordination.k8s.io/v1",
+                    "kind": "Lease",
+                    "metadata": {"name": name, "namespace": "kube-system", "labels": {"apiserver.kubernetes.io/identity": "kube-apiserver"}, "annotations": {SERVER_ENDPOINT_ANNOTATION: endpoint}},
+                    "spec": {"holderIdentity": cluster.name, "leaseDurationSeconds": SERVER_LEASE_SECS, "renewTime": now, "acquireTime": now},
+                });
+                state.create_object("coordination.k8s.io", "leases", Some("kube-system"), lease).map(|_| ())
+            }
+        };
+        if let Err(e) = result {
+            if state.log_requests {
+                eprintln!("apiserver: renewing this server's lease: {e}");
+            }
+        }
+    }
+}
+
+/// The `kubernetes` Service's endpoints: every server whose Lease is fresh
+/// (HA, leader only).
+async fn publish_server_endpoints(state: Arc<ApiState>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(5));
+    loop {
+        tick.tick().await;
+        let (leases, _) = state.store.list("coordination.k8s.io", "leases", Some("kube-system"));
+        let now = chrono::Utc::now();
+        let mut endpoints: Vec<(String, u16)> = leases
+            .iter()
+            .filter(|l| name_of(l).starts_with(SERVER_LEASE_PREFIX))
+            .filter(|l| {
+                l.pointer("/spec/renewTime")
+                    .and_then(Value::as_str)
+                    .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+                    .is_some_and(|t| (now - t.with_timezone(&chrono::Utc)).num_seconds() < SERVER_LEASE_SECS)
+            })
+            .filter_map(|l| l.pointer(&format!("/metadata/annotations/{}", SERVER_ENDPOINT_ANNOTATION.replace('/', "~1"))).and_then(Value::as_str).map(str::to_string))
+            .filter_map(|e| e.rsplit_once(':').and_then(|(ip, port)| Some((ip.to_string(), port.parse().ok()?))))
+            .collect();
+        endpoints.sort();
+        let Some(port) = endpoints.first().map(|(_, p)| *p) else { continue };
+        let ips: Vec<String> = endpoints.into_iter().filter(|(_, p)| *p == port).map(|(ip, _)| ip).collect();
+        if let Err(e) = state.publish_api_endpoints_of(&ips, port) {
+            eprintln!("apiserver: failed to publish the kubernetes endpoints: {e:#}");
+        }
+    }
+}
+
+/// Keep the resource types of CRDs in step with the store (HA: CRDs
+/// created through another server reach this one through the log).
+async fn follow_crds(state: Arc<ApiState>) {
+    loop {
+        let Ok(sub) = state.store.subscribe(None) else { return };
+        let mut live = sub.live;
+        state.register_stored_crds();
+        loop {
+            match live.recv().await {
+                Ok(event) if event.key.group == "apiextensions.k8s.io" && event.key.resource == "customresourcedefinitions" => {
+                    if event.event == super::store::EventType::Deleted {
+                        if let Ok(types) = super::registry::crd_types(&event.object) {
+                            state.registry.unregister_crd(&types[0].group, &types[0].plural);
+                        }
+                    } else if let Err(e) = state.registry.register_crd(&event.object) {
+                        eprintln!("apiserver: failed to register CRD {}: {e:#}", name_of(&event.object));
+                    }
+                }
+                Ok(_) => {}
+                // Fell behind, or a snapshot replaced the state: resync.
+                Err(_) => break,
+            }
+        }
+    }
 }
 
 /// Serve the API on `port` for pods. On a Linux host pods reach the host at
@@ -759,6 +955,11 @@ impl ApiError {
                 ),
             ),
             StoreError::Gone => Self::new(StatusCode::GONE, "Expired", "too old resource version"),
+            StoreError::Unavailable(message) => Self::new(
+                StatusCode::GATEWAY_TIMEOUT,
+                "Timeout",
+                format!("the write to {q} \"{name}\" may not have been applied: {message}"),
+            ),
         };
         e.details = Some(json!({"name": name, "group": rt.group, "kind": rt.plural}));
         e
@@ -854,6 +1055,9 @@ async fn handle(state: Arc<ApiState>, mut req: Request<Incoming>) -> Response<Bo
         .headers()
         .contains_key(hyper::header::UPGRADE)
         .then(|| hyper::upgrade::on(&mut req));
+    if req.uri().path().starts_with(super::ha::net::PREFIX) {
+        return super::ha::serve(&state, req).await;
+    }
     let (parts, body) = req.into_parts();
     let path = parts.uri.path().to_string();
     if path == IMAGES_PATH && parts.method == Method::POST {
@@ -885,10 +1089,16 @@ async fn handle(state: Arc<ApiState>, mut req: Request<Incoming>) -> Response<Bo
         headers: parts.headers.clone(),
         upgrade: std::sync::Mutex::new(upgrade),
     };
-    let resp = match route(&state, &path, &req).await {
+    let mut resp = match route(&state, &path, &req).await {
         Ok(resp) => resp,
         Err(error) => error.into_response(),
     };
+    // A write another server forwarded: tell it how far to catch up.
+    if parts.headers.contains_key(super::ha::net::FORWARDED_HEADER) {
+        if let Some(cluster) = state.ha() {
+            resp.headers_mut().insert(super::ha::net::APPLIED_HEADER, HeaderValue::from(cluster.last_applied()));
+        }
+    }
     let code = resp.status().as_u16();
     let watch = path.contains("/watch/") || matches!(req.q("watch"), Some("true" | "1"));
     if !watch && !path.starts_with("/apis/agent.litek8s.dev/") && path != "/metrics" {
@@ -961,7 +1171,97 @@ async fn load_images(state: &Arc<ApiState>, mut body: Incoming) -> Response<Body
     }
 }
 
+/// Lease annotation naming the server a node's agent is connected to (HA).
+pub(crate) const NODE_SERVER_ANNOTATION: &str = "litek8s.dev/server";
+
+/// HA routing before the request is served here: writes go to the leader,
+/// pod streams to the server the pod's node is connected to, and
+/// "most recent" reads pass the read barrier first.
+async fn ha_route(state: &Arc<ApiState>, cluster: &super::ha::Cluster, path: &str, req: &Req) -> Result<Option<Response<Body>>, ApiError> {
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let forwarded = !req.header(super::ha::net::FORWARDED_HEADER).is_empty();
+    let (core, group, rest): (bool, &str, &[&str]) = match segs.as_slice() {
+        ["api", _, rest @ ..] => (true, "", rest),
+        ["apis", group, _, rest @ ..] => (false, group, rest),
+        _ => return Ok(None),
+    };
+    if let (true, ["namespaces", ns, "pods", name, sub, ..]) = (core, rest) {
+        if matches!(*sub, "log" | "exec" | "attach" | "portforward" | "proxy") {
+            let name = name.split(':').find(|p| !p.is_empty() && *p != "http" && *p != "https").unwrap_or_default();
+            if forwarded {
+                return Ok(None);
+            }
+            if let Some(pod) = state.get_object("", "pods", ns, name) {
+                let node = pod.pointer("/spec/nodeName").and_then(Value::as_str).unwrap_or_default();
+                if !node.is_empty() && !state.hub.is_connected(node) {
+                    if let Some(addr) = state.node_server_addr(node) {
+                        return state.forward_to(&addr, req, None, false).await.map(Some).map_err(|(e, _)| e);
+                    }
+                }
+            }
+            return Ok(None);
+        }
+    }
+    let write = matches!(req.method, Method::POST | Method::PUT | Method::PATCH | Method::DELETE);
+    // A write handled here reads the current state first (to answer 404,
+    // to merge a patch): that read must be linearizable too. A deposed
+    // leader cut off from the others would otherwise answer from a stale
+    // state.
+    let barrier = || async {
+        cluster.read_barrier().await.map(|_| None).map_err(|e| {
+            ApiError::new(StatusCode::GATEWAY_TIMEOUT, "Timeout", format!("cannot confirm the latest state with the cluster: {e}"))
+        })
+    };
+    if write {
+        if forwarded {
+            return barrier().await;
+        }
+        // To the leader; through an election, to the next one. A request
+        // that may have reached a leader is not sent again.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            if cluster.is_leader() {
+                return barrier().await;
+            }
+            let now = tokio::time::Instant::now();
+            match cluster.leader_addr() {
+                Some(addr) => match state.forward_to(&addr, req, None, true).await {
+                    Err((_, true)) if now < deadline => {}
+                    result => return result.map(Some).map_err(|(e, _)| e),
+                },
+                // No leader known: an election. Store writes made here
+                // wait for one too.
+                None if now >= deadline => return barrier().await,
+                None => {}
+            }
+            let mut metrics = cluster.raft.metrics();
+            let _ = tokio::time::timeout(Duration::from_millis(300), metrics.changed()).await;
+        }
+    }
+    if req.method == Method::GET && !rest.is_empty() && group != "agent.litek8s.dev" {
+        match req.q("resourceVersion") {
+            None => {
+                barrier().await?;
+            }
+            Some("0") => {}
+            Some(rv) => {
+                if let Ok(rv) = rv.parse::<u64>() {
+                    if !state.store.wait_for_rv(rv, Duration::from_secs(3)).await {
+                        return Err(ApiError::new(StatusCode::GATEWAY_TIMEOUT, "Timeout", format!("Too large resource version: {rv}, current: {}", state.store.current_rv())));
+                    }
+                }
+            }
+        }
+    }
+    Ok(None)
+}
+
 async fn route(state: &Arc<ApiState>, path: &str, req: &Req) -> Result<Response<Body>, ApiError> {
+    if let Some(cluster) = state.ha() {
+        if let Some(resp) = ha_route(state, &cluster, path, req).await? {
+            return Ok(resp);
+        }
+    }
     let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
     let get = req.method == Method::GET;
     let aggregated = req
@@ -971,6 +1271,9 @@ async fn route(state: &Arc<ApiState>, path: &str, req: &Req) -> Result<Response<
     const AGGREGATED_TYPE: &str = "application/json;g=apidiscovery.k8s.io;v=v2;as=APIGroupDiscoveryList";
     match segs.as_slice() {
         ["version"] if get => Ok(json_response(StatusCode::OK, &discovery::version())),
+        ["readyz", ..] if get && state.ha().is_some_and(|c| !c.ready()) => {
+            Err(ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailable", "this server has no cluster leader"))
+        }
         [probe, ..] if get && matches!(*probe, "healthz" | "livez" | "readyz") => Ok(text_response("ok")),
         ["api"] if get && aggregated => Ok(json_response_typed(
             StatusCode::OK,
@@ -3469,6 +3772,102 @@ fn expired_event(rv: u64, current: u64) -> Value {
 impl ApiState {
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    pub fn store_arc(&self) -> Arc<Store> {
+        self.store.clone()
+    }
+
+    /// This server's part of an HA control plane, if it is one.
+    pub fn ha(&self) -> Option<Arc<super::ha::Cluster>> {
+        self.ha.get().cloned()
+    }
+
+    /// Whether this server runs the cluster's singletons (and writes their
+    /// status): always on a single server, the leader in HA.
+    pub(crate) fn leads(&self) -> bool {
+        self.ha.get().is_none_or(|c| c.is_leader())
+    }
+
+    /// The pod CIDR of a server's own node: allocated by the leader in HA,
+    /// so two servers never hand out the same block.
+    async fn allocate_local_pod_cidr(&self, node: &str, previous: Option<&str>) -> Result<String> {
+        if let Some(cluster) = self.ha() {
+            if let Some(addr) = cluster.leader_addr() {
+                let v: Value = cluster
+                    .peers
+                    .call_json(&addr, Method::POST, "/podcidr", &json!({"node": node, "requested": previous}), Duration::from_secs(30))
+                    .await?;
+                return v["cidr"].as_str().map(str::to_string).context("the leader allocated no pod CIDR");
+            }
+        }
+        join::allocate_pod_cidr(self, node, previous).map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    /// The server a node's agent is connected to (HA), from its Lease.
+    fn node_server_addr(&self, node: &str) -> Option<String> {
+        let cluster = self.ha()?;
+        let lease = self.get_object("coordination.k8s.io", "leases", "kube-node-lease", node)?;
+        let server = lease.pointer("/metadata/annotations").and_then(|a| a.get(NODE_SERVER_ANNOTATION)).and_then(Value::as_str)?;
+        if server == cluster.name {
+            return None;
+        }
+        cluster.server_addr(server)
+    }
+
+    /// Relay a request to another server (HA): a write to the leader (the
+    /// answer waits until this server has applied it, so a read here right
+    /// after sees it), or a pod stream to the server its node is connected
+    /// to (logs, exec, port-forward: streamed, upgrades spliced).
+    /// Errors say whether the request surely never reached `addr` (then it
+    /// can be retried elsewhere).
+    pub(crate) async fn forward_to(&self, addr: &str, req: &Req, path: Option<String>, write: bool) -> Result<Response<Body>, (ApiError, bool)> {
+        use super::ha::net::{APPLIED_HEADER, FORWARDED_HEADER};
+        let cluster = self.ha().ok_or_else(|| (ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "InternalError", "not a cluster member"), true))?;
+        let path = path.unwrap_or_else(|| req.path.clone());
+        let uri = if req.raw_query.is_empty() { path } else { format!("{path}?{}", req.raw_query) };
+        let upgrading = req.headers.contains_key(hyper::header::UPGRADE);
+        let build = || -> Result<Request<super::ha::net::ClientBody>> {
+            let mut builder = Request::builder().method(req.method.clone()).uri(&uri);
+            for (k, v) in req.headers.iter() {
+                let hop = matches!(k.as_str(), "host" | "content-length" | "transfer-encoding" | "keep-alive" | "te" | "trailer" | "proxy-connection")
+                    || (k.as_str() == "connection" && !upgrading);
+                if !hop {
+                    builder = builder.header(k, v);
+                }
+            }
+            Ok(builder.header(hyper::header::HOST, addr).header(FORWARDED_HEADER, &cluster.name).body(super::ha::net::body(req.body.clone()))?)
+        };
+        let unreachable = |e: anyhow::Error| {
+            let not_sent = super::ha::net::not_sent(&e);
+            (ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailable", format!("cannot reach the API server at {addr}: {e:#}")), not_sent)
+        };
+        if write {
+            let (mut parts, bytes) = cluster.peers.send(addr, Duration::from_secs(60), build).await.map_err(unreachable)?;
+            if let Some(index) = parts.headers.get(APPLIED_HEADER).and_then(|v| v.to_str().ok()).and_then(|v| v.parse().ok()) {
+                cluster.wait_applied(index, Duration::from_secs(10)).await;
+            }
+            parts.headers.remove(hyper::header::TRANSFER_ENCODING);
+            parts.headers.remove(hyper::header::CONTENT_LENGTH);
+            return Ok(Response::from_parts(parts, full(bytes)));
+        }
+        let upgrade = req.take_upgrade();
+        let mut resp = cluster.peers.open(addr, build().map_err(unreachable)?).await.map_err(unreachable)?;
+        if resp.status() == StatusCode::SWITCHING_PROTOCOLS {
+            let peer = hyper::upgrade::on(&mut resp);
+            if let Some(client) = upgrade {
+                tokio::spawn(async move {
+                    if let (Ok(p), Ok(c)) = (peer.await, client.await) {
+                        let (mut p, mut c) = (TokioIo::new(p), TokioIo::new(c));
+                        let _ = tokio::io::copy_bidirectional(&mut p, &mut c).await;
+                    }
+                });
+            }
+            let (parts, _) = resp.into_parts();
+            return Ok(Response::from_parts(parts, full(Bytes::new())));
+        }
+        let (parts, body) = resp.into_parts();
+        Ok(Response::from_parts(parts, body.map_err(std::io::Error::other).boxed_unsync()))
     }
 
     pub(crate) fn resource(&self, group: &str, plural: &str) -> Option<ResourceType> {

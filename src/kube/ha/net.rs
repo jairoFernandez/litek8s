@@ -1,0 +1,335 @@
+//! Server-to-server transport: HTTPS on the API port, pinned to the cluster
+//! CA, authenticated with the cluster's join secret. Raft RPCs, forwarded
+//! proposals and forwarded client requests all use it; connections are kept
+//! open per peer (heartbeats go out every 100 ms).
+
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, RwLock};
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use base64::Engine;
+use futures_util::TryStreamExt;
+use http_body_util::combinators::BoxBody;
+use http_body_util::{BodyExt, Full, StreamBody};
+use hyper::body::{Bytes, Frame, Incoming};
+use hyper::client::conn::http1::SendRequest;
+use hyper::{Method, Request, Response, StatusCode};
+use hyper_util::rt::TokioIo;
+use openraft::error::{InstallSnapshotError, NetworkError, RPCError, RaftError, RemoteError, ReplicationClosed, StreamingError, Unreachable};
+use openraft::network::{RPCOption, RaftNetwork, RaftNetworkFactory};
+use openraft::raft::{AppendEntriesRequest, AppendEntriesResponse, InstallSnapshotRequest, InstallSnapshotResponse, SnapshotResponse, VoteRequest, VoteResponse};
+use openraft::{Snapshot, Vote};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+
+use super::types::{ServerNode, TypeConfig};
+
+pub type ClientBody = BoxBody<Bytes, std::io::Error>;
+
+pub const PREFIX: &str = "/apis/server.litek8s.dev/v1";
+/// Header with the JSON (base64) of a snapshot's vote and metadata.
+pub const SNAPSHOT_HEADER: &str = "x-litek8s-snapshot";
+/// Set on requests one server forwards to another (loop guard).
+pub const FORWARDED_HEADER: &str = "x-litek8s-forwarded";
+/// The Raft log index a forwarded write's answer reflects: the forwarding
+/// server waits until it has applied that far before answering.
+pub const APPLIED_HEADER: &str = "x-litek8s-applied";
+
+/// The request never reached the peer (it could not be connected to, or
+/// the connection closed before the request went out): safe to retry
+/// elsewhere.
+#[derive(Debug)]
+pub struct NotSent(pub String);
+
+impl std::fmt::Display for NotSent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for NotSent {}
+
+pub fn not_sent(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.downcast_ref::<NotSent>().is_some())
+}
+
+pub fn body(bytes: impl Into<Bytes>) -> ClientBody {
+    Full::new(bytes.into()).map_err(|never| match never {}).boxed()
+}
+
+/// Connections to the other servers.
+pub struct Peers {
+    tls: Arc<rustls::ClientConfig>,
+    secret: String,
+    pool: Mutex<HashMap<String, Vec<SendRequest<ClientBody>>>>,
+    /// Peers this server cannot reach: a network partition, for tests.
+    blocked: RwLock<HashSet<String>>,
+}
+
+impl Peers {
+    pub fn new(ca_pem: &str, secret: &str) -> Result<Self> {
+        Ok(Self {
+            tls: crate::kube::join::pinned_client_config(ca_pem)?,
+            secret: secret.to_string(),
+            pool: Mutex::default(),
+            blocked: RwLock::default(),
+        })
+    }
+
+    pub fn secret(&self) -> &str {
+        &self.secret
+    }
+
+    /// Cut (or restore) the link to `addr` (tests).
+    pub fn set_blocked(&self, addr: &str, blocked: bool) {
+        let mut set = self.blocked.write().unwrap();
+        if blocked {
+            set.insert(addr.to_string());
+            self.pool.lock().unwrap().remove(addr);
+        } else {
+            set.remove(addr);
+        }
+    }
+
+    pub fn is_blocked(&self, addr: &str) -> bool {
+        self.blocked.read().unwrap().contains(addr)
+    }
+
+    async fn connect(&self, addr: &str) -> Result<SendRequest<ClientBody>> {
+        self.dial(addr).await.map_err(|e| anyhow::Error::new(NotSent(format!("{e:#}"))))
+    }
+
+    async fn dial(&self, addr: &str) -> Result<SendRequest<ClientBody>> {
+        if self.is_blocked(addr) {
+            bail!("{addr} is unreachable (partitioned)");
+        }
+        let tcp = tokio::time::timeout(Duration::from_secs(2), tokio::net::TcpStream::connect(addr))
+            .await
+            .with_context(|| format!("timed out connecting to {addr}"))?
+            .with_context(|| format!("failed to connect to {addr}"))?;
+        let _ = tcp.set_nodelay(true);
+        let keepalive = socket2::TcpKeepalive::new().with_time(Duration::from_secs(10)).with_interval(Duration::from_secs(3));
+        let _ = socket2::SockRef::from(&tcp).set_tcp_keepalive(&keepalive);
+        let name = rustls::pki_types::ServerName::try_from(crate::kube::join::SERVER_NAME)?;
+        let tls = tokio::time::timeout(Duration::from_secs(5), tokio_rustls::TlsConnector::from(self.tls.clone()).connect(name, tcp))
+            .await
+            .with_context(|| format!("TLS handshake with {addr} timed out"))??;
+        let (sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tls)).await?;
+        tokio::spawn(async move {
+            let _ = conn.with_upgrades().await;
+        });
+        Ok(sender)
+    }
+
+    fn take_pooled(&self, addr: &str) -> Option<SendRequest<ClientBody>> {
+        let mut pool = self.pool.lock().unwrap();
+        let conns = pool.get_mut(addr)?;
+        while let Some(c) = conns.pop() {
+            if !c.is_closed() && c.is_ready() {
+                return Some(c);
+            }
+        }
+        None
+    }
+
+    fn put_back(&self, addr: &str, conn: SendRequest<ClientBody>) {
+        if conn.is_closed() || self.is_blocked(addr) {
+            return;
+        }
+        let mut pool = self.pool.lock().unwrap();
+        let conns = pool.entry(addr.to_string()).or_default();
+        if conns.len() < 16 {
+            conns.push(conn);
+        }
+    }
+
+    fn build(&self, addr: &str, method: Method, path: &str, extra: &[(&str, String)], body: ClientBody) -> Result<Request<ClientBody>> {
+        let mut req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(hyper::header::HOST, addr)
+            .header(hyper::header::AUTHORIZATION, format!("Bearer {}", self.secret))
+            .header(hyper::header::CONTENT_TYPE, "application/json");
+        for (k, v) in extra {
+            req = req.header(*k, v);
+        }
+        Ok(req.body(body)?)
+    }
+
+    /// One request with a small body, answered with a small body; reuses
+    /// pooled connections.
+    pub async fn call(&self, addr: &str, method: Method, path: &str, payload: Bytes, timeout: Duration) -> Result<(StatusCode, Bytes)> {
+        let (parts, bytes) = self.send(addr, timeout, || self.build(addr, method.clone(), path, &[], body(payload.clone()))).await?;
+        Ok((parts.status, bytes))
+    }
+
+    /// Send the request `make` builds on a pooled connection (again on a
+    /// fresh one if the pooled one turns out closed) and read the answer.
+    pub async fn send(&self, addr: &str, timeout: Duration, make: impl Fn() -> Result<Request<ClientBody>>) -> Result<(hyper::http::response::Parts, Bytes)> {
+        let attempt = async {
+            if self.is_blocked(addr) {
+                return Err(anyhow::Error::new(NotSent(format!("{addr} is unreachable (partitioned)"))));
+            }
+            for fresh in [false, true] {
+                let pooled = if fresh { None } else { self.take_pooled(addr) };
+                let mut conn = match pooled {
+                    Some(c) => c,
+                    None => self.connect(addr).await?,
+                };
+                let resp = match conn.send_request(make()?).await {
+                    Ok(r) => r,
+                    // The connection closed before the request went out.
+                    Err(e) if e.is_canceled() && !fresh => continue,
+                    Err(e) if e.is_canceled() => return Err(anyhow::Error::new(NotSent(format!("request to {addr} failed: {e}")))),
+                    Err(e) => return Err(e).with_context(|| format!("request to {addr} failed")),
+                };
+                let (parts, body) = resp.into_parts();
+                let bytes = body.collect().await?.to_bytes();
+                self.put_back(addr, conn);
+                return Ok((parts, bytes));
+            }
+            bail!("request to {addr} failed")
+        };
+        tokio::time::timeout(timeout, attempt).await.with_context(|| format!("request to {addr} timed out"))?
+    }
+
+    /// A JSON request to a peer's `server.litek8s.dev` endpoint.
+    pub async fn call_json<T: DeserializeOwned>(&self, addr: &str, method: Method, path: &str, payload: &impl Serialize, timeout: Duration) -> Result<T> {
+        let (status, bytes) = self.call(addr, method, &format!("{PREFIX}{path}"), serde_json::to_vec(payload)?.into(), timeout).await?;
+        if !status.is_success() {
+            bail!("{addr} answered {status}: {}", String::from_utf8_lossy(&bytes).trim());
+        }
+        serde_json::from_slice(&bytes).with_context(|| format!("invalid answer from {addr}"))
+    }
+
+    /// A request on a connection of its own, its answer streamed (logs,
+    /// upgrades, snapshots).
+    pub async fn open(&self, addr: &str, req: Request<ClientBody>) -> Result<Response<Incoming>> {
+        let mut conn = self.connect(addr).await?;
+        Ok(conn.send_request(req).await?)
+    }
+
+    pub fn request(&self, addr: &str, method: Method, path: &str, extra: &[(&str, String)], body: ClientBody) -> Result<Request<ClientBody>> {
+        self.build(addr, method, path, extra, body)
+    }
+}
+
+/// Raft's view of the network.
+pub struct Network {
+    pub peers: Arc<Peers>,
+}
+
+pub struct Conn {
+    peers: Arc<Peers>,
+    target: u64,
+    addr: String,
+}
+
+impl RaftNetworkFactory<TypeConfig> for Network {
+    type Network = Conn;
+
+    async fn new_client(&mut self, target: u64, node: &ServerNode) -> Conn {
+        Conn { peers: self.peers.clone(), target, addr: node.addr.clone() }
+    }
+}
+
+type RpcErr<E = openraft::error::Infallible> = RPCError<u64, ServerNode, RaftError<u64, E>>;
+
+impl Conn {
+    async fn rpc<Req: Serialize, Resp: DeserializeOwned, E: std::error::Error + DeserializeOwned>(&self, path: &str, req: &Req, option: &RPCOption) -> Result<Resp, RpcErr<E>> {
+        let bytes = serde_json::to_vec(req).map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
+        let (status, body) = self
+            .peers
+            .call(&self.addr, Method::POST, &format!("{PREFIX}/raft/{path}"), bytes.into(), option.hard_ttl())
+            .await
+            .map_err(|e| RPCError::Unreachable(Unreachable::new(&std::io::Error::other(format!("{e:#}")))))?;
+        if !status.is_success() {
+            let e = std::io::Error::other(format!("{} answered {status}: {}", self.addr, String::from_utf8_lossy(&body)));
+            return Err(RPCError::Network(NetworkError::new(&e)));
+        }
+        let result: Result<Resp, RaftError<u64, E>> = serde_json::from_slice(&body).map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
+        result.map_err(|e| RPCError::RemoteError(RemoteError::new(self.target, e)))
+    }
+}
+
+impl RaftNetwork<TypeConfig> for Conn {
+    async fn append_entries(&mut self, rpc: AppendEntriesRequest<TypeConfig>, option: RPCOption) -> Result<AppendEntriesResponse<u64>, RpcErr> {
+        self.rpc("append", &rpc, &option).await
+    }
+
+    async fn vote(&mut self, rpc: VoteRequest<u64>, option: RPCOption) -> Result<VoteResponse<u64>, RpcErr> {
+        self.rpc("vote", &rpc, &option).await
+    }
+
+    async fn install_snapshot(&mut self, _rpc: InstallSnapshotRequest<TypeConfig>, _option: RPCOption) -> Result<InstallSnapshotResponse<u64>, RpcErr<InstallSnapshotError>> {
+        // Snapshots go whole, through full_snapshot.
+        Err(RPCError::Network(NetworkError::new(&std::io::Error::other("chunked snapshots are not supported"))))
+    }
+
+    async fn full_snapshot(
+        &mut self,
+        vote: Vote<u64>,
+        snapshot: Snapshot<TypeConfig>,
+        cancel: impl Future<Output = ReplicationClosed> + Send + 'static,
+        option: RPCOption,
+    ) -> Result<SnapshotResponse<u64>, StreamingError<TypeConfig, openraft::error::Fatal<u64>>> {
+        let unreachable = |e: anyhow::Error| StreamingError::Unreachable(Unreachable::new(&std::io::Error::other(format!("{e:#}"))));
+        let header = serde_json::to_vec(&(vote, &snapshot.meta)).map_err(|e| unreachable(e.into()))?;
+        let header = base64::engine::general_purpose::STANDARD.encode(header);
+        let file = *snapshot.snapshot;
+        let stream = tokio_util_stream(file);
+        let req = self
+            .peers
+            .request(&self.addr, Method::POST, &format!("{PREFIX}/raft/snapshot"), &[(SNAPSHOT_HEADER, header)], BodyExt::boxed(StreamBody::new(stream)))
+            .map_err(unreachable)?;
+        let send = async {
+            let resp = self.peers.open(&self.addr, req).await?;
+            let status = resp.status();
+            let bytes = resp.into_body().collect().await?.to_bytes();
+            if !status.is_success() {
+                bail!("{} answered {status}: {}", self.addr, String::from_utf8_lossy(&bytes));
+            }
+            let result: Result<SnapshotResponse<u64>, RaftError<u64>> = serde_json::from_slice(&bytes)?;
+            result.map_err(|e| anyhow::anyhow!("{e}"))
+        };
+        tokio::select! {
+            r = tokio::time::timeout(option.hard_ttl().max(Duration::from_secs(600)), send) => match r {
+                Ok(Ok(resp)) => Ok(resp),
+                Ok(Err(e)) => Err(unreachable(e)),
+                Err(_) => Err(unreachable(anyhow::anyhow!("sending the snapshot timed out"))),
+            },
+            closed = cancel => Err(StreamingError::Closed(closed)),
+        }
+    }
+
+    fn backoff(&self) -> openraft::network::Backoff {
+        openraft::network::Backoff::new(std::iter::repeat(Duration::from_millis(200)))
+    }
+}
+
+/// A file as a stream of body frames.
+fn tokio_util_stream(mut file: tokio::fs::File) -> impl futures_util::Stream<Item = Result<Frame<Bytes>, std::io::Error>> + Send + Sync + 'static {
+    use tokio::io::AsyncReadExt;
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(4);
+    tokio::spawn(async move {
+        let _ = tokio::io::AsyncSeekExt::seek(&mut file, std::io::SeekFrom::Start(0)).await;
+        loop {
+            let mut buf = vec![0u8; 256 * 1024];
+            match file.read(&mut buf).await {
+                Ok(0) => break,
+                Ok(n) => {
+                    buf.truncate(n);
+                    if tx.send(Ok(Bytes::from(buf))).await.is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e)).await;
+                    break;
+                }
+            }
+        }
+    });
+    futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|item| (item, rx)) }).map_ok(Frame::data)
+}

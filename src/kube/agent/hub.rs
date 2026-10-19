@@ -314,6 +314,9 @@ pub(crate) fn renew_lease(api: &ApiState, node: &str) {
             Some(mut lease) => {
                 lease["spec"]["renewTime"] = json!(now);
                 lease["spec"]["holderIdentity"] = json!(node);
+                if let Some(cluster) = api.ha() {
+                    lease["metadata"]["annotations"][super::super::server::NODE_SERVER_ANNOTATION] = json!(cluster.name);
+                }
                 api.update_object("coordination.k8s.io", "leases", lease).map(|_| ())
             }
             None => {
@@ -328,6 +331,9 @@ pub(crate) fn renew_lease(api: &ApiState, node: &str) {
                 });
                 if let Some(owner) = owner {
                     lease["metadata"]["ownerReferences"] = owner;
+                }
+                if let Some(cluster) = api.ha() {
+                    lease["metadata"]["annotations"][super::super::server::NODE_SERVER_ANNOTATION] = json!(cluster.name);
                 }
                 api.create_object("coordination.k8s.io", "leases", Some("kube-node-lease"), lease).map(|_| ())
             }

@@ -720,6 +720,8 @@ async fn inner_apiserver(data_dir: PathBuf) -> Result<()> {
         wireguard_port: None,
         listener,
         docker,
+        cluster_init: false,
+        join_server: None,
     })
     .await
 }

@@ -333,6 +333,10 @@ enum Command {
         no_wireguard: bool,
         #[arg(long, help = "Also serve the Docker Engine API on this Unix socket (crun runtime; published ports bind on 127.0.0.1)")]
         docker_socket: Option<PathBuf>,
+        #[arg(long, requires = "data_dir", help = "Start a highly available control plane with this server as its first member (a single server's objects move into it)")]
+        cluster_init: bool,
+        #[arg(long, value_name = "URL", requires_all = ["data_dir", "token"], conflicts_with = "cluster_init", help = "Join the control plane of this server as another server, e.g. https://192.168.1.10:6443 (needs --token)")]
+        server: Option<String>,
     },
     #[command(
         about = "A local Kubernetes cluster for development (like kind/k3d), without Docker",
@@ -1169,6 +1173,8 @@ pub async fn run() -> Result<()> {
             wireguard_port,
             no_wireguard,
             docker_socket,
+            cluster_init,
+            server,
         } => {
             let docker = match &docker_socket {
                 Some(path) => {
@@ -1210,6 +1216,8 @@ pub async fn run() -> Result<()> {
                 wireguard_port: (!no_wireguard).then_some(wireguard_port),
                 listener: None,
                 docker,
+                cluster_init,
+                join_server: server,
             })
             .await
         }

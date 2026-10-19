@@ -157,6 +157,10 @@ fn types_of(list: &Value, group: &str, version: &str) -> Vec<ResourceType> {
 
 /// Set the `Available` condition (kept first, as the aggregator does).
 fn set_available(state: &ApiState, api: &Value, ok: bool, reason: &str, message: &str) {
+    // Every server discovers aggregated APIs; the leader writes status.
+    if !state.leads() {
+        return;
+    }
     let mut conditions = util::conditions_of(api);
     let status = if ok { "True" } else { "False" };
     let now = util::rfc3339(util::now());
