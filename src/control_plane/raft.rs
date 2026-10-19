@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use openraft::BasicNode;
@@ -64,6 +65,16 @@ impl ControlPlaneNode {
                 .initialize(members)
                 .await
                 .context("failed to initialize single-node raft cluster")?;
+            // initialize() returns with the node still a candidate: its vote
+            // for itself is an async command of the raft core. Until it wins,
+            // client_write fails with ForwardToLeader(None), which callers
+            // proposing right after start (the daemon, tests) would surface as
+            // an error. Seen often on Linux, rarely on macOS.
+            node.raft
+                .wait(Some(Duration::from_secs(10)))
+                .current_leader(node_id, "single-node raft cluster elects itself")
+                .await
+                .context("single-node raft cluster did not elect itself leader")?;
         }
 
         Ok(node)
