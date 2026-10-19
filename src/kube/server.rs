@@ -332,6 +332,7 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
     eprintln!("apiserver: listening on http://{addr} (and https for in-cluster clients; no authentication)");
     tokio::spawn(super::controllers::run(state.clone()));
     tokio::spawn(super::aggregator::run(state.clone()));
+    tokio::spawn(expire_events(state.clone()));
 
     // The local node comes first: where pods reach this host (Docker's
     // host-gateway, crun's bridge address) decides where DNS and the in-cluster port can listen.
@@ -3135,6 +3136,41 @@ impl ApiState {
     }
 }
 
+/// How long an Event is kept after it was last recorded (kube-apiserver's
+/// `--event-ttl` default). Controllers like Argo CD's record several per
+/// sync; without a TTL they pile up in memory and in the object log.
+const EVENT_TTL: Duration = Duration::from_secs(3600);
+
+async fn expire_events(state: Arc<ApiState>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        tick.tick().await;
+        state.expire_events_before(chrono::Utc::now() - chrono::Duration::from_std(EVENT_TTL).unwrap_or_default());
+    }
+}
+
+impl ApiState {
+    fn expire_events_before(&self, cutoff: chrono::DateTime<chrono::Utc>) {
+        // Deleting the core/v1 Event also deletes its events.k8s.io mirror.
+        for event in self.store.list("", "events", None).0 {
+            if event_last_seen(&event).is_some_and(|t| t < cutoff) {
+                let ns = meta(&event).get("namespace").and_then(Value::as_str).unwrap_or_default().to_string();
+                let _ = self.delete_named("", "events", &ns, &name_of(&event));
+            }
+        }
+    }
+}
+
+/// When a core/v1 Event was last recorded: the latest of its timestamps.
+fn event_last_seen(event: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    ["/lastTimestamp", "/eventTime", "/series/lastObservedTime", "/firstTimestamp", "/metadata/creationTimestamp"]
+        .iter()
+        .filter_map(|p| event.pointer(p).and_then(Value::as_str))
+        .filter_map(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| t.with_timezone(&chrono::Utc))
+        .max()
+}
+
 /// The watch event that ends a watch whose resourceVersion is too old.
 fn expired_event(rv: u64, current: u64) -> Value {
     json!({"type": "ERROR", "object": {
@@ -3327,5 +3363,27 @@ mod tests {
         assert_eq!(q["labelSelector"], "app=web,tier in (a)");
         assert_eq!(q["watch"], "true");
         assert_eq!(q["x"], "");
+    }
+
+    #[test]
+    fn events_expire_after_their_last_timestamp() {
+        let api = ApiState::open(None, "127.0.0.1:0".into(), false).unwrap();
+        let now = chrono::Utc::now();
+        let event = |name: &str, last: chrono::DateTime<chrono::Utc>| {
+            json!({"metadata": {"name": name, "namespace": "default"}, "involvedObject": {"kind": "Pod", "name": "p"},
+                   "reason": "Started", "lastTimestamp": last.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)})
+        };
+        api.create_object("", "events", Some("default"), event("old", now - chrono::Duration::hours(2))).unwrap();
+        api.create_object("", "events", Some("default"), event("new", now)).unwrap();
+        assert!(api.get_object("events.k8s.io", "events", "default", "old").is_some(), "mirrored");
+        // Recorded two hours ago: the server stamped creation just now.
+        let mut old = api.get_object("", "events", "default", "old").unwrap();
+        old["metadata"]["creationTimestamp"] = old["lastTimestamp"].clone();
+        let key = ObjectKey::new("", "events", "default", "old");
+        api.store().update(key, old, None).unwrap();
+        api.expire_events_before(now - chrono::Duration::hours(1));
+        assert!(api.get_object("", "events", "default", "old").is_none());
+        assert!(api.get_object("events.k8s.io", "events", "default", "old").is_none());
+        assert!(api.get_object("", "events", "default", "new").is_some());
     }
 }
