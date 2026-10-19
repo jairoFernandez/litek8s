@@ -28,7 +28,7 @@ fn target(state: &ApiState, ns: &str, name: &str, req: &Req) -> Result<(Value, S
     if node.is_empty() {
         return Err(ApiError::bad_request(format!("pod {name} does not have a host assigned")));
     }
-    let names: Vec<String> = ["/spec/containers", "/spec/initContainers"]
+    let names: Vec<String> = ["/spec/containers", "/spec/initContainers", "/spec/ephemeralContainers"]
         .iter()
         .filter_map(|p| pod.pointer(p).and_then(Value::as_array))
         .flatten()
@@ -100,6 +100,46 @@ pub(crate) async fn log(state: &Arc<ApiState>, ns: &str, name: &str, req: &Req) 
     if let Some(StreamEvent::Done { error: Some(error), .. }) = &first {
         return Err(ApiError::bad_request(error.clone()));
     }
+    // Logs over a WebSocket (`binary.k8s.io`, or base64 text frames).
+    if req.header(UPGRADE.as_str()).eq_ignore_ascii_case("websocket") {
+        let offered = req.header("sec-websocket-protocol").to_string();
+        let base64 = offered.split(',').any(|p| p.trim() == "base64.binary.k8s.io") && !offered.split(',').any(|p| p.trim() == "binary.k8s.io");
+        let protocol = if base64 { "base64.binary.k8s.io" } else { "binary.k8s.io" };
+        let key = req.header("sec-websocket-key").to_string();
+        let on_upgrade = req.take_upgrade().ok_or_else(|| ApiError::bad_request("connection cannot be upgraded"))?;
+        tokio::spawn(async move {
+            let Ok(upgraded) = on_upgrade.await else { return };
+            let (_reader, mut writer) = ws::split(TokioIo::new(upgraded));
+            let mut pending = first;
+            loop {
+                let event = match pending.take() {
+                    Some(e) => Some(e),
+                    None => handle.events.recv().await,
+                };
+                let Some(StreamEvent::Data { bytes, .. }) = event else { break };
+                let sent = if base64 {
+                    use base64::Engine;
+                    writer.text(base64::engine::general_purpose::STANDARD.encode(&bytes).as_bytes()).await
+                } else {
+                    writer.binary(&bytes).await
+                };
+                if sent.is_err() {
+                    break;
+                }
+            }
+            let _ = writer.close().await;
+        });
+        let mut resp = Response::new(super::server::full(Bytes::new()));
+        *resp.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+        let h = resp.headers_mut();
+        h.insert(UPGRADE, HeaderValue::from_static("websocket"));
+        h.insert(CONNECTION, HeaderValue::from_static("Upgrade"));
+        h.insert("sec-websocket-accept", HeaderValue::from_str(&ws::accept_key(&key)).unwrap());
+        if !offered.is_empty() {
+            h.insert("sec-websocket-protocol", HeaderValue::from_static(protocol));
+        }
+        return Ok(resp);
+    }
     let body = stream::unfold((handle, first), |(mut handle, pending): (StreamHandle, Option<StreamEvent>)| async move {
         let event = match pending {
             Some(e) => Some(e),
@@ -130,7 +170,7 @@ pub(crate) async fn exec(state: &Arc<ApiState>, ns: &str, name: &str, req: &Req,
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty())
         .collect();
-    let protocol = ["v5.channel.k8s.io", "v4.channel.k8s.io"]
+    let protocol = ["v5.channel.k8s.io", "v4.channel.k8s.io", "channel.k8s.io"]
         .into_iter()
         .find(|p| offered.iter().any(|o| o == p))
         .ok_or_else(|| ApiError::bad_request("no supported streaming protocol offered (want v5.channel.k8s.io or v4.channel.k8s.io)"))?;
@@ -153,9 +193,10 @@ pub(crate) async fn exec(state: &Arc<ApiState>, ns: &str, name: &str, req: &Req,
         .await
         .map_err(open_error)?;
     let v5 = protocol == "v5.channel.k8s.io";
+    let v1 = protocol == "channel.k8s.io";
     tokio::spawn(async move {
         let Ok(upgraded) = on_upgrade.await else { return };
-        bridge(TokioIo::new(upgraded), handle, v5).await;
+        bridge(TokioIo::new(upgraded), handle, v5, v1).await;
     });
     let mut resp = Response::new(super::server::full(Bytes::new()));
     *resp.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
@@ -169,7 +210,7 @@ pub(crate) async fn exec(state: &Arc<ApiState>, ns: &str, name: &str, req: &Req,
 
 /// Shuttle bytes between the WebSocket (channel-prefixed messages) and the
 /// node's exec stream.
-async fn bridge<S>(socket: S, mut handle: StreamHandle, v5: bool)
+async fn bridge<S>(socket: S, mut handle: StreamHandle, v5: bool, v1: bool)
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
 {
@@ -228,6 +269,15 @@ where
                         "details": {"causes": [{"reason": "ExitCode", "message": code.to_string()}]},
                     }),
                 };
+                // channel.k8s.io (v1) carries an error text, nothing on success.
+                if v1 {
+                    if status["status"] != "Success" {
+                        let mut msg = vec![3u8];
+                        msg.extend_from_slice(status["message"].as_str().unwrap_or_default().as_bytes());
+                        let _ = writer.binary(&msg).await;
+                    }
+                    break;
+                }
                 let mut msg = vec![3u8];
                 msg.extend_from_slice(status.to_string().as_bytes());
                 let _ = writer.binary(&msg).await;

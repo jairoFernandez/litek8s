@@ -163,20 +163,62 @@ pub(crate) fn select_platform<'a>(index: &'a Value, arch: &str, variant: Option<
 // The store
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-struct IndexEntry {
+pub(crate) struct IndexEntry {
     /// The digest the reference resolved to (an index for multi-arch images).
     #[serde(default)]
-    top: String,
-    manifest: String,
-    config: String,
+    pub top: String,
+    pub manifest: String,
+    pub config: String,
     /// Layer diff ids, bottom first.
-    layers: Vec<String>,
+    pub layers: Vec<String>,
     #[serde(default)]
-    last_used: i64,
+    pub last_used: i64,
     /// Imported from an archive (`litek8s dev load`), not pulled: there is
     /// no registry to check, whatever the pull policy.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    loaded: bool,
+    pub loaded: bool,
+    /// Pulled or built through the Docker API: kept until `docker rmi`,
+    /// never removed by the kubelet-like image GC.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
+}
+
+/// How to pull: the registry check, the platform, credentials.
+#[derive(Clone, Default)]
+pub(crate) struct PullOptions {
+    /// Check the registry for a newer version of the tag.
+    pub always: bool,
+    /// `(architecture, variant)`; the host's by default.
+    pub platform: Option<(String, Option<String>)>,
+    /// Registry credentials (user, password), as `X-Registry-Auth` gives them.
+    pub auth: Option<(String, String)>,
+    /// Keep the image out of the image GC (Docker API pulls).
+    pub pinned: bool,
+    /// Progress for clients that show it: (layer digest or "", message).
+    pub progress: Option<Arc<dyn Fn(&str, &str) + Send + Sync>>,
+}
+
+/// An architecture name as image indexes write it (`linux/amd64`,
+/// `arm64/v8`, `x86_64`, `aarch64`) -> (architecture, variant).
+pub(crate) fn parse_platform(platform: &str) -> Option<(String, Option<String>)> {
+    let p = platform.trim();
+    if p.is_empty() {
+        return None;
+    }
+    let parts: Vec<&str> = p.split('/').collect();
+    let (arch, variant) = match parts.as_slice() {
+        [os, arch] if *os == "linux" => (*arch, None),
+        [os, arch, variant] if *os == "linux" => (*arch, Some(*variant)),
+        [arch] => (*arch, None),
+        [arch, variant] if *arch != "linux" => (*arch, Some(*variant)),
+        _ => return None,
+    };
+    let arch = match arch {
+        "x86_64" | "x86-64" => "amd64",
+        "aarch64" => "arm64",
+        a => a,
+    };
+    Some((arch.to_string(), variant.map(str::to_string)))
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -201,6 +243,18 @@ pub(crate) struct ImageStore {
     /// One unpack per layer at a time (images share layers).
     layer_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     owners: bool,
+    /// Pulls, imports and builds in progress: their blobs and layers are not
+    /// indexed yet, so sweeping waits.
+    busy: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// Holds off [`ImageStore::sweep`] while alive.
+pub(crate) struct Busy(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -218,7 +272,13 @@ impl ImageStore {
                 let _ = std::fs::remove_dir_all(e.path()).or_else(|_| std::fs::remove_file(e.path()));
             }
         }
-        Ok(Self { root: root.to_path_buf(), index: Mutex::new(()), layer_locks: Mutex::new(HashMap::new()), owners: is_root() })
+        Ok(Self { root: root.to_path_buf(), index: Mutex::new(()), layer_locks: Mutex::new(HashMap::new()), owners: is_root(), busy: Arc::default() })
+    }
+
+    /// Mark work that adds blobs or layers before indexing them.
+    pub fn busy(&self) -> Busy {
+        self.busy.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Busy(self.busy.clone())
     }
 
     pub fn layer_dir(&self, diff_id: &str) -> PathBuf {
@@ -275,6 +335,120 @@ impl ImageStore {
         })
     }
 
+    /// Every index key with its entry (Docker's image list).
+    pub fn entries(&self) -> Vec<(String, IndexEntry)> {
+        self.load_index().images.into_iter().collect()
+    }
+
+    /// The image config blob.
+    pub fn config_blob(&self, digest: &str) -> Option<Value> {
+        serde_json::from_slice(&std::fs::read(self.blob_path(digest)).ok()?).ok()
+    }
+
+    /// The image an index key (a canonical name or an untagged image's
+    /// config digest) refers to, if all of it is in the store.
+    pub fn image_by_key(&self, key: &str) -> Option<Image> {
+        let entry = self.load_index().images.get(key).cloned()?;
+        let reference = Reference::parse(key).unwrap_or_else(|_| Reference {
+            registry: "docker.io".into(),
+            repository: "library/none".into(),
+            tag: None,
+            digest: None,
+        });
+        self.image_of(&reference, &entry)
+    }
+
+    /// Point `key` at `entry` (tag), or drop it (`None`, untag). Layers no
+    /// key refers to any more are removed.
+    pub fn set_key(&self, key: &str, entry: Option<IndexEntry>) -> Result<()> {
+        self.update_index(|i| match entry {
+            Some(e) => {
+                i.images.insert(key.to_string(), e);
+            }
+            None => {
+                i.images.remove(key);
+            }
+        })?;
+        self.sweep()
+    }
+
+    /// Size on disk of a layer (cached next to it).
+    pub fn layer_size(&self, diff_id: &str) -> u64 {
+        let dir = self.layer_dir(diff_id);
+        let cache = dir.with_extension("size");
+        if let Some(n) = std::fs::read_to_string(&cache).ok().and_then(|s| s.trim().parse().ok()) {
+            return n;
+        }
+        let n = dir_bytes(&dir);
+        let _ = std::fs::write(&cache, n.to_string());
+        n
+    }
+
+    /// Move an unpacked layer (overlay format) into the store as
+    /// `diff_id`; a layer already there wins.
+    pub fn install_layer(&self, dir: &Path, diff_id: &str) -> Result<()> {
+        let dest = self.layer_dir(diff_id);
+        if dest.is_dir() {
+            let _ = std::fs::remove_dir_all(dir);
+            return Ok(());
+        }
+        if let Err(e) = std::fs::rename(dir, &dest) {
+            if !dest.is_dir() {
+                return Err(e).context("failed to store the layer");
+            }
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        Ok(())
+    }
+
+    /// Store an image built here (its layers already installed) under
+    /// `names`; returns the index entry (its `config` is the image ID).
+    pub fn register(&self, names: &[String], config_bytes: &[u8]) -> Result<IndexEntry> {
+        let config_digest = format!("sha256:{}", sha256_hex(config_bytes));
+        let config: Value = serde_json::from_slice(config_bytes).context("invalid image config")?;
+        let diff_ids: Vec<String> = config
+            .pointer("/rootfs/diff_ids")
+            .and_then(Value::as_array)
+            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
+            .unwrap_or_default();
+        for d in &diff_ids {
+            if !self.layer_dir(d).is_dir() {
+                bail!("layer {d} is not in the store");
+            }
+        }
+        self.put_blob(config_bytes, &config_digest)?;
+        let layer_descs: Vec<Value> = diff_ids
+            .iter()
+            .map(|d| serde_json::json!({"mediaType": "application/vnd.oci.image.layer.v1.tar", "digest": d, "size": self.layer_size(d)}))
+            .collect();
+        let manifest_bytes = serde_json::to_vec(&serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": config_digest, "size": config_bytes.len()},
+            "layers": layer_descs,
+        }))?;
+        let manifest_digest = format!("sha256:{}", sha256_hex(&manifest_bytes));
+        self.put_blob(&manifest_bytes, &manifest_digest)?;
+        let entry = IndexEntry {
+            top: manifest_digest.clone(),
+            manifest: manifest_digest,
+            config: config_digest.clone(),
+            layers: diff_ids,
+            last_used: chrono::Utc::now().timestamp(),
+            loaded: true,
+            pinned: true,
+        };
+        self.update_index(|i| {
+            for n in names {
+                i.images.insert(n.clone(), entry.clone());
+            }
+            if names.is_empty() {
+                i.images.insert(config_digest.clone(), entry.clone());
+            }
+        })?;
+        Ok(entry)
+    }
+
     /// The image if it is fully in the store.
     pub fn get(&self, image: &str) -> Option<Image> {
         let reference = Reference::parse(image).ok()?;
@@ -295,24 +469,54 @@ impl ImageStore {
     /// Pull `image` unless it is here (`always`: check the registry for a
     /// newer version of the tag, cheaply with a HEAD).
     pub async fn pull(&self, image: &str, always: bool) -> Result<Image> {
+        self.pull_with(image, &PullOptions { always, ..Default::default() }).await
+    }
+
+    pub async fn pull_with(&self, image: &str, opts: &PullOptions) -> Result<Image> {
+        let _busy = self.busy();
         let reference = Reference::parse(image)?;
         let key = reference.canonical();
+        let always = opts.always;
+        let progress = |id: &str, msg: &str| {
+            if let Some(p) = &opts.progress {
+                p(id, msg);
+            }
+        };
         let existing = self.load_index().images.get(&key).cloned();
+        let platform_matches = |entry: &IndexEntry| match &opts.platform {
+            None => true,
+            Some((arch, _)) => self
+                .config_blob(&entry.config)
+                .and_then(|c| c["architecture"].as_str().map(|a| a == arch))
+                .unwrap_or(true),
+        };
         if let Some(entry) = &existing {
-            if let Some(found) = self.image_of(&reference, entry) {
+            if let Some(found) = self.image_of(&reference, entry).filter(|_| platform_matches(entry)) {
                 if !always || reference.digest.is_some() || entry.loaded {
+                    if opts.pinned && !entry.pinned {
+                        let _ = self.update_index(|i| {
+                            if let Some(e) = i.images.get_mut(&key) {
+                                e.pinned = true;
+                            }
+                        });
+                    }
                     return Ok(found);
                 }
                 let mut session = Session::new(&reference);
+                session.auth = opts.auth.clone();
                 if let Ok(Some(digest)) = session.head_manifest().await {
                     if digest == entry.top {
+                        progress("", "Image is up to date");
                         return Ok(found);
                     }
                 }
             }
         }
         let mut session = Session::new(&reference);
+        session.auth = opts.auth.clone();
+        session.platform = opts.platform.clone();
         let (top, manifest_digest, manifest) = session.resolve_manifest().await?;
+        progress("", &format!("Pulling from {}", reference.repository.trim_start_matches("library/")));
         let config_desc = &manifest["config"];
         let config_digest = config_desc["digest"].as_str().context("manifest has no config")?.to_string();
         if !self.blob_path(&config_digest).exists() {
@@ -339,7 +543,19 @@ impl ImageStore {
         let results: Vec<Result<()>> = futures_util::stream::iter(layers.iter().cloned())
             .map(|(digest, diff_id)| {
                 let session = session.clone();
-                async move { self.fetch_layer(session, &digest, &diff_id).await }
+                let short = digest.trim_start_matches("sha256:").chars().take(12).collect::<String>();
+                async move {
+                    if self.layer_dir(&diff_id).is_dir() {
+                        progress(&short, "Already exists");
+                        return Ok(());
+                    }
+                    progress(&short, "Pulling fs layer");
+                    let r = self.fetch_layer(session, &digest, &diff_id).await;
+                    if r.is_ok() {
+                        progress(&short, "Pull complete");
+                    }
+                    r
+                }
             })
             .buffer_unordered(MAX_CONCURRENT_LAYERS)
             .collect()
@@ -352,6 +568,7 @@ impl ImageStore {
         if !path.exists() {
             std::fs::write(&path, &manifest_bytes)?;
         }
+        progress("", &format!("Digest: {top}"));
         let entry = IndexEntry {
             top,
             manifest: manifest_digest,
@@ -359,6 +576,7 @@ impl ImageStore {
             layers: diff_ids,
             last_used: chrono::Utc::now().timestamp(),
             loaded: false,
+            pinned: opts.pinned || existing.as_ref().is_some_and(|e| e.pinned),
         };
         self.update_index(|i| {
             i.images.insert(key.clone(), entry.clone());
@@ -416,6 +634,7 @@ impl ImageStore {
     /// `docker.io/library/myapp:dev`, which is what a pod's `myapp:dev`
     /// means) and are never pulled over afterwards.
     pub fn import_archive(&self, archive: &Path) -> Result<Vec<String>> {
+        let _busy = self.busy();
         let dir = self.staging_dir().join(format!("import-{}", random_hex(8)));
         let result = (|| {
             extract_archive(archive, &dir)?;
@@ -497,6 +716,7 @@ impl ImageStore {
             layers: diff_ids,
             last_used: chrono::Utc::now().timestamp(),
             loaded: true,
+            pinned: false,
         };
         self.update_index(|i| {
             for n in &names {
@@ -516,7 +736,7 @@ impl ImageStore {
             let mut candidates: Vec<(&String, &IndexEntry)> = index
                 .images
                 .iter()
-                .filter(|(_, e)| !in_use.contains(&e.manifest))
+                .filter(|(_, e)| !in_use.contains(&e.manifest) && !e.pinned)
                 .collect();
             candidates.sort_by_key(|(_, e)| e.last_used);
             for (key, _) in candidates {
@@ -538,7 +758,16 @@ impl ImageStore {
     }
 
     /// Remove layers and blobs that no indexed image refers to.
-    fn sweep(&self) -> Result<()> {
+    pub fn sweep(&self) -> Result<()> {
+        if self.busy.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            return Ok(());
+        }
+        // Anything changed (written, or renamed into place) in the last ten
+        // minutes may belong to work another process has not indexed yet.
+        let recent = |p: &Path| {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::symlink_metadata(p).is_ok_and(|m| chrono::Utc::now().timestamp() - m.ctime() < 600)
+        };
         let index = self.load_index();
         let mut layers = HashSet::new();
         let mut blobs = HashSet::new();
@@ -549,18 +778,20 @@ impl ImageStore {
             blobs.insert(self.blob_path(&e.manifest));
             blobs.insert(self.blob_path(&e.config));
         }
-        // Layers and blobs of a pull still in progress are not indexed yet:
-        // leave anything written in the last few minutes alone.
-        let fresh = |e: &std::fs::DirEntry| {
-            e.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|age| age < std::time::Duration::from_secs(600)))
-        };
         for entry in std::fs::read_dir(self.root.join("l"))?.flatten() {
-            if !layers.contains(&entry.path()) && !fresh(&entry) {
-                let _ = std::fs::remove_dir_all(entry.path());
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "size") {
+                if !layers.contains(&path.with_extension("")) {
+                    let _ = std::fs::remove_file(&path);
+                }
+                continue;
+            }
+            if !layers.contains(&path) && !recent(&path) {
+                let _ = std::fs::remove_dir_all(&path);
             }
         }
         for entry in std::fs::read_dir(self.root.join("blobs/sha256"))?.flatten() {
-            if !blobs.contains(&entry.path()) && !fresh(&entry) {
+            if !blobs.contains(&entry.path()) && !recent(&entry.path()) {
                 let _ = std::fs::remove_file(entry.path());
             }
         }
@@ -694,6 +925,129 @@ fn disk_usage(path: &Path) -> Option<f64> {
         return None;
     }
     Some(1.0 - (s.f_bavail as f64 / s.f_blocks as f64))
+}
+
+/// Write an unpacked layer (overlay format: 0/0 character devices for
+/// whiteouts, an `overlay.opaque` xattr on opaque directories) as a Docker
+/// layer tar (`.wh.` files), entries sorted, hard links kept.
+pub(crate) fn write_layer_tar(dir: &Path, out: impl std::io::Write) -> Result<()> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let mut b = tar::Builder::new(out);
+    b.follow_symlinks(false);
+    let mut links: HashMap<(u64, u64), PathBuf> = HashMap::new();
+    let mut stack: Vec<PathBuf> = vec![PathBuf::new()];
+    let empty_file = |name: &Path, mtime: u64| -> tar::Header {
+        let mut h = tar::Header::new_gnu();
+        h.set_entry_type(tar::EntryType::Regular);
+        h.set_size(0);
+        h.set_mode(0o644);
+        h.set_mtime(mtime);
+        let _ = h.set_path(name);
+        h.set_cksum();
+        h
+    };
+    while let Some(rel) = stack.pop() {
+        let full = dir.join(&rel);
+        let mut entries: Vec<_> = std::fs::read_dir(&full)?.flatten().map(|e| e.file_name()).collect();
+        entries.sort();
+        // Depth-first in sorted order: push in reverse.
+        let mut subdirs = Vec::new();
+        if !rel.as_os_str().is_empty() && is_opaque(&full) {
+            let meta = std::fs::symlink_metadata(&full)?;
+            let mut h = empty_file(&rel.join(OPAQUE_MARKER), meta.mtime() as u64);
+            b.append(&mut h, std::io::empty())?;
+        }
+        for name in entries {
+            let path = rel.join(&name);
+            let abs = dir.join(&path);
+            let meta = std::fs::symlink_metadata(&abs)?;
+            let ft = meta.file_type();
+            if ft.is_char_device() && meta.rdev() == 0 {
+                let mut h = empty_file(&rel.join(format!("{WHITEOUT_PREFIX}{}", name.to_string_lossy())), meta.mtime() as u64);
+                b.append(&mut h, std::io::empty())?;
+                continue;
+            }
+            if ft.is_file() && meta.nlink() > 1 {
+                let key = (meta.dev(), meta.ino());
+                if let Some(first) = links.get(&key) {
+                    let mut h = tar::Header::new_gnu();
+                    h.set_entry_type(tar::EntryType::Link);
+                    h.set_size(0);
+                    h.set_metadata(&meta);
+                    h.set_entry_type(tar::EntryType::Link);
+                    h.set_size(0);
+                    b.append_link(&mut h, &path, first)?;
+                    continue;
+                }
+                links.insert(key, path.clone());
+            }
+            b.append_path_with_name(&abs, &path)?;
+            if ft.is_dir() {
+                subdirs.push(path);
+            }
+        }
+        for d in subdirs.into_iter().rev() {
+            stack.push(d);
+        }
+    }
+    b.into_inner()?.flush()?;
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn is_opaque(dir: &Path) -> bool {
+    let Ok(c) = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()) else { return false };
+    ["trusted.overlay.opaque", "user.overlay.opaque"].iter().any(|attr| {
+        let a = std::ffi::CString::new(*attr).unwrap();
+        let mut buf = [0u8; 4];
+        // SAFETY: valid strings and buffer.
+        let n = unsafe { libc::lgetxattr(c.as_ptr(), a.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
+        n == 1 && buf[0] == b'y'
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_opaque(_: &Path) -> bool {
+    false
+}
+
+/// The diff ID (sha256 of the uncompressed tar) of an unpacked layer.
+pub(crate) fn layer_diff_id(dir: &Path) -> Result<String> {
+    struct HashWriter(Sha256);
+    impl std::io::Write for HashWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.update(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut w = HashWriter(Sha256::new());
+    write_layer_tar(dir, &mut w)?;
+    Ok(format!("sha256:{}", hex::encode(w.0.finalize())))
+}
+
+/// Bytes of the files under `dir` (hard links once).
+pub(crate) fn dir_bytes(dir: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let mut total = 0;
+    let mut seen = HashSet::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).into_iter().flatten().flatten() {
+            match e.metadata() {
+                Ok(m) if m.is_dir() => stack.push(e.path()),
+                Ok(m) => {
+                    if m.nlink() < 2 || seen.insert((m.dev(), m.ino())) {
+                        total += m.len();
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+    }
+    total
 }
 
 /// Stream a blob to `path`, checking its digest.
@@ -951,7 +1305,7 @@ fn parse_url(url: &str) -> Result<Url> {
     Ok(Url { https, host, port, path: path.to_string() })
 }
 
-async fn send(method: hyper::Method, url: &str, headers: &[(&str, String)]) -> Result<hyper::Response<hyper::body::Incoming>> {
+pub(crate) async fn send(method: hyper::Method, url: &str, headers: &[(&str, String)]) -> Result<hyper::Response<hyper::body::Incoming>> {
     let u = parse_url(url)?;
     let tcp = tokio::time::timeout(Duration::from_secs(30), tokio::net::TcpStream::connect((dial_host(&u.host), u.port)))
         .await
@@ -1025,11 +1379,23 @@ pub(crate) fn parse_challenge(header: &str) -> Option<(String, HashMap<String, S
 struct Session {
     reference: Reference,
     token: Option<String>,
+    /// Credentials for the registry (Basic auth, or to get a token).
+    auth: Option<(String, String)>,
+    /// The registry asked for Basic auth: send it with every request.
+    basic: bool,
+    /// `(architecture, variant)` to pick from an index; the host's if unset.
+    platform: Option<(String, Option<String>)>,
 }
 
 impl Session {
     fn new(reference: &Reference) -> Self {
-        Self { reference: reference.clone(), token: None }
+        Self { reference: reference.clone(), token: None, auth: None, basic: false, platform: None }
+    }
+
+    fn basic_header(&self) -> Option<String> {
+        use base64::Engine;
+        let (u, p) = self.auth.as_ref()?;
+        Some(format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{u}:{p}"))))
     }
 
     fn url(&self, kind: &str, r: &str) -> String {
@@ -1050,6 +1416,8 @@ impl Session {
             let same_host = parse_url(&url)?.host == home;
             if let (Some(t), true) = (&self.token, same_host) {
                 headers.push(("authorization", format!("Bearer {t}")));
+            } else if let (Some(b), true, true) = (self.basic_header(), self.basic, same_host) {
+                headers.push(("authorization", b));
             }
             let resp = send(method.clone(), &url, &headers).await?;
             let status = resp.status();
@@ -1079,7 +1447,12 @@ impl Session {
                         authed = true;
                         continue;
                     }
-                    _ => bail!("{} requires authentication (pull secrets are not supported yet)", self.reference.registry),
+                    Some((scheme, _)) if scheme == "basic" && self.auth.is_some() => {
+                        self.basic = true;
+                        authed = true;
+                        continue;
+                    }
+                    _ => bail!("{} requires authentication (log in with `docker login`, or pull secrets for pods)", self.reference.registry),
                 }
             }
             return Ok(resp);
@@ -1096,7 +1469,8 @@ impl Session {
         let scope = params.get("scope").cloned().unwrap_or_else(|| format!("repository:{}:pull", self.reference.repository));
         query.push(format!("scope={scope}"));
         let url = format!("{realm}{}{}", if realm.contains('?') { "&" } else { "?" }, query.join("&"));
-        let resp = send(hyper::Method::GET, &url, &[]).await?;
+        let headers: Vec<(&str, String)> = self.basic_header().map(|b| ("authorization", b)).into_iter().collect();
+        let resp = send(hyper::Method::GET, &url, &headers).await?;
         if !resp.status().is_success() {
             bail!("token request to {realm} failed: {}", resp.status());
         }
@@ -1132,7 +1506,11 @@ impl Session {
         let r = self.reference.manifest_ref().to_string();
         let (top, manifest) = self.fetch_manifest(&r).await?;
         if manifest.get("manifests").is_some() {
-            let (arch, variant) = host_platform();
+            let host = host_platform();
+            let (arch, variant) = match &self.platform {
+                Some((a, v)) => (a.as_str(), v.as_deref()),
+                None => host,
+            };
             let chosen = select_platform(&manifest, arch, variant)
                 .and_then(|m| m["digest"].as_str())
                 .with_context(|| format!("no linux/{arch} image for {}", self.reference.canonical()))?

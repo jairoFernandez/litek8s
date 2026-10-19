@@ -493,6 +493,17 @@ fn clean_target(t: &str) -> String {
     format!("/{}", joined.join("/"))
 }
 
+/// Open files per container: Docker's 1048576, or this process's own hard
+/// limit if lower (a rootless sandbox may not raise it).
+fn nofile_limit() -> u64 {
+    let mut lim = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
+    // SAFETY: getrlimit writes the struct we own.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } == 0 {
+        return (lim.rlim_max as u64).min(1_048_576);
+    }
+    1_048_576
+}
+
 /// The bundle's `config.json`.
 pub(crate) fn config(p: &BundleParams) -> Result<Value> {
     let spec = p.spec;
@@ -511,7 +522,7 @@ pub(crate) fn config(p: &BundleParams) -> Result<Value> {
         "env": environment(spec, p.image, p.hostname, &p.user.home),
         "cwd": cwd,
         "capabilities": {"bounding": caps, "effective": caps, "permitted": caps},
-        "rlimits": [{"type": "RLIMIT_NOFILE", "hard": 1048576u64, "soft": 1048576u64}],
+        "rlimits": [{"type": "RLIMIT_NOFILE", "hard": nofile_limit(), "soft": nofile_limit()}],
         "noNewPrivileges": spec.no_new_privileges && !spec.privileged,
     });
     let mut gids = p.user.additional_gids.clone();

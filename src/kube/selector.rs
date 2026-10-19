@@ -172,15 +172,30 @@ impl FieldSelector {
             for seg in path {
                 cur = cur.and_then(|v| v.get(seg));
             }
+            // core/v1 Events select on `source` as the source component.
+            if let Some(Value::Object(m)) = cur {
+                if path.len() == 1 && path[0] == "source" {
+                    cur = m.get("component");
+                }
+            }
             let got = match cur {
                 Some(Value::String(s)) => s.clone(),
                 Some(Value::Bool(b)) => b.to_string(),
                 Some(Value::Number(n)) => n.to_string(),
+                // Boolean fields the API server formats with strconv.FormatBool,
+                // so an absent value selects as "false".
+                _ if matches!(path_str(path).as_str(), "spec.unschedulable" | "spec.hostNetwork") => {
+                    "false".into()
+                }
                 _ => String::new(),
             };
             (got == *want) != *negate
         })
     }
+}
+
+fn path_str(path: &[String]) -> String {
+    path.join(".")
 }
 
 #[cfg(test)]
@@ -215,6 +230,7 @@ mod tests {
         assert!(!m("metadata.name!=a"));
         assert!(m("status.phase==Running"));
         assert!(!m("status.phase=Pending"));
+        assert!(m("spec.unschedulable=false"));
         assert_eq!(
             FieldSelector::parse("metadata.name=x").unwrap().exact_name(),
             Some("x")

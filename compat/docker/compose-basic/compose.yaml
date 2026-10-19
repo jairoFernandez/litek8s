@@ -1,0 +1,36 @@
+# Postgres with a healthcheck and a named volume, a client that waits for
+# it (depends_on: service_healthy) and reaches it by service name and by
+# alias, an env file, a bind mount of the project directory and a
+# published port.
+name: lk-basic
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: secret
+      POSTGRES_DB: app
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d app"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    networks:
+      default:
+        aliases: [database]
+  web:
+    image: nginx:alpine
+    ports:
+      - "18080:80"
+    volumes:
+      - ./site:/usr/share/nginx/html:ro
+  client:
+    image: postgres:16-alpine
+    env_file: client.env
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["sh", "-c", "psql -h db -U postgres -d app -tAc 'select 40+2' && psql -h database -U postgres -d app -tAc \"select 'alias-ok'\" && echo $$GREETING"]
+volumes:
+  dbdata:

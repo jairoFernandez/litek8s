@@ -18,12 +18,12 @@
 //! the server has been silent for [`SERVER_SILENCE`], so a half-open
 //! connection (after a laptop slept, or a NAT forgot it) is replaced quickly.
 
-mod crun;
+pub(crate) mod crun;
 pub mod hub;
 mod kubelet;
 pub mod overlay;
 mod pod;
-mod probe;
+pub(crate) mod probe;
 pub mod protocol;
 mod proxy;
 pub mod runtime;
@@ -251,6 +251,10 @@ impl<R: PodRuntime> Agent<R> {
         tokio::net::lookup_host((host, 53)).await.ok()?.find(|a| a.is_ipv4()).map(|a| a.ip().to_string())
     }
 
+    pub(crate) fn service_proxy(&self) -> &proxy::Proxy {
+        &self.proxy
+    }
+
     pub(crate) fn runtime(&self) -> &Arc<R> {
         &self.rt
     }
@@ -340,12 +344,16 @@ impl<R: PodRuntime> Agent<R> {
 
     /// Remove containers and volumes of pods the server no longer knows.
     async fn cleanup_orphans(self: &Arc<Self>) {
-        let known: HashSet<String> = self.workers.lock().unwrap().keys().cloned().collect();
+        // List first: a pod worker started after the listing is known below,
+        // so its new containers are never taken for orphans.
         let Ok(containers) = self.rt.list().await else { return };
-        // Only this node's: a Docker daemon may run other nodes' pods too
-        // (and unlabelled ones are from an older agent, maybe another's).
-        let node = &self.config.node_name;
-        for c in containers.into_iter().filter(|c| c.labels.get(runtime::LABEL_NODE) == Some(node)) {
+        let known: HashSet<String> = self.workers.lock().unwrap().keys().cloned().collect();
+        let node = self.config.node_name.clone();
+        for c in containers {
+            // Another agent's container on a shared runtime is not ours.
+            if c.labels.get(runtime::LABEL_NODE).is_some_and(|n| *n != node) {
+                continue;
+            }
             let uid = c.labels.get(runtime::LABEL_POD_UID).cloned().unwrap_or_default();
             if !known.contains(&uid) {
                 let _ = self.rt.remove(&c.id).await;
@@ -404,6 +412,21 @@ impl<R: PodRuntime> Agent<R> {
                 }
             }
         });
+        // Containers can outlive their pod when the runtime fails mid-way
+        // (a create that succeeded behind a timed-out start): sweep them.
+        let sweeper = {
+            let agent = self.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+                tick.tick().await;
+                loop {
+                    tick.tick().await;
+                    if agent.link().is_some() {
+                        agent.cleanup_orphans().await;
+                    }
+                }
+            })
+        };
 
         let result = async {
             loop {
@@ -423,6 +446,7 @@ impl<R: PodRuntime> Agent<R> {
         .await;
         heartbeat.abort();
         self.link.send_replace(None);
+        sweeper.abort();
         writer_task.abort();
         for (_, (_, task)) in self.streams.lock().unwrap().drain() {
             task.abort();

@@ -24,6 +24,11 @@ KUBECONFIG=/tmp/litek8s.kubeconfig compat/run.sh --tiers L0,L1
 compat/baseline-k3d.sh          # reference score on real k3s; every case must pass there
 ```
 
+Official conformance suite (e2e.test v1.33, ~30 min; scores in `compat/CONFORMANCE.md`):
+```bash
+KUBECONFIG=/tmp/litek8s.kubeconfig compat/conformance.sh --target litek8s
+```
+
 To run a single test:
 ```bash
 cargo test apply_get_logs_and_delete_roundtrip
@@ -43,7 +48,7 @@ cargo test apply_get_logs_and_delete_roundtrip
 - **Protocol** (`protocol.rs`) — `Request`/`Response` enums serialized as JSON over async Unix socket streams.
 - **Service** (`service.rs`) — Daemon-owned TCP listeners that forward to deployment containers, surviving CLI exits. Supports SSH tunneling for remote nodes.
 - **Control Plane** (`control_plane/`) — openraft. Every state change is proposed through `ControlPlaneNode::propose`; a daemon without `--join` initializes a single-node cluster.
-- **Kubernetes API server** (`kube/`) — `litek8s apiserver`, separate from the daemon for now. Generic JSON object store with an append-only WAL (`store.rs`), resource registry incl. CRDs (`registry.rs`), discovery incl. aggregated v2 and a schema-less `/openapi/v3` (`discovery.rs`), merge/JSON/strategic patch and simplified server-side apply (`patch.rs`), selectors, server-side tables, watch with resourceVersion resume (`server.rs`), admission webhooks (`admission.rs`), TLS on the same port for in-cluster clients (`tls.rs`). `protobuf.rs` decodes kubectl's protobuf request bodies using the vendored `proto/` schemas, compiled by `build.rs` with protox.
+- **Kubernetes API server** (`kube/`) — `litek8s apiserver`, separate from the daemon for now. Generic JSON object store with an append-only WAL (`store.rs`), resource registry incl. CRDs (`registry.rs`), discovery incl. aggregated v2 and a schema-less `/openapi/v3` (`discovery.rs`), merge/JSON/strategic patch and simplified server-side apply (`patch.rs`), selectors, server-side tables, watch with resourceVersion resume (`server.rs`), admission webhooks (`admission.rs`), API aggregation for APIServices (`aggregator.rs`), TLS on the same port for in-cluster clients (`tls.rs`). `protobuf.rs` decodes kubectl's protobuf request bodies using the vendored `proto/` schemas, compiled by `build.rs` with protox.
 - **Controllers** (`kube/controllers/`) — in-process, driven by the store's change feed: Deployment, ReplicaSet, StatefulSet, DaemonSet, Job, CronJob, ownerReference GC, the scheduler (binds pods to Nodes, spreads replicas of one owner, provisions local PVs), Service status/Endpoints, Event TTL, node lifecycle (`node_lifecycle.rs`: Lease expiry → Unknown, unreachable/not-ready taints, pods NotReady, eviction by tolerationSeconds, pod GC of deleted nodes). No-op writes are skipped so the loop settles; each work key has at most one pending timer.
 - **Joining nodes** (`kube/join.rs`) — the server keeps a join secret and prints a k3s-style token `K10<sha256 of CA PEM>::<secret>`; `litek8s agent --join https://... --token ...` fetches `/cacerts`, pins it, `POST /apis/agent.litek8s.dev/v1/join` (node password check, pod CIDR allocation from `--cluster-cidr`), then opens the authenticated agent connection. Heartbeats on that connection renew Leases in kube-node-lease. Pod overlay: kernel WireGuard set up over generic netlink (`vpn/wireguard.rs`, `kube/agent/overlay.rs`), peers pushed by the server from Node annotations. Multi-node test bed: `bench/cluster.sh` (VMs on a LAN via `bench/lanhub.py`), cross-node cases in `compat/cases/M1-multinode.sh` (`--tiers M1`), soak in `bench/soak.sh` / `bench/SOAK.md`.
 - **Node agent** (`kube/agent/`) — runs the pods bound to its node. One persistent framed connection to the API server (`protocol.rs`; in-process pipe locally, HTTP upgrade for `litek8s node-agent --server ...`) carries pod events, status and multiplexed log/exec/port-forward streams (`hub.rs` is the server side). Pods run behind the `PodRuntime` trait (`runtime.rs`), picked with `--runtime auto|crun|docker` (auto = crun on a Linux host with crun installed, running as root, else Docker):
@@ -51,6 +56,7 @@ cargo test apply_get_logs_and_delete_roundtrip
   - **Docker** (macOS dev): a busybox sandbox owns the network namespace, containers join it.
 
   `kubelet.rs` serves `/metrics/resource` on :10250.
+- **Docker API** (`src/docker/`) — the Docker Engine API on the crun runtime's pieces, served by `litek8s dev` on `~/.litek8s/docker.sock` (or `apiserver --docker-socket`). Docker containers are runtime-level containers, not Pods (`engine.rs`: records in `<data>/docker/containers/<id>/container.json`, writable layer kept between runs, the crun shim with `--keep-rootfs` and an attach socket), networks are bridges with file IPAM and names answered by the cluster DNS server (`network.rs`), the image store is shared with pods (`images.rs`), `build/` is a classic-API builder (RUN in crun on an overlay whose upper dir becomes the layer; BuildKit Dockerfile syntax). `api.rs` routes and hijacks; `fs.rs` is `litek8s docker-fs` (archive in/out of a container's mount namespace). Corpus: `compat/docker/run.sh`; docs: docs/docker.md.
 
 ## Key Conventions
 

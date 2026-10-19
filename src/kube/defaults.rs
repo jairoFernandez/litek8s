@@ -127,6 +127,13 @@ fn inject_service_account_token(spec: &mut Map<String, Value>, suffix: &str) {
     }
 }
 
+/// Container defaults for every element of a container list.
+pub fn containers(list: &mut Value) {
+    for c in list.as_array_mut().into_iter().flatten() {
+        container(c);
+    }
+}
+
 /// The defaults the API server gives a pod template (Deployment,
 /// ReplicaSet, StatefulSet, DaemonSet, Job, CronJob) at `ptr`, as for pods
 /// minus what admission adds to pods only (service account, tolerations).
@@ -169,10 +176,12 @@ fn container(c: &mut Value) {
     }
     for probe in ["readinessProbe", "livenessProbe", "startupProbe"] {
         if let Some(p) = m.get_mut(probe).and_then(Value::as_object_mut) {
-            set_default(p, "timeoutSeconds", json!(1));
-            set_default(p, "periodSeconds", json!(10));
-            set_default(p, "successThreshold", json!(1));
-            set_default(p, "failureThreshold", json!(3));
+            // 0 is "unset" too: protobuf clients send these non-pointer fields.
+            for (k, v) in [("timeoutSeconds", 1), ("periodSeconds", 10), ("successThreshold", 1), ("failureThreshold", 3)] {
+                if p.get(k).is_none_or(|x| *x == json!(0)) {
+                    p.insert(k.into(), json!(v));
+                }
+            }
             if let Some(h) = p.get_mut("httpGet").and_then(Value::as_object_mut) {
                 set_default(h, "scheme", json!("HTTP"));
                 set_default(h, "path", json!("/"));
@@ -183,7 +192,7 @@ fn container(c: &mut Value) {
 
 /// Guaranteed when every container sets equal cpu and memory requests and
 /// limits, BestEffort when none sets any, Burstable otherwise.
-fn qos_class(spec: &Map<String, Value>) -> &'static str {
+pub fn qos_class(spec: &Map<String, Value>) -> &'static str {
     let containers: Vec<&Value> = ["initContainers", "containers"]
         .iter()
         .filter_map(|f| spec.get(*f).and_then(Value::as_array))
@@ -328,4 +337,63 @@ pub fn pvc(obj: &mut Value, old: Option<&Value>) {
         set_default(spec, "storageClassName", json!(DEFAULT_STORAGE_CLASS));
         obj["status"] = json!({"phase": "Pending"});
     }
+}
+
+/// A core/v1 Event as events.k8s.io/v1.
+pub fn event_to_v1(core: &Value) -> Value {
+    let mut out = json!({"apiVersion": "events.k8s.io/v1", "kind": "Event", "metadata": core.get("metadata").cloned().unwrap_or_else(|| json!({}))});
+    let copy = |out: &mut Value, from: &str, to: &str| {
+        if let Some(v) = core.get(from).filter(|v| !v.is_null()) {
+            out[to] = v.clone();
+        }
+    };
+    copy(&mut out, "involvedObject", "regarding");
+    copy(&mut out, "related", "related");
+    copy(&mut out, "message", "note");
+    copy(&mut out, "reason", "reason");
+    copy(&mut out, "type", "type");
+    copy(&mut out, "action", "action");
+    copy(&mut out, "eventTime", "eventTime");
+    copy(&mut out, "series", "series");
+    copy(&mut out, "reportingComponent", "reportingController");
+    copy(&mut out, "reportingInstance", "reportingInstance");
+    copy(&mut out, "source", "deprecatedSource");
+    copy(&mut out, "firstTimestamp", "deprecatedFirstTimestamp");
+    copy(&mut out, "lastTimestamp", "deprecatedLastTimestamp");
+    copy(&mut out, "count", "deprecatedCount");
+    out
+}
+
+/// An events.k8s.io/v1 Event as core/v1.
+pub fn event_to_core(v1: &Value) -> Value {
+    let mut out = json!({"apiVersion": "v1", "kind": "Event", "metadata": v1.get("metadata").cloned().unwrap_or_else(|| json!({}))});
+    let copy = |out: &mut Value, from: &str, to: &str| {
+        if let Some(v) = v1.get(from).filter(|v| !v.is_null()) {
+            out[to] = v.clone();
+        }
+    };
+    copy(&mut out, "regarding", "involvedObject");
+    copy(&mut out, "related", "related");
+    copy(&mut out, "note", "message");
+    copy(&mut out, "reason", "reason");
+    copy(&mut out, "type", "type");
+    copy(&mut out, "action", "action");
+    copy(&mut out, "eventTime", "eventTime");
+    copy(&mut out, "series", "series");
+    copy(&mut out, "reportingController", "reportingComponent");
+    copy(&mut out, "reportingInstance", "reportingInstance");
+    copy(&mut out, "deprecatedSource", "source");
+    // core/v1 selects events by source component: the reporting controller.
+    if out.pointer("/source/component").is_none() {
+        if let Some(rc) = v1.get("reportingController").filter(|v| !v.is_null()) {
+            out["source"] = json!({"component": rc});
+        }
+    }
+    copy(&mut out, "deprecatedFirstTimestamp", "firstTimestamp");
+    copy(&mut out, "deprecatedLastTimestamp", "lastTimestamp");
+    copy(&mut out, "deprecatedCount", "count");
+    if out.get("involvedObject").is_none() {
+        out["involvedObject"] = json!({});
+    }
+    out
 }

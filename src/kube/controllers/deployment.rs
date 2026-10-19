@@ -58,7 +58,7 @@ pub(crate) fn reconcile(api: &ApiState, ns: &str, name: &str) -> Result<Requeue,
         max_unavailable = 1;
     }
 
-    let mut all = util::owned(api, "apps", "replicasets", ns, &deploy);
+    let mut all = adopt_replicasets(api, ns, &deploy)?;
     all.sort_by_key(revision);
     let new_index = all
         .iter()
@@ -96,8 +96,11 @@ pub(crate) fn reconcile(api: &ApiState, ns: &str, name: &str) -> Result<Requeue,
             create_replicaset(api, &deploy, &template, initial, max_old_revision + 1, replicas + max_surge)?
         }
     };
-    let old = all;
+    let mut old = all;
 
+    if !paused && !recreate {
+        proportional_scale(api, &deploy, &mut new_rs, &mut old, replicas, max_surge)?;
+    }
     if !paused {
         if recreate {
             rollout_recreate(api, ns, &deploy, &mut new_rs, &old, replicas)?;
@@ -110,6 +113,93 @@ pub(crate) fn reconcile(api: &ApiState, ns: &str, name: &str) -> Result<Requeue,
     let revision_str = revision(&new_rs).to_string();
     let deploy = util::ensure_annotation(api, "apps", "deployments", &deploy, REVISION, &revision_str)?;
     write_status(api, &deploy, Some(&new_rs), &old, replicas, max_unavailable)
+}
+
+/// The ReplicaSets the Deployment controls, after adopting orphans its
+/// selector matches and releasing those it no longer matches.
+fn adopt_replicasets(api: &ApiState, ns: &str, deploy: &Value) -> Result<Vec<Value>, ApiError> {
+    let selector = crate::kube::selector::LabelSelector::from_object(deploy.pointer("/spec/selector"));
+    let matches = |rs: &Value| selector.as_ref().is_some_and(|s| !s.is_empty() && s.matches(rs));
+    let uid = util::uid(deploy);
+    let (sets, _) = api.store().list("apps", "replicasets", Some(ns));
+    let mut owned = Vec::new();
+    for mut rs in sets {
+        if util::controlled_by(&rs, &uid) {
+            if matches(&rs) || util::is_deleting(&rs) {
+                owned.push(rs);
+                continue;
+            }
+            if let Some(refs) = rs.pointer_mut("/metadata/ownerReferences").and_then(Value::as_array_mut) {
+                refs.retain(|r| r.get("uid").and_then(Value::as_str) != Some(uid.as_str()));
+            }
+            let _ = api.update_object("apps", "replicasets", rs);
+        } else if util::controller_of(&rs).is_none() && !util::is_deleting(&rs) && matches(&rs) {
+            let meta = rs["metadata"].as_object_mut().unwrap();
+            let refs = meta.entry("ownerReferences").or_insert_with(|| json!([]));
+            if !refs.is_array() {
+                *refs = json!([]);
+            }
+            refs.as_array_mut().unwrap().push(util::owner_ref(deploy));
+            match api.update_object("apps", "replicasets", rs) {
+                Ok(adopted) => owned.push(adopted),
+                Err(e) if e.is_not_found() => {}
+                Err(e) => return Err(e),
+            }
+        }
+    }
+    Ok(owned)
+}
+
+/// When the Deployment is resized mid-rollout, resize every active
+/// ReplicaSet in proportion to its share, as the Deployment controller
+/// does (using each set's `max-replicas` annotation as its old size).
+fn proportional_scale(api: &ApiState, deploy: &Value, new_rs: &mut Value, old: &mut [Value], replicas: i64, max_surge: i64) -> Result<(), ApiError> {
+    const DESIRED: &str = "deployment.kubernetes.io/desired-replicas";
+    const MAX: &str = "deployment.kubernetes.io/max-replicas";
+    let ann = |rs: &Value, k: &str| rs.pointer("/metadata/annotations").and_then(|a| a.get(k)).and_then(Value::as_str).and_then(|v| v.parse::<i64>().ok());
+    let active = old.iter().filter(|rs| spec_replicas(rs) > 0).count() + usize::from(spec_replicas(new_rs) > 0);
+    let allowed = if replicas > 0 { replicas + max_surge } else { 0 };
+    let resized = std::iter::once(&*new_rs).chain(old.iter()).any(|rs| spec_replicas(rs) > 0 && ann(rs, DESIRED).is_some_and(|d| d != replicas));
+    if active > 1 && resized {
+        let total: i64 = old.iter().map(spec_replicas).sum::<i64>() + spec_replicas(new_rs);
+        let to_add = allowed - total;
+        if to_add != 0 {
+            // Largest first (newest first when growing).
+            let mut sets: Vec<&mut Value> = std::iter::once(new_rs as &mut Value).chain(old.iter_mut()).filter(|rs| spec_replicas(rs) > 0).collect();
+            sets.sort_by_key(|rs| -spec_replicas(rs));
+            let mut added = 0;
+            let mut targets: Vec<i64> = Vec::new();
+            for rs in sets.iter() {
+                let size = spec_replicas(rs);
+                let old_size = ann(rs, MAX).unwrap_or(total).max(1);
+                let fraction = ((size * allowed) as f64 / old_size as f64).round() as i64 - size;
+                let room = to_add - added;
+                let share = if to_add > 0 { fraction.min(room).max(0) } else { fraction.max(room).min(0) };
+                added += share;
+                targets.push(size + share);
+            }
+            if let Some(first) = targets.first_mut() {
+                *first += to_add - added;
+            }
+            for (rs, target) in sets.into_iter().zip(targets) {
+                scale(api, rs, target.max(0))?;
+            }
+        }
+    }
+    // Record the size every set was scaled for.
+    for rs in std::iter::once(new_rs as &mut Value).chain(old.iter_mut()) {
+        if ann(rs, DESIRED) != Some(replicas) || ann(rs, MAX) != Some(allowed) {
+            let mut updated = rs.clone();
+            if !updated["metadata"].get("annotations").is_some_and(Value::is_object) {
+                updated["metadata"]["annotations"] = json!({});
+            }
+            updated["metadata"]["annotations"][DESIRED] = json!(replicas.to_string());
+            updated["metadata"]["annotations"][MAX] = json!(allowed.to_string());
+            *rs = api.update_object("apps", "replicasets", updated)?;
+        }
+    }
+    let _ = deploy;
+    Ok(())
 }
 
 fn create_replicaset(

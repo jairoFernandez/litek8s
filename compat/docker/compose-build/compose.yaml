@@ -1,0 +1,21 @@
+# A built service (Python) talking to Redis by service name, with the
+# source bind-mounted for live reload and an anonymous volume shadowing a
+# directory the image fills (the node_modules pattern).
+name: lk-build
+services:
+  api:
+    build:
+      context: ./app
+      args:
+        APP_VERSION: "1.2.3"
+    ports:
+      - "18081:8000"
+    environment:
+      REDIS_HOST: cache
+    volumes:
+      - ./app:/srv/app
+      - /srv/app/vendor
+    depends_on:
+      - cache
+  cache:
+    image: redis:7-alpine

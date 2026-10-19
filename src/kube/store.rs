@@ -25,7 +25,7 @@ use tokio::sync::broadcast;
 /// How many past events a watch can resume from before getting `410 Gone`
 /// (clients then relist). History keeps each version as compact JSON bytes,
 /// a quarter of the size of the parsed form.
-const HISTORY_CAPACITY: usize = 1024;
+const HISTORY_CAPACITY: usize = 4096;
 /// ... and at most this many bytes: a burst of large objects (a chart's
 /// CRDs are up to ~1 MB each) must not pin hundreds of MB.
 const HISTORY_MAX_BYTES: usize = 16 << 20;

@@ -10,6 +10,8 @@ use crate::kube::selector::LabelSelector;
 use crate::kube::server::{ApiError, ApiState};
 
 const SERVICE_NAME_LABEL: &str = "kubernetes.io/service-name";
+const MANAGED_BY: &str = "endpoints.kubernetes.io/managed-by";
+const ENDPOINTS_MANAGER: &str = "endpoint-controller";
 
 /// The address of the first ready node, which LoadBalancer Services get as
 /// their ingress (like k3s's servicelb).
@@ -37,7 +39,8 @@ fn node_address(api: &ApiState) -> Option<String> {
 pub(crate) fn reconcile_service(api: &ApiState, ns: &str, name: &str) -> Result<Requeue, ApiError> {
     let Some(svc) = api.get_object("", "services", ns, name) else {
         // Endpoints carry no owner reference; remove them with the Service.
-        if api.get_object("", "endpoints", ns, name).is_some() {
+        let managed = |e: &Value| util::labels_of(e).get(MANAGED_BY).and_then(Value::as_str) == Some(ENDPOINTS_MANAGER);
+        if api.get_object("", "endpoints", ns, name).is_some_and(|e| managed(&e)) {
             let _ = api.delete_named("", "endpoints", ns, name);
         }
         return Ok(None);
@@ -54,6 +57,7 @@ pub(crate) fn reconcile_service(api: &ApiState, ns: &str, name: &str) -> Result<
     }
     let selector = svc.pointer("/spec/selector").and_then(Value::as_object).filter(|m| !m.is_empty());
     let Some(selector) = selector else {
+        mirror_endpoints(api, &svc)?;
         return Ok(None);
     };
     let selector = LabelSelector::from_object(Some(&json!({"matchLabels": selector}))).unwrap_or_default();
@@ -88,22 +92,37 @@ fn target_port(port: &Value, pod: Option<&Value>) -> Option<i64> {
 fn sync_endpoints(api: &ApiState, svc: &Value, pods: &[&Value]) -> Result<(), ApiError> {
     let (ns, name) = util::ns_name(svc);
     let ports: Vec<&Value> = svc.pointer("/spec/ports").and_then(Value::as_array).map(|p| p.iter().collect()).unwrap_or_default();
-    let endpoint_ports: Vec<Value> = ports
-        .iter()
-        .filter_map(|p| {
-            let mut port = json!({
-                "port": target_port(p, pods.first().copied())?,
-                "protocol": p.get("protocol").cloned().unwrap_or_else(|| json!("TCP")),
-            });
-            if let Some(n) = p.get("name").and_then(Value::as_str).filter(|n| !n.is_empty()) {
-                port["name"] = json!(n);
-            }
-            if let Some(a) = p.get("appProtocol") {
-                port["appProtocol"] = a.clone();
-            }
-            Some(port)
-        })
-        .collect();
+    // Named target ports resolve per pod, so pods are grouped by the ports
+    // they serve: one Endpoints subset (and one EndpointSlice) per group.
+    let ports_of = |pod: &Value| -> Vec<Value> {
+        ports
+            .iter()
+            .filter_map(|p| {
+                let mut port = json!({
+                    "port": target_port(p, Some(pod))?,
+                    "protocol": p.get("protocol").cloned().unwrap_or_else(|| json!("TCP")),
+                });
+                if let Some(n) = p.get("name").and_then(Value::as_str).filter(|n| !n.is_empty()) {
+                    port["name"] = json!(n);
+                }
+                if let Some(a) = p.get("appProtocol") {
+                    port["appProtocol"] = a.clone();
+                }
+                Some(port)
+            })
+            .collect()
+    };
+    let mut groups: Vec<(Vec<Value>, Vec<&Value>)> = Vec::new();
+    for pod in pods {
+        let ps = ports_of(pod);
+        if ps.is_empty() && !ports.is_empty() {
+            continue;
+        }
+        match groups.iter_mut().find(|(g, _)| *g == ps) {
+            Some((_, members)) => members.push(pod),
+            None => groups.push((ps, vec![pod])),
+        }
+    }
     let address = |p: &Value| {
         let mut a = json!({
             "ip": s(p, "/status/podIP"),
@@ -116,22 +135,34 @@ fn sync_endpoints(api: &ApiState, svc: &Value, pods: &[&Value]) -> Result<(), Ap
         }
         a
     };
-    let ready: Vec<Value> = pods.iter().filter(|p| util::is_ready(p)).map(|p| address(p)).collect();
-    let not_ready: Vec<Value> = pods.iter().filter(|p| !util::is_ready(p)).map(|p| address(p)).collect();
-    let mut subset = json!({"ports": endpoint_ports});
-    if !ready.is_empty() {
-        subset["addresses"] = json!(ready);
-    }
-    if !not_ready.is_empty() {
-        subset["notReadyAddresses"] = json!(not_ready);
-    }
-    let subsets = if pods.is_empty() { json!([]) } else { json!([subset]) };
-    let labels = svc.pointer("/metadata/labels").cloned().unwrap_or_else(|| json!({}));
+    let subsets: Vec<Value> = groups
+        .iter()
+        .map(|(ps, members)| {
+            let ready: Vec<Value> = members.iter().filter(|p| util::is_ready(p)).map(|p| address(p)).collect();
+            let not_ready: Vec<Value> = members.iter().filter(|p| !util::is_ready(p)).map(|p| address(p)).collect();
+            let mut subset = json!({"ports": ps});
+            if !ready.is_empty() {
+                subset["addresses"] = json!(ready);
+            }
+            if !not_ready.is_empty() {
+                subset["notReadyAddresses"] = json!(not_ready);
+            }
+            subset
+        })
+        .collect();
+    let subsets = json!(subsets);
+    let mut labels = svc.pointer("/metadata/labels").cloned().filter(Value::is_object).unwrap_or_else(|| json!({}));
+    labels[MANAGED_BY] = json!(ENDPOINTS_MANAGER);
     match api.get_object("", "endpoints", &ns, &name) {
         Some(existing) => {
-            if existing.get("subsets").cloned().unwrap_or_else(|| json!([])) != subsets {
+            let labeled = util::labels_of(&existing).get(MANAGED_BY).is_some();
+            if existing.get("subsets").cloned().unwrap_or_else(|| json!([])) != subsets || !labeled {
                 let mut updated = existing.clone();
                 updated["subsets"] = subsets;
+                if !updated["metadata"].get("labels").is_some_and(Value::is_object) {
+                    updated["metadata"]["labels"] = json!({});
+                }
+                updated["metadata"]["labels"][MANAGED_BY] = json!(ENDPOINTS_MANAGER);
                 api.update_object("", "endpoints", updated)?;
             }
         }
@@ -141,48 +172,78 @@ fn sync_endpoints(api: &ApiState, svc: &Value, pods: &[&Value]) -> Result<(), Ap
         }
     }
 
-    // The EndpointSlice view of the same data.
-    let endpoints: Vec<Value> = pods
-        .iter()
-        .map(|p| {
-            let ready = util::is_ready(p);
-            json!({
-                "addresses": [s(p, "/status/podIP")],
-                "conditions": {"ready": ready, "serving": ready, "terminating": false},
-                "nodeName": s(p, "/spec/nodeName"),
-                "targetRef": {"kind": "Pod", "namespace": ns, "name": util::name(p), "uid": util::uid(p)},
-            })
+    // The EndpointSlice view of the same data: one slice per port group
+    // (one empty slice when there are no endpoints).
+    if groups.is_empty() {
+        groups.push((Vec::new(), Vec::new()));
+    }
+    let (slices, _) = api.store().list("discovery.k8s.io", "endpointslices", Some(&ns));
+    let mut mine: Vec<Value> = slices
+        .into_iter()
+        .filter(|sl| {
+            util::labels_of(sl).get(SERVICE_NAME_LABEL).and_then(Value::as_str) == Some(name.as_str())
+                && util::controlled_by(sl, &util::uid(svc))
         })
         .collect();
-    let (slices, _) = api.store().list("discovery.k8s.io", "endpointslices", Some(&ns));
-    let existing = slices.into_iter().find(|sl| {
-        util::labels_of(sl).get(SERVICE_NAME_LABEL).and_then(Value::as_str) == Some(name.as_str())
-            && util::controlled_by(sl, &util::uid(svc))
-    });
-    match existing {
-        Some(slice) => {
-            if slice.get("endpoints") != Some(&json!(endpoints)) || slice.get("ports") != Some(&json!(endpoint_ports)) {
-                let mut updated = slice.clone();
-                updated["endpoints"] = json!(endpoints);
-                updated["ports"] = json!(endpoint_ports);
-                api.update_object("discovery.k8s.io", "endpointslices", updated)?;
+    for (ps, members) in &groups {
+        // EndpointSlice ports always carry a name (kubectl relies on it).
+        let ps: Vec<Value> = ps
+            .iter()
+            .map(|p| {
+                let mut p = p.clone();
+                if p.get("name").is_none() {
+                    p["name"] = json!("");
+                }
+                p
+            })
+            .collect();
+        let ps = &ps;
+        let endpoints: Vec<Value> = members
+            .iter()
+            .map(|p| {
+                let ready = util::is_ready(p);
+                let mut e = json!({
+                    "addresses": [s(p, "/status/podIP")],
+                    "conditions": {"ready": ready, "serving": ready, "terminating": false},
+                    "nodeName": s(p, "/spec/nodeName"),
+                    "targetRef": {"kind": "Pod", "namespace": ns, "name": util::name(p), "uid": util::uid(p)},
+                });
+                if s(p, "/spec/subdomain") == name && !s(p, "/spec/hostname").is_empty() {
+                    e["hostname"] = json!(s(p, "/spec/hostname"));
+                }
+                e
+            })
+            .collect();
+        // Reuse the slice with the same ports, else any spare one.
+        let pos = mine.iter().position(|sl| sl.get("ports") == Some(&json!(ps))).or(if mine.is_empty() { None } else { Some(0) });
+        match pos.map(|i| mine.remove(i)) {
+            Some(slice) => {
+                if slice.get("endpoints") != Some(&json!(endpoints)) || slice.get("ports") != Some(&json!(ps)) {
+                    let mut updated = slice.clone();
+                    updated["endpoints"] = json!(endpoints);
+                    updated["ports"] = json!(ps);
+                    api.update_object("discovery.k8s.io", "endpointslices", updated)?;
+                }
+            }
+            None => {
+                let slice = json!({
+                    "apiVersion": "discovery.k8s.io/v1",
+                    "kind": "EndpointSlice",
+                    "metadata": {
+                        "generateName": format!("{name}-"),
+                        "labels": {SERVICE_NAME_LABEL: name, "endpointslice.kubernetes.io/managed-by": "endpointslice-controller.k8s.io"},
+                        "ownerReferences": [util::owner_ref(svc)],
+                    },
+                    "addressType": "IPv4",
+                    "endpoints": endpoints,
+                    "ports": ps,
+                });
+                api.create_object("discovery.k8s.io", "endpointslices", Some(&ns), slice)?;
             }
         }
-        None => {
-            let slice = json!({
-                "apiVersion": "discovery.k8s.io/v1",
-                "kind": "EndpointSlice",
-                "metadata": {
-                    "generateName": format!("{name}-"),
-                    "labels": {SERVICE_NAME_LABEL: name, "endpointslice.kubernetes.io/managed-by": "endpointslice-controller.k8s.io"},
-                    "ownerReferences": [util::owner_ref(svc)],
-                },
-                "addressType": "IPv4",
-                "endpoints": endpoints,
-                "ports": endpoint_ports,
-            });
-            api.create_object("discovery.k8s.io", "endpointslices", Some(&ns), slice)?;
-        }
+    }
+    for stale in mine {
+        let _ = api.delete_named("discovery.k8s.io", "endpointslices", &ns, &util::name(&stale));
     }
     Ok(())
 }
@@ -280,4 +341,118 @@ pub(crate) fn expire_events(api: &ApiState) -> Result<Requeue, ApiError> {
         }
     }
     Ok(Some(std::time::Duration::from_secs(300)))
+}
+
+/// ResourceQuota: `status.hard` mirrors the spec, `status.used` is what the
+/// namespace uses now.
+pub(crate) fn reconcile_quota(api: &ApiState, ns: &str, name: &str) -> Result<Requeue, ApiError> {
+    let Some(quota) = api.get_object("", "resourcequotas", ns, name) else { return Ok(None) };
+    let used = crate::kube::quota::used(api.store(), &quota);
+    let hard = quota.pointer("/spec/hard").cloned().unwrap_or_else(|| json!({}));
+    util::write_status(api, "", "resourcequotas", &quota, json!({"hard": hard, "used": used}))?;
+    Ok(None)
+}
+
+/// EndpointSlice mirroring: a selector-less Service's hand-written
+/// Endpoints get matching EndpointSlices.
+fn mirror_endpoints(api: &ApiState, svc: &Value) -> Result<(), ApiError> {
+    const MANAGER: &str = "endpointslicemirroring-controller.k8s.io";
+    let (ns, name) = util::ns_name(svc);
+    let ep = api.get_object("", "endpoints", &ns, &name);
+    let skip = ep.as_ref().is_some_and(|e| util::labels_of(e).get("endpointslice.kubernetes.io/skip-mirror").and_then(Value::as_str) == Some("true"));
+    let mut wanted: Vec<(Value, Value)> = Vec::new();
+    if !skip {
+        for subset in ep.as_ref().and_then(|e| e.get("subsets")).and_then(Value::as_array).into_iter().flatten() {
+            let mut endpoints = Vec::new();
+            for (field, ready) in [("addresses", true), ("notReadyAddresses", false)] {
+                for a in subset.get(field).and_then(Value::as_array).into_iter().flatten() {
+                    let mut e = json!({"addresses": [s(a, "/ip")], "conditions": {"ready": ready}});
+                    for k in ["hostname", "nodeName", "targetRef"] {
+                        if let Some(v) = a.get(k) {
+                            e[k] = v.clone();
+                        }
+                    }
+                    endpoints.push(e);
+                }
+            }
+            let ports = subset.get("ports").cloned().unwrap_or_else(|| json!([]));
+            wanted.push((json!(endpoints), ports));
+        }
+    }
+    let (slices, _) = api.store().list("discovery.k8s.io", "endpointslices", Some(&ns));
+    let mut mine: Vec<Value> = slices
+        .into_iter()
+        .filter(|sl| {
+            let labels = util::labels_of(sl);
+            labels.get(SERVICE_NAME_LABEL).and_then(Value::as_str) == Some(name.as_str())
+                && labels.get("endpointslice.kubernetes.io/managed-by").and_then(Value::as_str) == Some(MANAGER)
+        })
+        .collect();
+    for (endpoints, ports) in wanted {
+        match (!mine.is_empty()).then(|| mine.remove(0)) {
+            Some(slice) => {
+                if slice.get("endpoints") != Some(&endpoints) || slice.get("ports") != Some(&ports) {
+                    let mut updated = slice.clone();
+                    updated["endpoints"] = endpoints;
+                    updated["ports"] = ports;
+                    api.update_object("discovery.k8s.io", "endpointslices", updated)?;
+                }
+            }
+            None => {
+                let slice = json!({
+                    "apiVersion": "discovery.k8s.io/v1",
+                    "kind": "EndpointSlice",
+                    "metadata": {
+                        "generateName": format!("{name}-"),
+                        "labels": {SERVICE_NAME_LABEL: name, "endpointslice.kubernetes.io/managed-by": MANAGER},
+                        "ownerReferences": [util::owner_ref(svc)],
+                    },
+                    "addressType": "IPv4",
+                    "endpoints": endpoints,
+                    "ports": ports,
+                });
+                api.create_object("discovery.k8s.io", "endpointslices", Some(&ns), slice)?;
+            }
+        }
+    }
+    for stale in mine {
+        let _ = api.delete_named("discovery.k8s.io", "endpointslices", &ns, &util::name(&stale));
+    }
+    Ok(())
+}
+
+/// PodDisruptionBudget status: how many matching pods are healthy and how
+/// many may be disrupted now.
+pub(crate) fn reconcile_pdb(api: &ApiState, ns: &str, name: &str) -> Result<Requeue, ApiError> {
+    let Some(pdb) = api.get_object("policy", "poddisruptionbudgets", ns, name) else { return Ok(None) };
+    let selector = LabelSelector::from_object(pdb.pointer("/spec/selector"));
+    let (pods, _) = api.store().list("", "pods", Some(ns));
+    let pods: Vec<&Value> = pods
+        .iter()
+        .filter(|p| selector.as_ref().is_some_and(|s| s.matches(p)) && !util::is_terminal(p) && !util::is_deleting(p))
+        .collect();
+    let expected = pods.len() as i64;
+    let healthy = pods.iter().filter(|p| util::is_ready(p)).count() as i64;
+    let desired = match (pdb.pointer("/spec/minAvailable"), pdb.pointer("/spec/maxUnavailable")) {
+        (Some(min), _) => util::int_or_percent(Some(min), expected, true, 0),
+        (None, Some(max)) => (expected - util::int_or_percent(Some(max), expected, true, 0)).max(0),
+        (None, None) => expected,
+    };
+    let allowed = (healthy - desired).max(0);
+    let mut conditions = util::conditions_of(&pdb);
+    let (status, reason) = if allowed > 0 { ("True", "SufficientPods") } else { ("False", "InsufficientPods") };
+    util::set_condition(&mut conditions, "DisruptionAllowed", status, reason, "");
+    let mut new_status = json!({
+        "currentHealthy": healthy,
+        "desiredHealthy": desired,
+        "expectedPods": expected,
+        "disruptionsAllowed": allowed,
+        "observedGeneration": util::i(&pdb, "/metadata/generation").unwrap_or(1),
+        "conditions": conditions,
+    });
+    if let Some(d) = pdb.pointer("/status/disruptedPods") {
+        new_status["disruptedPods"] = d.clone();
+    }
+    util::write_status(api, "policy", "poddisruptionbudgets", &pdb, new_status)?;
+    Ok(None)
 }

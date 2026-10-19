@@ -25,7 +25,7 @@ The cluster runs in namespaces of its own, as your user:
 
 | namespace | what it isolates |
 |---|---|
-| user | you are root inside; your `/etc/subuid` range backs the other ids, so image layers keep their owners |
+| user | your uid keeps its number inside; your `/etc/subuid` range backs every other id, root included, so image layers keep their owners and files a container creates in a bind mount as your uid are yours on the host (`LITEK8S_DEV_IDMAP=root` makes you root inside instead, Docker-rootless style) |
 | network | the `litek8s0` bridge, pod veths and **every** iptables rule (pod NAT, Service DNAT) |
 | mount | a fresh `/run` (pod network namespaces, crun state), sysfs, a cgroup2 mount rooted at the cluster's cgroup |
 | PID | PID 1 is a small init; stopping it stops every pod process |
@@ -74,14 +74,20 @@ a sparse disk holds images and objects. The Mac side:
   NodePort and on `127.0.0.1:<port>` for LoadBalancer ports
   (`EXTERNAL-IP` is `127.0.0.1`, as with Docker Desktop's Kubernetes);
 - shares `$HOME` (or `--share <dir>`) over virtiofs at the **same path**, so
-  `hostPath: /Users/you/project` volumes work and edits show up live;
+  `hostPath: /Users/you/project` volumes work and edits show up live (also
+  `/private/tmp` and `/private/var/folders`, where `/tmp` and `$TMPDIR` are);
+- passes file changes under bind-mounted directories into the VM (FSEvents
+  on the Mac, IN_ATTRIB in the guest), so inotify watchers see Mac edits;
+- shares Rosetta when it is installed, so `linux/amd64` images run;
+- serves the Docker API on `~/.litek8s/docker.sock` (see [docker.md](docker.md));
 - uses the console as the control channel (the guest reports its address,
   `dev down` powers it off cleanly).
 
 The framework requires the `com.apple.security.virtualization` entitlement;
 if the binary lacks it, `dev up` runs an ad-hoc signed copy
 (`codesign --sign -`), so nothing needs `sudo`. VM size: `--memory` (MiB,
-default 2048) and `--cpus` (default half the Mac's).
+default 4096, an upper bound: the VM's footprint is what it touches) and
+`--cpus` (default half the Mac's).
 
 Build the guest once (needs Docker or any Linux box for the musl build):
 

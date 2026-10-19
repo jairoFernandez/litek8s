@@ -322,6 +322,8 @@ enum Command {
         wireguard_port: u16,
         #[arg(long, help = "Do not set up the WireGuard pod overlay (single node)")]
         no_wireguard: bool,
+        #[arg(long, help = "Also serve the Docker Engine API on this Unix socket (crun runtime; published ports bind on 127.0.0.1)")]
+        docker_socket: Option<PathBuf>,
     },
     #[command(
         about = "A local Kubernetes cluster for development (like kind/k3d), without Docker",
@@ -1151,7 +1153,25 @@ pub async fn run() -> Result<()> {
             default_unreachable_toleration_seconds,
             wireguard_port,
             no_wireguard,
+            docker_socket,
         } => {
+            let docker = match &docker_socket {
+                Some(path) => {
+                    let _ = std::fs::remove_file(path);
+                    if let Some(parent) = path.parent() {
+                        std::fs::create_dir_all(parent)?;
+                    }
+                    let listener = std::os::unix::net::UnixListener::bind(path).with_context(|| format!("failed to listen on {}", path.display()))?;
+                    Some(crate::docker::Settings {
+                        root: data_dir.clone().unwrap_or_else(|| std::env::temp_dir().join("litek8s")).join("docker"),
+                        listener: Some(listener),
+                        tcp: None,
+                        publisher: crate::docker::Publisher::Local,
+                        socket_aliases: vec![path.to_string_lossy().to_string()],
+                    })
+                }
+                None => None,
+            };
             crate::kube::serve(crate::kube::ApiServerConfig {
                 listen,
                 data_dir,
@@ -1174,6 +1194,7 @@ pub async fn run() -> Result<()> {
                 },
                 wireguard_port: (!no_wireguard).then_some(wireguard_port),
                 listener: None,
+                docker,
             })
             .await
         }

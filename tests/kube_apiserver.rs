@@ -273,10 +273,12 @@ async fn deployment_rolls_out_through_replicasets_and_scheduler() -> Result<()> 
     // Play the kubelet: mark both pods Running and Ready.
     for pod in pods.as_array().unwrap() {
         let name = pod["metadata"]["name"].as_str().unwrap();
-        let status = json!({"metadata": {"name": name}, "status": {
+        // A status PUT replaces labels too, so send the whole pod.
+        let mut status = pod.clone();
+        status["status"] = json!({
             "phase": "Running",
             "conditions": [{"type": "Ready", "status": "True", "lastTransitionTime": "2026-01-01T00:00:00Z"}],
-        }});
+        });
         call(&addr, "PUT", &format!("/api/v1/namespaces/default/pods/{name}/status"), "application/json", &status.to_string()).await?;
     }
     let deploy = eventually("an available deployment", || async {
@@ -294,7 +296,10 @@ async fn deployment_rolls_out_through_replicasets_and_scheduler() -> Result<()> 
     eventually("garbage collection", || async {
         let (_, pods) = get(&addr, "/api/v1/namespaces/default/pods").await?;
         let (_, rs) = get(&addr, "/apis/apps/v1/namespaces/default/replicasets").await?;
-        let empty = pods["items"].as_array().is_some_and(|a| a.is_empty()) && rs["items"].as_array().is_some_and(|a| a.is_empty());
+        // Bound pods terminate gracefully: with no kubelet on n1 they
+        // stay with a deletionTimestamp, as in Kubernetes.
+        let all_terminating = |l: &Value| l["items"].as_array().is_some_and(|a| a.iter().all(|o| o["metadata"]["deletionTimestamp"].is_string()));
+        let empty = all_terminating(&pods) && rs["items"].as_array().is_some_and(|a| a.is_empty());
         Ok(empty.then_some(Value::Null))
     })
     .await?;
@@ -314,7 +319,8 @@ async fn jobs_complete_and_no_op_updates_keep_the_resource_version() -> Result<(
     })
     .await?;
     let name = pod["metadata"]["name"].as_str().unwrap();
-    let status = json!({"metadata": {"name": name}, "status": {"phase": "Succeeded"}});
+    let mut status = pod.clone();
+    status["status"] = json!({"phase": "Succeeded"});
     call(&addr, "PUT", &format!("/api/v1/namespaces/default/pods/{name}/status"), "application/json", &status.to_string()).await?;
     eventually("a complete job", || async {
         let (_, j) = get(&addr, "/apis/batch/v1/namespaces/default/jobs/once").await?;

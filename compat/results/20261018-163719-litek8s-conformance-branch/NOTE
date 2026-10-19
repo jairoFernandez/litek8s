@@ -1,0 +1,1 @@
+helm_nextcloud timed out here (Deployment not Available in 6 min) with the host at load average ~230; rechecked twice on the same build: pass, 53 s and 52 s. main (3cd7152) showed the same first-start restart under that load.

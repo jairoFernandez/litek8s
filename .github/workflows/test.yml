@@ -1,0 +1,52 @@
+name: test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+
+jobs:
+  cargo-test:
+    name: cargo test (${{ matrix.os }}, ${{ matrix.features }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        features: [default, no-default-features]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.features }}
+
+      # ubuntu-latest ships a running Docker daemon: tests/integration.rs runs
+      # against it. macOS runners have no Docker, so those tests skip there
+      # (docker_available() is false) and the rest of the suite still runs.
+      - name: Docker info
+        if: runner.os == 'Linux'
+        run: |
+          docker info --format '{{.ServerVersion}} {{.OperatingSystem}} cgroup v{{.CgroupVersion}}'
+          docker pull busybox:1.36
+
+      - name: cargo test
+        shell: bash
+        run: |
+          if [[ "${{ matrix.features }}" == no-default-features ]]; then
+            cargo test --no-default-features
+          else
+            cargo test
+          fi

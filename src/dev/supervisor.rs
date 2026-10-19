@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-use super::sandbox::{self, FD_API_LISTENER, FD_BROKER, FD_CONTROL_IN, FD_CONTROL_OUT};
+use super::sandbox::{self, FD_API_LISTENER, FD_BROKER, FD_CONTROL_IN, FD_CONTROL_OUT, FD_DOCKER};
 use super::{DEFAULT_PORT, DevState, dev_home, now_ms, which, write_state};
 
 fn pipe() -> Result<(OwnedFd, OwnedFd)> {
@@ -53,19 +53,38 @@ fn is_root() -> bool {
     unsafe { libc::geteuid() == 0 }
 }
 
-/// Write the user and group id maps of `pid`'s new user namespace: our
-/// own id becomes root, the subordinate range backs ids 1..65536.
+/// The id ranges of the sandbox's user namespace for our `id`: our own id
+/// keeps its number (files a container creates as that uid in a bind
+/// mount belong to the user, as with Docker), the subordinate range backs
+/// every other id up to 65535, root included. `(inside, outside, count)`.
+/// With `LITEK8S_DEV_IDMAP=root` (or an id above 65535) the user is root
+/// inside instead (Docker rootless semantics).
+pub(crate) fn id_ranges(id: u32, start: u32, count: u32) -> Vec<(u32, u32, u32)> {
+    let root_mode = std::env::var("LITEK8S_DEV_IDMAP").is_ok_and(|v| v == "root");
+    if root_mode || id == 0 || id >= 65536 || count < 65535 {
+        return vec![(0, id, 1), (1, start, count.min(65536))];
+    }
+    let mut v = vec![(0, start, id), (id, id, 1)];
+    let rest = 65535 - id;
+    if rest > 0 {
+        v.push((id + 1, start + id, rest));
+    }
+    v
+}
+
+/// Write the user and group id maps of `pid`'s new user namespace (see
+/// [`id_ranges`]).
 fn map_ids(pid: u32) -> Result<()> {
     // SAFETY: no preconditions.
     let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
     let user = sandbox::user_name(uid);
     for (tool, file, id) in [("newuidmap", "/etc/subuid", uid), ("newgidmap", "/etc/subgid", gid)] {
         let (start, count) = sandbox::subordinate_range(file, &user, uid).with_context(|| format!("{file} has no range for {user}"))?;
-        let count = count.min(65536);
-        let out = std::process::Command::new(tool)
-            .args([pid.to_string(), "0".into(), id.to_string(), "1".into(), "1".into(), start.to_string(), count.to_string()])
-            .output()
-            .with_context(|| format!("failed to run {tool}"))?;
+        let mut args = vec![pid.to_string()];
+        for (inside, outside, n) in id_ranges(id, start, count) {
+            args.extend([inside.to_string(), outside.to_string(), n.to_string()]);
+        }
+        let out = std::process::Command::new(tool).args(&args).output().with_context(|| format!("failed to run {tool}"))?;
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
             if sandbox::apparmor_restricts_userns() {
@@ -219,6 +238,23 @@ fn unbind_netns(file: &Path) {
     let _ = std::fs::remove_file(file);
 }
 
+/// The Docker API socket on the host (`~/.litek8s/docker.sock`), only for
+/// this user.
+fn bind_docker_socket() -> Result<std::os::unix::net::UnixListener> {
+    use std::os::unix::fs::PermissionsExt;
+    let path = crate::docker::host_socket_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    if std::os::unix::net::UnixStream::connect(&path).is_ok() {
+        bail!("{} is in use (another litek8s dev?)", path.display());
+    }
+    let _ = std::fs::remove_file(&path);
+    let l = std::os::unix::net::UnixListener::bind(&path).with_context(|| format!("failed to listen on {}", path.display()))?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(l)
+}
+
 fn bind_api(port: Option<u16>) -> Result<std::net::TcpListener> {
     let want = port.unwrap_or(DEFAULT_PORT);
     match std::net::TcpListener::bind(("127.0.0.1", want)) {
@@ -239,6 +275,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let started = now_ms();
     let listener = bind_api(port)?;
     let port = listener.local_addr()?.port();
+    let docker = bind_docker_socket()?;
     let cgroup = setup_cgroups(rootless)?;
 
     let (in_r, in_w) = pipe()?;
@@ -247,14 +284,26 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let mut cmd = std::process::Command::new("/proc/self/exe");
     cmd.arg("dev-sandbox").args(["dev", "__apiserver", "--data-dir"]).arg(&data);
     cmd.env("LITEK8S_DEV_ROOTLESS", if rootless { "1" } else { "0" });
+    if which("pasta").is_some() {
+        if let Some(gw) = std::fs::read_to_string("/proc/net/route").ok().and_then(|t| super::hostinfo::parse_default_gateway(&t)) {
+            cmd.env("LITEK8S_DEV_HOST_GATEWAY", gw);
+        }
+    }
+    if rootless {
+        // SAFETY: no preconditions.
+        let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };
+        if id_ranges(uid, 1, 65536).iter().any(|r| r.0 == uid && r.0 != 0) {
+            cmd.env("LITEK8S_DEV_HOLDER_IDS", format!("{uid}:{gid}"));
+        }
+    }
     cmd.stdin(std::process::Stdio::null());
     remap_fds(
         &mut cmd,
-        vec![in_r.as_raw_fd(), out_w.as_raw_fd(), listener.as_raw_fd(), broker_sandbox.as_raw_fd()],
-        vec![FD_CONTROL_IN, FD_CONTROL_OUT, FD_API_LISTENER, FD_BROKER],
+        vec![in_r.as_raw_fd(), out_w.as_raw_fd(), listener.as_raw_fd(), broker_sandbox.as_raw_fd(), docker.as_raw_fd()],
+        vec![FD_CONTROL_IN, FD_CONTROL_OUT, FD_API_LISTENER, FD_BROKER, FD_DOCKER],
     );
     let mut stage1 = cmd.spawn().context("failed to start the sandbox")?;
-    drop((in_r, out_w, listener, broker_sandbox));
+    drop((in_r, out_w, listener, broker_sandbox, docker));
     let stage1_pid = stage1.id();
 
     let setup_home = home.clone();
@@ -270,17 +319,19 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         }
         std::fs::write(cg.join("sandbox/cgroup.procs"), stage1_pid.to_string()).context("failed to move the sandbox into its cgroup")?;
         writeln!(input, "M")?;
-        let (mut pid1, mut mounted) = (None, false);
+        let (mut pid1, mut holder, mut mounted) = (None, None, false);
         while pid1.is_none() || !mounted {
             let line = sandbox::read_control(&mut output)?;
             if let Some(p) = line.strip_prefix("P ") {
                 pid1 = p.trim().parse::<u32>().ok();
+            } else if let Some(p) = line.strip_prefix("N ") {
+                holder = p.trim().parse::<u32>().ok();
             } else if line == "S" {
                 mounted = true;
             }
         }
         let pid1 = pid1.unwrap();
-        let net = Network::attach(pid1, rootless, &setup_home)?;
+        let net = Network::attach(holder.filter(|_| rootless).unwrap_or(pid1), rootless, &setup_home)?;
         writeln!(input, "R")?;
         Ok((pid1, net))
     });
@@ -339,6 +390,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
         }
     };
     network.stop();
+    let _ = std::fs::remove_file(crate::docker::host_socket_path());
     let _ = std::fs::remove_file(super::state_path(&home));
     if !rootless {
         // Let the kernel finish tearing down the PID namespace first, then
@@ -380,4 +432,18 @@ pub fn remove_in_userns(dir: &Path) -> Result<()> {
         bail!("failed to delete {}", dir.display());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::id_ranges;
+
+    #[test]
+    fn user_keeps_its_id() {
+        assert_eq!(id_ranges(1000, 100000, 65536), vec![(0, 100000, 1000), (1000, 1000, 1), (1001, 101000, 64535)]);
+        // Every id below 65536 is mapped once.
+        let total: u32 = id_ranges(1000, 100000, 65536).iter().map(|r| r.2).sum();
+        assert_eq!(total, 65536);
+        assert_eq!(id_ranges(70000, 100000, 65536), vec![(0, 70000, 1), (1, 100000, 65536)]);
+    }
 }

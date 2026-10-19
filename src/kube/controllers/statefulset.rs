@@ -39,15 +39,25 @@ pub(crate) fn reconcile(api: &ApiState, ns: &str, name: &str) -> Result<Requeue,
     let partition = i(&sts, "/spec/updateStrategy/rollingUpdate/partition").unwrap_or(0).max(0);
     let min_ready = i(&sts, "/spec/minReadySeconds").unwrap_or(0);
     let template = sts.pointer("/spec/template").cloned().unwrap_or_else(|| json!({}));
-    let update_revision = format!("{name}-{}", util::hash_of(&template));
+    let hash = util::hash_of(&template);
+    let owned_pods = util::owned(api, "", "pods", ns, &sts);
+    let mut in_use: Vec<String> = owned_pods.iter().map(revision_of).collect();
+    in_use.push(s(&sts, "/status/currentRevision").to_string());
+    let update_revision = super::history::sync(api, &sts, &template, &hash, &in_use)?.name;
     let current_revision = match s(&sts, "/status/currentRevision") {
         "" => update_revision.clone(),
         r => r.to_string(),
     };
+    // Pods below the partition are recreated from the current revision.
+    let current_template = if current_revision == update_revision {
+        template.clone()
+    } else {
+        super::history::template_of(api, ns, &current_revision).unwrap_or_else(|| template.clone())
+    };
 
     let mut pods: BTreeMap<i64, Value> = BTreeMap::new();
     let mut strays = Vec::new();
-    for pod in util::owned(api, "", "pods", ns, &sts) {
+    for pod in owned_pods {
         match ordinal_of(name, &pod) {
             Some(ord) => {
                 pods.insert(ord, pod);
@@ -59,10 +69,12 @@ pub(crate) fn reconcile(api: &ApiState, ns: &str, name: &str) -> Result<Requeue,
         let _ = api.delete_named("", "pods", ns, &util::name(&pod));
     }
 
-    let healthy = |p: &Value| util::phase(p) == "Running" && util::is_ready(p);
+    let healthy = |p: &Value| util::phase(p) == "Running" && util::is_ready(p) && !util::is_deleting(p);
     let mut requeue = None;
+    // OrderedReady: nothing moves while a pod is terminating.
+    let terminating = pods.values().any(util::is_deleting);
     // Create missing and replace failed pods, in order.
-    let mut blocked = false;
+    let mut blocked = !parallel && terminating;
     for ord in 0..replicas {
         match pods.get(&ord) {
             None => {
@@ -70,14 +82,14 @@ pub(crate) fn reconcile(api: &ApiState, ns: &str, name: &str) -> Result<Requeue,
                     break;
                 }
                 ensure_claims(api, &sts, ord)?;
-                let revision = if ord < partition { &current_revision } else { &update_revision };
-                let pod = pod_for(&sts, &template, ord, revision);
+                let (revision, tmpl) = if ord < partition { (&current_revision, &current_template) } else { (&update_revision, &template) };
+                let pod = pod_for(&sts, tmpl, ord, revision);
                 api.create_object("", "pods", Some(ns), pod)?;
                 if !parallel {
                     blocked = true;
                 }
             }
-            Some(pod) if util::is_terminal(pod) => {
+            Some(pod) if util::is_terminal(pod) && !util::is_deleting(pod) => {
                 let _ = api.delete_named("", "pods", ns, &util::name(pod));
                 if !parallel {
                     blocked = true;
@@ -90,9 +102,11 @@ pub(crate) fn reconcile(api: &ApiState, ns: &str, name: &str) -> Result<Requeue,
             }
         }
     }
-    // Scale down from the highest ordinal.
+    // Scale down from the highest ordinal; OrderedReady only while every
+    // pod is healthy and none is terminating.
     let extra: Vec<i64> = pods.keys().copied().filter(|o| *o >= replicas).collect();
-    for ord in extra.iter().rev() {
+    let may_scale_down = parallel || (!terminating && pods.values().all(healthy));
+    for ord in extra.iter().rev().filter(|_| may_scale_down) {
         let pod = &pods[ord];
         let _ = api.delete_named("", "pods", ns, &util::name(pod));
         if !parallel {

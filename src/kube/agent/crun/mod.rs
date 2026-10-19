@@ -18,12 +18,12 @@
 //! images, address reservations) and `/run/litek8s` (crun's state, the IPC
 //! namespace files, console sockets); network namespaces are in /run/netns.
 
-mod image;
-mod logs;
-mod net;
+pub(crate) mod image;
+pub(crate) mod logs;
+pub(crate) mod net;
 pub(crate) mod shim;
-mod spec;
-mod sys;
+pub(crate) mod spec;
+pub(crate) mod sys;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::os::fd::OwnedFd;
@@ -71,6 +71,9 @@ struct SandboxMeta {
     netns: Option<String>,
     ipc: String,
     host_ports: Vec<(u16, u16, String)>,
+    /// The hostIP of each host port ("" for every address).
+    #[serde(default)]
+    host_port_ips: Vec<String>,
     /// (target in the old sandbox container, directory on the node) of the
     /// pod's runtime volumes.
     volumes: Vec<(String, String)>,
@@ -99,7 +102,7 @@ struct Inner {
     root: PathBuf,
     crun: PathBuf,
     state_root: PathBuf,
-    images: image::ImageStore,
+    images: Arc<image::ImageStore>,
     ipam: Mutex<net::Ipam>,
     subnet: net::Subnet,
     /// MTU of pod interfaces (lower on the WireGuard overlay).
@@ -217,7 +220,7 @@ impl CrunPods {
             inner: Arc::new(Inner {
                 crun: find_crun().context("crun not found")?,
                 state_root: run.join("crun"),
-                images: image::ImageStore::open(&root.join("images"))?,
+                images: Arc::new(image::ImageStore::open(&root.join("images"))?),
                 ipam: Mutex::new(net::Ipam::open(&root.join("ipam"), subnet)?),
                 subnet,
                 mtu,
@@ -244,6 +247,11 @@ impl CrunPods {
             }
         });
         Ok(pods)
+    }
+
+    /// The node's image store (shared with the Docker API, see `crate::docker`).
+    pub(crate) fn image_store(&self) -> Arc<image::ImageStore> {
+        self.inner.images.clone()
     }
 
     /// Where image archives are staged before [`Self::import_images`].
@@ -394,8 +402,9 @@ impl CrunPods {
         let mut ports = Vec::new();
         for s in self.sandboxes().iter().filter(|s| Self::sandbox_running(s)) {
             if let Some(ip) = &s.ip {
-                for (container_port, host_port, proto) in &s.host_ports {
-                    ports.push((*host_port, proto.clone(), ip.clone(), *container_port));
+                for (i, (container_port, host_port, proto)) in s.host_ports.iter().enumerate() {
+                    let host_ip = s.host_port_ips.get(i).cloned().unwrap_or_default();
+                    ports.push((*host_port, proto.clone(), ip.clone(), *container_port, host_ip));
                 }
             }
         }
@@ -436,7 +445,10 @@ impl CrunPods {
             hosts.push_str("# Kubernetes-managed hosts file.\n127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n");
             hosts.push_str("fe00::0\tip6-localnet\nff00::0\tip6-mcastprefix\nff02::1\tip6-allnodes\nff02::2\tip6-allrouters\n");
             if let Some(ip) = ip {
-                hosts.push_str(&format!("{ip}\t{}\n", spec.hostname));
+                match &spec.fqdn {
+                    None => hosts.push_str(&format!("{ip}\t{}\n", spec.hostname)),
+                    Some(fqdn) => hosts.push_str(&format!("{ip}\t{fqdn}\t{}\n", spec.hostname)),
+                }
             }
         }
         for entry in &spec.extra_hosts {
@@ -675,6 +687,10 @@ impl PodRuntime for CrunPods {
         "crun"
     }
 
+    fn writes_pod_files(&self) -> bool {
+        true
+    }
+
     async fn machine(&self) -> Result<MachineInfo> {
         let mem_kb: i64 = std::fs::read_to_string("/proc/meminfo")
             .unwrap_or_default()
@@ -742,12 +758,11 @@ impl PodRuntime for CrunPods {
             let name = e.file_name().to_string_lossy().to_string();
             if let Some(volume) = name.strip_suffix(".labels") {
                 let labels: HashMap<String, String> = read_json(&e.path()).unwrap_or_default();
-                // `key` or `key=value`, as Docker's label filter.
-                let matches = match label.split_once('=') {
+                let hit = match label.split_once('=') {
                     Some((k, v)) => labels.get(k).is_some_and(|x| x == v),
                     None => labels.contains_key(label),
                 };
-                if matches {
+                if hit {
                     out.push(volume.to_string());
                 }
             }
@@ -773,6 +788,7 @@ impl PodRuntime for CrunPods {
             netns: (!spec.host_network).then(|| format!("{}/litek8s-{short}", net::NETNS_DIR)),
             ipc: format!("{RUN_DIR}/ipc/{short}"),
             host_ports: spec.host_ports.clone(),
+            host_port_ips: spec.host_port_ips.clone(),
             volumes: spec
                 .mounts
                 .iter()
@@ -790,7 +806,7 @@ impl PodRuntime for CrunPods {
             let ip = if spec.host_network { None } else { Some(self.inner.ipam.lock().unwrap().allocate(&id)?) };
             let host_if = format!("lk{short}");
             let batch = ip.map(|ip| net::pod_link_commands(&host_if, ip, &self.inner.subnet, self.inner.mtu));
-            sys::create_namespaces(meta.netns.as_ref().map(PathBuf::from), PathBuf::from(&meta.ipc), batch, Vec::new())?;
+            sys::create_namespaces(meta.netns.as_ref().map(PathBuf::from), PathBuf::from(&meta.ipc), batch, spec.sysctls.clone())?;
             if ip.is_some() {
                 sys::bridge_attach(net::BRIDGE, &host_if)?;
             }

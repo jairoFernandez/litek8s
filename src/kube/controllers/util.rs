@@ -318,3 +318,33 @@ mod tests {
         assert_ne!(a, hash_of(&json!({"spec": {"containers": [{"image": "httpd"}]}})));
     }
 }
+
+/// Record a core/v1 Event about `obj` (like client-go's event recorder).
+pub(crate) fn record_event(api: &ApiState, obj: &Value, type_: &str, reason: &str, message: &str, component: &str) {
+    let (ns, name) = ns_name(obj);
+    let ns = if ns.is_empty() { "default".to_string() } else { ns };
+    let now = rfc3339(now());
+    let mut suffix = [0u8; 8];
+    use rand_core::RngCore;
+    rand_core::OsRng.fill_bytes(&mut suffix);
+    let event = json!({
+        "apiVersion": "v1",
+        "kind": "Event",
+        "metadata": {"name": format!("{name}.{}", hex::encode(suffix))},
+        "involvedObject": {
+            "apiVersion": s(obj, "/apiVersion"), "kind": s(obj, "/kind"), "name": name,
+            "namespace": s(obj, "/metadata/namespace"), "uid": uid(obj),
+            "resourceVersion": s(obj, "/metadata/resourceVersion"),
+        },
+        "reason": reason,
+        "message": message,
+        "type": type_,
+        "source": {"component": component},
+        "reportingComponent": component,
+        "reportingInstance": "",
+        "firstTimestamp": now,
+        "lastTimestamp": now,
+        "count": 1,
+    });
+    let _ = api.create_object("", "events", Some(&ns), event);
+}

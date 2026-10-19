@@ -10,12 +10,10 @@
 //!   Time is measured from when this controller last saw the Lease change,
 //!   on its own clock, so neither clock skew nor an API server restart
 //!   expires anyone.
-//! - Pods on a node with NoExecute taints are evicted (deleted) once their
-//!   tolerations run out: at once without a matching toleration, after
-//!   `tolerationSeconds` from the taint's `timeAdded` with one, never with
-//!   one that has no limit. Every pod gets 300 s for not-ready/unreachable by
-//!   default (DefaultTolerationSeconds), so a node that comes back within the
-//!   grace period plus that keeps its pods.
+//! - The taint manager (`scheduler::evict_for_taints`) then evicts pods once
+//!   their tolerations run out. Every pod gets 300 s for not-ready and
+//!   unreachable by default (DefaultTolerationSeconds), so a node that comes
+//!   back within the grace period plus that keeps its pods.
 //! - When every node is unhealthy at once (the control plane lost its
 //!   network, not the nodes), nothing is evicted, like Kubernetes's full
 //!   disruption mode.
@@ -29,7 +27,6 @@ use serde_json::{Value, json};
 use tokio::time::Instant;
 
 use super::Requeue;
-use super::scheduler::toleration_matches;
 use super::util::{self, s};
 use crate::kube::server::{ApiError, ApiState};
 
@@ -170,49 +167,8 @@ pub(crate) fn reconcile(api: &ApiState, name: &str, health: Option<&Health>) -> 
         node = api.update_object("", "nodes", updated)?;
     }
 
-    // 3. Evict pods whose tolerations ran out.
-    let no_execute: Vec<Value> = taints.iter().filter(|t| s(t, "/effect") == "NoExecute").cloned().collect();
-    if !no_execute.is_empty() {
-        let now = util::now();
-        for pod in pods_on(api, name) {
-            if !util::is_active(&pod) {
-                continue;
-            }
-            let Some(at) = eviction_time(&pod, &no_execute) else { continue };
-            let (ns, pod_name) = util::ns_name(&pod);
-            if at <= now {
-                eprintln!("controllers: evicting pod {ns}/{pod_name} from node {name} (taint {})", s(&no_execute[0], "/key"));
-                match api.delete_named("", "pods", &ns, &pod_name) {
-                    Err(e) if !e.is_not_found() => return Err(e),
-                    _ => {}
-                }
-            } else {
-                let wait = (at - now).to_std().unwrap_or_default() + Duration::from_millis(500);
-                requeue = Some(requeue.map_or(wait, |r| r.min(wait)));
-            }
-        }
-    }
     let _ = node;
     Ok(requeue)
-}
-
-/// When a pod must leave a node with these NoExecute taints: now when one
-/// is not tolerated, `None` when all are tolerated forever.
-fn eviction_time(pod: &Value, taints: &[Value]) -> Option<chrono::DateTime<chrono::Utc>> {
-    let tolerations = pod.pointer("/spec/tolerations").and_then(Value::as_array).cloned().unwrap_or_default();
-    let mut earliest: Option<chrono::DateTime<chrono::Utc>> = None;
-    for taint in taints {
-        let matching: Vec<&Value> = tolerations.iter().filter(|t| toleration_matches(t, taint)).collect();
-        if matching.is_empty() {
-            return Some(util::now());
-        }
-        // The shortest limit of the matching tolerations; none: forever.
-        let Some(secs) = matching.iter().filter_map(|t| t.get("tolerationSeconds").and_then(Value::as_i64)).min() else { continue };
-        let added = taint.get("timeAdded").and_then(Value::as_str).and_then(util::parse_time).unwrap_or_else(util::now);
-        let at = added + chrono::Duration::seconds(secs.max(0));
-        earliest = Some(earliest.map_or(at, |e| e.min(at)));
-    }
-    earliest
 }
 
 /// Set Ready=False on the node's pods, so Endpoints drop them.
@@ -241,30 +197,6 @@ fn mark_pods_not_ready(api: &ApiState, node: &str) -> Result<(), ApiError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn taint(key: &str, added: &str) -> Value {
-        json!({"key": key, "effect": "NoExecute", "timeAdded": added})
-    }
-
-    #[test]
-    fn eviction_follows_toleration_seconds() {
-        let added = "2026-01-01T00:00:00Z";
-        let t0 = util::parse_time(added).unwrap();
-        let defaults = json!({"spec": {"tolerations": [
-            {"key": TAINT_NOT_READY, "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300},
-            {"key": TAINT_UNREACHABLE, "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300},
-        ]}});
-        assert_eq!(eviction_time(&defaults, &[taint(TAINT_UNREACHABLE, added)]), Some(t0 + chrono::Duration::seconds(300)));
-        let forever = json!({"spec": {"tolerations": [{"operator": "Exists"}]}});
-        assert_eq!(eviction_time(&forever, &[taint(TAINT_UNREACHABLE, added)]), None);
-        let none = json!({"spec": {}});
-        assert!(eviction_time(&none, &[taint(TAINT_UNREACHABLE, added)]).unwrap() > t0);
-        let short = json!({"spec": {"tolerations": [
-            {"key": TAINT_UNREACHABLE, "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300},
-            {"key": TAINT_UNREACHABLE, "operator": "Exists", "tolerationSeconds": 10},
-        ]}});
-        assert_eq!(eviction_time(&short, &[taint(TAINT_UNREACHABLE, added)]), Some(t0 + chrono::Duration::seconds(10)));
-    }
 
     #[test]
     fn taints_follow_ready() {

@@ -191,7 +191,36 @@ pub fn strategic_merge_patch(target: &mut Value, patch: &Value) {
         match (existing, value) {
             (Value::Array(current), Value::Array(incoming)) => {
                 if let Some(mkey) = merge_key(key, incoming) {
+                    let server_order: Vec<Value> = current.iter().filter_map(|e| e.get(mkey).cloned()).collect();
                     merge_keyed_list(current, incoming, mkey);
+                    // Element order as the API server computes it: the patch's
+                    // items in `$setElementOrder/<key>` (or patch) order, with
+                    // server-only items merged in by their live positions.
+                    let order: Vec<Value> = match patch_map.get(&format!("$setElementOrder/{key}")).and_then(Value::as_array) {
+                        Some(o) => o.iter().filter_map(|e| e.get(mkey).cloned()).collect(),
+                        None => incoming.iter().filter_map(|e| e.get(mkey).cloned()).collect(),
+                    };
+                    let rank = |v: &Value| v.get(mkey).and_then(|id| order.iter().position(|o| o == id));
+                    let mut patched: Vec<(usize, Value)> = Vec::new();
+                    let mut server_only = Vec::new();
+                    for item in current.drain(..) {
+                        match rank(&item) {
+                            Some(r) => patched.push((r, item)),
+                            None => server_only.push(item),
+                        }
+                    }
+                    patched.sort_by_key(|(r, _)| *r);
+                    let pos = |v: &Value| v.get(mkey).and_then(|id| server_order.iter().position(|o| o == id));
+                    let (mut left, mut right) = (server_only.into_iter().peekable(), patched.into_iter().map(|(_, v)| v).peekable());
+                    loop {
+                        let take_left = match (left.peek(), right.peek()) {
+                            (None, None) => break,
+                            (Some(_), None) => true,
+                            (None, Some(_)) => false,
+                            (Some(l), Some(r)) => matches!((pos(l), pos(r)), (Some(a), Some(b)) if a < b),
+                        };
+                        current.push(if take_left { left.next().unwrap() } else { right.next().unwrap() });
+                    }
                 } else if merges_as_set(key) {
                     for item in incoming {
                         if !current.contains(item) {
@@ -299,7 +328,7 @@ mod tests {
         assert_eq!(
             doc,
             json!({"spec": {"containers": [
-                {"name": "app", "image": "a:2", "env": [{"name": "X", "value": "1"}, {"name": "Y", "value": "2"}]}
+                {"name": "app", "image": "a:2", "env": [{"name": "Y", "value": "2"}, {"name": "X", "value": "1"}]}
             ], "tolerations": [{"key": "b"}]}})
         );
     }
@@ -313,5 +342,12 @@ mod tests {
                     "data": {"$patch": "replace", "only": "this"}}),
         );
         assert_eq!(doc, json!({"metadata": {"finalizers": ["b"]}, "data": {"only": "this"}}));
+    }
+
+    #[test]
+    fn strategic_new_items_come_first() {
+        let mut doc = json!({"containers": [{"name": "web", "image": "a"}]});
+        strategic_merge_patch(&mut doc, &json!({"containers": [{"name": "new", "image": "b"}]}));
+        assert_eq!(doc, json!({"containers": [{"name": "new", "image": "b"}, {"name": "web", "image": "a"}]}));
     }
 }

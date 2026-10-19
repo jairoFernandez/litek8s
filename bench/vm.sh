@@ -143,7 +143,7 @@ cmd_up() {
   rm -rf "$dir"; mkdir -p "$dir"
   echo "$port" >"$dir/port"
   echo "$mem $cpus $lan_ip" >"$dir/shape"
-  qemu-img create -q -f qcow2 -F qcow2 -b "$BASE" "$dir/disk.qcow2" 12G
+  qemu-img create -q -f qcow2 -F qcow2 -b "$BASE" "$dir/disk.qcow2" ${BENCH_DISK:-12G}
   make_seed "$dir" "$name" "$lan_ip"
   cp "$QEMU_SHARE/edk2-aarch64-code.fd" "$dir/efi-code.fd"
   dd if=/dev/zero of="$dir/efi-vars.fd" bs=1m count=64 2>/dev/null

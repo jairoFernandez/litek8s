@@ -32,6 +32,9 @@ pub struct ResourceType {
     pub printer_columns: Vec<PrinterColumn>,
     /// Defined by a CustomResourceDefinition (no strategic merge patch).
     pub custom: bool,
+    /// Served by an extension API server behind an APIService; listed in
+    /// discovery here, every request proxied (see `aggregator.rs`).
+    pub aggregated: bool,
 }
 
 impl ResourceType {
@@ -91,6 +94,7 @@ const BUILTINS: &[Builtin] = &[
     ("", "v1", "ReplicationController", "replicationcontrollers", &["rc"], true, true, true),
     ("", "v1", "ResourceQuota", "resourcequotas", &["quota"], true, true, false),
     ("", "v1", "LimitRange", "limitranges", &["limits"], true, false, false),
+    ("", "v1", "PodTemplate", "podtemplates", &[], true, false, false),
     ("apps", "v1", "Deployment", "deployments", &["deploy"], true, true, true),
     ("apps", "v1", "ReplicaSet", "replicasets", &["rs"], true, true, true),
     ("apps", "v1", "StatefulSet", "statefulsets", &["sts"], true, true, true),
@@ -99,10 +103,14 @@ const BUILTINS: &[Builtin] = &[
     ("batch", "v1", "Job", "jobs", &[], true, true, false),
     ("batch", "v1", "CronJob", "cronjobs", &["cj"], true, true, false),
     ("autoscaling", "v2", "HorizontalPodAutoscaler", "horizontalpodautoscalers", &["hpa"], true, true, false),
+    // Same objects, older version (no conversion: served as stored).
+    ("autoscaling", "v1", "HorizontalPodAutoscaler", "horizontalpodautoscalers", &["hpa"], true, true, false),
     ("policy", "v1", "PodDisruptionBudget", "poddisruptionbudgets", &["pdb"], true, true, false),
     ("networking.k8s.io", "v1", "Ingress", "ingresses", &["ing"], true, true, false),
     ("networking.k8s.io", "v1", "IngressClass", "ingressclasses", &[], false, false, false),
     ("networking.k8s.io", "v1", "NetworkPolicy", "networkpolicies", &["netpol"], true, false, false),
+    ("networking.k8s.io", "v1", "IPAddress", "ipaddresses", &["ip"], false, false, false),
+    ("networking.k8s.io", "v1", "ServiceCIDR", "servicecidrs", &[], false, true, false),
     ("discovery.k8s.io", "v1", "EndpointSlice", "endpointslices", &[], true, false, false),
     ("rbac.authorization.k8s.io", "v1", "Role", "roles", &[], true, false, false),
     ("rbac.authorization.k8s.io", "v1", "RoleBinding", "rolebindings", &[], true, false, false),
@@ -110,6 +118,9 @@ const BUILTINS: &[Builtin] = &[
     ("rbac.authorization.k8s.io", "v1", "ClusterRoleBinding", "clusterrolebindings", &[], false, false, false),
     ("storage.k8s.io", "v1", "StorageClass", "storageclasses", &["sc"], false, false, false),
     ("storage.k8s.io", "v1", "CSIDriver", "csidrivers", &[], false, false, false),
+    ("storage.k8s.io", "v1", "CSINode", "csinodes", &[], false, false, false),
+    ("storage.k8s.io", "v1", "CSIStorageCapacity", "csistoragecapacities", &[], true, false, false),
+    ("storage.k8s.io", "v1", "VolumeAttachment", "volumeattachments", &[], false, true, false),
     ("coordination.k8s.io", "v1", "Lease", "leases", &[], true, false, false),
     ("scheduling.k8s.io", "v1", "PriorityClass", "priorityclasses", &["pc"], false, false, false),
     ("events.k8s.io", "v1", "Event", "events", &["ev"], true, false, false),
@@ -120,6 +131,8 @@ const BUILTINS: &[Builtin] = &[
     // Stored and served; their CEL rules are not evaluated yet.
     ("admissionregistration.k8s.io", "v1", "ValidatingAdmissionPolicy", "validatingadmissionpolicies", &[], false, true, false),
     ("admissionregistration.k8s.io", "v1", "ValidatingAdmissionPolicyBinding", "validatingadmissionpolicybindings", &[], false, false, false),
+    ("flowcontrol.apiserver.k8s.io", "v1", "FlowSchema", "flowschemas", &[], false, true, false),
+    ("flowcontrol.apiserver.k8s.io", "v1", "PriorityLevelConfiguration", "prioritylevelconfigurations", &[], false, true, false),
     ("node.k8s.io", "v1", "RuntimeClass", "runtimeclasses", &[], false, false, false),
     ("certificates.k8s.io", "v1", "CertificateSigningRequest", "certificatesigningrequests", &["csr"], false, true, false),
     ("authentication.k8s.io", "v1", "TokenReview", "tokenreviews", &[], false, false, false),
@@ -160,6 +173,7 @@ impl Registry {
                     has_scale,
                     printer_columns: Vec::new(),
                     custom: false,
+                    aggregated: false,
                 }
             })
             .collect();
@@ -242,6 +256,14 @@ impl Registry {
         Ok(())
     }
 
+    /// Replace the resources an extension API server serves for a group
+    /// version (none: it is gone or unavailable).
+    pub fn set_aggregated(&self, group: &str, version: &str, types: Vec<ResourceType>) {
+        let mut all = self.types.write().unwrap();
+        all.retain(|t| !(t.aggregated && t.group == group && t.version == version));
+        all.extend(types);
+    }
+
     pub fn unregister_crd(&self, group: &str, plural: &str) {
         self.types
             .write()
@@ -273,7 +295,7 @@ pub fn crd_types(crd: &Value) -> Result<Vec<ResourceType>> {
         .context("CRD spec.versions is required")?;
     let mut types = Vec::new();
     for version in versions {
-        if version.get("served").and_then(Value::as_bool) == Some(false) {
+        if version.get("served").and_then(Value::as_bool) != Some(true) {
             continue;
         }
         let Some(name) = s(version, "/name") else {
@@ -307,6 +329,7 @@ pub fn crd_types(crd: &Value) -> Result<Vec<ResourceType>> {
             has_scale: version.pointer("/subresources/scale").is_some(),
             printer_columns,
             custom: true,
+            aggregated: false,
         });
     }
     if types.is_empty() {
