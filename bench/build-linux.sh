@@ -3,6 +3,13 @@
 # `litek8s node add --install` uses, so the benchmark measures what a real node runs.
 # Usage: bench/build-linux.sh [arm64|amd64]   -> prints the artifact path
 #
+# Any Docker API does, litek8s's own included (DOCKER_HOST=unix://$HOME/.litek8s/docker.sock,
+# docs/develop-without-docker.md; amd64 then runs under Rosetta in the dev VM).
+#   LITEK8S_BUILD_VOLUME=<name>  keep cargo's target dir and registry in that
+#       Docker volume instead of target/ in the bind-mounted checkout; only the
+#       binary is copied out (to the same path).
+#   CARGO_BUILD_JOBS=<n>         passed to cargo in the container.
+#
 # With BENCH_BUILD_VM=<vm name> (a bench/vm.sh VM, e.g. `bench/vm.sh up lkbuild
 # 2420 4096 6` with rustup installed) the source is synced into that VM and
 # built natively there instead (arm64 only), without Docker.
@@ -26,9 +33,17 @@ if [[ -n "${BENCH_BUILD_VM:-}" ]]; then
   echo "$ROOT/$TARGET_DIR/release/litek8s"
   exit 0
 fi
-docker run --rm --platform "linux/${ARCH}" \
-  -u "$(id -u):$(id -g)" \
-  -e "CARGO_TARGET_DIR=/work/${TARGET_DIR}" \
-  -v "${ROOT}:/work" -w /work \
-  rust:1.90 cargo build --release >&2
+args=(--rm --platform "linux/${ARCH}" -u "$(id -u):$(id -g)" -v "${ROOT}:/work" -w /work)
+[[ -n "${CARGO_BUILD_JOBS:-}" ]] && args+=(-e "CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}")
+if [[ -n "${LITEK8S_BUILD_VOLUME:-}" ]]; then
+  mkdir -p "$ROOT/$TARGET_DIR/release"
+  # A fresh volume belongs to root: hand it to the build user first.
+  docker run --rm -v "${LITEK8S_BUILD_VOLUME}:/cache" busybox:1.36 chown "$(id -u):$(id -g)" /cache
+  docker run "${args[@]}" -v "${LITEK8S_BUILD_VOLUME}:/cache" \
+    -e CARGO_TARGET_DIR=/cache/target -e CARGO_HOME=/cache/cargo-home \
+    rust:1.90 sh -c "cargo build --release && cp /cache/target/release/litek8s /work/${TARGET_DIR}/release/litek8s.tmp" >&2
+  mv "$ROOT/$TARGET_DIR/release/litek8s.tmp" "$ROOT/$TARGET_DIR/release/litek8s"
+else
+  docker run "${args[@]}" -e "CARGO_TARGET_DIR=/work/${TARGET_DIR}" rust:1.90 cargo build --release >&2
+fi
 echo "${ROOT}/${TARGET_DIR}/release/litek8s"
