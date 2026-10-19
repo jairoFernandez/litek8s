@@ -154,6 +154,34 @@ async fn watch_resumes_from_resource_version() -> Result<()> {
 }
 
 #[tokio::test]
+async fn watch_from_an_expired_resource_version_ends_with_an_error_event() -> Result<()> {
+    // A restarted server has no event history: older versions are expired.
+    let dir = tempfile::tempdir()?;
+    let addr = {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?.to_string();
+        let state = Arc::new(ApiState::open(Some(dir.path()), addr.clone(), false)?);
+        tokio::spawn(serve_listener(state, listener));
+        addr
+    };
+    let base = "/api/v1/namespaces/default/configmaps";
+    post(&addr, base, cm("a", json!({}))).await?;
+    post(&addr, base, cm("b", json!({}))).await?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let restarted = listener.local_addr()?.to_string();
+    let state = Arc::new(ApiState::open(Some(dir.path()), restarted.clone(), false)?);
+    tokio::spawn(serve_listener(state, listener));
+
+    // Like kube-apiserver: 200 and an ERROR event, which makes client-go
+    // relist (a 410 response makes its RetryWatcher retry forever).
+    let (code, event) = get(&restarted, &format!("{base}?watch=true&resourceVersion=1")).await?;
+    assert_eq!(code, 200);
+    assert_eq!((event["type"].as_str(), event["object"]["code"].as_i64()), (Some("ERROR"), Some(410)));
+    assert_eq!(event["object"]["reason"], "Expired");
+    Ok(())
+}
+
+#[tokio::test]
 async fn crds_serve_custom_resources() -> Result<()> {
     let addr = start().await?;
     let crd = json!({
@@ -235,6 +263,60 @@ where
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     anyhow::bail!("timed out waiting for {what}")
+}
+
+#[tokio::test]
+async fn foreground_deletion_of_a_service_finishes() -> Result<()> {
+    // Argo CD deletes an Application's resources in the foreground; the
+    // Service's EndpointSlice (blockOwnerDeletion) must not come back.
+    let addr = start_with_controllers().await?;
+    let pod = json!({"metadata": {"name": "p", "labels": {"app": "x"}}, "spec": {"containers": [{"name": "c", "image": "nginx:1"}]}});
+    let (_, pod) = post(&addr, "/api/v1/namespaces/default/pods", pod).await?;
+    let mut status = pod.clone();
+    status["status"] = json!({"phase": "Running", "podIP": "10.42.0.9",
+        "conditions": [{"type": "Ready", "status": "True", "lastTransitionTime": "2026-01-01T00:00:00Z"}]});
+    call(&addr, "PUT", "/api/v1/namespaces/default/pods/p/status", "application/json", &status.to_string()).await?;
+    let svc = json!({"metadata": {"name": "web"}, "spec": {"selector": {"app": "x"}, "ports": [{"port": 80}]}});
+    post(&addr, "/api/v1/namespaces/default/services", svc).await?;
+    eventually("an EndpointSlice", || async {
+        let (_, l) = get(&addr, "/apis/discovery.k8s.io/v1/namespaces/default/endpointslices?labelSelector=kubernetes.io%2Fservice-name%3Dweb").await?;
+        Ok(l["items"].as_array().is_some_and(|a| !a.is_empty()).then_some(l))
+    })
+    .await?;
+    let (code, _) = call(&addr, "DELETE", "/api/v1/namespaces/default/services/web", "application/json", r#"{"propagationPolicy":"Foreground"}"#).await?;
+    assert_eq!(code, 200);
+    eventually("the Service gone", || async {
+        let (code, _) = get(&addr, "/api/v1/namespaces/default/services/web").await?;
+        Ok((code == 404).then_some(Value::Null))
+    })
+    .await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn controllers_finish_foreground_deletions_started_before_they_ran() -> Result<()> {
+    // As after a restart: the deletion began while no controller watched.
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?.to_string();
+    let state = Arc::new(ApiState::open(None, addr.clone(), false)?);
+    tokio::spawn(serve_listener(state.clone(), listener));
+    let (_, cm_owner) = post(&addr, "/api/v1/namespaces/default/configmaps", cm("owner", json!({}))).await?;
+    let mut dependent = cm("dependent", json!({}));
+    dependent["metadata"]["ownerReferences"] = json!([{"apiVersion": "v1", "kind": "ConfigMap", "name": "owner",
+        "uid": cm_owner["metadata"]["uid"], "blockOwnerDeletion": true}]);
+    post(&addr, "/api/v1/namespaces/default/configmaps", dependent).await?;
+    call(&addr, "DELETE", "/api/v1/namespaces/default/configmaps/owner", "application/json", r#"{"propagationPolicy":"Foreground"}"#).await?;
+    let (code, _) = get(&addr, "/api/v1/namespaces/default/configmaps/owner").await?;
+    assert_eq!(code, 200, "held by its foregroundDeletion finalizer");
+
+    tokio::spawn(litek8s::kube::controllers::run(state));
+    eventually("owner and dependent gone", || async {
+        let (owner, _) = get(&addr, "/api/v1/namespaces/default/configmaps/owner").await?;
+        let (dep, _) = get(&addr, "/api/v1/namespaces/default/configmaps/dependent").await?;
+        Ok((owner == 404 && dep == 404).then_some(Value::Null))
+    })
+    .await?;
+    Ok(())
 }
 
 #[tokio::test]

@@ -295,6 +295,163 @@ passes 101/101 against `litek8s dev` both on Linux (rootless) and in the macOS
 VM ([compat/RESULTS.md](../compat/RESULTS.md); k3d is the 101/101 reference
 there). kind was not scored; it runs upstream Kubernetes.
 
+## Argo CD on k3s and on litek8s (2026-10-19, x86_64/KVM)
+
+Does the advantage hold for a heavy, real workload? Argo CD's application
+controller watches every resource type in the cluster, lists them all on
+start, patches its Applications on every reconcile and records events for
+every sync: a good stress of list/watch, discovery and custom resources.
+
+**Setup.** `bench/run.sh argocd-k3s argocd-litek8s`. Each system gets a
+fresh Ubuntu 24.04 **amd64** guest of **2 vCPU / 2 GiB**, no swap, under
+qemu + KVM on an AMD Ryzen 7 5800X workstation (16 threads, 31 GiB; the VMs
+run inside a Docker container given `/dev/kvm`). k3s v1.36.5+k3s1 minimal
+(`--disable=traefik,servicelb,metrics-server,local-storage`: CoreDNS is its
+only addon) against `litek8s apiserver --runtime crun` (crun 1.14.1) at
+`76dc2cb`. Both install the same pinned chart, **argo-cd 10.10.5** (Argo CD
+v3.5.5, chart defaults, non-HA: application controller, ApplicationSet
+controller, server, repo server, notifications controller, Dex, Redis; no
+PVC), with the same helm v3.19.0, kubectl v1.34.1 and driver
+([`node/argocd.py`](node/argocd.py)). The GitOps steps use
+`argoproj/argocd-example-apps` (`guestbook`, plain manifests; `helm-guestbook`,
+a Helm chart) with automated sync, prune and self-heal. Three rounds,
+alternating which system goes first (k3s → litek8s, litek8s → k3s,
+k3s → litek8s), three repeats of every timed step per round, 60 s settle and
+a 300 s idle window. The host was otherwise idle: 1.9–3.3 % of its CPU busy
+during each phase, VM included, load average ≤ 0.8. Raw data:
+[`results/2026-10-19-argocd-x86-kvm/`](results/2026-10-19-argocd-x86-kvm/)
+(`report.md` is the generated report with every round).
+
+Medians over the three rounds (times: over every repeat; range in parentheses):
+
+| | k3s minimal | **litek8s (crun)** |
+|---|---|---|
+| Orchestrator memory, no Argo CD (PSS) | 586 MiB | **19 MiB** |
+| Orchestrator memory, Argo CD + 1 synced app, idle | 900 MiB | **90 MiB** |
+| … control plane (k3s-server / litek8s apiserver) | 736 MiB | 76 MiB |
+| … container runtime (containerd, shims, pause / crun shims) | 136 MiB | 13 MiB |
+| … CoreDNS | 26 MiB | – (in the API server) |
+| Orchestrator memory, peak while syncing (5 s samples) | 945 MiB | **130 MiB** |
+| Argo CD's own pods, idle | 342 MiB | 359 MiB |
+| Guest MemAvailable, Argo CD + 1 app idle (of 1,967) | 571 MiB | **1,337 MiB** |
+| Guest MemAvailable, lowest while syncing | 499 MiB | 1,270 MiB |
+| Idle CPU, whole guest, Argo CD + 1 app (% of one vCPU) | 2.98 % | **0.43 %** |
+| … control plane / runtime | 1.92 % / 1.03 % | 0.06 % / 0.00 % |
+| … Argo CD's pods | 0.36 % | 0.45 % |
+| `helm install` → all 7 Argo CD pods Ready, images pulled | 27.1 s (27.0–72.5) | **19.9 s** (19.5–20.0) |
+| … after `helm uninstall`, images cached (n=9) | 20.0 s (19.1–44.7) | **13.4 s** (13.3–13.6) |
+| … of which `helm install` returning (pre-install hook Job) | 5.8 s | 2.1 s |
+| Application created → Synced + Healthy, first (git clone, image pull) | **15.7 s** (15.6–16.6) | 18.1 s (18.0–19.1) |
+| … `guestbook` recreated (n=9) | 1.3 s | **1.0 s** |
+| … `helm-guestbook` recreated (n=9) | 1.8 s | **1.0 s** |
+| Parameter override replicaCount 1 → 2: re-synced, 2 pods Ready (n=9) | 1.9 s (1.6–2.5) | **1.0 s** (1.0–1.0) |
+| replicaCount 2 → 1 (n=9) | 0.8 s | 0.7 s |
+| Drift: managed Deployment deleted → recreated (n=9) | 0.4 s (0.4–7.2) | 0.3 s (0.3–0.4) |
+| … → Available, app Synced + Healthy again (n=9) | 1.1 s (0.8–7.9) | **0.4 s** (0.4–0.4) |
+| API requests/s, no Argo CD | 0.77 | 0.02 |
+| API requests/s, Argo CD + 1 app idle | 1.22 | 0.10 |
+| API requests/s during the GitOps steps (without the driver's own GETs) | 11.5 | 6.4 |
+| Open watches, no Argo CD → with Argo CD | 162 → 265 | 0 → 79 |
+
+**Read:** the advantage holds, and grows in absolute terms. With Argo CD
+installed and an app synced, the whole litek8s orchestrator takes **90 MiB
+against 900 MiB** (10×), leaves 1.34 GiB of the 2 GiB guest free against
+0.57 GiB, and idles at a seventh of k3s's CPU. Argo CD itself costs about
+the same on both (342 vs 359 MiB, 0.36 vs 0.45 % CPU): the difference is all
+orchestrator. Every GitOps step is as fast or faster, and less variable, on
+litek8s. k3s minimal does fit at 2 GiB (no OOM kills, no pod restarts on
+either system, ~500 MiB still available at its lowest), so no 4 GiB run was
+needed. On a 1 GiB node it would not fit: k3s alone already uses ~0.67 GiB
+of the 1.92 GiB guest.
+
+**Where the differences come from.**
+
+- *Memory.* k3s-server grows from ~400 to ~740 MiB PSS with Argo CD: its
+  watch cache keeps a decoded copy of every watched type, and Argo CD
+  watches 103 more of them. The litek8s API server grows from 19 to 76 MiB:
+  objects are kept as compact JSON, watches are served from one change feed
+  plus a byte-bounded history, and there is no separate kubelet,
+  controller-manager, scheduler, CoreDNS or kube-proxy (all in-process).
+  Argo CD's application + ApplicationSet controllers take ~45 MiB less on
+  litek8s (117 vs 164 MiB), consistent with the application controller's
+  cluster cache mirroring every resource type the API serves: litek8s
+  serves fewer (Argo CD opens 79 watches against 103). Dex is
+  the exception, 93 MiB on litek8s against 28–63 MiB on k3s; not
+  investigated.
+- *API load.* Argo CD itself is quiet once synced (≈0.1 requests/s on
+  litek8s, watch renewals and an Application patch now and then). On k3s
+  most of the 1.2 requests/s at idle is k3s talking to itself: lease
+  renewals, kubelet node status, endpoint/endpointslice reads, all over
+  HTTP even inside one process; plus 60 `/openapi/v3` and 40 discovery GETs
+  per 5 minutes that `/metrics` does not attribute (on litek8s Argo CD made
+  one discovery request in the same window). While
+  syncing, k3s serves twice the requests (11.5 vs 6.4/s): its kubelet and
+  controller-manager write Deployment, ReplicaSet and Pod status and events
+  through the API, while litek8s's controllers and node agent write straight
+  to the store.
+- *Install time.* `helm install` returns once the chart's pre-install hook
+  Job has run: 2.1 s on litek8s, 5.8 s on k3s (Job controller → scheduler →
+  kubelet → containerd → pause + container, each a separate loop). The rest
+  is the seven pods starting; litek8s starts a pod with `unshare`, one `ip
+  -batch` and `crun create/start` per container, k3s goes through
+  containerd, a pause container and runc.
+- *The one slower step.* The first Application sync includes pulling the
+  example app's image (`gcr.io/google-samples/gb-frontend:v5`): 18.1 s on
+  litek8s against 15.7 s on k3s, with the same clone in the repo server, so
+  most likely litek8s's image pull and unpack. Not investigated further.
+- *Drift.* Self-heal is driven by Argo CD's watch on the Deployment, so
+  recreation takes 0.3–0.4 s on both; becoming Available again is faster on
+  litek8s because its pod start is (0.4 vs 1.1 s). One k3s repeat hit Argo
+  CD's self-heal backoff (7.2 s).
+
+**What Argo CD broke in litek8s, fixed on the way** (each with a test;
+`cargo test` passes with and without `--no-default-features`, and the
+101-case compat corpus passes, 101/101 on crun, x86_64):
+
+- *Syncs never finished.* Argo CD 3.x clears `operation` with a JSON patch
+  that adds `null`. kube-apiserver treats a null in a non-nullable custom
+  resource field as absent (default or drop); litek8s rejected it with 422,
+  so every sync stayed "Running" (`994df55`).
+- *Watch storm after an API server restart.* A watch from a resourceVersion
+  older than the history must end with 200 and an ERROR event (410
+  Expired), not a 410 response: client-go's RetryWatcher (Argo CD's cluster
+  cache) only relists on the event, and retried the old version ~50 times a
+  second forever (`bb3e494`).
+- *Deleting an Application hung.* Argo CD deletes resources in the
+  foreground; the Service controller recreated the EndpointSlice the garbage
+  collector had to delete first, so the Service never went away. Foreground
+  deletions under way at a restart were also never resumed (`36325e8`).
+- *Memory under many watches.* A resumed watch parsed the whole event
+  history (every resource type) into a backlog it kept for its lifetime: 54
+  of 72 MB of heap under Argo CD (heaptrack). Each custom resource read,
+  write and watch event re-parsed its CRD, a few MB for Argo CD's
+  Application. glibc gave each busy thread its own arena: 470 MiB RSS on a
+  16-thread host, ~120 MiB with two (`bb3e494`, `46ec8de`, `47935cb`).
+- *Events never expired.* kube-apiserver keeps them for an hour; litek8s
+  kept them forever (3,700 after five hours of Argo CD) (`694ef91`).
+- *Image pulls.* ECR Public rate-limits anonymous pulls with 429; the pull
+  failed into the pod's backoff and Argo CD's Redis took two minutes to
+  start. 429/503 are now retried in place (`3b2bb89`). A failed layer unpack
+  left its partial tree behind on every retry (`6e740e5`, also fixed on main).
+- *A corpus regression from upstream:* the current kyverno chart renders
+  `replicas:` with no value; Kubernetes decodes that as unset (default 1),
+  litek8s kept the null and Helm's readiness check crashed (`cbffdd2`).
+- New: `/metrics` also serves `apiserver_request_total` and
+  `apiserver_longrunning_requests` with kube-apiserver's labels (`5977b36`),
+  which is how the request rates above compare.
+
+The heap work overlapped with main's own (compact JSON objects, byte-bounded
+history, periodic `malloc_trim`, merged in `d354f98`); together they took
+the API server under Argo CD from 129 to 72 MiB PSS in the Mac dry runs
+(same 2 GiB shape, arm64).
+
+Caveats: one guest shape and one host; the CPU percentages are of a Ryzen
+5800X core. The sync-window request rates include the driver's own
+`kubectl` runs that are not single GETs (24 per round on both systems).
+Earlier dry runs on the Mac (arm64 guests under HVF, 2 vCPU / 2 GiB, short
+windows; the example apps' amd64-only image ran under qemu-user there) gave
+the same picture: k3s-server 681 MiB with Argo CD, litek8s 72 MiB.
+
 ## Remote node over SSH (litek8s only)
 
 Control plane in one guest, the node in a second guest of the same shape, reached through
@@ -413,6 +570,8 @@ litek8s's local node) and **7.8 % on the control plane**, 5.8 % of it in forked 
 bench/run.sh                        # all phases on fresh local VMs, ~55 min
 bench/run.sh litek8s rpc            # just litek8s single-node + remote-node phases
 bench/run.sh kube kube-crun         # the Kubernetes path on Docker and on crun
+bench/run.sh argocd-k3s argocd-litek8s   # Argo CD on both (ARGO_VM_MEM, ARGO_RUNS)
+python3 bench/argocd_report.py bench/results/<run1> bench/results/<run2>   # pooled
 IDLE_SECS=60 SETTLE_SECS=10 bench/run.sh k3s-minimal   # quick look
 python3 bench/report.py bench/results/<timestamp>      # tables from raw JSON
 ```

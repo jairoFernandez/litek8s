@@ -95,6 +95,7 @@ pub enum StoreError {
 }
 
 /// A past change, kept for watches that resume from a resourceVersion.
+#[derive(Clone)]
 struct HistoryEntry {
     rv: u64,
     key: ObjectKey,
@@ -253,6 +254,11 @@ impl Store {
         json.map(|j| serde_json::from_slice(&j).unwrap_or(Value::Null))
     }
 
+    /// An object's resourceVersion, without copying the object.
+    pub fn resource_version_of(&self, key: &ObjectKey) -> Option<u64> {
+        self.inner.lock().unwrap().objects.get(key).map(|s| s.rv)
+    }
+
     /// All objects of one resource, optionally restricted to a namespace, in
     /// key order, plus the resourceVersion the snapshot was taken at.
     pub fn list(&self, group: &str, resource: &str, namespace: Option<&str>) -> (Vec<Value>, u64) {
@@ -346,24 +352,31 @@ impl Store {
     /// delivered (the caller sends its own initial list). Taken under the store
     /// lock, so no event can fall between the backlog and the live feed.
     pub fn subscribe(&self, since: Option<u64>) -> Result<Subscription, StoreError> {
-        let inner = self.inner.lock().unwrap();
-        let live = self.events.subscribe();
-        let backlog = match since {
-            None => Vec::new(),
-            Some(rv) if rv >= inner.rv => Vec::new(),
-            Some(rv) => {
-                let oldest = inner.history.front().map(|e| e.rv).unwrap_or(inner.rv + 1);
-                if rv + 1 < oldest {
-                    return Err(StoreError::Gone);
+        self.subscribe_for(since, |_| true)
+    }
+
+    /// [`subscribe`](Self::subscribe) with a backlog of only the events for
+    /// keys `wanted` accepts (a watch replays one resource, not the whole
+    /// history; the live feed is unfiltered).
+    pub fn subscribe_for(&self, since: Option<u64>, wanted: impl Fn(&ObjectKey) -> bool) -> Result<Subscription, StoreError> {
+        let (live, entries) = {
+            let inner = self.inner.lock().unwrap();
+            let live = self.events.subscribe();
+            let entries: Vec<HistoryEntry> = match since {
+                None => Vec::new(),
+                Some(rv) if rv >= inner.rv => Vec::new(),
+                Some(rv) => {
+                    let oldest = inner.history.front().map(|e| e.rv).unwrap_or(inner.rv + 1);
+                    if rv + 1 < oldest {
+                        return Err(StoreError::Gone);
+                    }
+                    inner.history.iter().filter(|e| e.rv > rv && wanted(&e.key)).cloned().collect()
                 }
-                inner
-                    .history
-                    .iter()
-                    .filter(|e| e.rv > rv)
-                    .map(HistoryEntry::to_event)
-                    .collect()
-            }
+            };
+            (live, entries)
         };
+        // Parsed outside the lock.
+        let backlog = entries.iter().map(HistoryEntry::to_event).collect();
         Ok(Subscription { backlog, live })
     }
 
@@ -538,6 +551,9 @@ mod tests {
         let names: Vec<_> = sub.backlog.iter().map(|e| e.key.name.clone()).collect();
         assert_eq!(names, vec!["b"]);
         assert!(store.subscribe(Some(2)).unwrap().backlog.is_empty());
+        let only_a = store.subscribe_for(Some(0), |k| k.name == "a").unwrap();
+        let names: Vec<_> = only_a.backlog.iter().map(|e| e.key.name.clone()).collect();
+        assert_eq!(names, vec!["a"]);
     }
 
     #[test]

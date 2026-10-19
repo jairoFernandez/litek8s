@@ -139,6 +139,19 @@ pub struct ApiState {
     pod_port: std::sync::atomic::AtomicU16,
     /// Imports image archives into the local node, when there is one.
     pub(crate) image_loader: std::sync::OnceLock<ImageLoader>,
+    /// kube-apiserver's request counters, also served at `/metrics`.
+    request_metrics: super::metrics::RequestMetrics,
+    /// Parsed CRDs by name. Every custom resource read, write and watch
+    /// event needs its CRD and schema, and some are megabytes when parsed
+    /// (Argo CD's Application): share one copy per CRD resourceVersion.
+    crd_cache: std::sync::Mutex<HashMap<String, CachedCrd>>,
+}
+
+struct CachedCrd {
+    rv: u64,
+    crd: Arc<Value>,
+    /// `openAPIV3Schema` by version name.
+    schemas: HashMap<String, Option<Arc<Value>>>,
 }
 
 impl ApiState {
@@ -168,6 +181,8 @@ impl ApiState {
             signer: super::sa_token::TokenSigner::load_or_create(data_dir)?,
             pod_port: std::sync::atomic::AtomicU16::new(0),
             image_loader: std::sync::OnceLock::new(),
+            request_metrics: Default::default(),
+            crd_cache: Default::default(),
         };
         state.bootstrap()?;
         Ok(state)
@@ -359,6 +374,7 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
     tokio::spawn(super::controllers::run(state.clone()));
     super::metrics::spawn_memory_trim();
     tokio::spawn(super::aggregator::run(state.clone()));
+    tokio::spawn(expire_events(state.clone()));
 
     // The local node comes first: where pods reach this host (Docker's
     // host-gateway, crun's bridge address) decides where DNS and the in-cluster port can listen.
@@ -873,21 +889,25 @@ async fn handle(state: Arc<ApiState>, mut req: Request<Incoming>) -> Response<Bo
         Ok(resp) => resp,
         Err(error) => error.into_response(),
     };
+    let code = resp.status().as_u16();
     let watch = path.contains("/watch/") || matches!(req.q("watch"), Some("true" | "1"));
     if !watch && !path.starts_with("/apis/agent.litek8s.dev/") && path != "/metrics" {
         state.metrics.observe(Metrics::verb(&parts.method, false, request_names_object(&path)), started.elapsed());
     }
     if state.log_requests {
         eprintln!(
-            "apiserver: {} {}{} -> {} ({} µs)",
+            "apiserver: {} {}{} -> {} ({} µs) {}",
             parts.method,
             path,
             parts.uri.query().map(|q| format!("?{q}")).unwrap_or_default(),
-            resp.status().as_u16(),
-            started.elapsed().as_micros()
+            code,
+            started.elapsed().as_micros(),
+            header(hyper::header::USER_AGENT),
         );
     }
-    resp
+    let info = super::metrics::request_info(&req.method, &path, &req.query, &req.content_type, parts.headers.contains_key(hyper::header::UPGRADE));
+    let (resp_parts, body) = resp.into_parts();
+    Response::from_parts(resp_parts, state.request_metrics.observe(info, code, body))
 }
 
 /// Whether a resource path names one object (`get`) rather than a
@@ -1490,7 +1510,7 @@ impl ApiState {
         if !rt.custom {
             return Ok(objects);
         }
-        let Some(crd) = self.store.get(&ObjectKey::new("apiextensions.k8s.io", "customresourcedefinitions", "", &format!("{}.{}", rt.plural, rt.group))) else {
+        let Some(crd) = self.crd(rt) else {
             return Ok(objects);
         };
         let mut objects = admission::convert_objects(self, &crd, objects, &rt.api_version()).await?;
@@ -1504,8 +1524,8 @@ impl ApiState {
     }
 
     /// The version custom resources are stored as.
-    fn storage_version(&self, rt: &ResourceType) -> Option<(Value, String)> {
-        let crd = self.store.get(&ObjectKey::new("apiextensions.k8s.io", "customresourcedefinitions", "", &format!("{}.{}", rt.plural, rt.group)))?;
+    fn storage_version(&self, rt: &ResourceType) -> Option<(Arc<Value>, String)> {
+        let crd = self.crd(rt)?;
         let v = crd
             .pointer("/spec/versions")?
             .as_array()?
@@ -1553,6 +1573,7 @@ impl ApiState {
         let mut obj = parse_body(req)?;
         self.strict_fields(rt, req, &obj, false)?;
         let generated = meta(&obj).get("name").and_then(Value::as_str).unwrap_or_default().is_empty();
+        let incoming = obj.pointer("/metadata/managedFields").cloned();
         self.prepare_create(rt, ns, &mut obj, true)?;
         let name = name_of(&obj);
         let attrs = admission::Attributes {
@@ -1573,6 +1594,7 @@ impl ApiState {
                 }
             }
         }
+        self.track_fields(rt, None, &mut obj, incoming, req, None);
         if req.dry_run() {
             return Ok(json_response(StatusCode::CREATED, &obj));
         }
@@ -1618,6 +1640,7 @@ impl ApiState {
             .filter(|s| !s.is_empty())
             .map(|s| s.parse::<u64>().map_err(|_| ApiError::bad_request("invalid resourceVersion")))
             .transpose()?;
+        let incoming = obj.pointer("/metadata/managedFields").cloned();
         let new = self.prepare_update(rt, &old, obj, sub, name)?;
         let attrs = admission::Attributes {
             rt,
@@ -1628,7 +1651,8 @@ impl ApiState {
             old: Some(&old),
             dry_run: req.dry_run(),
         };
-        let new = admission::admit(self, &attrs, new).await?;
+        let mut new = admission::admit(self, &attrs, new).await?;
+        self.track_fields(rt, Some(&old), &mut new, incoming, req, sub);
         if req.dry_run() {
             return Ok(json_response(StatusCode::OK, &new));
         }
@@ -1668,7 +1692,7 @@ impl ApiState {
             let Some(old) = self.store.get(&key) else {
                 if is_apply && sub.is_none() {
                     // Server-side apply creates missing objects.
-                    let mut obj = body.clone();
+                    let (mut obj, entries) = self.apply_config(rt, None, &body, req, sub)?;
                     if name_of(&obj).is_empty() {
                         obj["metadata"]["name"] = json!(name);
                     }
@@ -1682,7 +1706,8 @@ impl ApiState {
                         old: None,
                         dry_run: req.dry_run(),
                     };
-                    let obj = admission::admit(self, &attrs, obj).await?;
+                    let mut obj = admission::admit(self, &attrs, obj).await?;
+                    set_managed_fields(&mut obj, entries);
                     if req.dry_run() {
                         return Ok(json_response(StatusCode::CREATED, &obj));
                     }
@@ -1700,6 +1725,7 @@ impl ApiState {
             let stored_rv = resource_version(&old);
             let old = self.served_as(rt, vec![old]).await?.remove(0);
             let mut target = old.clone();
+            let mut applied: Option<Vec<super::managed::Entry>> = None;
             match ct {
                 "application/json-patch+json" => patch::json_patch(&mut target, &body)
                     .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "Invalid", e.to_string()))?,
@@ -1714,7 +1740,11 @@ impl ApiState {
                     }
                     patch::strategic_merge_patch(&mut target, &body)
                 }
-                _ if is_apply => patch::apply_merge(&mut target, &body),
+                _ if is_apply => {
+                    let (merged, entries) = self.apply_config(rt, Some(&old), &body, req, sub)?;
+                    target = merged;
+                    applied = Some(entries);
+                }
                 other => {
                     return Err(ApiError::new(
                         StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -1723,6 +1753,7 @@ impl ApiState {
                     ));
                 }
             }
+            let incoming = target.pointer("/metadata/managedFields").cloned().filter(|m| Some(m) != old.pointer("/metadata/managedFields"));
             let new = self.prepare_update(rt, &old, target, sub, name)?;
             let attrs = admission::Attributes {
                 rt,
@@ -1733,7 +1764,11 @@ impl ApiState {
                 old: Some(&old),
                 dry_run: req.dry_run(),
             };
-            let new = admission::admit(self, &attrs, new).await?;
+            let mut new = admission::admit(self, &attrs, new).await?;
+            match applied {
+                Some(entries) => set_managed_fields(&mut new, entries),
+                None => self.track_fields(rt, Some(&old), &mut new, incoming, req, sub),
+            }
             if req.dry_run() {
                 return Ok(json_response(StatusCode::OK, &new));
             }
@@ -2027,7 +2062,8 @@ impl ApiState {
                 .ok_or_else(|| ApiError::bad_request("scale needs spec.replicas"))?;
             let mut updated = old.clone();
             updated["spec"]["replicas"] = json!(replicas);
-            let new = self.prepare_update(rt, &old, updated, None, name)?;
+            let mut new = self.prepare_update(rt, &old, updated, None, name)?;
+            self.track_fields(rt, Some(&old), &mut new, None, req, Some("scale"));
             if req.dry_run() {
                 return Ok(json_response(StatusCode::OK, &scale_of(&new)));
             }
@@ -2057,6 +2093,9 @@ impl ApiState {
         obj: &mut Value,
         check_namespace: bool,
     ) -> Result<(), ApiError> {
+        if !rt.custom {
+            super::fields::drop_nulls(obj);
+        }
         let Some(map) = obj.as_object_mut() else {
             return Err(ApiError::bad_request("the request body must be a JSON object"));
         };
@@ -2130,7 +2169,7 @@ impl ApiState {
             map.remove("status");
         }
         self.default_by_kind(rt, obj, None)?;
-        self.enforce_crd_schema(rt, obj)?;
+        self.enforce_crd_schema(rt, obj, None)?;
         let errs = super::validation::validate(&rt.group, &rt.kind, obj, None);
         if !errs.is_empty() {
             return Err(ApiError::invalid_fields(rt, &name_of(obj), &errs));
@@ -2157,6 +2196,9 @@ impl ApiState {
     ) -> Result<Value, ApiError> {
         if !new.is_object() {
             return Err(ApiError::bad_request("the request body must be a JSON object"));
+        }
+        if !rt.custom {
+            super::fields::drop_nulls(&mut new);
         }
         let body_name = name_of(&new);
         if !body_name.is_empty() && body_name != url_name {
@@ -2197,6 +2239,7 @@ impl ApiState {
                     }
                 }
             }
+            self.enforce_crd_schema(rt, &mut result, Some(old))?;
             return Ok(result);
         }
         new["kind"] = json!(rt.kind);
@@ -2239,7 +2282,7 @@ impl ApiState {
             new["metadata"]["generation"] = json!(bumped);
         }
         self.default_by_kind(rt, &mut new, Some(old))?;
-        self.enforce_crd_schema(rt, &mut new)?;
+        self.enforce_crd_schema(rt, &mut new, Some(old))?;
         let errs = super::validation::validate(&rt.group, &rt.kind, &new, Some(old));
         if !errs.is_empty() {
             return Err(ApiError::invalid_fields(rt, url_name, &errs));
@@ -2411,27 +2454,179 @@ impl ApiState {
     }
 
     /// The structural schema of a custom resource's version.
-    fn crd_schema(&self, rt: &ResourceType) -> Option<Value> {
+    /// A custom resource's CRD, shared from the cache while unchanged.
+    fn crd(&self, rt: &ResourceType) -> Option<Arc<Value>> {
+        self.cached_crd(rt, |c| c.crd.clone())
+    }
+
+    fn crd_schema(&self, rt: &ResourceType) -> Option<Arc<Value>> {
+        self.cached_crd(rt, |c| {
+            let crd = c.crd.clone();
+            c.schemas
+                .entry(rt.version.clone())
+                .or_insert_with(|| {
+                    crd.pointer("/spec/versions")?
+                        .as_array()?
+                        .iter()
+                        .find(|v| v.get("name").and_then(Value::as_str) == Some(rt.version.as_str()))?
+                        .pointer("/schema/openAPIV3Schema")
+                        .filter(|s| s.is_object())
+                        .map(|s| Arc::new(s.clone()))
+                })
+                .clone()
+        })
+        .flatten()
+    }
+
+    fn cached_crd<T>(&self, rt: &ResourceType, f: impl FnOnce(&mut CachedCrd) -> T) -> Option<T> {
         if !rt.custom {
             return None;
         }
-        let crd = self.store.get(&ObjectKey::new("apiextensions.k8s.io", "customresourcedefinitions", "", &format!("{}.{}", rt.plural, rt.group)))?;
-        crd.pointer("/spec/versions")?
-            .as_array()?
-            .iter()
-            .find(|v| v.get("name").and_then(Value::as_str) == Some(rt.version.as_str()))?
-            .pointer("/schema/openAPIV3Schema")
-            .filter(|s| s.is_object())
-            .cloned()
+        let name = format!("{}.{}", rt.plural, rt.group);
+        let key = ObjectKey::new("apiextensions.k8s.io", "customresourcedefinitions", "", &name);
+        let Some(rv) = self.store.resource_version_of(&key) else {
+            self.crd_cache.lock().unwrap().remove(&name);
+            return None;
+        };
+        let mut cache = self.crd_cache.lock().unwrap();
+        if cache.get(&name).is_none_or(|c| c.rv != rv) {
+            let crd = self.store.get(&key)?;
+            let rv = resource_version(&crd).unwrap_or(rv);
+            cache.insert(name.clone(), CachedCrd { rv, crd: Arc::new(crd), schemas: HashMap::new() });
+        }
+        cache.get_mut(&name).map(f)
     }
 
-    /// Custom resources: drop fields the schema does not declare, then check
-    /// the values against it.
-    fn enforce_crd_schema(&self, rt: &ResourceType, obj: &mut Value) -> Result<(), ApiError> {
+    /// The manager of a non-apply write: `?fieldManager=`, else the client's
+    /// user agent up to the first '/'.
+    fn manager_of(req: &Req) -> String {
+        if let Some(m) = req.q("fieldManager") {
+            return m.to_string();
+        }
+        let ua = req.headers.get(hyper::header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or_default();
+        let name = ua.split('/').next().unwrap_or_default();
+        name.chars().take(128).collect()
+    }
+
+    /// Record the fields a write (create, update, non-apply patch) changes
+    /// in `new`'s managedFields. `incoming` is the managedFields the request
+    /// itself carried: `[{}]` clears them, other non-empty values replace
+    /// the stored ones as the starting point.
+    fn track_fields(&self, rt: &ResourceType, old: Option<&Value>, new: &mut Value, incoming: Option<Value>, req: &Req, sub: Option<&str>) {
+        self.track_fields_as(rt, old, new, incoming, &Self::manager_of(req), sub);
+    }
+
+    /// [`Self::track_fields`] for a named manager (the in-process
+    /// controllers write as `kube-controller-manager`).
+    fn track_fields_as(&self, rt: &ResourceType, old: Option<&Value>, new: &mut Value, incoming: Option<Value>, manager: &str, sub: Option<&str>) {
+        let base = match incoming.as_ref().and_then(Value::as_array) {
+            Some(list) if list.len() == 1 && list[0].as_object().is_some_and(|m| m.is_empty()) => {
+                if let Some(m) = new.get_mut("metadata").and_then(Value::as_object_mut) {
+                    m.remove("managedFields");
+                }
+                return;
+            }
+            Some(list) if !list.is_empty() => super::managed::decode(&json!({"metadata": {"managedFields": list}})),
+            _ => old.map(super::managed::decode).unwrap_or_default(),
+        };
+        let schema = self.crd_schema(rt);
+        let ty = match &schema {
+            Some(s) => super::managed::Ty::CrdRoot(s),
+            None if rt.custom => super::managed::Ty::Deduced,
+            None => super::managed::Ty::BuiltinRoot,
+        };
+        let now = now_rfc3339();
+        let api_version = rt.api_version();
+        let request = super::managed::Request {
+            manager,
+            api_version: &api_version,
+            scope: super::managed::Scope { subresource: sub.unwrap_or_default(), has_status: rt.has_status },
+            now: &now,
+        };
+        let empty = json!({});
+        let mut stripped_old = old.cloned().unwrap_or_else(|| empty.clone());
+        let mut stripped_new = new.clone();
+        for v in [&mut stripped_old, &mut stripped_new] {
+            if let Some(m) = v.get_mut("metadata").and_then(Value::as_object_mut) {
+                m.remove("managedFields");
+            }
+        }
+        let entries = super::managed::update(&stripped_old, &stripped_new, base, &request, ty);
+        set_managed_fields(new, entries);
+    }
+
+    /// Server-side apply: merge `config` into `live` (`None` creates) with
+    /// field ownership; 409 on conflicts unless `?force=true`.
+    fn apply_config(&self, rt: &ResourceType, live: Option<&Value>, config: &Value, req: &Req, sub: Option<&str>) -> Result<(Value, Vec<super::managed::Entry>), ApiError> {
+        let Some(manager) = req.q("fieldManager") else {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Invalid",
+                "PatchOptions.meta.k8s.io \"\" is invalid: fieldManager: Required value: is required for apply patch",
+            ));
+        };
+        if config.pointer("/metadata/managedFields").is_some_and(|m| !m.is_null()) {
+            return Err(ApiError::bad_request("metadata.managedFields must be nil"));
+        }
+        let schema = self.crd_schema(rt);
+        let ty = match &schema {
+            Some(s) => super::managed::Ty::CrdRoot(s),
+            None if rt.custom => super::managed::Ty::Deduced,
+            None => super::managed::Ty::BuiltinRoot,
+        };
+        let now = now_rfc3339();
+        let api_version = rt.api_version();
+        let request = super::managed::Request {
+            manager,
+            api_version: &api_version,
+            scope: super::managed::Scope { subresource: sub.unwrap_or_default(), has_status: rt.has_status },
+            now: &now,
+        };
+        let base = live.map(super::managed::decode).unwrap_or_default();
+        let mut live = live.cloned();
+        if let Some(m) = live.as_mut().and_then(|l| l.get_mut("metadata")).and_then(Value::as_object_mut) {
+            m.remove("managedFields");
+        }
+        let force = req.q("force") == Some("true");
+        let mut result = super::managed::apply(live.as_ref(), config, base.clone(), &request, force, ty);
+        // Moving from client-side to server-side apply: conflicts only with
+        // kubectl-client-side-apply over fields its last-applied
+        // configuration set are not conflicts (the API server's
+        // lastAppliedManager).
+        if let Err(super::managed::ApplyError::Conflicts(c)) = &result {
+            let last_applied = live
+                .as_ref()
+                .and_then(|l| l.pointer("/metadata/annotations/kubectl.kubernetes.io~1last-applied-configuration"))
+                .and_then(Value::as_str)
+                .and_then(|s| serde_json::from_str::<Value>(s).ok());
+            if let Some(last) = last_applied.and_then(|l| super::managed::to_set(&l, ty).ok()) {
+                let owned = last.paths().into_iter().map(|p| super::managed::path_string(&p)).collect::<Vec<_>>();
+                let only_csa = c.0.iter().all(|(m, p)| m.starts_with("\"kubectl-client-side-apply\" using") && owned.contains(p));
+                if only_csa {
+                    result = super::managed::apply(live.as_ref(), config, base, &request, true, ty);
+                }
+            }
+        }
+        result.map_err(|e| match e {
+            super::managed::ApplyError::Invalid(msg) => ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "Invalid", msg),
+            super::managed::ApplyError::Conflicts(c) => {
+                let mut err = ApiError::new(StatusCode::CONFLICT, "Conflict", c.message());
+                err.details = Some(json!({"causes": c.causes()}));
+                err
+            }
+        })
+    }
+
+    /// Custom resources: drop fields the schema does not declare, fill in
+    /// defaults, drop nulls the schema does not allow, then validate the
+    /// values and the `x-kubernetes-validations` rules (transition rules
+    /// and ratcheting against `old` on updates).
+    fn enforce_crd_schema(&self, rt: &ResourceType, obj: &mut Value, old: Option<&Value>) -> Result<(), ApiError> {
         let Some(schema) = self.crd_schema(rt) else { return Ok(()) };
         super::fields::prune(obj, &schema);
         super::fields::apply_defaults(obj, &schema);
-        let errs = super::fields::schema_errors(obj, &schema);
+        super::crd_schema::prune_nulls(obj, &schema);
+        let errs = super::crd_schema::validate(obj, old, &schema);
         if !errs.is_empty() {
             return Err(ApiError::invalid_fields(rt, &name_of(obj), &errs));
         }
@@ -2690,24 +2885,60 @@ impl ApiState {
                         format!("metadata.name: Invalid value: must be spec.names.plural+\".\"+spec.group ({expected})"),
                     ));
                 }
-                let storage: Vec<Value> = obj
-                    .pointer("/spec/versions")
+                let errs = super::crd_schema::validate_crd(obj, old);
+                if !errs.is_empty() {
+                    return Err(ApiError::invalid_fields(rt, &name, &errs));
+                }
+                let versions: Vec<Value> = obj.pointer("/spec/versions").and_then(Value::as_array).cloned().unwrap_or_default();
+                let storage: Vec<&str> = versions
+                    .iter()
+                    .filter(|v| v.get("storage").and_then(Value::as_bool) == Some(true))
+                    .filter_map(|v| v.get("name").and_then(Value::as_str))
+                    .collect();
+                if storage.len() != 1 {
+                    return Err(ApiError::invalid_fields(
+                        rt,
+                        &name,
+                        &[format!("spec.versions: Invalid value: {}: must have exactly one version marked as storage version", serde_json::to_string(&versions).unwrap_or_default())],
+                    ));
+                }
+                // storedVersions lists every version objects may still be
+                // stored in: it only grows here, and shrinks only through
+                // status updates (after a storage migration).
+                let mut stored: Vec<Value> = old
+                    .and_then(|o| o.pointer("/status/storedVersions"))
                     .and_then(Value::as_array)
-                    .map(|vs| {
-                        vs.iter()
-                            .filter(|v| v.get("storage").and_then(Value::as_bool) == Some(true))
-                            .filter_map(|v| v.get("name").cloned())
-                            .collect()
-                    })
+                    .cloned()
                     .unwrap_or_default();
+                if !stored.iter().any(|v| v == storage[0]) {
+                    stored.push(json!(storage[0]));
+                }
+                let names: Vec<&str> = versions.iter().filter_map(|v| v.get("name").and_then(Value::as_str)).collect();
+                let missing: Vec<String> = stored
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|v| !names.contains(v))
+                    .map(|v| {
+                        format!(
+                            "status.storedVersions[{}]: Invalid value: \"{v}\": missing from spec.versions; {v} was previously a storage version, and must remain in spec.versions until a storage migration ensures no data remains persisted in {v} and removes {v} from status.storedVersions",
+                            stored.iter().position(|s| s == v).unwrap_or(0)
+                        )
+                    })
+                    .collect();
+                if !missing.is_empty() {
+                    return Err(ApiError::invalid_fields(rt, &name, &missing));
+                }
                 let now = now_rfc3339();
-                obj["status"] = json!({
-                    "acceptedNames": obj["spec"]["names"].clone(),
-                    "storedVersions": storage,
-                    "conditions": [
+                let conditions = old.and_then(|o| o.pointer("/status/conditions")).cloned().unwrap_or_else(|| {
+                    json!([
                         {"type": "NamesAccepted", "status": "True", "reason": "NoConflicts", "message": "no conflicts found", "lastTransitionTime": now},
                         {"type": "Established", "status": "True", "reason": "InitialNamesAccepted", "message": "the initial names have been accepted", "lastTransitionTime": now},
-                    ],
+                    ])
+                });
+                obj["status"] = json!({
+                    "acceptedNames": obj["spec"]["names"].clone(),
+                    "storedVersions": stored,
+                    "conditions": conditions,
                 });
             }
             _ => {}
@@ -2970,12 +3201,28 @@ impl ApiState {
             }
         }
 
+        let wanted = {
+            let (group, plural, filter_ns) = (rt.group.clone(), rt.plural.clone(), filter_ns.clone());
+            move |k: &ObjectKey| k.group == group && k.resource == plural && filter_ns.as_ref().is_none_or(|ns| &k.namespace == ns)
+        };
         let mut initial: VecDeque<Value> = VecDeque::new();
         let (subscription, floor) = match since {
-            Some(rv) => (
-                self.store.subscribe(Some(rv)).map_err(|e| ApiError::from_store(e, rt, ""))?,
-                rv,
-            ),
+            Some(rv) => match self.store.subscribe_for(Some(rv), &wanted) {
+                Ok(sub) => (sub, rv),
+                // Like kube-apiserver: a resourceVersion older than the
+                // history fails as an ERROR event on a 200 stream, not as a
+                // 410 response. client-go's RetryWatcher (Argo CD's cluster
+                // cache) relists on the event, but retries the same version
+                // forever on a 410 response.
+                Err(StoreError::Gone) => {
+                    let mut line = serde_json::to_vec(&expired_event(rv, self.store.current_rv())).unwrap_or_default();
+                    line.push(b'\n');
+                    let mut resp = Response::new(full(line));
+                    resp.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+                    return Ok(resp);
+                }
+                Err(e) => return Err(ApiError::from_store(e, rt, "")),
+            },
             None => {
                 // Subscribe before listing so nothing falls in between; events
                 // already covered by the list are skipped by rv below.
@@ -3046,7 +3293,9 @@ impl ApiState {
                 initial = kept;
             }
             let encode = |mut event: Value| -> Bytes {
-                if as_table && event["type"] != "BOOKMARK" {
+                if event["type"] == "ERROR" {
+                    // A Status, sent as is.
+                } else if as_table && event["type"] != "BOOKMARK" {
                     let obj = event["object"].take();
                     let rv = resource_version(&obj).unwrap_or(0);
                     event["object"] = table::build(&rt, &[obj], rv, true);
@@ -3063,7 +3312,8 @@ impl ApiState {
                 }
             }
             let mut last_rv = floor;
-            for e in &subscription.backlog {
+            let super::store::Subscription { backlog, live } = subscription;
+            for e in &backlog {
                 last_rv = last_rv.max(e.rv);
                 if e.rv > floor {
                     let converted;
@@ -3081,7 +3331,9 @@ impl ApiState {
                     }
                 }
             }
-            let mut live = subscription.live;
+            // Not kept for the life of the watch.
+            drop(backlog);
+            let mut live = live;
             let deadline = tokio::time::Instant::now() + timeout;
             let mut tick = tokio::time::interval(Duration::from_secs(if bookmarks { 30 } else { 5 }));
             tick.tick().await;
@@ -3126,7 +3378,10 @@ impl ApiState {
                         // catch up from the history, or end the watch if it
                         // no longer reaches back; clients then re-list.
                         Err(broadcast::error::RecvError::Lagged(_)) => {
-                            let Ok(caught_up) = state.store.subscribe(Some(last_rv)) else { return };
+                            let Ok(caught_up) = state.store.subscribe_for(Some(last_rv), &wanted) else {
+                                let _ = tx.send(encode(expired_event(last_rv, state.store.current_rv()))).await;
+                                return;
+                            };
                             live = caught_up.live;
                             for e in &caught_up.backlog {
                                 if e.rv <= last_rv {
@@ -3164,6 +3419,49 @@ impl ApiState {
     }
 }
 
+/// How long an Event is kept after it was last recorded (kube-apiserver's
+/// `--event-ttl` default). Controllers like Argo CD's record several per
+/// sync; without a TTL they pile up in memory and in the object log.
+const EVENT_TTL: Duration = Duration::from_secs(3600);
+
+async fn expire_events(state: Arc<ApiState>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        tick.tick().await;
+        state.expire_events_before(chrono::Utc::now() - chrono::Duration::from_std(EVENT_TTL).unwrap_or_default());
+    }
+}
+
+impl ApiState {
+    fn expire_events_before(&self, cutoff: chrono::DateTime<chrono::Utc>) {
+        // Deleting the core/v1 Event also deletes its events.k8s.io mirror.
+        for event in self.store.list("", "events", None).0 {
+            if event_last_seen(&event).is_some_and(|t| t < cutoff) {
+                let ns = meta(&event).get("namespace").and_then(Value::as_str).unwrap_or_default().to_string();
+                let _ = self.delete_named("", "events", &ns, &name_of(&event));
+            }
+        }
+    }
+}
+
+/// When a core/v1 Event was last recorded: the latest of its timestamps.
+fn event_last_seen(event: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    ["/lastTimestamp", "/eventTime", "/series/lastObservedTime", "/firstTimestamp", "/metadata/creationTimestamp"]
+        .iter()
+        .filter_map(|p| event.pointer(p).and_then(Value::as_str))
+        .filter_map(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| t.with_timezone(&chrono::Utc))
+        .max()
+}
+
+/// The watch event that ends a watch whose resourceVersion is too old.
+fn expired_event(rv: u64, current: u64) -> Value {
+    json!({"type": "ERROR", "object": {
+        "kind": "Status", "apiVersion": "v1", "metadata": {}, "status": "Failure",
+        "message": format!("too old resource version: {rv} ({current})"), "reason": "Expired", "code": 410,
+    }})
+}
+
 // ---------------------------------------------------------------------------
 // In-process API for controllers, the scheduler and the agent hub. Same
 // defaulting and invariants as HTTP requests, without the HTTP.
@@ -3198,6 +3496,7 @@ impl ApiState {
         let rt = self.internal_rt(group, plural)?;
         let generated = name_of(&obj).is_empty();
         self.prepare_create(&rt, ns, &mut obj, true)?;
+        self.track_fields_as(&rt, None, &mut obj, None, CONTROLLER_MANAGER, None);
         for _ in 0..5 {
             let name = name_of(&obj);
             match self.store.create(key_for(&rt, ns, &name), obj.clone()) {
@@ -3236,7 +3535,8 @@ impl ApiState {
             .get(&key)
             .ok_or_else(|| ApiError::from_store(StoreError::NotFound, &rt, &name))?;
         let expected = resource_version(&obj);
-        let new = self.prepare_update(&rt, &old, obj, sub, &name)?;
+        let mut new = self.prepare_update(&rt, &old, obj, sub, &name)?;
+        self.track_fields_as(&rt, Some(&old), &mut new, None, CONTROLLER_MANAGER, sub);
         self.commit_update(&rt, key, new, expected)
             .map_err(|e| ApiError::from_store(e, &rt, &name))
     }
@@ -3279,6 +3579,7 @@ impl ApiState {
     fn render_metrics(&self) -> String {
         let mut out = String::new();
         self.metrics.render(&mut out);
+        out.push_str(&self.request_metrics.render());
         let st = self.store.stats();
         metrics::gauge(&mut out, "litek8s_store_objects", st.objects);
         metrics::gauge(&mut out, "litek8s_store_resource_version", st.resource_version);
@@ -3314,6 +3615,19 @@ impl ApiError {
 }
 
 /// Equal apart from the resourceVersion.
+/// The field manager of writes the in-process controllers make.
+const CONTROLLER_MANAGER: &str = "kube-controller-manager";
+
+/// Store managedFields on an object (none if empty).
+fn set_managed_fields(obj: &mut Value, entries: Vec<super::managed::Entry>) {
+    let Some(m) = obj.get_mut("metadata").and_then(Value::as_object_mut) else { return };
+    if entries.is_empty() {
+        m.remove("managedFields");
+    } else {
+        m.insert("managedFields".into(), super::managed::encode(entries));
+    }
+}
+
 fn same_content(a: &Value, b: &Value) -> bool {
     let strip = |v: &Value| {
         let mut v = v.clone();
@@ -3384,5 +3698,27 @@ mod tests {
         assert_eq!(q["labelSelector"], "app=web,tier in (a)");
         assert_eq!(q["watch"], "true");
         assert_eq!(q["x"], "");
+    }
+
+    #[test]
+    fn events_expire_after_their_last_timestamp() {
+        let api = ApiState::open(None, "127.0.0.1:0".into(), false).unwrap();
+        let now = chrono::Utc::now();
+        let event = |name: &str, last: chrono::DateTime<chrono::Utc>| {
+            json!({"metadata": {"name": name, "namespace": "default"}, "involvedObject": {"kind": "Pod", "name": "p"},
+                   "reason": "Started", "lastTimestamp": last.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)})
+        };
+        api.create_object("", "events", Some("default"), event("old", now - chrono::Duration::hours(2))).unwrap();
+        api.create_object("", "events", Some("default"), event("new", now)).unwrap();
+        assert!(api.get_object("events.k8s.io", "events", "default", "old").is_some(), "mirrored");
+        // Recorded two hours ago: the server stamped creation just now.
+        let mut old = api.get_object("", "events", "default", "old").unwrap();
+        old["metadata"]["creationTimestamp"] = old["lastTimestamp"].clone();
+        let key = ObjectKey::new("", "events", "default", "old");
+        api.store().update(key, old, None).unwrap();
+        api.expire_events_before(now - chrono::Duration::hours(1));
+        assert!(api.get_object("", "events", "default", "old").is_none());
+        assert!(api.get_object("events.k8s.io", "events", "default", "old").is_none());
+        assert!(api.get_object("", "events", "default", "new").is_some());
     }
 }

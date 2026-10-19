@@ -1,0 +1,4 @@
+{"id": "crd_ratcheting", "tier": "L1", "status": "pass", "seconds": 5, "detail": "Warning: spec.code: Invalid value: \"string\": code is too short"}
+{"id": "crd_list_types", "tier": "L1", "status": "pass", "seconds": 3, "detail": ""}
+{"id": "crd_stored_versions", "tier": "L1", "status": "pass", "seconds": 2, "detail": ""}
+{"id": "crd_validation_cleanup", "tier": "L1", "status": "pass", "seconds": 0, "detail": ""}

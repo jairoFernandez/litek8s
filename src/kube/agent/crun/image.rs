@@ -684,7 +684,10 @@ impl ImageStore {
                 continue;
             }
             let tmp = self.staging_dir().join(random_hex(8));
-            unpack_layer(&path, &tmp, diff_id, self.owners).with_context(|| format!("failed to unpack layer {file}"))?;
+            if let Err(e) = unpack_layer(&path, &tmp, diff_id, self.owners) {
+                let _ = std::fs::remove_dir_all(&tmp);
+                return Err(e.context(format!("failed to unpack layer {file}")));
+            }
             if let Err(e) = std::fs::rename(&tmp, &dest) {
                 let _ = std::fs::remove_dir_all(&tmp);
                 if !dest.is_dir() {
@@ -1408,7 +1411,8 @@ impl Session {
         let home = parse_url(url)?.host;
         let mut url = url.to_string();
         let mut authed = false;
-        for _ in 0..8 {
+        let mut throttled = 0u32;
+        for _ in 0..16 {
             let mut headers = Vec::new();
             if let Some(a) = accept {
                 headers.push(("accept", a.to_string()));
@@ -1421,6 +1425,20 @@ impl Session {
             }
             let resp = send(method.clone(), &url, &headers).await?;
             let status = resp.status();
+            // Rate limits on anonymous pulls (ECR Public answers 429 to a
+            // burst of manifest and blob requests): wait and retry here
+            // rather than fail the pull into the pod's image pull backoff.
+            if matches!(status, hyper::StatusCode::TOO_MANY_REQUESTS | hyper::StatusCode::SERVICE_UNAVAILABLE) && throttled < 5 {
+                let after = resp
+                    .headers()
+                    .get(hyper::header::RETRY_AFTER)
+                    .and_then(|h| h.to_str().ok())
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .map(|s| std::time::Duration::from_secs(s.min(10)));
+                tokio::time::sleep(after.unwrap_or(std::time::Duration::from_millis(500 << throttled))).await;
+                throttled += 1;
+                continue;
+            }
             if status.is_redirection() {
                 let location = resp
                     .headers()
@@ -1556,6 +1574,31 @@ mod tests {
     use super::*;
     use serde_json::json;
     use std::io::Write;
+
+    #[tokio::test]
+    async fn rate_limited_requests_are_retried() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            for n in 0.. {
+                let (mut c, _) = listener.accept().await.unwrap();
+                let mut buf = [0u8; 4096];
+                let _ = c.read(&mut buf).await;
+                let resp: &[u8] = if n < 2 {
+                    b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 0\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                } else {
+                    b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok"
+                };
+                let _ = c.write_all(resp).await;
+            }
+        });
+        let reference = Reference::parse(&format!("localhost:{port}/a/b:c")).unwrap();
+        let mut session = Session::new(&reference);
+        let url = format!("http://127.0.0.1:{port}/v2/a/b/blobs/sha256:00");
+        let resp = session.get(hyper::Method::GET, &url, None).await.unwrap();
+        assert_eq!(resp.status(), hyper::StatusCode::OK);
+    }
 
     #[test]
     fn parses_references() {

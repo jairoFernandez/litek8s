@@ -16,6 +16,15 @@ fn main() -> anyhow::Result<()> {
         None if args[0] == "/init" && std::process::id() == 1 => litek8s::dev::guest::main(),
         _ => {}
     }
+    // glibc gives each thread that contends for malloc its own arena (up to
+    // 8 per CPU), and a long-running server's freed memory then stays spread
+    // over all of them: the API server under Argo CD's watches grew to 470 MiB
+    // RSS on a 16-core machine with ~60 MiB live, 120 MiB with two arenas.
+    // MALLOC_ARENA_MAX, when set, still wins.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if std::env::var_os("MALLOC_ARENA_MAX").is_none() {
+        unsafe { libc::mallopt(libc::M_ARENA_MAX, 2) };
+    }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?
