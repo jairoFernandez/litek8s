@@ -221,7 +221,10 @@ pub async fn resolve_service_targets(
             ssh_target,
             ssh_identity_file,
             container_port,
-            host_port: selected_port.host_port,
+            // Published only by a single replica (see `suppress_host_ports`).
+            host_port: selected_port
+                .host_port
+                .filter(|_| deployment.manifest.desired_replicas() <= 1),
             container_ip,
             protocol: protocol.clone(),
         });
