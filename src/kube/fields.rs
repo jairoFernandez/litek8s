@@ -240,12 +240,18 @@ fn prune_at(v: &mut Value, schema: &Value, resource: bool) {
 
 /// Fill in `default`s the schema declares for missing fields (also inside
 /// array items and additionalProperties), like the API server does on
-/// requests and on reads from storage.
+/// requests and on reads from storage. As there, a `null` in a field that is
+/// not `nullable` counts as missing: it gets the default, or is dropped (Argo
+/// CD clears `operation` with a JSON patch that adds `null`).
 pub fn apply_defaults(v: &mut Value, schema: &Value) {
+    let null_not_allowed = |child: &Value, s: &Value| child.is_null() && !bool_at(s, "nullable");
     match v {
         Value::Object(map) => {
             if let Some(props) = schema.get("properties").and_then(Value::as_object) {
                 for (k, s) in props {
+                    if map.get(k).is_some_and(|child| null_not_allowed(child, s)) {
+                        map.remove(k);
+                    }
                     if !map.contains_key(k) {
                         if let Some(d) = s.get("default") {
                             map.insert(k.clone(), d.clone());
@@ -258,8 +264,12 @@ pub fn apply_defaults(v: &mut Value, schema: &Value) {
             }
             if let Some(add) = schema.get("additionalProperties").filter(|a| a.is_object()) {
                 let known: Vec<String> = schema.get("properties").and_then(Value::as_object).map(|p| p.keys().cloned().collect()).unwrap_or_default();
+                map.retain(|k, child| known.contains(k) || !null_not_allowed(child, add) || add.get("default").is_some());
                 for (k, child) in map.iter_mut() {
                     if !known.contains(k) {
+                        if null_not_allowed(child, add) {
+                            *child = add["default"].clone();
+                        }
                         apply_defaults(child, add);
                     }
                 }
@@ -268,6 +278,11 @@ pub fn apply_defaults(v: &mut Value, schema: &Value) {
         Value::Array(items) => {
             if let Some(s) = schema.get("items") {
                 for item in items {
+                    if null_not_allowed(item, s) {
+                        if let Some(d) = s.get("default") {
+                            *item = d.clone();
+                        }
+                    }
                     apply_defaults(item, s);
                 }
             }
@@ -430,5 +445,21 @@ mod tests {
         prune(&mut pruned, &schema);
         assert!(pruned.get("unknownField").is_none() && pruned["spec"].get("foo").is_none());
         assert_eq!(pruned["metadata"]["unknownMeta"], 1);
+    }
+
+    #[test]
+    fn nulls_in_non_nullable_fields_are_defaulted_or_dropped() {
+        let schema = json!({"type": "object", "properties": {
+            "operation": {"type": "object", "properties": {"x": {"type": "string"}}},
+            "spec": {"type": "object", "properties": {
+                "mode": {"type": "string", "default": "auto"},
+                "note": {"type": "string", "nullable": true},
+                "labels": {"type": "object", "additionalProperties": {"type": "string"}},
+            }},
+        }});
+        let mut obj = json!({"operation": null, "spec": {"mode": null, "note": null, "labels": {"a": null, "b": "x"}}});
+        apply_defaults(&mut obj, &schema);
+        assert_eq!(obj, json!({"spec": {"mode": "auto", "note": null, "labels": {"b": "x"}}}));
+        assert!(schema_errors(&obj, &schema).is_empty());
     }
 }
