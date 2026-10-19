@@ -8,6 +8,7 @@ mod aggregator;
 pub mod agent;
 pub mod cel;
 pub mod controllers;
+pub mod crd_schema;
 pub mod defaults;
 pub mod discovery;
 pub mod dns;

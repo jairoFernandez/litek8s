@@ -2025,7 +2025,7 @@ impl ApiState {
             map.remove("status");
         }
         self.default_by_kind(rt, obj, None)?;
-        self.enforce_crd_schema(rt, obj)?;
+        self.enforce_crd_schema(rt, obj, None)?;
         let errs = super::validation::validate(&rt.group, &rt.kind, obj, None);
         if !errs.is_empty() {
             return Err(ApiError::invalid_fields(rt, &name_of(obj), &errs));
@@ -2092,6 +2092,7 @@ impl ApiState {
                     }
                 }
             }
+            self.enforce_crd_schema(rt, &mut result, Some(old))?;
             return Ok(result);
         }
         new["kind"] = json!(rt.kind);
@@ -2134,7 +2135,7 @@ impl ApiState {
             new["metadata"]["generation"] = json!(bumped);
         }
         self.default_by_kind(rt, &mut new, Some(old))?;
-        self.enforce_crd_schema(rt, &mut new)?;
+        self.enforce_crd_schema(rt, &mut new, Some(old))?;
         let errs = super::validation::validate(&rt.group, &rt.kind, &new, Some(old));
         if !errs.is_empty() {
             return Err(ApiError::invalid_fields(rt, url_name, &errs));
@@ -2320,13 +2321,16 @@ impl ApiState {
             .cloned()
     }
 
-    /// Custom resources: drop fields the schema does not declare, then check
-    /// the values against it.
-    fn enforce_crd_schema(&self, rt: &ResourceType, obj: &mut Value) -> Result<(), ApiError> {
+    /// Custom resources: drop fields the schema does not declare, fill in
+    /// defaults, drop nulls the schema does not allow, then validate the
+    /// values and the `x-kubernetes-validations` rules (transition rules
+    /// and ratcheting against `old` on updates).
+    fn enforce_crd_schema(&self, rt: &ResourceType, obj: &mut Value, old: Option<&Value>) -> Result<(), ApiError> {
         let Some(schema) = self.crd_schema(rt) else { return Ok(()) };
         super::fields::prune(obj, &schema);
         super::fields::apply_defaults(obj, &schema);
-        let errs = super::fields::schema_errors(obj, &schema);
+        super::crd_schema::prune_nulls(obj, &schema);
+        let errs = super::crd_schema::validate(obj, old, &schema);
         if !errs.is_empty() {
             return Err(ApiError::invalid_fields(rt, &name_of(obj), &errs));
         }
@@ -2585,24 +2589,55 @@ impl ApiState {
                         format!("metadata.name: Invalid value: must be spec.names.plural+\".\"+spec.group ({expected})"),
                     ));
                 }
-                let storage: Vec<Value> = obj
-                    .pointer("/spec/versions")
+                let errs = super::crd_schema::validate_crd(obj, old);
+                if !errs.is_empty() {
+                    return Err(ApiError::invalid_fields(rt, &name, &errs));
+                }
+                let versions: Vec<Value> = obj.pointer("/spec/versions").and_then(Value::as_array).cloned().unwrap_or_default();
+                let storage: Vec<&str> = versions
+                    .iter()
+                    .filter(|v| v.get("storage").and_then(Value::as_bool) == Some(true))
+                    .filter_map(|v| v.get("name").and_then(Value::as_str))
+                    .collect();
+                if storage.len() != 1 {
+                    return Err(ApiError::invalid_fields(
+                        rt,
+                        &name,
+                        &[format!("spec.versions: Invalid value: {}: must have exactly one version marked as storage version", serde_json::to_string(&versions).unwrap_or_default())],
+                    ));
+                }
+                // storedVersions lists every version objects may still be
+                // stored in: it only grows here, and shrinks only through
+                // status updates (after a storage migration).
+                let mut stored: Vec<Value> = old
+                    .and_then(|o| o.pointer("/status/storedVersions"))
                     .and_then(Value::as_array)
-                    .map(|vs| {
-                        vs.iter()
-                            .filter(|v| v.get("storage").and_then(Value::as_bool) == Some(true))
-                            .filter_map(|v| v.get("name").cloned())
-                            .collect()
-                    })
+                    .cloned()
                     .unwrap_or_default();
+                if !stored.iter().any(|v| v == storage[0]) {
+                    stored.push(json!(storage[0]));
+                }
+                let names: Vec<&str> = versions.iter().filter_map(|v| v.get("name").and_then(Value::as_str)).collect();
+                let missing: Vec<String> = stored
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|v| !names.contains(v))
+                    .map(|v| format!("status.storedVersions[{}]: Invalid value: \"{v}\": must appear in spec.versions", stored.iter().position(|s| s == v).unwrap_or(0)))
+                    .collect();
+                if !missing.is_empty() {
+                    return Err(ApiError::invalid_fields(rt, &name, &missing));
+                }
                 let now = now_rfc3339();
-                obj["status"] = json!({
-                    "acceptedNames": obj["spec"]["names"].clone(),
-                    "storedVersions": storage,
-                    "conditions": [
+                let conditions = old.and_then(|o| o.pointer("/status/conditions")).cloned().unwrap_or_else(|| {
+                    json!([
                         {"type": "NamesAccepted", "status": "True", "reason": "NoConflicts", "message": "no conflicts found", "lastTransitionTime": now},
                         {"type": "Established", "status": "True", "reason": "InitialNamesAccepted", "message": "the initial names have been accepted", "lastTransitionTime": now},
-                    ],
+                    ])
+                });
+                obj["status"] = json!({
+                    "acceptedNames": obj["spec"]["names"].clone(),
+                    "storedVersions": stored,
+                    "conditions": conditions,
                 });
             }
             _ => {}
