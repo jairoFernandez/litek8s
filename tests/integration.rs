@@ -262,13 +262,7 @@ async fn resolves_proxy_target_for_published_port() -> Result<()> {
         host_port,
     );
 
-    request(
-        &harness.socket_path,
-        Request::Apply {
-            manifest: manifest.clone(),
-        },
-    )
-    .await?;
+    harness.apply(&manifest).await?;
     harness.wait_until_running(&deployment).await?;
 
     let response = request(
@@ -313,13 +307,7 @@ async fn service_listener_forwards_to_deployment() -> Result<()> {
         http_echo_manifest_with_readiness(&deployment, host_port, "hello through service");
     let service_manifest = service_manifest_yaml(&service, &deployment, &listen_addr, None);
 
-    request(
-        &harness.socket_path,
-        Request::Apply {
-            manifest: manifest.clone(),
-        },
-    )
-    .await?;
+    harness.apply(&manifest).await?;
     harness
         .wait_until_description(&deployment, |item| item.status == "Ready" && item.ready)
         .await?;
@@ -379,13 +367,7 @@ async fn deployment_with_readiness_probe_becomes_ready() -> Result<()> {
     let host_port = unique_port(18_096);
     let manifest = http_echo_manifest_with_readiness(&deployment, host_port, "ready with probe");
 
-    request(
-        &harness.socket_path,
-        Request::Apply {
-            manifest: manifest.clone(),
-        },
-    )
-    .await?;
+    harness.apply(&manifest).await?;
 
     let describe = harness
         .wait_until_description(&deployment, |item| item.status == "Ready" && item.ready)
@@ -425,7 +407,7 @@ async fn service_waits_for_readiness_before_exposing_endpoints() -> Result<()> {
         Some(8080),
     );
 
-    request(&harness.socket_path, Request::Apply { manifest }).await?;
+    harness.apply(&manifest).await?;
 
     let describe = harness
         .wait_until_description(&deployment, |item| {
@@ -440,13 +422,7 @@ async fn service_waits_for_readiness_before_exposing_endpoints() -> Result<()> {
         .await?;
     assert!(!describe.ready);
 
-    request(
-        &harness.socket_path,
-        Request::Apply {
-            manifest: service_manifest,
-        },
-    )
-    .await?;
+    harness.apply(&service_manifest).await?;
 
     let service_describe = harness
         .wait_until_service_status(&service, |item| item.status == "NoEndpoints")
@@ -483,22 +459,10 @@ async fn service_transitions_to_no_endpoints_after_backend_disappears() -> Resul
         None,
     );
 
-    request(
-        &harness.socket_path,
-        Request::Apply {
-            manifest: manifest.clone(),
-        },
-    )
-    .await?;
+    harness.apply(&manifest).await?;
     harness.wait_until_running(&deployment).await?;
 
-    request(
-        &harness.socket_path,
-        Request::Apply {
-            manifest: service_manifest,
-        },
-    )
-    .await?;
+    harness.apply(&service_manifest).await?;
     harness
         .wait_until_service_status(&service, |item| item.status == "Listening")
         .await?;
@@ -544,13 +508,7 @@ async fn reconciler_recreates_container_after_manual_removal() -> Result<()> {
     let deployment = unique_name("restart");
     let manifest = manifest_yaml(&deployment, r#"["sh"]"#, r#"["-c", "sleep 3600"]"#);
 
-    request(
-        &harness.socket_path,
-        Request::Apply {
-            manifest: manifest.clone(),
-        },
-    )
-    .await?;
+    harness.apply(&manifest).await?;
     let original_id = harness.wait_until_running(&deployment).await?;
 
     let runtime = DockerRuntime::connect()?;
@@ -561,32 +519,34 @@ async fn reconciler_recreates_container_after_manual_removal() -> Result<()> {
         .await?;
     assert_ne!(original_id, new_id);
 
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    loop {
-        let top = request(&harness.socket_path, Request::Top).await?;
-        match top {
+    let row = wait_for(
+        "top to show the recreated container",
+        wait_timeout(60),
+        Duration::from_millis(200),
+        || request(&harness.socket_path, Request::Top),
+        |top| match top {
             Response::Top { items, .. } => {
                 let row = items
                     .into_iter()
                     .find(|item| item.name == deployment)
                     .expect("deployment should appear in top");
                 if row.restart_count >= 1 && row.container_id.as_deref() == Some(new_id.as_str()) {
-                    assert!(matches!(
-                        row.last_exit.as_deref(),
-                        Some("removed") | Some("container disappeared")
-                    ));
-                    break;
+                    Probe::Done(row)
+                } else {
+                    Probe::Pending(format!(
+                        "restarts={} container={:?}",
+                        row.restart_count, row.container_id
+                    ))
                 }
             }
             other => panic!("unexpected response: {other:?}"),
-        }
-
-        if tokio::time::Instant::now() > deadline {
-            anyhow::bail!("top did not converge to the recreated container in time");
-        }
-
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
+        },
+    )
+    .await?;
+    assert!(matches!(
+        row.last_exit.as_deref(),
+        Some("removed") | Some("container disappeared")
+    ));
 
     harness.cleanup_deployment(&deployment).await?;
     Ok(())
@@ -603,13 +563,7 @@ async fn daemon_restart_rehydrates_state_file() -> Result<()> {
     let deployment = unique_name("rehydrate");
     let manifest = manifest_yaml(&deployment, r#"["sh"]"#, r#"["-c", "sleep 3600"]"#);
 
-    request(
-        &harness.socket_path,
-        Request::Apply {
-            manifest: manifest.clone(),
-        },
-    )
-    .await?;
+    harness.apply(&manifest).await?;
     harness.wait_until_running(&deployment).await?;
 
     harness.restart().await?;
@@ -653,13 +607,7 @@ async fn applies_and_updates_container_resource_limits() -> Result<()> {
         Some("64Mi"),
     );
 
-    request(
-        &harness.socket_path,
-        Request::Apply {
-            manifest: initial_manifest,
-        },
-    )
-    .await?;
+    harness.apply(&initial_manifest).await?;
     let original_id = harness.wait_until_running(&deployment).await?;
 
     let describe = request(
@@ -691,13 +639,7 @@ async fn applies_and_updates_container_resource_limits() -> Result<()> {
         Some("128Mi"),
     );
 
-    request(
-        &harness.socket_path,
-        Request::Apply {
-            manifest: updated_manifest,
-        },
-    )
-    .await?;
+    harness.apply(&updated_manifest).await?;
     let updated_id = harness
         .wait_until_container_id_changes(&deployment, &original_id)
         .await?;
@@ -742,13 +684,7 @@ async fn crash_loop_uses_restart_backoff() -> Result<()> {
     let deployment = unique_name("backoff");
     let manifest = manifest_yaml(&deployment, r#"["sh"]"#, r#"["-c", "exit 1"]"#);
 
-    request(
-        &harness.socket_path,
-        Request::Apply {
-            manifest: manifest.clone(),
-        },
-    )
-    .await?;
+    harness.apply(&manifest).await?;
 
     let item = harness
         .wait_until_description(&deployment, |item| {
@@ -883,13 +819,7 @@ async fn drain_without_alternative_cordons_node_and_reports_blocked_workloads() 
     let deployment = unique_name("drain");
     let manifest = manifest_yaml(&deployment, r#"["sh"]"#, r#"["-c", "sleep 3600"]"#);
 
-    request(
-        &harness.socket_path,
-        Request::Apply {
-            manifest: manifest.clone(),
-        },
-    )
-    .await?;
+    harness.apply(&manifest).await?;
     harness.wait_until_running(&deployment).await?;
 
     let drain = request(
@@ -945,13 +875,7 @@ async fn events_can_filter_by_deployment_and_node() -> Result<()> {
         r#"["-c", "echo ready && sleep 3600"]"#,
     );
 
-    request(
-        &harness.socket_path,
-        Request::Apply {
-            manifest: manifest.clone(),
-        },
-    )
-    .await?;
+    harness.apply(&manifest).await?;
     harness.wait_until_running(&deployment).await?;
 
     let deployment_events = request(
@@ -1034,33 +958,6 @@ impl TestHarness {
         Ok(())
     }
 
-    async fn wait_until_running(&self, deployment: &str) -> Result<String> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
-        loop {
-            let response = request(
-                &self.socket_path,
-                Request::DescribeDeployment {
-                    name: deployment.to_string(),
-                },
-            )
-            .await?;
-
-            if let Response::Description { item } = response {
-                if item.status == "Running" {
-                    return item
-                        .container_id
-                        .context("deployment reported Running without a container ID");
-                }
-            }
-
-            if tokio::time::Instant::now() > deadline {
-                anyhow::bail!("deployment `{deployment}` did not become Running in time");
-            }
-
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    }
-
     async fn cleanup_deployment(&self, deployment: &str) -> Result<()> {
         let _ = request(
             &self.socket_path,
@@ -1112,6 +1009,116 @@ impl TestHarness {
         }
     }
 
+    /// Names of all managed containers for a deployment, via Docker directly.
+    async fn replica_container_names(&self, deployment: &str) -> Result<Vec<String>> {
+        let runtime = DockerRuntime::connect()?;
+        let mut names: Vec<String> = runtime
+            .list_containers_for_deployment(deployment)
+            .await?
+            .into_iter()
+            .map(|c| c.name)
+            .collect();
+        names.sort();
+        Ok(names)
+    }
+
+    // Waits on the daemon. Each one polls through `wait_for`, which logs
+    // progress on slow machines and fails with the last state it observed;
+    // deployment waits also attach the deployment's recent events.
+
+    async fn describe(&self, deployment: &str) -> Result<Option<DeploymentDescription>> {
+        match request(
+            &self.socket_path,
+            Request::DescribeDeployment {
+                name: deployment.to_string(),
+            },
+        )
+        .await?
+        {
+            Response::Description { item } => Ok(Some(item)),
+            Response::Error { .. } => Ok(None),
+            other => anyhow::bail!("unexpected describe response: {other:?}"),
+        }
+    }
+
+    /// The deployment's most recent events, one per line, for timeout errors.
+    async fn recent_events(&self, deployment: &str) -> String {
+        let response = request(
+            &self.socket_path,
+            Request::GetEvents {
+                limit: 15,
+                since_id: None,
+                deployment_name: Some(deployment.to_string()),
+                node_name: None,
+            },
+        )
+        .await;
+        match response {
+            Ok(Response::Events { items }) if !items.is_empty() => items
+                .iter()
+                .map(|e| format!("  {} {}: {}", e.level, e.reason, e.message))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Ok(Response::Events { .. }) => "  (none)".to_string(),
+            Ok(other) => format!("  (unexpected response: {other:?})"),
+            Err(err) => format!("  (could not fetch events: {err:#})"),
+        }
+    }
+
+    async fn wait_until_description<F>(
+        &self,
+        deployment: &str,
+        mut predicate: F,
+    ) -> Result<DeploymentDescription>
+    where
+        F: FnMut(&DeploymentDescription) -> bool,
+    {
+        let result = wait_for(
+            &format!("deployment `{deployment}` to reach the expected state"),
+            wait_timeout(180),
+            Duration::from_millis(500),
+            || self.describe(deployment),
+            |item| match item {
+                Some(item) if predicate(&item) => Probe::Done(item),
+                Some(item) => Probe::Pending(summarize(&item)),
+                None => Probe::Pending("deployment not found".to_string()),
+            },
+        )
+        .await;
+        match result {
+            Ok(item) => Ok(item),
+            Err(err) => Err(anyhow::anyhow!(
+                "{err:#}\nrecent events of `{deployment}`:\n{}",
+                self.recent_events(deployment).await
+            )),
+        }
+    }
+
+    async fn wait_until_running(&self, deployment: &str) -> Result<String> {
+        let item = self
+            .wait_until_description(deployment, |item| item.status == "Running")
+            .await?;
+        item.container_id
+            .context("deployment reported Running without a container ID")
+    }
+
+    async fn wait_until_container_id_changes(
+        &self,
+        deployment: &str,
+        previous_id: &str,
+    ) -> Result<String> {
+        let item = self
+            .wait_until_description(deployment, |item| {
+                item.status == "Running"
+                    && item
+                        .container_id
+                        .as_deref()
+                        .is_some_and(|id| id != previous_id)
+            })
+            .await?;
+        Ok(item.container_id.expect("checked by the predicate"))
+    }
+
     /// Wait until the deployment reports `ready_replicas == desired_replicas`
     /// at the expected count, returning the per-ordinal container IDs.
     async fn wait_until_replicas_ready(
@@ -1132,46 +1139,35 @@ impl TestHarness {
         // it to hold steady across two polls so a mid-reconcile recreation can't
         // leak a transient id into the assertions.
         let runtime = DockerRuntime::connect()?;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
         let mut previous: Option<std::collections::BTreeMap<u32, String>> = None;
-        loop {
-            let mut map = std::collections::BTreeMap::new();
-            for c in runtime.list_containers_for_deployment(deployment).await? {
-                // Only running containers count; exited ones (mid-recreate) would
-                // otherwise shadow the live container for an ordinal.
-                if c.running {
-                    if let Some(ordinal) = c.ordinal {
-                        map.insert(ordinal, c.id);
+        wait_for(
+            &format!("deployment `{deployment}` to settle at {expected} running replicas"),
+            wait_timeout(120),
+            Duration::from_millis(600),
+            || runtime.list_containers_for_deployment(deployment),
+            |containers| {
+                let mut map = std::collections::BTreeMap::new();
+                for c in containers {
+                    // Only running containers count; exited ones (mid-recreate)
+                    // would otherwise shadow the live container for an ordinal.
+                    if c.running {
+                        if let Some(ordinal) = c.ordinal {
+                            map.insert(ordinal, c.id);
+                        }
                     }
                 }
-            }
-            let settled = map.len() as u32 == expected
-                && previous.as_ref() == Some(&map)
-                && map.keys().copied().eq(0..expected);
-            if settled {
-                return Ok(map);
-            }
-            if tokio::time::Instant::now() > deadline {
-                anyhow::bail!(
-                    "deployment `{deployment}` did not reach {expected} stable replicas (saw {map:?})"
-                );
-            }
-            previous = Some(map);
-            tokio::time::sleep(Duration::from_millis(600)).await;
-        }
-    }
-
-    /// Names of all managed containers for a deployment, via Docker directly.
-    async fn replica_container_names(&self, deployment: &str) -> Result<Vec<String>> {
-        let runtime = DockerRuntime::connect()?;
-        let mut names: Vec<String> = runtime
-            .list_containers_for_deployment(deployment)
-            .await?
-            .into_iter()
-            .map(|c| c.name)
-            .collect();
-        names.sort();
-        Ok(names)
+                let settled = map.len() as u32 == expected
+                    && previous.as_ref() == Some(&map)
+                    && map.keys().copied().eq(0..expected);
+                if settled {
+                    return Probe::Done(map);
+                }
+                let state = format!("running replicas {map:?}");
+                previous = Some(map);
+                Probe::Pending(state)
+            },
+        )
+        .await
     }
 
     /// Wait until exactly `expected` managed containers exist for the deployment
@@ -1181,71 +1177,20 @@ impl TestHarness {
         deployment: &str,
         expected: usize,
     ) -> Result<Vec<String>> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
-        loop {
-            let names = self.replica_container_names(deployment).await?;
-            if names.len() == expected {
-                return Ok(names);
-            }
-            if tokio::time::Instant::now() > deadline {
-                anyhow::bail!(
-                    "deployment `{deployment}` did not settle to {expected} containers (saw {names:?})"
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    }
-
-    async fn wait_until_description<F>(
-        &self,
-        deployment: &str,
-        mut predicate: F,
-    ) -> Result<DeploymentDescription>
-    where
-        F: FnMut(&DeploymentDescription) -> bool,
-    {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
-        loop {
-            let response = request(
-                &self.socket_path,
-                Request::DescribeDeployment {
-                    name: deployment.to_string(),
-                },
-            )
-            .await?;
-
-            if let Response::Description { item } = response {
-                if predicate(&item) {
-                    return Ok(item);
+        wait_for(
+            &format!("deployment `{deployment}` to settle at {expected} containers"),
+            wait_timeout(120),
+            Duration::from_millis(500),
+            || self.replica_container_names(deployment),
+            |names| {
+                if names.len() == expected {
+                    Probe::Done(names)
+                } else {
+                    Probe::Pending(format!("containers {names:?}"))
                 }
-            }
-
-            if tokio::time::Instant::now() > deadline {
-                anyhow::bail!("deployment `{deployment}` did not reach the expected description");
-            }
-
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    }
-
-    async fn wait_until_container_id_changes(
-        &self,
-        deployment: &str,
-        previous_id: &str,
-    ) -> Result<String> {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(90);
-        loop {
-            let current_id = self.wait_until_running(deployment).await?;
-            if current_id != previous_id {
-                return Ok(current_id);
-            }
-
-            if tokio::time::Instant::now() > deadline {
-                anyhow::bail!("deployment `{deployment}` did not recreate its container in time");
-            }
-
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
+            },
+        )
+        .await
     }
 
     async fn wait_until_service_status<F>(
@@ -1256,28 +1201,27 @@ impl TestHarness {
     where
         F: FnMut(&litek8s::protocol::ServiceDescription) -> bool,
     {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-        loop {
-            let response = request(
-                &self.socket_path,
-                Request::DescribeService {
-                    name: service.to_string(),
-                },
-            )
-            .await?;
-
-            if let Response::ServiceDescription { item } = response {
-                if predicate(&item) {
-                    return Ok(item);
+        wait_for(
+            &format!("service `{service}` to reach the expected status"),
+            wait_timeout(60),
+            Duration::from_millis(250),
+            || {
+                request(
+                    &self.socket_path,
+                    Request::DescribeService {
+                        name: service.to_string(),
+                    },
+                )
+            },
+            |response| match response {
+                Response::ServiceDescription { item } if predicate(&item) => Probe::Done(item),
+                Response::ServiceDescription { item } => {
+                    Probe::Pending(format!("status={} message={:?}", item.status, item.message))
                 }
-            }
-
-            if tokio::time::Instant::now() > deadline {
-                anyhow::bail!("service `{service}` did not reach the expected status");
-            }
-
-            tokio::time::sleep(Duration::from_millis(250)).await;
-        }
+                other => Probe::Pending(format!("{other:?}")),
+            },
+        )
+        .await
     }
 }
 
@@ -1285,6 +1229,87 @@ impl Drop for TestHarness {
     fn drop(&mut self) {
         self.server.abort();
     }
+}
+
+/// One observation of a [`wait_for`] loop.
+enum Probe<T> {
+    Done(T),
+    /// Not there yet; says what was seen, for progress lines and the timeout error.
+    Pending(String),
+}
+
+/// Deadline for a wait, `base_secs` scaled by `LITEK8S_TEST_TIMEOUT_SCALE`.
+/// The bases are generous on purpose: on a loaded machine (a CI runner, a VM
+/// soak next door) pulling and starting a container can take a minute. A real
+/// hang still fails, with the last state `wait_for` observed.
+fn wait_timeout(base_secs: u64) -> Duration {
+    let scale = env::var("LITEK8S_TEST_TIMEOUT_SCALE")
+        .ok()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|scale| *scale > 0.0)
+        .unwrap_or(1.0);
+    Duration::from_secs_f64(base_secs as f64 * scale)
+}
+
+const WAIT_PROGRESS_EVERY: Duration = Duration::from_secs(15);
+
+/// Poll `fetch` every `interval` until `check` accepts what it returned.
+/// Errors from `fetch` (the daemon went away) fail at once. While waiting, a
+/// progress line with the last observed state goes to stderr every 15 s, and
+/// the timeout error carries that state too.
+async fn wait_for<S, T, Fetch, Fut, Check>(
+    what: &str,
+    timeout: Duration,
+    interval: Duration,
+    mut fetch: Fetch,
+    mut check: Check,
+) -> Result<T>
+where
+    Fetch: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<S>>,
+    Check: FnMut(S) -> Probe<T>,
+{
+    let start = tokio::time::Instant::now();
+    let mut next_report = start + WAIT_PROGRESS_EVERY;
+    loop {
+        let last = match check(fetch().await?) {
+            Probe::Done(value) => {
+                if start.elapsed() >= WAIT_PROGRESS_EVERY {
+                    eprintln!("[wait] {what}: done after {:.1?}", start.elapsed());
+                }
+                return Ok(value);
+            }
+            Probe::Pending(state) => state,
+        };
+        let now = tokio::time::Instant::now();
+        if now - start > timeout {
+            anyhow::bail!("timed out after {timeout:?} waiting for {what}; last observed: {last}");
+        }
+        if now >= next_report {
+            eprintln!(
+                "[wait] {what}: still waiting after {:.0?}; last observed: {last}",
+                now - start
+            );
+            next_report += WAIT_PROGRESS_EVERY;
+        }
+        tokio::time::sleep(interval).await;
+    }
+}
+
+fn summarize(item: &DeploymentDescription) -> String {
+    format!(
+        "status={} ready={} ready_replicas={}/{} container={:?} restarts={} last_exit={:?} message={:?}",
+        item.status,
+        item.ready,
+        item.ready_replicas,
+        item.desired_replicas,
+        item.container_id
+            .as_deref()
+            .map(|id| &id[..id.len().min(12)]),
+        item.restart_count,
+        item.last_exit,
+        item.message,
+    )
 }
 
 async fn spawn_server(

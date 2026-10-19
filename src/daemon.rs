@@ -208,7 +208,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     })?;
 
     let effective_api_addr = resolve_api_bind_addr(&config);
-    let tcp_api_task = if let Some(api_addr) = effective_api_addr.as_ref() {
+    let _tcp_api_task = if let Some(api_addr) = effective_api_addr.as_ref() {
         let tcp_listener = tokio::net::TcpListener::bind(api_addr)
             .await
             .with_context(|| format!("failed to bind TCP API listener on {api_addr}"))?;
@@ -218,7 +218,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
             eprintln!("api: listening on {api_addr} (auto-rebound to VPN IP)");
         }
         let state = app_state.clone();
-        Some(tokio::spawn(async move {
+        Some(AbortOnDrop(tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = tcp_listener.accept().await else {
                     continue;
@@ -230,20 +230,26 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
                     }
                 });
             }
-        }))
+        })))
     } else {
         None
     };
 
     let notify = Arc::new(Notify::new());
-    let reconcile_task =
-        spawn_reconcile_loop(app_state.clone(), notify.clone(), config.poll_interval);
-    let snapshot_task = spawn_snapshot_loop(
+    // Guards, not bare handles: when `serve` is cancelled (a test aborting
+    // it) or returns early with an error, the loops stop with it instead of
+    // reconciling, and creating containers, for a daemon that is gone.
+    let _reconcile_task = AbortOnDrop(spawn_reconcile_loop(
+        app_state.clone(),
+        notify.clone(),
+        config.poll_interval,
+    ));
+    let _snapshot_task = AbortOnDrop(spawn_snapshot_loop(
         app_state.clone(),
         snapshot_refresh,
         CLUSTER_SNAPSHOT_REFRESH_INTERVAL,
-    );
-    let event_listener = app_state.runtime.spawn_event_listener(notify.clone());
+    ));
+    let _event_listener = AbortOnDrop(app_state.runtime.spawn_event_listener(notify.clone()));
     notify.notify_one();
     app_state.request_cluster_snapshot_refresh();
 
@@ -265,17 +271,20 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         }
     }
 
-    reconcile_task.abort();
-    snapshot_task.abort();
-    event_listener.abort();
-    if let Some(task) = tcp_api_task {
-        task.abort();
-    }
     if config.socket_path.exists() {
         std::fs::remove_file(&config.socket_path)
             .with_context(|| format!("failed to remove socket {}", config.socket_path.display()))?;
     }
     Ok(())
+}
+
+/// Aborts a background task when dropped.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 async fn handle_connection(state: Arc<AppState>, mut stream: UnixStream) -> Result<()> {
