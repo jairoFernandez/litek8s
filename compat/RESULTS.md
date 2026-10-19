@@ -273,3 +273,13 @@ endpoints on two nodes, a Deployment surviving a worker's hard power-off
   and `20261017-220217-litek8s-3vm-l4rerun2/` for the rest. Every chart
   passed once; L4 was not repeated as a single clean run on 3 VMs.
 
+### On the merged code (2026-10-19)
+
+The branch after merging main 6172595 (6a63fab; the corpus has grown to
+119 cases with the L1 CRD cases), on a fresh 3-VM cluster:
+`results/20261019-092227-litek8s-3vm-merged/` **118/119** (L0 7/7, L1 43/43,
+L2 15/15, L3 7/7, L4 46/47) in one run; the miss, `helm_grafana`, timed out
+pulling its image into an empty node cache and passed alone right after
+(`20261019-100930-litek8s-3vm-merged-grafana/`, 35 s). M1 5/5 on the same
+cluster: `20261019-*-litek8s-3vm-merged-M1/`.
+
