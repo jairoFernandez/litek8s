@@ -29,6 +29,8 @@ use super::server::{ApiError, ApiState, Body, Req};
 
 const GROUP: &str = "apiregistration.k8s.io";
 const PLURAL: &str = "apiservices";
+/// Upper bound for one APIService's availability check.
+const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The APIService that delegates `group/version` to a Service, if any.
 pub(crate) fn service_for(state: &ApiState, group: &str, version: &str) -> Option<Value> {
@@ -103,9 +105,16 @@ async fn discover(state: &ApiState, api: &Value, group: &str, version: &str) -> 
     let request = Request::get(format!("/apis/{group}/{version}"))
         .header(hyper::header::ACCEPT, "application/json")
         .body(Full::new(Bytes::new()))?;
-    let response = tokio::time::timeout(Duration::from_secs(5), send(state, api, request)).await.context("timed out")??;
-    let status = response.status();
-    let bytes = response.into_body().collect().await?.to_bytes();
+    // One deadline for the whole exchange, body included: a backend that
+    // sends headers and then stalls must not hold the availability loop.
+    let (status, bytes) = tokio::time::timeout(Duration::from_secs(5), async {
+        let response = send(state, api, request).await?;
+        let status = response.status();
+        let bytes = response.into_body().collect().await?.to_bytes();
+        anyhow::Ok((status, bytes))
+    })
+    .await
+    .context("timed out")??;
     if !status.is_success() {
         bail!("failing or missing response from https://{}/apis/{group}/{version}: bad status from {status}", util::s(api, "/spec/service/name"));
     }
@@ -206,8 +215,21 @@ pub(crate) async fn run(state: Arc<ApiState>) {
         let (apis, _) = state.store().list(GROUP, PLURAL, None);
         let mut now = HashSet::new();
         for api in &apis {
-            if let Some(gv) = check(&state, api).await {
-                now.insert(gv);
+            // Belt and braces: whatever a check waits on, one slow APIService
+            // must never stop the others from being checked.
+            match tokio::time::timeout(CHECK_TIMEOUT, check(&state, api)).await {
+                Ok(Some(gv)) => {
+                    now.insert(gv);
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    let gv = (util::s(api, "/spec/group").to_string(), util::s(api, "/spec/version").to_string());
+                    state.registry.set_aggregated(&gv.0, &gv.1, Vec::new());
+                    if let Some(current) = state.get_object(GROUP, PLURAL, "", &util::name(api)) {
+                        set_available(&state, &current, false, "FailedDiscoveryCheck", "availability check timed out");
+                    }
+                    now.insert(gv);
+                }
             }
         }
         for (group, version) in served.difference(&now) {
