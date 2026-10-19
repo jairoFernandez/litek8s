@@ -416,3 +416,27 @@ async fn linearizable_under_leader_kills_and_partitions() {
         panic!("{e} (history in {})", path.display());
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn big_objects_replicate() {
+    let root = tempfile::tempdir().unwrap();
+    let servers_ = cluster(root.path()).await;
+    let addrs: Vec<String> = servers_.iter().map(|s| s.addr.clone()).collect();
+    let base = "/api/v1/namespaces/default/configmaps";
+    // A burst of big objects: more than one AppendEntries can carry.
+    let blob = "x".repeat(400 << 10);
+    let mut writes = Vec::new();
+    for i in 0..12 {
+        let (addr, blob) = (addrs[i % 3].clone(), blob.clone());
+        writes.push(tokio::spawn(async move { http(&addr, "POST", base, Some(&cm(&format!("big-{i}"), json!({"blob": blob}))), Duration::from_secs(30)).await }));
+    }
+    for w in writes {
+        assert!(matches!(w.await.unwrap(), Ok((201, _))));
+    }
+    for a in &addrs {
+        let (code, list) = http(a, "GET", base, None, T).await.unwrap();
+        assert_eq!(code, 200);
+        let n = list["items"].as_array().unwrap().iter().filter(|o| o["metadata"]["name"].as_str().unwrap().starts_with("big-")).count();
+        assert_eq!(n, 12, "on {a}");
+    }
+}

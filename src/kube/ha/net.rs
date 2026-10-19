@@ -283,14 +283,28 @@ impl RaftNetworkFactory<TypeConfig> for Network {
 
 type RpcErr<E = openraft::error::Infallible> = RPCError<u64, ServerNode, RaftError<u64, E>>;
 
+/// The largest AppendEntries request sent at once: openraft gives each one
+/// a heartbeat interval to complete, so a batch of big objects (a chart's
+/// CRDs) is split instead of timing out again and again.
+const MAX_APPEND_BYTES: usize = 512 << 10;
+
 impl Conn {
     async fn rpc<Req: Serialize, Resp: DeserializeOwned, E: std::error::Error + DeserializeOwned>(&self, path: &str, req: &Req, option: &RPCOption) -> Result<Resp, RpcErr<E>> {
         let bytes = serde_json::to_vec(req).map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
+        self.send_rpc(path, bytes, option).await
+    }
+
+    async fn send_rpc<Resp: DeserializeOwned, E: std::error::Error + DeserializeOwned>(&self, path: &str, bytes: Vec<u8>, option: &RPCOption) -> Result<Resp, RpcErr<E>> {
         let (status, body) = self
             .peers
             .call_on(Lane::Raft, &self.addr, Method::POST, &format!("{PREFIX}/raft/{path}"), bytes.into(), option.hard_ttl())
             .await
-            .map_err(|e| RPCError::Unreachable(Unreachable::new(&std::io::Error::other(format!("{e:#}")))))?;
+            .map_err(|e| {
+                let io = std::io::Error::other(format!("{e:#}"));
+                // Unreachable makes openraft back off (no heartbeats for a
+                // while): only for a peer that cannot be connected to.
+                if not_sent(&e) { RPCError::Unreachable(Unreachable::new(&io)) } else { RPCError::Network(NetworkError::new(&io)) }
+            })?;
         if !status.is_success() {
             let e = std::io::Error::other(format!("{} answered {status}: {}", self.addr, String::from_utf8_lossy(&body)));
             return Err(RPCError::Network(NetworkError::new(&e)));
@@ -302,7 +316,12 @@ impl Conn {
 
 impl RaftNetwork<TypeConfig> for Conn {
     async fn append_entries(&mut self, rpc: AppendEntriesRequest<TypeConfig>, option: RPCOption) -> Result<AppendEntriesResponse<u64>, RpcErr> {
-        self.rpc("append", &rpc, &option).await
+        let bytes = serde_json::to_vec(&rpc).map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
+        if bytes.len() > MAX_APPEND_BYTES && rpc.entries.len() > 1 {
+            let fit = (rpc.entries.len() * MAX_APPEND_BYTES / bytes.len()).max(1);
+            return Err(RPCError::PayloadTooLarge(openraft::error::PayloadTooLarge::new_entries_hint(fit as u64)));
+        }
+        self.send_rpc("append", bytes, &option).await
     }
 
     async fn vote(&mut self, rpc: VoteRequest<u64>, option: RPCOption) -> Result<VoteResponse<u64>, RpcErr> {
@@ -351,7 +370,7 @@ impl RaftNetwork<TypeConfig> for Conn {
     }
 
     fn backoff(&self) -> openraft::network::Backoff {
-        openraft::network::Backoff::new(std::iter::repeat(Duration::from_millis(200)))
+        openraft::network::Backoff::new(std::iter::repeat(Duration::from_millis(100)))
     }
 }
 

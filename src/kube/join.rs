@@ -258,16 +258,21 @@ pub(crate) fn allocate_pod_cidr(api: &ApiState, node: &str, requested: Option<&s
 /// Label the API server's own node as the control plane (as k3s does), so
 /// tools that keep workloads or disruption tests off it can tell.
 pub(crate) fn mark_control_plane(api: &ApiState, node: &str) {
-    let Some(mut obj) = api.get_object("", "nodes", "", node) else { return };
-    if util::labels_of(&obj).contains_key(CONTROL_PLANE_LABEL) {
-        return;
-    }
-    if !obj["metadata"]["labels"].is_object() {
-        obj["metadata"]["labels"] = json!({});
-    }
-    obj["metadata"]["labels"][CONTROL_PLANE_LABEL] = json!("true");
-    if let Err(e) = api.update_object("", "nodes", obj) {
-        eprintln!("apiserver: could not label node {node} as control plane: {e}");
+    // The node lifecycle controller may write the Node meanwhile (HA).
+    for attempt in 0..5 {
+        let Some(mut obj) = api.get_object("", "nodes", "", node) else { return };
+        if util::labels_of(&obj).contains_key(CONTROL_PLANE_LABEL) {
+            return;
+        }
+        if !obj["metadata"]["labels"].is_object() {
+            obj["metadata"]["labels"] = json!({});
+        }
+        obj["metadata"]["labels"][CONTROL_PLANE_LABEL] = json!("true");
+        match api.update_object("", "nodes", obj) {
+            Ok(_) => return,
+            Err(e) if e.is_conflict() && attempt < 4 => continue,
+            Err(e) => return eprintln!("apiserver: could not label node {node} as control plane: {e}"),
+        }
     }
 }
 
