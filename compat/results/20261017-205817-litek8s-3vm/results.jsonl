@@ -1,0 +1,5 @@
+{"id": "multi_pod_to_pod", "tier": "M1", "status": "pass", "seconds": 4, "detail": ""}
+{"id": "multi_daemonset_every_node", "tier": "M1", "status": "pass", "seconds": 4, "detail": ""}
+{"id": "multi_service_spreads", "tier": "M1", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "multi_node_kill_deployment", "tier": "M1", "status": "pass", "seconds": 64, "detail": "vm lk2 up"}
+{"id": "multi_node_short_outage", "tier": "M1", "status": "pass", "seconds": 57, "detail": "vm lk2 up"}

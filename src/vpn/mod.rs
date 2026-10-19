@@ -11,6 +11,7 @@ pub mod keys;
 pub mod storage;
 pub mod token;
 pub mod tunnel;
+pub mod wireguard;
 
 pub use bootstrap::{
     HUB_NODE_NAME, complete_spoke, current_local_membership, init_hub, prepare_spoke,
@@ -18,6 +19,6 @@ pub use bootstrap::{
 };
 pub use config::{VpnMembership, VpnNetwork, VpnRole, VpnStatus};
 pub use keys::{KeyPair, PublicKey};
-pub use storage::{HubState, RegisteredPeer, SpokeState, load_or_generate_keypair};
+pub use storage::{HubState, RegisteredPeer, SpokeState, load_or_generate_keypair, load_or_generate_keypair_at};
 pub use token::JoinToken;
 pub use tunnel::{TunnelHandle, write_wg_quick_config, write_wg_quick_hub_config};

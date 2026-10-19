@@ -17,12 +17,13 @@ mod gc;
 mod history;
 mod job;
 mod misc;
+mod node_lifecycle;
 mod replicaset;
 mod scheduler;
 mod statefulset;
 pub(crate) mod util;
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -32,6 +33,8 @@ use tokio::time::Instant;
 
 use super::server::ApiState;
 use super::store::{EventType, WatchEvent};
+
+pub use node_lifecycle::NodeLifecycle;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum Kind {
@@ -50,6 +53,10 @@ pub(crate) enum Kind {
     Namespace,
     /// Reclaim the volume of a deleted claim.
     VolumeClaim,
+    /// Node health: heartbeats, taints, evictions.
+    Node,
+    /// Delete Events older than the event TTL (as kube-apiserver does).
+    EventTtl,
     /// `status.used` of a ResourceQuota.
     Quota,
     /// Status of a PodDisruptionBudget.
@@ -89,6 +96,12 @@ pub(crate) struct Manager {
     deleted: BTreeMap<String, HashSet<String>>,
     /// Pods the scheduler could not place; retried when nodes or pods change.
     unschedulable: BTreeSet<(String, String)>,
+    /// When each node's Lease was last seen changing.
+    health: HashMap<String, node_lifecycle::Health>,
+    /// The pending timer of each key: one at a time, the earliest (the
+    /// reconcile it runs asks for the next), so periodic reconciles started
+    /// by many events do not multiply.
+    pending: HashMap<WorkKey, Instant>,
 }
 
 /// Run the controllers until the store goes away.
@@ -99,6 +112,8 @@ pub async fn run(api: Arc<ApiState>) {
         timers: BTreeMap::new(),
         deleted: BTreeMap::new(),
         unschedulable: BTreeSet::new(),
+        health: HashMap::new(),
+        pending: HashMap::new(),
     };
     loop {
         let mut live = match manager.api.store().subscribe(None) {
@@ -147,7 +162,36 @@ impl Manager {
     }
 
     fn after(&mut self, delay: Duration, key: WorkKey) {
-        self.timers.entry(Instant::now() + delay).or_default().push(key);
+        let at = Instant::now() + delay;
+        match self.pending.get(&key) {
+            Some(pending) if *pending <= at => return,
+            Some(pending) => {
+                let pending = *pending;
+                if let Some(keys) = self.timers.get_mut(&pending) {
+                    keys.retain(|k| *k != key);
+                    if keys.is_empty() {
+                        self.timers.remove(&pending);
+                    }
+                }
+            }
+            None => {}
+        }
+        self.pending.insert(key.clone(), at);
+        self.timers.entry(at).or_default().push(key);
+    }
+
+    fn lease_renewed(&mut self, name: &str, lease: &Value) {
+        let renew = util::s(lease, "/spec/renewTime").to_string();
+        let changed = self.health.get(name).is_none_or(|h| h.renew_time != renew);
+        if changed {
+            self.health.insert(name.to_string(), node_lifecycle::Health { renew_time: renew, seen: Instant::now() });
+            let ready = self.api.get_object("", "nodes", "", name).is_some_and(|n| util::condition_true(&n, "Ready"));
+            if ready {
+                self.after(self.api.lifecycle.grace, WorkKey::new(Kind::Node, "", name));
+            } else {
+                self.enqueue(Kind::Node, "", name);
+            }
+        }
     }
 
     /// Queue every object a controller owns, and garbage-collect anything
@@ -173,6 +217,18 @@ impl Manager {
         }
         for key in store.keys_of_resource("", "namespaces") {
             self.enqueue(Kind::Namespace, "", &key.name);
+        }
+        self.enqueue(Kind::EventTtl, "", "");
+        // Heartbeat clocks start now: a restart must not expire anyone.
+        for key in store.keys_of_resource("", "nodes") {
+            if !self.health.contains_key(&key.name) {
+                let renew = api
+                    .get_object("coordination.k8s.io", "leases", "kube-node-lease", &key.name)
+                    .map(|l| util::s(&l, "/spec/renewTime").to_string())
+                    .unwrap_or_default();
+                self.health.insert(key.name.clone(), node_lifecycle::Health { renew_time: renew, seen: Instant::now() });
+            }
+            self.enqueue(Kind::Node, "", &key.name);
         }
         let (pods, _) = store.list("", "pods", None);
         for pod in &pods {
@@ -253,7 +309,16 @@ impl Manager {
                 }
                 self.enqueue_services_for(ns);
             }
+            ("coordination.k8s.io", "leases") if ns == "kube-node-lease" && event.event != EventType::Deleted => {
+                self.lease_renewed(name, obj);
+            }
             ("", "nodes") => {
+                if event.event == EventType::Deleted {
+                    self.health.remove(name);
+                } else {
+                    self.health.entry(name.to_string()).or_insert_with(|| node_lifecycle::Health { renew_time: String::new(), seen: Instant::now() });
+                }
+                self.enqueue(Kind::Node, "", name);
                 self.enqueue(Kind::Taints, "", name);
                 for ds in self.api.store().keys_of_resource("apps", "daemonsets") {
                     self.enqueue(Kind::DaemonSet, &ds.namespace, &ds.name);
@@ -338,6 +403,9 @@ impl Manager {
         let due: Vec<Instant> = self.timers.range(..=now).map(|(t, _)| *t).collect();
         for t in due {
             for key in self.timers.remove(&t).unwrap_or_default() {
+                if self.pending.get(&key) == Some(&t) {
+                    self.pending.remove(&key);
+                }
                 self.queue.insert(key);
             }
         }
@@ -375,6 +443,8 @@ impl Manager {
             Kind::Service => misc::reconcile_service(&api, ns, name),
             Kind::Namespace => misc::reconcile_namespace(&api, name),
             Kind::VolumeClaim => misc::reclaim_volumes(&api, ns, name),
+            Kind::Node => node_lifecycle::reconcile(&api, name, self.health.get(name)),
+            Kind::EventTtl => misc::expire_events(&api),
             Kind::Quota => misc::reconcile_quota(&api, ns, name),
             Kind::Pdb => misc::reconcile_pdb(&api, ns, name),
             Kind::Taints => scheduler::evict_for_taints(&api, name),

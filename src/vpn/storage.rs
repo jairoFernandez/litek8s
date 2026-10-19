@@ -101,7 +101,12 @@ impl SpokeState {
 
 /// Load the hub key pair from disk, or generate and persist a fresh one.
 pub fn load_or_generate_keypair() -> Result<KeyPair> {
-    let path = config::default_vpn_private_key_file()?;
+    load_or_generate_keypair_at(&config::default_vpn_private_key_file()?)
+}
+
+/// The key pair kept at `path` (0600), made on first use.
+pub fn load_or_generate_keypair_at(path: &Path) -> Result<KeyPair> {
+    let path = path.to_path_buf();
     if path.exists() {
         let raw = fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;

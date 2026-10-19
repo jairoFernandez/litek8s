@@ -1,0 +1,69 @@
+{"id": "deploy_ready", "tier": "L2", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "deploy_scale", "tier": "L2", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "deploy_rollout_undo", "tier": "L2", "status": "pass", "seconds": 20, "detail": ""}
+{"id": "pod_logs", "tier": "L2", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "pod_exec", "tier": "L2", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "port_forward", "tier": "L2", "status": "pass", "seconds": 2, "detail": ""}
+{"id": "job_complete", "tier": "L2", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "cronjob_schedules", "tier": "L2", "status": "pass", "seconds": 47, "detail": ""}
+{"id": "statefulset_ordinals", "tier": "L2", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "daemonset_all_nodes", "tier": "L2", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "multi_container_pod", "tier": "L2", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "config_injection", "tier": "L2", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "http_readiness", "tier": "L2", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "restart_on_crash", "tier": "L2", "status": "pass", "seconds": 3, "detail": ""}
+{"id": "pvc_local", "tier": "L2", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "svc_clusterip", "tier": "L3", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "svc_dns", "tier": "L3", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "svc_endpoints", "tier": "L3", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "svc_headless", "tier": "L3", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "svc_nodeport", "tier": "L3", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "pod_to_pod", "tier": "L3", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "api_from_pod", "tier": "L3", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "helm_podinfo", "tier": "L4", "status": "pass", "seconds": 16, "detail": "podinfo-6.15.0"}
+{"id": "helm_traefik", "tier": "L4", "status": "pass", "seconds": 16, "detail": "traefik-42.0.0"}
+{"id": "helm_cert_manager", "tier": "L4", "status": "pass", "seconds": 23, "detail": "cert-manager-v1.21.2"}
+{"id": "helm_metrics_server", "tier": "L4", "status": "pass", "seconds": 28, "detail": "metrics-server-3.14.0"}
+{"id": "helm_node_exporter", "tier": "L4", "status": "pass", "seconds": 10, "detail": "prometheus-node-exporter-4.60.0"}
+{"id": "helm_ksm", "tier": "L4", "status": "pass", "seconds": 30, "detail": "kube-state-metrics-8.6.0"}
+{"id": "helm_grafana", "tier": "L4", "status": "pass", "seconds": 41, "detail": "grafana-10.5.15"}
+{"id": "helm_kyverno", "tier": "L4", "status": "pass", "seconds": 72, "detail": "kyverno-3.9.1"}
+{"id": "helm_ext_secrets", "tier": "L4", "status": "pass", "seconds": 79, "detail": "external-secrets-2.13.0"}
+{"id": "helm_reloader", "tier": "L4", "status": "pass", "seconds": 17, "detail": "reloader-2.2.18"}
+{"id": "helm_keda", "tier": "L4", "status": "pass", "seconds": 74, "detail": "keda-2.21.0"}
+{"id": "helm_argo_cd", "tier": "L4", "status": "pass", "seconds": 124, "detail": "argo-cd-10.10.5"}
+{"id": "helm_cnpg", "tier": "L4", "status": "pass", "seconds": 43, "detail": "cloudnative-pg-0.29.1"}
+{"id": "helm_headlamp", "tier": "L4", "status": "pass", "seconds": 76, "detail": "headlamp-0.46.0"}
+{"id": "helm_nats", "tier": "L4", "status": "pass", "seconds": 38, "detail": "nats-2.15.1"}
+{"id": "helm_vault", "tier": "L4", "status": "pass", "seconds": 36, "detail": "vault-0.34.1"}
+{"id": "helm_minio_operator", "tier": "L4", "status": "pass", "seconds": 16, "detail": "operator-7.1.1"}
+{"id": "helm_external_dns", "tier": "L4", "status": "pass", "seconds": 68, "detail": "external-dns-1.23.0"}
+{"id": "helm_gitea", "tier": "L4", "status": "pass", "seconds": 26, "detail": "gitea-12.7.0"}
+{"id": "helm_loki", "tier": "L4", "status": "pass", "seconds": 85, "detail": "loki-7.3.0"}
+{"id": "helm_kps", "tier": "L4", "status": "pass", "seconds": 227, "detail": "kube-prometheus-stack-92.10.1"}
+{"id": "helm_vm_single", "tier": "L4", "status": "fail", "seconds": 1, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}
+{"id": "helm_alloy", "tier": "L4", "status": "fail", "seconds": 2, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}
+{"id": "helm_haproxy", "tier": "L4", "status": "fail", "seconds": 1, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}
+{"id": "helm_envoy_gateway", "tier": "L4", "status": "pass", "seconds": 21, "detail": "gateway-helm-1.9.2"}
+{"id": "helm_nginx_ingress", "tier": "L4", "status": "pass", "seconds": 22, "detail": "nginx-ingress-2.8.0"}
+{"id": "helm_metallb", "tier": "L4", "status": "fail", "seconds": 0, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}
+{"id": "helm_openebs_local", "tier": "L4", "status": "fail", "seconds": 1, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}
+{"id": "helm_redis_operator", "tier": "L4", "status": "fail", "seconds": 0, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}
+{"id": "helm_mariadb_op", "tier": "L4", "status": "fail", "seconds": 1, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}
+{"id": "helm_zalando_pg", "tier": "L4", "status": "fail", "seconds": 1, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}
+{"id": "helm_valkey", "tier": "L4", "status": "fail", "seconds": 1, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}
+{"id": "helm_home_assistant", "tier": "L4", "status": "fail", "seconds": 1, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}
+{"id": "helm_jellyfin", "tier": "L4", "status": "fail", "seconds": 1, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}
+{"id": "helm_nextcloud", "tier": "L4", "status": "fail", "seconds": 1, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}
+{"id": "helm_uptime_kuma", "tier": "L4", "status": "fail", "seconds": 1, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}
+{"id": "helm_vaultwarden", "tier": "L4", "status": "fail", "seconds": 0, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}
+{"id": "helm_pihole", "tier": "L4", "status": "fail", "seconds": 1, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}
+{"id": "helm_node_red", "tier": "L4", "status": "fail", "seconds": 1, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}
+{"id": "helm_homepage", "tier": "L4", "status": "fail", "seconds": 0, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}
+{"id": "helm_gatus", "tier": "L4", "status": "fail", "seconds": 1, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}
+{"id": "helm_zot", "tier": "L4", "status": "fail", "seconds": 1, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}
+{"id": "helm_registry", "tier": "L4", "status": "fail", "seconds": 1, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}
+{"id": "helm_flux2", "tier": "L4", "status": "fail", "seconds": 0, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}
+{"id": "helm_argo_wf", "tier": "L4", "status": "fail", "seconds": 1, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}
+{"id": "helm_descheduler", "tier": "L4", "status": "fail", "seconds": 1, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}
+{"id": "helm_trivy_operator", "tier": "L4", "status": "fail", "seconds": 0, "detail": "Error: INSTALLATION FAILED: no cached repo found. (try 'helm repo update'): open /Users/jairo/Library/Caches/helm/repository/prometheus-community-index.yaml: no such file or directory"}

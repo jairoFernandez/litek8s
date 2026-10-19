@@ -56,6 +56,12 @@ pub(crate) fn reconcile(api: &ApiState, ns: &str, name: &str) -> Result<Requeue,
         .filter(|n| !util::is_deleting(n) && scheduler::node_fits_constraints(&probe_spec, n, true).is_ok())
         .map(util::name)
         .collect();
+    // Nodes a running daemon pod may stay on (NoSchedule taints aside).
+    let keeps: Vec<String> = nodes
+        .iter()
+        .filter(|n| !util::is_deleting(n) && scheduler::node_keeps_daemon_pod(&probe_spec, n))
+        .map(util::name)
+        .collect();
 
     let mut by_node: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for pod in util::owned(api, "", "pods", ns, &ds) {
@@ -70,7 +76,7 @@ pub(crate) fn reconcile(api: &ApiState, ns: &str, name: &str) -> Result<Requeue,
     }
 
     for (node, pods) in &by_node {
-        let keep = if eligible.contains(node) { 1 } else { 0 };
+        let keep = if keeps.contains(node) { 1 } else { 0 };
         for pod in pods.iter().skip(keep) {
             let _ = api.delete_named("", "pods", ns, &util::name(pod));
         }
@@ -98,7 +104,7 @@ pub(crate) fn reconcile(api: &ApiState, ns: &str, name: &str) -> Result<Requeue,
     let mut updated = 0;
     let mut current = 0;
     let mut outdated = Vec::new();
-    for node in &eligible {
+    for node in eligible.iter().chain(keeps.iter().filter(|n| !eligible.contains(n) && by_node.contains_key(*n))) {
         let Some(pod) = by_node.get(node).and_then(|p| p.first()) else { continue };
         current += 1;
         if util::is_ready(pod) {
@@ -118,7 +124,7 @@ pub(crate) fn reconcile(api: &ApiState, ns: &str, name: &str) -> Result<Requeue,
         }
     }
     let desired = eligible.len() as i64;
-    let misscheduled = by_node.keys().filter(|n| !eligible.contains(n)).count();
+    let misscheduled = by_node.keys().filter(|n| !keeps.contains(n)).count();
 
     // Rolling update within maxUnavailable, unavailable outdated pods first.
     if s(&ds, "/spec/updateStrategy/type") != "OnDelete" && !outdated.is_empty() {

@@ -325,6 +325,29 @@ pub(crate) fn reclaim_volumes(api: &ApiState, ns: &str, claim: &str) -> Result<R
     Ok(None)
 }
 
+/// How long Events are kept (kube-apiserver's `--event-ttl` default).
+const EVENT_TTL: chrono::Duration = chrono::Duration::hours(1);
+
+/// Delete Events (both API groups) older than the TTL. Without this, events
+/// written by in-cluster controllers would pile up forever.
+pub(crate) fn expire_events(api: &ApiState) -> Result<Requeue, ApiError> {
+    let cutoff = util::now() - EVENT_TTL;
+    for group in ["", "events.k8s.io"] {
+        let (events, _) = api.store().list(group, "events", None);
+        for ev in &events {
+            let stamp = ["/lastTimestamp", "/eventTime", "/series/lastObservedTime", "/metadata/creationTimestamp"]
+                .iter()
+                .filter_map(|p| ev.pointer(p).and_then(Value::as_str).and_then(util::parse_time))
+                .max();
+            if stamp.is_some_and(|t| t < cutoff) {
+                let (ns, name) = util::ns_name(ev);
+                let _ = api.delete_named(group, "events", &ns, &name);
+            }
+        }
+    }
+    Ok(Some(std::time::Duration::from_secs(300)))
+}
+
 /// ResourceQuota: `status.hard` mirrors the spec, `status.used` is what the
 /// namespace uses now.
 pub(crate) fn reconcile_quota(api: &ApiState, ns: &str, name: &str) -> Result<Requeue, ApiError> {

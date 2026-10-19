@@ -44,8 +44,6 @@ use super::runtime::{
     SandboxInfo, SandboxSpec,
 };
 
-/// The node's pod CIDR (what the Node object announces).
-pub const POD_CIDR: &str = "10.42.0.0/24";
 const RUN_DIR: &str = "/run/litek8s";
 const CGROUP_ROOT: &str = "/sys/fs/cgroup";
 
@@ -107,6 +105,8 @@ struct Inner {
     images: Arc<image::ImageStore>,
     ipam: Mutex<net::Ipam>,
     subnet: net::Subnet,
+    /// MTU of pod interfaces (lower on the WireGuard overlay).
+    mtu: u32,
     exits_tx: mpsc::UnboundedSender<String>,
     exits_rx: Mutex<Option<mpsc::UnboundedReceiver<String>>>,
     execs: Mutex<HashMap<String, Exec>>,
@@ -194,10 +194,10 @@ async fn run_quiet(program: &str, args: &[&str], stdin: Option<&str>) -> Result<
 }
 
 impl CrunPods {
-    /// Set up the runtime under `node_dir`: directories, the bridge and its
-    /// rules, and watches on containers that kept running while the agent
-    /// was away.
-    pub async fn new(node_dir: &Path) -> Result<Self> {
+    /// Set up the runtime under `node_dir`: directories, the bridge for the
+    /// node's `pod_cidr` (a block of `cluster_cidr`) and its rules, and
+    /// watches on containers that kept running while the agent was away.
+    pub async fn new(node_dir: &Path, pod_cidr: &str, cluster_cidr: &str, mtu: u32) -> Result<Self> {
         available().map_err(anyhow::Error::msg)?;
         let root = node_dir.join("crun");
         for d in ["containers", "sandboxes", "volumes"] {
@@ -209,10 +209,11 @@ impl CrunPods {
         }
         sys::ensure_shared_dir(Path::new(net::NETNS_DIR))?;
         sys::ensure_shared_dir(&run.join("ipc"))?;
-        let subnet = net::Subnet::parse(POD_CIDR)?;
+        let subnet = net::Subnet::parse(pod_cidr)?;
+        let cluster = net::Subnet::parse(cluster_cidr)?;
         run_quiet("sh", &["-c", &net::bridge_commands(&subnet)], None).await.context("failed to set up the pod bridge")?;
         let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1");
-        run_quiet("iptables-restore", &["--noflush"], Some(&net::base_rules(&subnet))).await?;
+        run_quiet("iptables-restore", &["--noflush"], Some(&net::base_rules(&subnet, &cluster))).await?;
         run_quiet("sh", &["-c", net::HOOKS], None).await?;
         let (exits_tx, exits_rx) = mpsc::unbounded_channel();
         let pods = Self {
@@ -222,6 +223,7 @@ impl CrunPods {
                 images: Arc::new(image::ImageStore::open(&root.join("images"))?),
                 ipam: Mutex::new(net::Ipam::open(&root.join("ipam"), subnet)?),
                 subnet,
+                mtu,
                 exits_tx,
                 exits_rx: Mutex::new(Some(exits_rx)),
                 execs: Mutex::new(HashMap::new()),
@@ -719,10 +721,13 @@ impl PodRuntime for CrunPods {
     }
 
     async fn pull_image(&self, image: &str, always: bool) -> Result<()> {
-        self.inner.images.pull(image, always).await?;
+        // Make room first (a no-op below the GC threshold), and again after:
+        // a pull that failed for lack of space must not wait 10 minutes.
+        self.gc().await;
+        let result = self.inner.images.pull(image, always).await;
         let pods = self.clone();
         tokio::spawn(async move { pods.gc().await });
-        Ok(())
+        result.map(|_| ())
     }
 
     async fn ensure_volume(&self, name: &str, labels: HashMap<String, String>) -> Result<bool> {
@@ -800,7 +805,7 @@ impl PodRuntime for CrunPods {
             sys::mount_tmpfs(&dir.join("shm"), "mode=1777,size=65536k")?;
             let ip = if spec.host_network { None } else { Some(self.inner.ipam.lock().unwrap().allocate(&id)?) };
             let host_if = format!("lk{short}");
-            let batch = ip.map(|ip| net::pod_link_commands(&host_if, ip, &self.inner.subnet));
+            let batch = ip.map(|ip| net::pod_link_commands(&host_if, ip, &self.inner.subnet, self.inner.mtu));
             sys::create_namespaces(meta.netns.as_ref().map(PathBuf::from), PathBuf::from(&meta.ipc), batch, spec.sysctls.clone())?;
             if ip.is_some() {
                 sys::bridge_attach(net::BRIDGE, &host_if)?;

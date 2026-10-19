@@ -12,6 +12,7 @@ pub mod defaults;
 pub mod discovery;
 pub mod dns;
 pub mod fields;
+pub mod join;
 pub mod metrics;
 pub mod patch;
 mod pod_streams;

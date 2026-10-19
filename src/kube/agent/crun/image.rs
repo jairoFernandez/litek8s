@@ -602,13 +602,13 @@ impl ImageStore {
             download(response, &tmp_file, digest).await?;
             let tmp_dir = self.root.join("tmp").join(random_hex(8));
             let (src, dst, expected, owners) = (tmp_file.clone(), tmp_dir.clone(), diff_id.to_string(), self.owners);
-            let unpacked = tokio::task::spawn_blocking(move || unpack_layer(&src, &dst, &expected, owners)).await?;
-            if let Err(e) = unpacked {
-                // A failed unpack is retried with the pod's backoff: do not
-                // leave a partial tree behind each time.
+            let unpacked = tokio::task::spawn_blocking(move || unpack_layer(&src, &dst, &expected, owners)).await;
+            if !matches!(unpacked, Ok(Ok(()))) {
+                // A partly unpacked layer (a full disk, a bad blob) must not
+                // stay behind: it would only fill the disk further.
                 let _ = std::fs::remove_dir_all(&tmp_dir);
-                return Err(e.context(format!("failed to unpack layer {digest}")));
             }
+            unpacked?.with_context(|| format!("failed to unpack layer {digest}"))?;
             if let Err(e) = std::fs::rename(&tmp_dir, &dir) {
                 let _ = std::fs::remove_dir_all(&tmp_dir);
                 if !dir.is_dir() {

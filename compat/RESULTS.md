@@ -238,3 +238,38 @@ Found by running real kubectl against the server, not from the spec:
    shares one per pod between its containers.
 4. Service proxy without the helper container on Linux hosts, where the
    agent can program the host's NAT table directly.
+
+## Multi-node (2026-10-17)
+
+A 3-node litek8s cluster on local VMs (`bench/cluster.sh up 3`: Ubuntu
+24.04 arm64, 2 vCPU / 1 GiB each, crun, pods over the WireGuard overlay;
+lk1 runs the API server and is a node, lk2 and lk3 joined with
+`litek8s agent --join`), and the new **M1** tier of cross-node cases
+(`compat/cases/M1-multinode.sh`, not in the default tiers, so the corpus
+stays at 101 cases): pod-to-pod across nodes with source addresses kept, a
+DaemonSet on every node reachable by IP and DNS, a Service balancing over
+endpoints on two nodes, a Deployment surviving a worker's hard power-off
+(evicted, rescheduled, clean rejoin), and a short outage that keeps its pod.
+
+| tier | k3s (k3d, 1 server + 2 agents) | litek8s, 3 VMs |
+|---|---|---|
+| M1 multi-node | 5/5 | **5/5** |
+| L2 workloads | | **15/15** |
+| L3 networking | | **7/7** |
+| L4 Helm charts | | **47/47** |
+
+- M1 litek8s: `results/20261017-205817-litek8s-3vm/`, power commands
+  `bench/vm.sh kill|start`. k3s: `results/20261017-211550-k3d-multi/` (4/5;
+  `multi_service_spreads` raced kube-proxy's rule sync, the case now retries,
+  `211854`: pass), then the whole tier again in `211907` (4/5: that case hit
+  the previous run's still-terminating namespace) and `212137` (pass). k3d nodes are
+  killed with `docker kill|start`; the kubelet's disk eviction thresholds were
+  lowered because OrbStack's disk was 94 % full.
+- L2–L4 litek8s: `results/20261017-211147-litek8s-3vm/` (L2, L3 and 23 of
+  47 charts: the shared Helm repository cache was clobbered by another
+  process during the run), `20261017-213456-litek8s-3vm-l4rerun/` (with a
+  private Helm cache; stopped after lk1's 12 GB disk filled: failed layer
+  unpacks left their partial directories behind, fixed in the image store)
+  and `20261017-220217-litek8s-3vm-l4rerun2/` for the rest. Every chart
+  passed once; L4 was not repeated as a single clean run on 3 VMs.
+

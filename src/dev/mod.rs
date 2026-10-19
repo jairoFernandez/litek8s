@@ -627,6 +627,13 @@ async fn inner_apiserver(data_dir: PathBuf) -> Result<()> {
         cluster_dns: Some(std::net::SocketAddr::from(([0, 0, 0, 0], 53))),
         in_cluster_port: Some(443),
         runtime: crate::kube::agent::RuntimeChoice::Crun,
+        node_ip: None,
+        advertise_address: None,
+        network: crate::kube::join::ClusterNetwork::default(),
+        token: None,
+        lifecycle: crate::kube::controllers::NodeLifecycle::default(),
+        // One node: no pod overlay.
+        wireguard_port: None,
         listener,
         docker,
     })

@@ -189,6 +189,7 @@ pub trait PodRuntime: Send + Sync + 'static {
     fn pull_image(&self, image: &str, always: bool) -> impl Future<Output = Result<()>> + Send;
     fn ensure_volume(&self, name: &str, labels: HashMap<String, String>) -> impl Future<Output = Result<bool>> + Send;
     fn remove_volume(&self, name: &str) -> impl Future<Output = Result<()>> + Send;
+    /// Volumes with a label: `key`, or `key=value`.
     fn list_volumes(&self, label: &str) -> impl Future<Output = Result<Vec<String>>> + Send;
     fn run_sandbox(&self, spec: &SandboxSpec) -> impl Future<Output = Result<SandboxInfo>> + Send;
     fn sandbox_ip(&self, id: &str) -> impl Future<Output = Result<Option<String>>> + Send;

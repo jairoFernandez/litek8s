@@ -3,7 +3,9 @@
 //! Filters: node Ready and schedulable, taints tolerated, `nodeSelector` and
 //! required node affinity, cpu/memory/pod-count requests fitting allocatable,
 //! and claims bound to local volumes on another node. Among the nodes left it
-//! picks the least loaded by requested cpu. Claims still unbound
+//! spreads replicas: fewest pods of the same owner first (Kubernetes's
+//! default topology spread over hostnames), then the least loaded by
+//! requested cpu, then the fewest pods. Claims still unbound
 //! (WaitForFirstConsumer) are provisioned on the chosen node.
 
 use serde_json::{Value, json};
@@ -60,39 +62,21 @@ pub(crate) fn pod_requests(spec: &Value) -> (i128, i128) {
     (cpu, mem)
 }
 
-fn tolerates(spec: &Value, taint: &Value) -> bool {
-    let key = s(taint, "/key");
-    let value = s(taint, "/value");
-    let effect = s(taint, "/effect");
-    spec.get("tolerations").and_then(Value::as_array).is_some_and(|ts| {
-        ts.iter().any(|t| {
-            let t_effect = s(t, "/effect");
-            if !t_effect.is_empty() && t_effect != effect {
-                return false;
-            }
-            let t_key = s(t, "/key");
-            match s(t, "/operator") {
-                "Exists" => t_key.is_empty() || t_key == key,
-                _ => t_key == key && s(t, "/value") == value,
-            }
-        })
-    })
+/// Whether toleration `t` tolerates `taint`.
+pub(crate) fn toleration_matches(t: &Value, taint: &Value) -> bool {
+    let t_effect = s(t, "/effect");
+    if !t_effect.is_empty() && t_effect != s(taint, "/effect") {
+        return false;
+    }
+    let t_key = s(t, "/key");
+    match s(t, "/operator") {
+        "Exists" => t_key.is_empty() || t_key == s(taint, "/key"),
+        _ => t_key == s(taint, "/key") && s(t, "/value") == s(taint, "/value"),
+    }
 }
 
-/// The toleration of `spec` matching `taint`, if any.
-fn toleration_for<'a>(spec: &'a Value, taint: &Value) -> Option<&'a Value> {
-    let (key, value, effect) = (s(taint, "/key"), s(taint, "/value"), s(taint, "/effect"));
-    spec.get("tolerations")?.as_array()?.iter().find(|t| {
-        let t_effect = s(t, "/effect");
-        if !t_effect.is_empty() && t_effect != effect {
-            return false;
-        }
-        let t_key = s(t, "/key");
-        match s(t, "/operator") {
-            "Exists" => t_key.is_empty() || t_key == key,
-            _ => t_key == key && s(t, "/value") == value,
-        }
-    })
+fn tolerates(spec: &Value, taint: &Value) -> bool {
+    spec.get("tolerations").and_then(Value::as_array).is_some_and(|ts| ts.iter().any(|t| toleration_matches(t, taint)))
 }
 
 /// NoExecute taints: evict pods on `node` that do not tolerate one (now, or
@@ -117,16 +101,21 @@ pub(crate) fn evict_for_taints(api: &ApiState, node_name: &str) -> Result<super:
         let spec = pod.get("spec").cloned().unwrap_or_default();
         let mut evict_in: Option<i64> = None;
         for taint in &taints {
-            let wait = match toleration_for(&spec, taint) {
-                None => 0,
-                Some(t) => match t.get("tolerationSeconds").and_then(Value::as_i64) {
+            // The shortest limit among the matching tolerations; none set:
+            // tolerated forever.
+            let matching: Vec<&Value> = spec.get("tolerations").and_then(Value::as_array).into_iter().flatten().filter(|t| toleration_matches(t, taint)).collect();
+            let wait = if matching.is_empty() {
+                0
+            } else {
+                // Kubernetes's getMinTolerationTime: the minimum of the limits set.
+                match matching.iter().filter_map(|t| t.get("tolerationSeconds").and_then(Value::as_i64)).min() {
                     None => continue,
                     Some(secs) => {
                         let added = s(taint, "/timeAdded");
                         let since = util::parse_time(added).map(|t| (now - t).num_seconds()).unwrap_or(0);
                         (secs - since).max(0)
                     }
-                },
+                }
             };
             evict_in = Some(evict_in.map_or(wait, |w| w.min(wait)));
         }
@@ -200,6 +189,17 @@ fn node_affinity_matches(spec: &Value, node: &Value) -> bool {
 /// Whether a pod spec may run on `node`, ignoring resources. With
 /// `daemon`, readiness and cordoning do not matter (DaemonSet semantics).
 pub(crate) fn node_fits_constraints(spec: &Value, node: &Value, daemon: bool) -> Result<(), String> {
+    fits(spec, node, daemon, &["NoSchedule", "NoExecute"])
+}
+
+/// Whether a daemon pod already on `node` may stay: only NoExecute taints
+/// count (a NoSchedule taint, e.g. unreachable, keeps new pods away but
+/// leaves running ones alone).
+pub(crate) fn node_keeps_daemon_pod(spec: &Value, node: &Value) -> bool {
+    fits(spec, node, true, &["NoExecute"]).is_ok()
+}
+
+fn fits(spec: &Value, node: &Value, daemon: bool, effects: &[&str]) -> Result<(), String> {
     if !daemon {
         if !util::condition_true(node, "Ready") {
             return Err("node is not ready".into());
@@ -210,7 +210,7 @@ pub(crate) fn node_fits_constraints(spec: &Value, node: &Value, daemon: bool) ->
     }
     for taint in node.pointer("/spec/taints").and_then(Value::as_array).into_iter().flatten() {
         let effect = s(taint, "/effect");
-        if (effect == "NoSchedule" || effect == "NoExecute") && !tolerates(spec, taint) {
+        if effects.contains(&effect) && !tolerates(spec, taint) {
             return Err(format!("node had untolerated taint {{{}: {}}}", s(taint, "/key"), s(taint, "/value")));
         }
     }
@@ -270,7 +270,8 @@ pub(crate) fn schedule(api: &ApiState, ns: &str, name: &str) -> Result<Outcome, 
     let (want_cpu, want_mem) = pod_requests(&spec);
     let want_ext = extended_requests(&spec);
     let mut reasons: Vec<String> = Vec::new();
-    let mut best: Option<(f64, String)> = None;
+    let owner = controller_uid(&pod);
+    let mut best: Option<((usize, f64, usize), String)> = None;
     for node in &nodes {
         let node_name = util::name(node);
         if pinned.as_ref().is_some_and(|p| *p != node_name) {
@@ -316,8 +317,11 @@ pub(crate) fn schedule(api: &ApiState, ns: &str, name: &str) -> Result<Outcome, 
             continue;
         }
         let load = cpu_cap.map(|cap| (used_cpu + want_cpu) as f64 / cap.max(1) as f64).unwrap_or(0.0);
-        if best.as_ref().is_none_or(|(l, _)| load < *l) {
-            best = Some((load, node_name));
+        let siblings = owner.as_ref().map_or(0, |o| on_node.iter().filter(|p| controller_uid(p).as_ref() == Some(o)).count());
+        let score = (siblings, load, on_node.len());
+        let better = best.as_ref().is_none_or(|(b, _)| score.0 < b.0 || (score.0 == b.0 && (score.1 < b.1 || (score.1 == b.1 && score.2 < b.2))));
+        if better {
+            best = Some((score, node_name));
         }
     }
     let Some((_, node)) = best else {
@@ -337,6 +341,16 @@ pub(crate) fn schedule(api: &ApiState, ns: &str, name: &str) -> Result<Outcome, 
     util::record_event(api, &bound, "Normal", "Scheduled", &format!("Successfully assigned {ns}/{name} to {node}"), "default-scheduler");
     set_scheduled(api, bound, "True", "", "")?;
     Ok(Outcome::Done)
+}
+
+/// The uid of the pod's controlling owner (its ReplicaSet, StatefulSet...).
+fn controller_uid(pod: &Value) -> Option<String> {
+    pod.pointer("/metadata/ownerReferences")?
+        .as_array()?
+        .iter()
+        .find(|r| r.get("controller").and_then(Value::as_bool) == Some(true))
+        .and_then(|r| r.get("uid").and_then(Value::as_str))
+        .map(str::to_string)
 }
 
 fn unschedulable(api: &ApiState, pod: &Value, message: &str) -> Result<Outcome, ApiError> {
@@ -504,3 +518,36 @@ pub(crate) fn provision(api: &ApiState, pvc: &Value, node: &str) -> Result<(), A
     )?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn node(name: &str) -> Value {
+        json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": name},
+            "status": {"allocatable": {"cpu": "2", "memory": "1Gi", "pods": "110"}, "conditions": [{"type": "Ready", "status": "True"}]}})
+    }
+
+    #[test]
+    fn spreads_replicas_of_one_owner() {
+        let api = ApiState::open(None, "127.0.0.1:0".into(), false).unwrap();
+        for n in ["a", "b", "c"] {
+            let created = api.create_object("", "nodes", None, node(n)).unwrap();
+            util::write_status(&api, "", "nodes", &created, node(n)["status"].clone()).unwrap();
+        }
+        let owner = json!([{"apiVersion": "apps/v1", "kind": "ReplicaSet", "name": "rs", "uid": "rs-uid", "controller": true}]);
+        for i in 0..6 {
+            let pod = json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": format!("p{i}"), "ownerReferences": owner},
+                "spec": {"containers": [{"name": "c", "image": "x"}]}});
+            api.create_object("", "pods", Some("default"), pod).unwrap();
+            schedule(&api, "default", &format!("p{i}")).unwrap();
+        }
+        let (pods, _) = api.store().list("", "pods", None);
+        let mut per_node = std::collections::BTreeMap::new();
+        for p in &pods {
+            *per_node.entry(s(p, "/spec/nodeName").to_string()).or_insert(0) += 1;
+        }
+        assert_eq!(per_node.into_iter().collect::<Vec<_>>(), vec![("a".to_string(), 2), ("b".to_string(), 2), ("c".to_string(), 2)]);
+    }
+}
+

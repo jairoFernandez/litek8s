@@ -181,6 +181,39 @@ cargo run -- delete deployment logstorm
 cargo run -- delete deployment oom-demo
 ```
 
+## Kubernetes API server: a multi-node cluster
+
+`litek8s apiserver` serves the real Kubernetes API (kubectl and Helm work
+unchanged) and runs the controllers, the scheduler, cluster DNS and a node
+agent in one process. More machines join as nodes with the command it prints:
+
+```bash
+# on the server (pods run here too)
+litek8s apiserver --listen 0.0.0.0:6443 --data-dir /var/lib/litek8s/apiserver --node-ip 192.168.1.10
+#   apiserver: join nodes with: litek8s agent --join https://192.168.1.10:6443 --token K10<hash>::<secret>
+
+# on every other machine (Linux, as root, with crun installed)
+litek8s agent --join https://192.168.1.10:6443 --token K10<hash>::<secret> --node-ip 192.168.1.21
+litek8s agent --join https://home.example:6443 --token ... --node-grace-period 15m   # a laptop that sleeps
+```
+
+- The token (also in `<data-dir>/join-token`) pins the cluster CA, so the
+  agent checks it talks to the right server; each node also keeps a node
+  password, so nobody else with the token can take over its name.
+- Every node gets a `/24` of `--cluster-cidr` (10.42.0.0/16). Pods of all
+  nodes share one network over a WireGuard mesh (kernel WireGuard, UDP
+  51820, configured by litek8s itself — no `wg` tool needed); Services and
+  DNS work cluster-wide and pods see each other's real addresses.
+- Agents hold one connection to the server (no inbound port on nodes) and
+  renew their Lease every 10 s. A node that stops is `NotReady` after
+  `--node-monitor-grace-period` (40 s); its pods are evicted after their
+  `tolerationSeconds` (default 300 s, `--default-unreachable-toleration-seconds`)
+  and rescheduled. A node that comes back sooner keeps its pods.
+
+`bench/cluster.sh up 3` builds a 3-node cluster of local VMs for testing,
+`compat/run.sh --tiers M1` checks cross-node behaviour, and `bench/soak.sh`
+runs it for a day with churn (results in `bench/SOAK.md`).
+
 ## Remote node demo
 
 `litek8s` can also place a deployment on another machine over `ssh`. The simplest path is `node add --install`, which detects the remote platform, builds a compatible binary, copies it over SSH, and registers the node.

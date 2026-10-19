@@ -42,7 +42,18 @@ Controllers (Deployment, ReplicaSet, StatefulSet, DaemonSet, Job, CronJob,
 garbage collection), a scheduler and a Docker-backed node agent run in the
 same process, so pods run on this machine (`--no-node` to only serve).
 Plain HTTP serves kubectl; pods reach the same port over TLS. There is no
-authentication, so keep it on localhost or a trusted network.";
+authentication for API clients, so keep the port on a trusted network.
+
+More nodes join with the command the server prints at startup (the token is
+also kept in <data-dir>/join-token):
+  litek8s apiserver --data-dir /var/lib/litek8s/apiserver --listen 0.0.0.0:6443 --node-ip 192.168.1.10
+  litek8s agent --join https://192.168.1.10:6443 --token K10...::...
+
+Pods of all nodes share one network (each node gets a /24 of --cluster-cidr)
+over a WireGuard mesh (UDP --wireguard-port, kernel WireGuard). A node whose
+heartbeats stop is marked Unknown after --node-monitor-grace-period and its
+pods are evicted after their tolerationSeconds (default 300 s, see
+--default-unreachable-toleration-seconds).";
 
 const DEV_AFTER_HELP: &str = "\
 Examples:
@@ -58,13 +69,32 @@ on localhost and $HOME is shared at the same path for hostPath volumes.";
 
 const NODE_AGENT_AFTER_HELP: &str = "\
 Examples:
-  litek8s node-agent --server http://192.168.1.10:6443
-  litek8s node-agent --server http://apiserver:6443 --node-name pi-4
+  litek8s agent --join https://192.168.1.10:6443 --token K10<hash>::<secret>
+  litek8s agent --join https://apiserver:6443 --token $(cat token) --node-name pi-4 --node-ip 192.168.1.21
+  litek8s agent --join https://home.example:6443 --token ... --node-grace-period 15m   # a laptop that sleeps
 
-The agent keeps one connection to the API server: pods bound to this node
-are pushed over it, status goes back on it, and kubectl logs/exec are relayed
-through it. It reconnects on its own; running pods keep running meanwhile.
-The API server must listen on an address this machine can reach.";
+The token comes from the API server (printed at startup, kept in
+<data-dir>/join-token); it pins the cluster CA, so the agent checks it is
+talking to the right server. The agent keeps one connection to the API
+server: pods bound to this node are pushed over it, status and heartbeats go
+back on it, and kubectl logs/exec are relayed through it. It reconnects on
+its own; running pods keep running meanwhile, also across agent restarts.
+Pods reach pods on other nodes over WireGuard (UDP --wireguard-port must be
+reachable from the other nodes, or this node must reach theirs).";
+
+/// `40s`, `5m`, `1h`, or plain seconds.
+fn parse_duration(raw: &str) -> Result<Duration, String> {
+    let raw = raw.trim();
+    let (number, unit) = raw.split_at(raw.find(|c: char| !c.is_ascii_digit()).unwrap_or(raw.len()));
+    let n: u64 = number.parse().map_err(|_| format!("invalid duration {raw:?} (use e.g. 40s, 5m, 1h)"))?;
+    let secs = match unit {
+        "" | "s" => n,
+        "m" => n * 60,
+        "h" => n * 3600,
+        _ => return Err(format!("invalid duration unit in {raw:?} (s, m or h)")),
+    };
+    Ok(Duration::from_secs(secs))
+}
 
 const SERVE_AFTER_HELP: &str = "\
 Examples:
@@ -272,6 +302,26 @@ enum Command {
         in_cluster_port: u16,
         #[arg(long, value_enum, default_value = "auto", help = "Container runtime of the local node: auto (crun on Linux when installed, else Docker), crun or docker")]
         runtime: crate::kube::agent::RuntimeChoice,
+        #[arg(long, help = "The local node's address (default: the source address of the default route)")]
+        node_ip: Option<std::net::IpAddr>,
+        #[arg(long, help = "Address joining nodes reach this server at, for the printed join command (default: --node-ip)")]
+        advertise_address: Option<String>,
+        #[arg(long, default_value = "10.42.0.0/16", help = "Pod network of the cluster; each node gets one block of it")]
+        cluster_cidr: String,
+        #[arg(long, default_value_t = 24, help = "Prefix length of each node's pod CIDR")]
+        node_cidr_mask_size: u8,
+        #[arg(long, help = "Join secret (or a whole token) instead of the stored or a generated one")]
+        token: Option<String>,
+        #[arg(long, default_value = "40s", value_parser = parse_duration, help = "Mark a node Unknown when it has not heartbeated for this long (e.g. 40s, 5m)")]
+        node_monitor_grace_period: Duration,
+        #[arg(long, default_value_t = 300, help = "tolerationSeconds every pod gets for the not-ready taint")]
+        default_not_ready_toleration_seconds: u64,
+        #[arg(long, default_value_t = 300, help = "tolerationSeconds every pod gets for the unreachable taint")]
+        default_unreachable_toleration_seconds: u64,
+        #[arg(long, default_value_t = 51820, help = "UDP port of the WireGuard pod overlay")]
+        wireguard_port: u16,
+        #[arg(long, help = "Do not set up the WireGuard pod overlay (single node)")]
+        no_wireguard: bool,
         #[arg(long, help = "Also serve the Docker Engine API on this Unix socket (crun runtime; published ports bind on 127.0.0.1)")]
         docker_socket: Option<PathBuf>,
     },
@@ -289,15 +339,32 @@ enum Command {
         help_template = HELP_TEMPLATE,
         after_help = NODE_AGENT_AFTER_HELP
     )]
-    NodeAgent {
-        #[arg(long, help = "API server URL, e.g. http://192.168.1.10:6443")]
-        server: String,
+    #[command(alias = "node-agent")]
+    Agent {
+        #[arg(long, alias = "server", help = "API server URL, e.g. https://192.168.1.10:6443")]
+        join: Option<String>,
+        #[arg(long, env = "LITEK8S_TOKEN", hide_env_values = true, requires = "join", help = "Join token printed by the API server")]
+        token: Option<String>,
         #[arg(long, help = "Name of this node (default: the hostname)")]
         node_name: Option<String>,
+        #[arg(long, help = "This node's address for other nodes (default: the source address of the default route)")]
+        node_ip: Option<std::net::IpAddr>,
         #[arg(long, help = "Directory for pod files")]
         node_dir: Option<PathBuf>,
         #[arg(long, value_enum, default_value = "auto", help = "Container runtime: auto (crun on Linux when installed, else Docker), crun or docker")]
         runtime: crate::kube::agent::RuntimeChoice,
+        #[arg(long, default_value_t = 51820, help = "UDP port of the WireGuard pod overlay")]
+        wireguard_port: u16,
+        #[arg(long, help = "Do not join the WireGuard pod overlay")]
+        no_wireguard: bool,
+        #[arg(long, value_parser = parse_duration, help = "Heartbeat grace for this node when longer than the cluster's (e.g. 15m for a laptop that sleeps)")]
+        node_grace_period: Option<Duration>,
+        /// Without --join: the legacy daemon's SSH node agent. With this
+        /// flag it runs as the persistent agent daemon (Unix socket, weight
+        /// shards resident in RAM); without, it proxies one stdin request to
+        /// that daemon (starting it if needed).
+        #[arg(long, hide = true, conflicts_with = "join")]
+        serve: bool,
     },
     #[command(
         about = "Apply a reduced Deployment or Service manifest",
@@ -510,14 +577,6 @@ enum Command {
     Llm {
         #[command(subcommand)]
         command: LlmCommand,
-    },
-    #[command(hide = true)]
-    Agent {
-        /// Run as the persistent agent daemon (listens on a Unix socket, keeps
-        /// weight shards resident in RAM). Without this flag, proxy one stdin
-        /// request to that daemon (starting it if needed).
-        #[arg(long)]
-        serve: bool,
     },
 }
 
@@ -1084,6 +1143,16 @@ pub async fn run() -> Result<()> {
             no_cluster_dns,
             in_cluster_port,
             runtime,
+            node_ip,
+            advertise_address,
+            cluster_cidr,
+            node_cidr_mask_size,
+            token,
+            node_monitor_grace_period,
+            default_not_ready_toleration_seconds,
+            default_unreachable_toleration_seconds,
+            wireguard_port,
+            no_wireguard,
             docker_socket,
         } => {
             let docker = match &docker_socket {
@@ -1114,15 +1183,49 @@ pub async fn run() -> Result<()> {
                 cluster_dns: (!no_cluster_dns).then_some(cluster_dns),
                 in_cluster_port: (in_cluster_port != 0).then_some(in_cluster_port),
                 runtime,
+                node_ip,
+                advertise_address,
+                network: crate::kube::join::ClusterNetwork { cluster_cidr, node_mask: node_cidr_mask_size },
+                token,
+                lifecycle: crate::kube::controllers::NodeLifecycle {
+                    grace: node_monitor_grace_period,
+                    not_ready_toleration_secs: default_not_ready_toleration_seconds,
+                    unreachable_toleration_secs: default_unreachable_toleration_seconds,
+                },
+                wireguard_port: (!no_wireguard).then_some(wireguard_port),
                 listener: None,
                 docker,
             })
             .await
         }
         Command::Dev { command } => crate::dev::run(command).await,
-        Command::NodeAgent { server, node_name, node_dir, runtime } => {
-            let agent = crate::kube::agent::node_agent(runtime, node_name, node_dir).await?;
-            crate::kube::agent::run_remote(agent, &server).await
+        Command::Agent { join: Some(join), token, node_name, node_ip, node_dir, runtime, wireguard_port, no_wireguard, node_grace_period, .. } => {
+            let token = token.context("--token is required with --join")?;
+            let node_name = node_name.unwrap_or_else(crate::kube::agent::default_node_name);
+            let node_dir = node_dir.unwrap_or_else(crate::kube::agent::default_root_dir);
+            let mut client = crate::kube::join::Client::new(&join, &token, &node_name, &node_dir)?;
+            // Without a saved join the node cannot set up its pod network:
+            // wait for the server.
+            let joined = loop {
+                match client.join().await {
+                    Ok(j) => break j,
+                    Err(e) if format!("{e:#}").contains("refused (") => return Err(e),
+                    Err(e) => {
+                        eprintln!("node-agent: cannot join yet: {e:#}");
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                }
+            };
+            eprintln!("node-agent: joined as {node_name} (pod CIDR {})", joined.pod_cidr);
+            let network = crate::kube::agent::NodeNetwork {
+                pod_cidr: joined.pod_cidr,
+                cluster_cidr: joined.cluster_cidr,
+                node_ip: node_ip.map(|ip| ip.to_string()).unwrap_or_else(crate::kube::agent::local_ip),
+                wireguard_port: (!no_wireguard).then_some(wireguard_port),
+            };
+            let agent = crate::kube::agent::node_agent_with(runtime, Some(node_name), Some(node_dir), network, node_grace_period).await?;
+            crate::kube::metrics::spawn_memory_trim();
+            crate::kube::agent::run_remote(agent, client).await
         }
         Command::Serve {
             state_file,
@@ -1570,7 +1673,7 @@ pub async fn run() -> Result<()> {
             ClusterCommand::Destroy { file } => run_cluster_destroy(&endpoint, &file).await,
             ClusterCommand::Export { name } => run_cluster_export(&endpoint, &name).await,
         },
-        Command::Agent { serve } => {
+        Command::Agent { join: None, serve, .. } => {
             if serve {
                 crate::node::run_agent_serve().await
             } else {

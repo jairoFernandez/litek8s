@@ -26,7 +26,9 @@ fn set_default(map: &mut Map<String, Value>, key: &str, value: Value) {
 
 /// `serviceAccount` is the pod's ServiceAccount object, if it exists (for
 /// `automountServiceAccountToken: false`). `suffix` names the token volume.
-pub fn pod_on_create(pod: &mut Value, service_account: Option<&Value>, suffix: &str) {
+/// `toleration_seconds` are the default not-ready and unreachable
+/// tolerations (DefaultTolerationSeconds).
+pub fn pod_on_create(pod: &mut Value, service_account: Option<&Value>, suffix: &str, toleration_seconds: (u64, u64)) {
     let spec = obj_entry(pod, "spec");
     set_default(spec, "restartPolicy", json!("Always"));
     set_default(spec, "dnsPolicy", json!("ClusterFirst"));
@@ -50,13 +52,14 @@ pub fn pod_on_create(pod: &mut Value, service_account: Option<&Value>, suffix: &
         .entry("tolerations")
         .or_insert_with(|| json!([]));
     if let Some(list) = tolerations.as_array_mut() {
-        for taint in ["node.kubernetes.io/not-ready", "node.kubernetes.io/unreachable"] {
+        let (not_ready, unreachable) = toleration_seconds;
+        for (taint, seconds) in [("node.kubernetes.io/not-ready", not_ready), ("node.kubernetes.io/unreachable", unreachable)] {
             let present = list.iter().any(|t| {
                 t.get("key").and_then(Value::as_str) == Some(taint)
                     || (t.get("operator").and_then(Value::as_str) == Some("Exists") && t.get("key").is_none())
             });
             if !present {
-                list.push(json!({"key": taint, "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": 300}));
+                list.push(json!({"key": taint, "operator": "Exists", "effect": "NoExecute", "tolerationSeconds": seconds}));
             }
         }
     }
