@@ -50,6 +50,7 @@ cargo test apply_get_logs_and_delete_roundtrip
   - **Docker** (macOS dev): a busybox sandbox owns the network namespace, containers join it.
 
   `kubelet.rs` serves `/metrics/resource` on :10250.
+- **Docker API** (`src/docker/`) — the Docker Engine API on the crun runtime's pieces, served by `litek8s dev` on `~/.litek8s/docker.sock` (or `apiserver --docker-socket`). Docker containers are runtime-level containers, not Pods (`engine.rs`: records in `<data>/docker/containers/<id>/container.json`, writable layer kept between runs, the crun shim with `--keep-rootfs` and an attach socket), networks are bridges with file IPAM and names answered by the cluster DNS server (`network.rs`), the image store is shared with pods (`images.rs`), `build/` is a classic-API builder (RUN in crun on an overlay whose upper dir becomes the layer; BuildKit Dockerfile syntax). `api.rs` routes and hijacks; `fs.rs` is `litek8s docker-fs` (archive in/out of a container's mount namespace). Corpus: `compat/docker/run.sh`; docs: docs/docker.md.
 
 ## Key Conventions
 

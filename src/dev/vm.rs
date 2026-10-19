@@ -140,7 +140,9 @@ pub fn start(home: &Path, opts: &UpOptions) -> Result<u32> {
         initrd,
         disk,
         share: share.map(|s| s.canonicalize().unwrap_or(s)),
-        memory_mib: opts.memory.unwrap_or(2048),
+        // The most the guest may use; only what it touches costs memory on the
+        // Mac. Docker workloads (builds, databases) want more than pods alone.
+        memory_mib: opts.memory.unwrap_or(4096),
         cpus: opts.cpus.unwrap_or((ncpu / 2).clamp(1, 8)),
         port: opts.port,
         mac,

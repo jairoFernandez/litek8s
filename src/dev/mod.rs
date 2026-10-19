@@ -45,7 +45,7 @@ pub enum DevCommand {
         no_kubeconfig: bool,
         #[arg(long, default_value_t = 120, help = "Seconds to wait for the node to be Ready")]
         timeout: u64,
-        #[arg(long, help = "macOS: VM memory in MiB (default 2048)")]
+        #[arg(long, help = "macOS: VM memory in MiB (default 4096; only what the guest touches is used)")]
         memory: Option<u64>,
         #[arg(long, help = "macOS: VM CPUs (default: half of the Mac's)")]
         cpus: Option<usize>,
