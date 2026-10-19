@@ -181,7 +181,13 @@ fn home(f: &mut Frame, app: &App, area: Rect) {
     let inner_w = area.width.saturating_sub(2).max(1) as usize;
     let wrapped: usize = app.dev_output.iter().map(|l| l.chars().count().max(1).div_ceil(inner_w)).sum();
     let output_rows = if app.dev_output.is_empty() { 1 } else { (wrapped as u16 + 2).clamp(3, 12) };
-    let [upper, ctx, out, _] = Layout::vertical([Constraint::Length(7), Constraint::Length(5), Constraint::Length(output_rows), Constraint::Fill(1)]).areas(area);
+    // The memory breakdown when there is room for it next to the output.
+    let mem_rows = h.memory.as_ref().map(|m| m.lines.len() as u16 + 2).filter(|r| 7 + r + 5 + output_rows <= area.height).unwrap_or(0);
+    let [upper, mem, ctx, out, _] =
+        Layout::vertical([Constraint::Length(7), Constraint::Length(mem_rows), Constraint::Length(5), Constraint::Length(output_rows), Constraint::Fill(1)]).areas(area);
+    if let (Some(m), true) = (&h.memory, mem_rows > 0) {
+        memory_box(f, m, mem);
+    }
     let [left, right] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(upper);
 
     let w = left.width.saturating_sub(12) as usize;
@@ -315,6 +321,17 @@ fn home(f: &mut Frame, app: &App, area: Rect) {
         };
         f.render_widget(Paragraph::new(Span::styled(format!(" {tip}"), DIM)), out);
     }
+}
+
+/// Where the memory figure goes: litek8s, pods, the kernel, cache.
+fn memory_box(f: &mut Frame, m: &crate::dev::memory::Breakdown, area: Rect) {
+    let lines: Vec<Line> = m
+        .lines
+        .iter()
+        .map(|l| Line::from(vec![Span::raw(format!("{:<22}", l.label)), Span::styled(format!("{:>9}", bytes(l.bytes)), BOLD), Span::styled(format!("   {}", l.note), DIM)]))
+        .collect();
+    let title = format!("Memory · {} ({})", bytes(m.total), m.what);
+    f.render_widget(Paragraph::new(lines).block(block(&trunc(&title, area.width.saturating_sub(4) as usize))), area);
 }
 
 /// Rows the output of a running `litek8s dev` needs (wrapped) in `width`.
@@ -863,7 +880,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
 ];
 
 fn help(f: &mut Frame, app: &App, area: Rect) {
-    let r = centered(area, 78, HELP.len() as u16 + 7);
+    let r = centered(area, 78, HELP.len() as u16 + 9);
     f.render_widget(Clear, r);
     let mut lines = Vec::new();
     for (section, keys) in HELP {
@@ -876,6 +893,8 @@ fn help(f: &mut Frame, app: &App, area: Rect) {
     }
     let ctx = if app.kube_context.is_empty() { "litek8s-dev" } else { &app.kube_context };
     lines.push(Line::raw(""));
+    lines.push(Line::styled("Memory (Home): litek8s = its own processes; pods & containers; kernel", DIM));
+    lines.push(Line::styled("+ base = the VM's fixed cost; cache = reclaimable; freed = macOS reclaims it", DIM));
     lines.push(Line::from(vec![Span::styled("More Kubernetes: ", DIM), Span::styled(format!("k9s --context {ctx}"), BOLD), Span::styled(" (https://k9scli.io)", DIM)]));
     lines.push(Line::styled("Destructive actions always ask. Mouse: litek8s ui --mouse. Docs: docs/ui.md", DIM));
     lines.push(Line::styled("Any key closes this.", DIM));

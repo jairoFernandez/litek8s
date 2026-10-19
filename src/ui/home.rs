@@ -18,7 +18,14 @@ pub const VISIBLE: u64 = 2;
 pub const SETTINGS: u64 = 10;
 pub const HIDDEN: u64 = 60;
 
-pub fn spawn(tx: UnboundedSender<Msg>, local: bool, pace: Arc<AtomicU64>, wake: Arc<Notify>, active: Arc<Mutex<String>>) -> tokio::task::JoinHandle<()> {
+pub fn spawn(
+    tx: UnboundedSender<Msg>,
+    local: bool,
+    pace: Arc<AtomicU64>,
+    wake: Arc<Notify>,
+    active: Arc<Mutex<String>>,
+    remote: Option<super::client::Endpoint>,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut cpu_prev: Option<(u64, Instant)> = None;
         let mut disk: Option<(u64, Instant, String)> = None;
@@ -67,6 +74,14 @@ pub fn spawn(tx: UnboundedSender<Msg>, local: bool, pace: Arc<AtomicU64>, wake: 
             s.disk_used = disk.as_ref().filter(|(_, _, n)| *n == name).map(|(n, _, _)| *n);
             s.disk_free = free_space(if home.is_dir() { &home } else if dev_home.is_dir() { &dev_home } else { std::path::Path::new("/") });
             s.contexts = super::ctx::detect(&cluster, state.as_ref().map(|st| st.port));
+            // Where the memory goes: only while it is on screen.
+            if every == VISIBLE {
+                s.memory = match (&remote, &state) {
+                    (Some(ep), _) => remote_memory(ep).await,
+                    (None, Some(_)) => crate::dev::memory_breakdown(&name).await,
+                    (None, None) => None,
+                };
+            }
             s.running = state;
             if tx.send(Msg::Home(Box::new(s))).is_err() {
                 return;
@@ -77,6 +92,13 @@ pub fn spawn(tx: UnboundedSender<Msg>, local: bool, pace: Arc<AtomicU64>, wake: 
             }
         }
     })
+}
+
+/// A remote litek8s's node, from its API server.
+async fn remote_memory(ep: &super::client::Endpoint) -> Option<crate::dev::memory::Breakdown> {
+    let v = tokio::time::timeout(Duration::from_secs(3), ep.json(hyper::Method::GET, crate::kube::server::MEMORY_PATH, None)).await.ok()?.ok()?;
+    let node: crate::dev::memory::NodeMemory = serde_json::from_value(v).ok()?;
+    Some(crate::dev::memory::node_breakdown(&node))
 }
 
 /// Bytes free on the filesystem holding `path`.

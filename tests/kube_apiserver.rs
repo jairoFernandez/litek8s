@@ -87,6 +87,21 @@ async fn discovery_and_default_objects() -> Result<()> {
 }
 
 #[tokio::test]
+async fn reports_where_its_nodes_memory_goes() -> Result<()> {
+    let addr = start().await?;
+    let (code, mem) = get(&addr, "/litek8s/v1/memory").await?;
+    assert_eq!(code, 200);
+    assert!(mem["node"].as_str().is_some_and(|n| !n.is_empty()), "{mem}");
+    for key in ["litek8s", "containers", "cache"] {
+        assert!(mem[key].is_u64(), "{key}: {mem}");
+    }
+    if cfg!(target_os = "linux") {
+        assert!(mem["meminfo"]["total"].as_u64().is_some_and(|t| t > 0), "{mem}");
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn crud_patch_and_conflicts() -> Result<()> {
     let addr = start().await?;
     let base = "/api/v1/namespaces/default/configmaps";

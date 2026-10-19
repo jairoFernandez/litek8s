@@ -556,3 +556,21 @@ fn home_says_dash_while_the_engine_is_down() {
     assert!(!s.contains("0/0") && !s.contains("0 (0 B)") && !s.contains("0  (0 B)"), "{s}");
     assert!(s.contains("engine not running"), "{s}");
 }
+
+#[test]
+fn home_explains_the_memory_figure() {
+    let mut app = sample_app();
+    let mem = crate::dev::memory::parse_meminfo("MemTotal: 3934000 kB\nMemFree: 3700000 kB\nCached: 125000 kB\nShmem: 51200 kB\nSReclaimable: 10000 kB\nSUnreclaim: 35000 kB\n");
+    let shown = crate::dev::memory::Usage { litek8s: 12 << 20, containers: 30 << 20, cache: 0 };
+    let mut home = app.home.clone();
+    home.memory = Some(crate::dev::memory::vm_breakdown(421 << 20, 4096 << 20, &mem, "dev", shown, &[]));
+    app.apply(Msg::Home(Box::new(home)));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("Memory · 441 MB (what macOS charges the VM)"), "{s}");
+    assert!(s.contains("litek8s (dev)") && s.contains("12.6 MB") && s.contains("pods & containers"), "{s}");
+    assert!(s.contains("Linux kernel + base") && s.contains("fixed cost: kernel") && s.contains("reclaimable"), "{s}");
+    assert!(s.contains("✓ docker context"), "the contexts still fit:\n{s}");
+    app.key(key('?'));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("fixed cost") && s.contains("Any key closes"), "{s}");
+}

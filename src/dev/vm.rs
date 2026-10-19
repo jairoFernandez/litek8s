@@ -505,13 +505,18 @@ impl VmHandle {
         Ok(stream)
     }
 
-    /// Every cluster's memory and CPU time, as the guest's cgroups count it.
-    async fn stats(self) -> Result<Vec<CellStats>> {
+    /// Every cluster's memory and CPU time, as the guest's cgroups count
+    /// it, and the guest's meminfo.
+    async fn stats(self) -> Result<super::env::GuestStats> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut stream = self.stream().await?;
         stream.write_all(b"stats\n").await?;
         let mut buf = Vec::new();
         tokio::time::timeout(Duration::from_secs(3), stream.read_to_end(&mut buf)).await??;
+        // A guest from before the meminfo answers with the list alone.
+        if let Ok(cells) = serde_json::from_slice::<Vec<CellStats>>(&buf) {
+            return Ok(super::env::GuestStats { cells, meminfo: None });
+        }
         Ok(serde_json::from_slice(&buf)?)
     }
 
@@ -678,7 +683,7 @@ impl Shared {
             }
             Request::Stats => {
                 return match self.vm.stats().await {
-                    Ok(stats) => Response { stats, running: self.names(), ..Default::default() },
+                    Ok(s) => Response { stats: s.cells, meminfo: s.meminfo, running: self.names(), ..Default::default() },
                     Err(e) => Response::error(format!("{e:#}")),
                 };
             }

@@ -259,6 +259,8 @@ pub struct HomeSample {
     pub data_dir: String,
     /// What the running cluster was started with.
     pub running: Option<crate::dev::DevState>,
+    /// The memory figure explained, when it can be.
+    pub memory: Option<crate::dev::memory::Breakdown>,
     pub contexts: Contexts,
 }
 

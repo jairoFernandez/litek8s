@@ -57,6 +57,39 @@ Home:
  u up  d down  R delete  2 clusters  8 settings                          ? help
 ```
 
+Under it, Home explains its memory figure: who uses what the Resources box
+counts. On the Mac (a fresh VM, `dev` and a second cluster idle):
+
+```
+┌ Memory · 388 MB (what macOS charges the VM) ─────────────────────────────────┐
+│litek8s (dev)            2.7 MB   API server, controllers, node agent         │
+│pods & containers           0 B                                               │
+│other clusters (1)       1.8 MB   litek8s and pods of the rest                │
+│Linux kernel + base      318 MB   fixed cost: kernel, root fs in RAM          │
+│cache                   11.1 MB   reclaimable                                 │
+│freed in the VM         54.2 MB   macOS takes it back when it needs it        │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+| line | what it is | from |
+|---|---|---|
+| litek8s (cluster) | the shown cluster's own processes (API server, controllers, node agent, crun shims) on all its nodes | its cells' cgroups: usage less file pages, less the pods' |
+| pods & containers | its pods, Docker containers and image builds | the `pod*`, `docker/*`, `build/*` cgroups under each node |
+| other clusters | the same two for every other running cluster, together | their cells |
+| Linux kernel + base (macOS) | what the VM costs before anything runs: memory the kernel sets aside at boot (its image and the page structures, ~4 % of the VM's size), its unreclaimable slab, stacks and page tables, and the root filesystem held in RAM (the initramfs: litek8s's binary, crun, iptables); also the VM's own init, cell manager and DHCP client | the VM's size less `MemTotal`, `/proc/meminfo` |
+| sandbox (Linux) | the supervisor, pasta and the cell manager | the sandbox's cgroup less the clusters' |
+| cache | file pages: images, logs, the binary; the kernel drops them under pressure | `/proc/meminfo` (VM) or the sandbox's `file` pages |
+| freed in the VM (macOS) | pages the guest used once and has freed; macOS still counts them for the VM until it needs them back, so a VM that once filled its memory keeps a large figure while idle | the footprint less what the guest uses |
+
+The headline figure is what macOS charges the VM process (its physical
+footprint, what Activity Monitor shows) or, on Linux, the sandbox's cgroup.
+The guest's numbers come from its cgroups and `/proc/meminfo` through the
+VM's control channel; a remote litek8s (`--context`) answers
+`GET /litek8s/v1/memory` on its API server with its node's split (litek8s,
+pods and containers, cache) and its meminfo, which Home shows instead. It
+is sampled with the rest of Home: every 2 s while Home is on screen, not
+otherwise.
+
 After `u` on a stopped cluster, the output of `litek8s dev up` shows under
 it (here on Linux, over SSH):
 

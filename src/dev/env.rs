@@ -69,6 +69,9 @@ pub struct Response {
     pub port: Option<u16>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stats: Vec<CellStats>,
+    /// The VM's `/proc/meminfo` (macOS).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meminfo: Option<super::memory::MemInfo>,
     /// Clusters still running after the request.
     #[serde(default)]
     pub running: Vec<String>,
@@ -87,6 +90,17 @@ pub struct CellStats {
     pub name: String,
     pub memory_bytes: u64,
     pub cpu_usec: u64,
+    /// By owner: litek8s, pods and containers, cache (all its nodes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<super::memory::Usage>,
+}
+
+/// What the VM's init answers to `stats` over vsock.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct GuestStats {
+    pub cells: Vec<CellStats>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub meminfo: Option<super::memory::MemInfo>,
 }
 
 /// Requests from the environment's owner to the cell manager inside it.
@@ -143,7 +157,7 @@ pub fn cell_stats(cgroup: &Path) -> Vec<CellStats> {
                 .ok()
                 .and_then(|s| s.lines().find_map(|l| l.strip_prefix("usage_usec ")?.trim().parse().ok()))
                 .unwrap_or(0);
-            CellStats { name: e.file_name().to_string_lossy().into(), memory_bytes, cpu_usec }
+            CellStats { name: e.file_name().to_string_lossy().into(), memory_bytes, cpu_usec, usage: super::memory::cluster(&dir) }
         })
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));

@@ -875,6 +875,10 @@ async fn handle(state: Arc<ApiState>, mut req: Request<Incoming>) -> Response<Bo
     if path == IMAGES_PATH && parts.method == Method::POST {
         return load_images(&state, body).await;
     }
+    if path == MEMORY_PATH && parts.method == Method::GET {
+        let node = tokio::task::spawn_blocking(|| crate::dev::memory::this_node(&super::agent::default_node_name())).await.unwrap_or_default();
+        return json_response(StatusCode::OK, &serde_json::to_value(node).unwrap_or_default());
+    }
     let header = |name| {
         parts
             .headers
@@ -946,6 +950,9 @@ fn request_names_object(path: &str) -> bool {
 /// litek8s's own endpoint for loading image archives into the local node
 /// (`litek8s dev load`), like `kind load image-archive`.
 pub const IMAGES_PATH: &str = "/litek8s/v1/images";
+/// Where this server's node's memory goes (litek8s, pods, cache) and the
+/// machine's meminfo: what `litek8s ui` explains its memory figure with.
+pub const MEMORY_PATH: &str = "/litek8s/v1/memory";
 
 /// Stream an uploaded image archive to disk (it can be far larger than an
 /// API request body) and import it.

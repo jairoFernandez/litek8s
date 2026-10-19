@@ -107,7 +107,7 @@ pub async fn run(args: UiArgs) -> Result<()> {
     let wake_clusters = Arc::new(Notify::new());
     let docker_task = docker::spawn(docker_ep.clone(), tx.clone(), refresh.clone());
     let tasks = vec![
-        home::spawn(tx.clone(), local, pace.clone(), wake_home.clone(), active.clone()),
+        home::spawn(tx.clone(), local, pace.clone(), wake_home.clone(), active.clone(), fixed.as_ref().filter(|_| !local).map(|(ep, _)| ep.clone())),
         clusters::spawn(tx.clone(), clusters_visible.clone(), wake_clusters.clone()),
     ];
     let kube_watches = if fixed.is_some() { kube::spawn_watches(kube_ep.clone(), tx.clone()) } else { Vec::new() };

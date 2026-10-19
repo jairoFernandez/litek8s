@@ -21,6 +21,7 @@ pub mod cells;
 pub mod cluster;
 pub mod config;
 pub mod env;
+pub mod memory;
 pub mod hostinfo;
 pub mod kubeconfig;
 #[cfg(target_os = "linux")]
@@ -681,6 +682,29 @@ async fn stop(state: &DevState) -> Result<()> {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     Ok(())
+}
+
+/// The shown cluster's memory explained (Home): the VM's footprint on
+/// macOS, the sandbox's cgroup on Linux, split by owner. `None` without a
+/// running VM or sandbox.
+pub async fn memory_breakdown(cluster: &str) -> Option<memory::Breakdown> {
+    let home = dev_home().ok()?;
+    let e = env::running(&home)?;
+    let split = |stats: &[env::CellStats]| {
+        let shown = stats.iter().find(|s| s.name == cluster).and_then(|s| s.usage).unwrap_or_default();
+        let others: Vec<memory::Usage> = stats.iter().filter(|s| s.name != cluster).filter_map(|s| s.usage).collect();
+        (shown, others)
+    };
+    if e.mode == "vm" {
+        let r = env::request(&home, &env::Request::Stats, Duration::from_secs(3)).await.ok()?;
+        let (shown, others) = split(&r.stats);
+        return Some(memory::vm_breakdown(env_memory(&e)?, e.memory_mib? << 20, &r.meminfo?, cluster, shown, &others));
+    }
+    let base = e.cgroup?;
+    let (used, cache) = memory::cgroup(&base)?;
+    let stats = env::cell_stats(&base.join("sandbox"));
+    let (shown, others) = split(&stats);
+    Some(memory::sandbox_breakdown(used, cache, cluster, shown, &others))
 }
 
 /// Memory and CPU time of each running cluster, from the VM or sandbox.
