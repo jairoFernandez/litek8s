@@ -154,6 +154,34 @@ async fn watch_resumes_from_resource_version() -> Result<()> {
 }
 
 #[tokio::test]
+async fn watch_from_an_expired_resource_version_ends_with_an_error_event() -> Result<()> {
+    // A restarted server has no event history: older versions are expired.
+    let dir = tempfile::tempdir()?;
+    let addr = {
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        let addr = listener.local_addr()?.to_string();
+        let state = Arc::new(ApiState::open(Some(dir.path()), addr.clone(), false)?);
+        tokio::spawn(serve_listener(state, listener));
+        addr
+    };
+    let base = "/api/v1/namespaces/default/configmaps";
+    post(&addr, base, cm("a", json!({}))).await?;
+    post(&addr, base, cm("b", json!({}))).await?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let restarted = listener.local_addr()?.to_string();
+    let state = Arc::new(ApiState::open(Some(dir.path()), restarted.clone(), false)?);
+    tokio::spawn(serve_listener(state, listener));
+
+    // Like kube-apiserver: 200 and an ERROR event, which makes client-go
+    // relist (a 410 response makes its RetryWatcher retry forever).
+    let (code, event) = get(&restarted, &format!("{base}?watch=true&resourceVersion=1")).await?;
+    assert_eq!(code, 200);
+    assert_eq!((event["type"].as_str(), event["object"]["code"].as_i64()), (Some("ERROR"), Some(410)));
+    assert_eq!(event["object"]["reason"], "Expired");
+    Ok(())
+}
+
+#[tokio::test]
 async fn crds_serve_custom_resources() -> Result<()> {
     let addr = start().await?;
     let crd = json!({

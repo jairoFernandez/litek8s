@@ -2865,12 +2865,28 @@ impl ApiState {
             }
         }
 
+        let wanted = {
+            let (group, plural, filter_ns) = (rt.group.clone(), rt.plural.clone(), filter_ns.clone());
+            move |k: &ObjectKey| k.group == group && k.resource == plural && filter_ns.as_ref().is_none_or(|ns| &k.namespace == ns)
+        };
         let mut initial: VecDeque<Value> = VecDeque::new();
         let (subscription, floor) = match since {
-            Some(rv) => (
-                self.store.subscribe(Some(rv)).map_err(|e| ApiError::from_store(e, rt, ""))?,
-                rv,
-            ),
+            Some(rv) => match self.store.subscribe_for(Some(rv), &wanted) {
+                Ok(sub) => (sub, rv),
+                // Like kube-apiserver: a resourceVersion older than the
+                // history fails as an ERROR event on a 200 stream, not as a
+                // 410 response. client-go's RetryWatcher (Argo CD's cluster
+                // cache) relists on the event, but retries the same version
+                // forever on a 410 response.
+                Err(StoreError::Gone) => {
+                    let mut line = serde_json::to_vec(&expired_event(rv, self.store.current_rv())).unwrap_or_default();
+                    line.push(b'\n');
+                    let mut resp = Response::new(full(line));
+                    resp.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+                    return Ok(resp);
+                }
+                Err(e) => return Err(ApiError::from_store(e, rt, "")),
+            },
             None => {
                 // Subscribe before listing so nothing falls in between; events
                 // already covered by the list are skipped by rv below.
@@ -2939,7 +2955,9 @@ impl ApiState {
                 initial = kept;
             }
             let encode = |mut event: Value| -> Bytes {
-                if as_table && event["type"] != "BOOKMARK" {
+                if event["type"] == "ERROR" {
+                    // A Status, sent as is.
+                } else if as_table && event["type"] != "BOOKMARK" {
                     let obj = event["object"].take();
                     let rv = resource_version(&obj).unwrap_or(0);
                     event["object"] = table::build(&rt, &[obj], rv, true);
@@ -2956,7 +2974,8 @@ impl ApiState {
                 }
             }
             let mut last_rv = floor;
-            for e in &subscription.backlog {
+            let super::store::Subscription { backlog, live } = subscription;
+            for e in &backlog {
                 last_rv = last_rv.max(e.rv);
                 if e.rv > floor {
                     let converted;
@@ -2974,7 +2993,9 @@ impl ApiState {
                     }
                 }
             }
-            let mut live = subscription.live;
+            // Not kept for the life of the watch.
+            drop(backlog);
+            let mut live = live;
             let deadline = tokio::time::Instant::now() + timeout;
             let mut tick = tokio::time::interval(Duration::from_secs(if bookmarks { 30 } else { 5 }));
             tick.tick().await;
@@ -3019,7 +3040,10 @@ impl ApiState {
                         // catch up from the history, or end the watch if it
                         // no longer reaches back; clients then re-list.
                         Err(broadcast::error::RecvError::Lagged(_)) => {
-                            let Ok(caught_up) = state.store.subscribe(Some(last_rv)) else { return };
+                            let Ok(caught_up) = state.store.subscribe_for(Some(last_rv), &wanted) else {
+                                let _ = tx.send(encode(expired_event(last_rv, state.store.current_rv()))).await;
+                                return;
+                            };
                             live = caught_up.live;
                             for e in &caught_up.backlog {
                                 if e.rv <= last_rv {
@@ -3055,6 +3079,14 @@ impl ApiState {
             .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         Ok(resp)
     }
+}
+
+/// The watch event that ends a watch whose resourceVersion is too old.
+fn expired_event(rv: u64, current: u64) -> Value {
+    json!({"type": "ERROR", "object": {
+        "kind": "Status", "apiVersion": "v1", "metadata": {}, "status": "Failure",
+        "message": format!("too old resource version: {rv} ({current})"), "reason": "Expired", "code": 410,
+    }})
 }
 
 // ---------------------------------------------------------------------------
