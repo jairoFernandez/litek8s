@@ -45,6 +45,11 @@ pub(crate) fn reconcile_service(api: &ApiState, ns: &str, name: &str) -> Result<
         }
         return Ok(None);
     };
+    if util::is_deleting(&svc) {
+        // Being deleted in the foreground, the garbage collector removes its
+        // EndpointSlices first: recreating them would block it forever.
+        return Ok(None);
+    }
     if s(&svc, "/spec/type") == "LoadBalancer" {
         if let Some(ip) = node_address(api) {
             let want = json!({"loadBalancer": {"ingress": [{"ip": ip, "ipMode": "VIP"}]}});

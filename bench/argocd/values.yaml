@@ -1,0 +1,5 @@
+# Argo CD chart values for the `argocd` benchmark phase, the same on k3s and
+# litek8s. Empty on purpose: the chart's non-HA defaults (application
+# controller, server, repo server, ApplicationSet controller, notifications
+# controller, Dex and Redis, one replica each).
+{}

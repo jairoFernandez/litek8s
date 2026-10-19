@@ -24,16 +24,18 @@
 # VM, and `down` only forgets it. Hosts must be fresh Ubuntu 24.04, one per name.
 #
 # Requires: qemu-system-aarch64 (Homebrew), hdiutil (macOS) or genisoimage/xorriso.
+# On an x86_64 Linux host (BENCH_VM_ARCH=amd64, the default there) the guests
+# are amd64 Ubuntu under qemu-system-x86_64 with KVM instead (/dev/kvm).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 WORK="${BENCH_WORK:-$HERE/.work}"
-IMAGE_URL="https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-arm64.img"
+VM_ARCH="${BENCH_VM_ARCH:-$([[ "$(uname -m)" == x86_64 ]] && echo amd64 || echo arm64)}"
+IMAGE_URL="https://cloud-images.ubuntu.com/releases/noble/release/ubuntu-24.04-server-cloudimg-$VM_ARCH.img"
 IMAGE_SHA256="${BENCH_IMAGE_SHA256:-}"
-BASE="$WORK/images/ubuntu-24.04-server-cloudimg-arm64.img"
+BASE="$WORK/images/ubuntu-24.04-server-cloudimg-$VM_ARCH.img"
 KEY="$WORK/id_ed25519"
 EXT_KEY="${BENCH_KEY:-$HOME/.ssh/id_ed25519}"
-QEMU_SHARE="$(dirname "$(command -v qemu-system-aarch64)")/../share/qemu"
 
 ensure_base() {
   mkdir -p "$WORK/images"
@@ -145,9 +147,12 @@ cmd_up() {
   echo "$mem $cpus $lan_ip" >"$dir/shape"
   qemu-img create -q -f qcow2 -F qcow2 -b "$BASE" "$dir/disk.qcow2" ${BENCH_DISK:-12G}
   make_seed "$dir" "$name" "$lan_ip"
-  cp "$QEMU_SHARE/edk2-aarch64-code.fd" "$dir/efi-code.fd"
-  dd if=/dev/zero of="$dir/efi-vars.fd" bs=1m count=64 2>/dev/null
-  truncate -s 64m "$dir/efi-code.fd"
+  if [[ "$VM_ARCH" == arm64 ]]; then
+    local share; share="$(dirname "$(command -v qemu-system-aarch64)")/../share/qemu"
+    cp "$share/edk2-aarch64-code.fd" "$dir/efi-code.fd"
+    dd if=/dev/zero of="$dir/efi-vars.fd" bs=1m count=64 2>/dev/null
+    truncate -s 64m "$dir/efi-code.fd"
+  fi
   boot "$name"
 }
 
@@ -162,10 +167,17 @@ boot() {
     lan=(-netdev "dgram,id=n1,local.type=inet,local.host=127.0.0.1,local.port=$((hub + ${lan_ip##*.})),remote.type=inet,remote.host=127.0.0.1,remote.port=$hub"
          -device "virtio-net-pci,netdev=n1,mac=$(lan_mac "$lan_ip")")
   fi
-  qemu-system-aarch64 \
-    -name "$name" -machine virt,accel=hvf -cpu host -smp "$cpus" -m "$mem" \
-    -drive if=pflash,format=raw,readonly=on,file="$dir/efi-code.fd" \
-    -drive if=pflash,format=raw,file="$dir/efi-vars.fd" \
+  local machine=()
+  if [[ "$VM_ARCH" == arm64 ]]; then
+    machine=(qemu-system-aarch64 -machine virt,accel=hvf -cpu host
+             -drive "if=pflash,format=raw,readonly=on,file=$dir/efi-code.fd"
+             -drive "if=pflash,format=raw,file=$dir/efi-vars.fd")
+  else
+    # The cloud image boots with SeaBIOS too.
+    machine=(qemu-system-x86_64 -machine q35,accel=kvm -cpu host)
+  fi
+  "${machine[@]}" \
+    -name "$name" -smp "$cpus" -m "$mem" \
     -drive if=virtio,format=qcow2,file="$dir/disk.qcow2" \
     -drive if=virtio,format=raw,readonly=on,file="$dir/seed.iso" \
     -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$port-:22" -device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56 \

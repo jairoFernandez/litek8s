@@ -1,0 +1,765 @@
+{
+ "apiserver_request_total": [
+  {
+   "verb": "DELETE",
+   "group": "",
+   "version": "v1",
+   "resource": "configmaps",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 24.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "",
+   "version": "v1",
+   "resource": "secrets",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 9.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "",
+   "version": "v1",
+   "resource": "serviceaccounts",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 21.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "",
+   "version": "v1",
+   "resource": "serviceaccounts",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 1.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "",
+   "version": "v1",
+   "resource": "services",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 15.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "apps",
+   "version": "v1",
+   "resource": "deployments",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 18.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "apps",
+   "version": "v1",
+   "resource": "statefulsets",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "batch",
+   "version": "v1",
+   "resource": "jobs",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 4.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "networkpolicies",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 18.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "clusterrolebindings",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 9.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "clusterroles",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 9.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "rolebindings",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 21.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "rolebindings",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 1.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "roles",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 21.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "roles",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 1.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "",
+   "resource": "",
+   "subresource": "",
+   "scope": "",
+   "code": "200",
+   "value": 100.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "v1",
+   "resource": "configmaps",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 4.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "v1",
+   "resource": "configmaps",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 80.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "v1",
+   "resource": "namespaces",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 154.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "v1",
+   "resource": "secrets",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 10.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "v1",
+   "resource": "secrets",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 21.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "v1",
+   "resource": "serviceaccounts",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 64.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "v1",
+   "resource": "services",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 50.0
+  },
+  {
+   "verb": "GET",
+   "group": "apiextensions.k8s.io",
+   "version": "v1",
+   "resource": "customresourcedefinitions",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 36.0
+  },
+  {
+   "verb": "GET",
+   "group": "apiextensions.k8s.io",
+   "version": "v1",
+   "resource": "customresourcedefinitions",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 3.0
+  },
+  {
+   "verb": "GET",
+   "group": "apps",
+   "version": "v1",
+   "resource": "deployments",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 60.0
+  },
+  {
+   "verb": "GET",
+   "group": "apps",
+   "version": "v1",
+   "resource": "statefulsets",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 10.0
+  },
+  {
+   "verb": "GET",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "appprojects",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "GET",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "appprojects",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 1.0
+  },
+  {
+   "verb": "GET",
+   "group": "batch",
+   "version": "v1",
+   "resource": "jobs",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 4.0
+  },
+  {
+   "verb": "GET",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "networkpolicies",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 60.0
+  },
+  {
+   "verb": "GET",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "clusterrolebindings",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 30.0
+  },
+  {
+   "verb": "GET",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "clusterroles",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 30.0
+  },
+  {
+   "verb": "GET",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "rolebindings",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 64.0
+  },
+  {
+   "verb": "GET",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "roles",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 64.0
+  },
+  {
+   "verb": "LIST",
+   "group": "",
+   "version": "v1",
+   "resource": "configmaps",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 36.0
+  },
+  {
+   "verb": "LIST",
+   "group": "",
+   "version": "v1",
+   "resource": "nodes",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "LIST",
+   "group": "",
+   "version": "v1",
+   "resource": "pods",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "LIST",
+   "group": "",
+   "version": "v1",
+   "resource": "pods",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 645.0
+  },
+  {
+   "verb": "LIST",
+   "group": "",
+   "version": "v1",
+   "resource": "secrets",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 79.0
+  },
+  {
+   "verb": "LIST",
+   "group": "apps",
+   "version": "v1",
+   "resource": "deployments",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 131.0
+  },
+  {
+   "verb": "LIST",
+   "group": "apps",
+   "version": "v1",
+   "resource": "statefulsets",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 131.0
+  },
+  {
+   "verb": "LIST",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applications",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 20.0
+  },
+  {
+   "verb": "LIST",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applicationsets",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 8.0
+  },
+  {
+   "verb": "LIST",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "appprojects",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 16.0
+  },
+  {
+   "verb": "LIST",
+   "group": "batch",
+   "version": "v1",
+   "resource": "jobs",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 4.0
+  },
+  {
+   "verb": "POST",
+   "group": "",
+   "version": "v1",
+   "resource": "configmaps",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "201",
+   "value": 32.0
+  },
+  {
+   "verb": "POST",
+   "group": "",
+   "version": "v1",
+   "resource": "namespaces",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "201",
+   "value": 1.0
+  },
+  {
+   "verb": "POST",
+   "group": "",
+   "version": "v1",
+   "resource": "namespaces",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "409",
+   "value": 3.0
+  },
+  {
+   "verb": "POST",
+   "group": "",
+   "version": "v1",
+   "resource": "secrets",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "201",
+   "value": 14.0
+  },
+  {
+   "verb": "POST",
+   "group": "",
+   "version": "v1",
+   "resource": "secrets",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "409",
+   "value": 3.0
+  },
+  {
+   "verb": "POST",
+   "group": "",
+   "version": "v1",
+   "resource": "serviceaccounts",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "201",
+   "value": 28.0
+  },
+  {
+   "verb": "POST",
+   "group": "",
+   "version": "v1",
+   "resource": "services",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "201",
+   "value": 20.0
+  },
+  {
+   "verb": "POST",
+   "group": "apiextensions.k8s.io",
+   "version": "v1",
+   "resource": "customresourcedefinitions",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "201",
+   "value": 3.0
+  },
+  {
+   "verb": "POST",
+   "group": "apps",
+   "version": "v1",
+   "resource": "deployments",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "201",
+   "value": 24.0
+  },
+  {
+   "verb": "POST",
+   "group": "apps",
+   "version": "v1",
+   "resource": "statefulsets",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "201",
+   "value": 4.0
+  },
+  {
+   "verb": "POST",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "appprojects",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "201",
+   "value": 1.0
+  },
+  {
+   "verb": "POST",
+   "group": "batch",
+   "version": "v1",
+   "resource": "jobs",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "201",
+   "value": 4.0
+  },
+  {
+   "verb": "POST",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "networkpolicies",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "201",
+   "value": 24.0
+  },
+  {
+   "verb": "POST",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "clusterrolebindings",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "201",
+   "value": 12.0
+  },
+  {
+   "verb": "POST",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "clusterroles",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "201",
+   "value": 12.0
+  },
+  {
+   "verb": "POST",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "rolebindings",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "201",
+   "value": 28.0
+  },
+  {
+   "verb": "POST",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "roles",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "201",
+   "value": 28.0
+  },
+  {
+   "verb": "PUT",
+   "group": "",
+   "version": "v1",
+   "resource": "secrets",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 34.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "configmaps",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 36.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "secrets",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 72.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applications",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 16.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applicationsets",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 8.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "appprojects",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 12.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "batch",
+   "version": "v1",
+   "resource": "jobs",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 4.0
+  }
+ ],
+ "apiserver_longrunning_requests": [
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "configmaps",
+   "subresource": "",
+   "scope": "namespace",
+   "value": 7.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "secrets",
+   "subresource": "",
+   "scope": "namespace",
+   "value": 14.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applications",
+   "subresource": "",
+   "scope": "namespace",
+   "value": 4.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applicationsets",
+   "subresource": "",
+   "scope": "namespace",
+   "value": 2.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "appprojects",
+   "subresource": "",
+   "scope": "namespace",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "batch",
+   "version": "v1",
+   "resource": "jobs",
+   "subresource": "",
+   "scope": "namespace",
+   "value": 0.0
+  }
+ ],
+ "t": 1792400255.9334993,
+ "harness": {
+  "kubectl": 910,
+  "raw_gets": 910
+ }
+}

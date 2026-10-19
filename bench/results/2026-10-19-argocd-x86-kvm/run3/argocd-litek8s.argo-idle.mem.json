@@ -1,0 +1,153 @@
+{
+ "buckets": {
+  "os/other": {
+   "rss_kib": 169224,
+   "pss_kib": 79781,
+   "procs": 18,
+   "comms": {
+    "systemd": 2,
+    "systemd-journal": 1,
+    "multipathd": 1,
+    "systemd-udevd": 1,
+    "systemd-resolve": 1,
+    "systemd-timesyn": 1,
+    "systemd-network": 1,
+    "cron": 1,
+    "dbus-daemon": 1,
+    "polkitd": 1,
+    "systemd-logind": 1,
+    "udisksd": 1,
+    "rsyslogd": 1,
+    "agetty": 2,
+    "ModemManager": 1,
+    "(sd-pam)": 1
+   }
+  },
+  "sshd": {
+   "rss_kib": 25820,
+   "pss_kib": 7843,
+   "procs": 3,
+   "comms": {
+    "sshd": 3
+   }
+  },
+  "litek8s-serve": {
+   "rss_kib": 79868,
+   "pss_kib": 75567,
+   "procs": 1,
+   "comms": {
+    "litek8s": 1
+   }
+  },
+  "crun-shim": {
+   "rss_kib": 26580,
+   "pss_kib": 11928,
+   "procs": 7,
+   "comms": {
+    "litek8s-shim": 7
+   }
+  },
+  "argocd": {
+   "rss_kib": 656980,
+   "pss_kib": 340584,
+   "procs": 13,
+   "comms": {
+    "tini": 5,
+    "argocd-applicat": 2,
+    "argocd-notifica": 1,
+    "redis-server": 1,
+    "argocd-server": 1,
+    "argocd-dex": 1,
+    "argocd-repo-ser": 1,
+    "gpg-agent": 1
+   }
+  }
+ },
+ "pods": {
+  "/litek8s/podb3e7d570_a603_4b70_a1f8_2cd81196d4be": {
+   "kind": "argocd",
+   "pss_kib": 40769,
+   "comms": [
+    "argocd-applicat",
+    "tini"
+   ]
+  },
+  "/litek8s/podae9d4bbb_2574_4975_ac82_6526b0b6e0c3": {
+   "kind": "argocd",
+   "pss_kib": 35877,
+   "comms": [
+    "argocd-notifica",
+    "tini"
+   ]
+  },
+  "/litek8s/poda7af667a_d6bd_4d0a_a2a2_8aaf6491fde4": {
+   "kind": "argocd",
+   "pss_kib": 42468,
+   "comms": [
+    "argocd-applicat",
+    "tini"
+   ]
+  },
+  "/litek8s/pod8fff110c_3a2b_48a1_9b9c_0b4aa4257893": {
+   "kind": "argocd",
+   "pss_kib": 23116,
+   "comms": [
+    "redis-server"
+   ]
+  },
+  "/litek8s/pod1f431d36_fc3b_4ab5_abea_bfbf234a109f": {
+   "kind": "argocd",
+   "pss_kib": 60219,
+   "comms": [
+    "argocd-server",
+    "tini"
+   ]
+  },
+  "/litek8s/podd17fd3c8_848e_4b45_b69d_ec9d39f3cd03": {
+   "kind": "argocd",
+   "pss_kib": 39987,
+   "comms": [
+    "argocd-repo-ser",
+    "gpg-agent",
+    "tini"
+   ]
+  },
+  "/litek8s/pod8e0ce1e0_fd1f_41a6_ba19_bcf24762e1a5": {
+   "kind": "argocd",
+   "pss_kib": 98148,
+   "comms": [
+    "argocd-dex"
+   ]
+  }
+ },
+ "categories": {
+  "os/other": {
+   "rss_kib": 169224,
+   "pss_kib": 79781
+  },
+  "node-agent": {
+   "rss_kib": 25820,
+   "pss_kib": 7843
+  },
+  "control-plane": {
+   "rss_kib": 79868,
+   "pss_kib": 75567
+  },
+  "runtime": {
+   "rss_kib": 26580,
+   "pss_kib": 11928
+  },
+  "argocd": {
+   "rss_kib": 656980,
+   "pss_kib": 340584
+  }
+ },
+ "system": {
+  "mem_total_kib": 2014840,
+  "mem_available_kib": 1438360,
+  "mem_used_kib": 576480
+ },
+ "cgroup_memory_current_kib": {
+  "system.slice/litek8s.service": 847164
+ }
+}

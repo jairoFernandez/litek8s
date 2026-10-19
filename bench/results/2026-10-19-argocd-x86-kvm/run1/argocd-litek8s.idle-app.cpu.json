@@ -1,0 +1,67 @@
+{
+ "window_s": 300.0,
+ "buckets": {
+  "argocd": {
+   "cpu_s": 1.17,
+   "pct_one_core": 0.39
+  },
+  "crun-shim": {
+   "cpu_s": 0.0,
+   "pct_one_core": 0.0
+  },
+  "litek8s-serve": {
+   "cpu_s": 0.15,
+   "pct_one_core": 0.05
+  },
+  "os/other": {
+   "cpu_s": 0.0,
+   "pct_one_core": 0.0
+  },
+  "sshd": {
+   "cpu_s": 0.0,
+   "pct_one_core": 0.0
+  },
+  "user.slice (short-lived)": {
+   "cpu_s": 0.012,
+   "pct_one_core": 0.004
+  },
+  "workload": {
+   "cpu_s": 0.02,
+   "pct_one_core": 0.007
+  }
+ },
+ "categories": {
+  "argocd": {
+   "cpu_s": 1.17,
+   "pct_one_core": 0.39
+  },
+  "control-plane": {
+   "cpu_s": 0.15,
+   "pct_one_core": 0.05
+  },
+  "node-agent": {
+   "cpu_s": 0.012,
+   "pct_one_core": 0.004
+  },
+  "os/other": {
+   "cpu_s": 0.0,
+   "pct_one_core": 0.0
+  },
+  "runtime": {
+   "cpu_s": 0.0,
+   "pct_one_core": 0.0
+  },
+  "workload": {
+   "cpu_s": 0.02,
+   "pct_one_core": 0.007
+  }
+ },
+ "write_syscall_kib": {
+  "argocd": 296,
+  "crun-shim": 28,
+  "litek8s-serve": 22
+ },
+ "busy_cpu_s": 1.23,
+ "system_busy_pct_of_all_cpus": 0.205,
+ "ncpu": 2
+}

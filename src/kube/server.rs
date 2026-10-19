@@ -139,6 +139,19 @@ pub struct ApiState {
     pod_port: std::sync::atomic::AtomicU16,
     /// Imports image archives into the local node, when there is one.
     pub(crate) image_loader: std::sync::OnceLock<ImageLoader>,
+    /// kube-apiserver's request counters, also served at `/metrics`.
+    request_metrics: super::metrics::RequestMetrics,
+    /// Parsed CRDs by name. Every custom resource read, write and watch
+    /// event needs its CRD and schema, and some are megabytes when parsed
+    /// (Argo CD's Application): share one copy per CRD resourceVersion.
+    crd_cache: std::sync::Mutex<HashMap<String, CachedCrd>>,
+}
+
+struct CachedCrd {
+    rv: u64,
+    crd: Arc<Value>,
+    /// `openAPIV3Schema` by version name.
+    schemas: HashMap<String, Option<Arc<Value>>>,
 }
 
 impl ApiState {
@@ -168,6 +181,8 @@ impl ApiState {
             signer: super::sa_token::TokenSigner::load_or_create(data_dir)?,
             pod_port: std::sync::atomic::AtomicU16::new(0),
             image_loader: std::sync::OnceLock::new(),
+            request_metrics: Default::default(),
+            crd_cache: Default::default(),
         };
         state.bootstrap()?;
         Ok(state)
@@ -359,6 +374,7 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
     tokio::spawn(super::controllers::run(state.clone()));
     super::metrics::spawn_memory_trim();
     tokio::spawn(super::aggregator::run(state.clone()));
+    tokio::spawn(expire_events(state.clone()));
 
     // The local node comes first: where pods reach this host (Docker's
     // host-gateway, crun's bridge address) decides where DNS and the in-cluster port can listen.
@@ -873,21 +889,25 @@ async fn handle(state: Arc<ApiState>, mut req: Request<Incoming>) -> Response<Bo
         Ok(resp) => resp,
         Err(error) => error.into_response(),
     };
+    let code = resp.status().as_u16();
     let watch = path.contains("/watch/") || matches!(req.q("watch"), Some("true" | "1"));
     if !watch && !path.starts_with("/apis/agent.litek8s.dev/") && path != "/metrics" {
         state.metrics.observe(Metrics::verb(&parts.method, false, request_names_object(&path)), started.elapsed());
     }
     if state.log_requests {
         eprintln!(
-            "apiserver: {} {}{} -> {} ({} µs)",
+            "apiserver: {} {}{} -> {} ({} µs) {}",
             parts.method,
             path,
             parts.uri.query().map(|q| format!("?{q}")).unwrap_or_default(),
-            resp.status().as_u16(),
-            started.elapsed().as_micros()
+            code,
+            started.elapsed().as_micros(),
+            header(hyper::header::USER_AGENT),
         );
     }
-    resp
+    let info = super::metrics::request_info(&req.method, &path, &req.query, &req.content_type, parts.headers.contains_key(hyper::header::UPGRADE));
+    let (resp_parts, body) = resp.into_parts();
+    Response::from_parts(resp_parts, state.request_metrics.observe(info, code, body))
 }
 
 /// Whether a resource path names one object (`get`) rather than a
@@ -1490,7 +1510,7 @@ impl ApiState {
         if !rt.custom {
             return Ok(objects);
         }
-        let Some(crd) = self.store.get(&ObjectKey::new("apiextensions.k8s.io", "customresourcedefinitions", "", &format!("{}.{}", rt.plural, rt.group))) else {
+        let Some(crd) = self.crd(rt) else {
             return Ok(objects);
         };
         let mut objects = admission::convert_objects(self, &crd, objects, &rt.api_version()).await?;
@@ -1504,8 +1524,8 @@ impl ApiState {
     }
 
     /// The version custom resources are stored as.
-    fn storage_version(&self, rt: &ResourceType) -> Option<(Value, String)> {
-        let crd = self.store.get(&ObjectKey::new("apiextensions.k8s.io", "customresourcedefinitions", "", &format!("{}.{}", rt.plural, rt.group)))?;
+    fn storage_version(&self, rt: &ResourceType) -> Option<(Arc<Value>, String)> {
+        let crd = self.crd(rt)?;
         let v = crd
             .pointer("/spec/versions")?
             .as_array()?
@@ -2073,6 +2093,9 @@ impl ApiState {
         obj: &mut Value,
         check_namespace: bool,
     ) -> Result<(), ApiError> {
+        if !rt.custom {
+            super::fields::drop_nulls(obj);
+        }
         let Some(map) = obj.as_object_mut() else {
             return Err(ApiError::bad_request("the request body must be a JSON object"));
         };
@@ -2173,6 +2196,9 @@ impl ApiState {
     ) -> Result<Value, ApiError> {
         if !new.is_object() {
             return Err(ApiError::bad_request("the request body must be a JSON object"));
+        }
+        if !rt.custom {
+            super::fields::drop_nulls(&mut new);
         }
         let body_name = name_of(&new);
         if !body_name.is_empty() && body_name != url_name {
@@ -2428,18 +2454,47 @@ impl ApiState {
     }
 
     /// The structural schema of a custom resource's version.
-    fn crd_schema(&self, rt: &ResourceType) -> Option<Value> {
+    /// A custom resource's CRD, shared from the cache while unchanged.
+    fn crd(&self, rt: &ResourceType) -> Option<Arc<Value>> {
+        self.cached_crd(rt, |c| c.crd.clone())
+    }
+
+    fn crd_schema(&self, rt: &ResourceType) -> Option<Arc<Value>> {
+        self.cached_crd(rt, |c| {
+            let crd = c.crd.clone();
+            c.schemas
+                .entry(rt.version.clone())
+                .or_insert_with(|| {
+                    crd.pointer("/spec/versions")?
+                        .as_array()?
+                        .iter()
+                        .find(|v| v.get("name").and_then(Value::as_str) == Some(rt.version.as_str()))?
+                        .pointer("/schema/openAPIV3Schema")
+                        .filter(|s| s.is_object())
+                        .map(|s| Arc::new(s.clone()))
+                })
+                .clone()
+        })
+        .flatten()
+    }
+
+    fn cached_crd<T>(&self, rt: &ResourceType, f: impl FnOnce(&mut CachedCrd) -> T) -> Option<T> {
         if !rt.custom {
             return None;
         }
-        let crd = self.store.get(&ObjectKey::new("apiextensions.k8s.io", "customresourcedefinitions", "", &format!("{}.{}", rt.plural, rt.group)))?;
-        crd.pointer("/spec/versions")?
-            .as_array()?
-            .iter()
-            .find(|v| v.get("name").and_then(Value::as_str) == Some(rt.version.as_str()))?
-            .pointer("/schema/openAPIV3Schema")
-            .filter(|s| s.is_object())
-            .cloned()
+        let name = format!("{}.{}", rt.plural, rt.group);
+        let key = ObjectKey::new("apiextensions.k8s.io", "customresourcedefinitions", "", &name);
+        let Some(rv) = self.store.resource_version_of(&key) else {
+            self.crd_cache.lock().unwrap().remove(&name);
+            return None;
+        };
+        let mut cache = self.crd_cache.lock().unwrap();
+        if cache.get(&name).is_none_or(|c| c.rv != rv) {
+            let crd = self.store.get(&key)?;
+            let rv = resource_version(&crd).unwrap_or(rv);
+            cache.insert(name.clone(), CachedCrd { rv, crd: Arc::new(crd), schemas: HashMap::new() });
+        }
+        cache.get_mut(&name).map(f)
     }
 
     /// The manager of a non-apply write: `?fieldManager=`, else the client's
@@ -3146,12 +3201,28 @@ impl ApiState {
             }
         }
 
+        let wanted = {
+            let (group, plural, filter_ns) = (rt.group.clone(), rt.plural.clone(), filter_ns.clone());
+            move |k: &ObjectKey| k.group == group && k.resource == plural && filter_ns.as_ref().is_none_or(|ns| &k.namespace == ns)
+        };
         let mut initial: VecDeque<Value> = VecDeque::new();
         let (subscription, floor) = match since {
-            Some(rv) => (
-                self.store.subscribe(Some(rv)).map_err(|e| ApiError::from_store(e, rt, ""))?,
-                rv,
-            ),
+            Some(rv) => match self.store.subscribe_for(Some(rv), &wanted) {
+                Ok(sub) => (sub, rv),
+                // Like kube-apiserver: a resourceVersion older than the
+                // history fails as an ERROR event on a 200 stream, not as a
+                // 410 response. client-go's RetryWatcher (Argo CD's cluster
+                // cache) relists on the event, but retries the same version
+                // forever on a 410 response.
+                Err(StoreError::Gone) => {
+                    let mut line = serde_json::to_vec(&expired_event(rv, self.store.current_rv())).unwrap_or_default();
+                    line.push(b'\n');
+                    let mut resp = Response::new(full(line));
+                    resp.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+                    return Ok(resp);
+                }
+                Err(e) => return Err(ApiError::from_store(e, rt, "")),
+            },
             None => {
                 // Subscribe before listing so nothing falls in between; events
                 // already covered by the list are skipped by rv below.
@@ -3222,7 +3293,9 @@ impl ApiState {
                 initial = kept;
             }
             let encode = |mut event: Value| -> Bytes {
-                if as_table && event["type"] != "BOOKMARK" {
+                if event["type"] == "ERROR" {
+                    // A Status, sent as is.
+                } else if as_table && event["type"] != "BOOKMARK" {
                     let obj = event["object"].take();
                     let rv = resource_version(&obj).unwrap_or(0);
                     event["object"] = table::build(&rt, &[obj], rv, true);
@@ -3239,7 +3312,8 @@ impl ApiState {
                 }
             }
             let mut last_rv = floor;
-            for e in &subscription.backlog {
+            let super::store::Subscription { backlog, live } = subscription;
+            for e in &backlog {
                 last_rv = last_rv.max(e.rv);
                 if e.rv > floor {
                     let converted;
@@ -3257,7 +3331,9 @@ impl ApiState {
                     }
                 }
             }
-            let mut live = subscription.live;
+            // Not kept for the life of the watch.
+            drop(backlog);
+            let mut live = live;
             let deadline = tokio::time::Instant::now() + timeout;
             let mut tick = tokio::time::interval(Duration::from_secs(if bookmarks { 30 } else { 5 }));
             tick.tick().await;
@@ -3302,7 +3378,10 @@ impl ApiState {
                         // catch up from the history, or end the watch if it
                         // no longer reaches back; clients then re-list.
                         Err(broadcast::error::RecvError::Lagged(_)) => {
-                            let Ok(caught_up) = state.store.subscribe(Some(last_rv)) else { return };
+                            let Ok(caught_up) = state.store.subscribe_for(Some(last_rv), &wanted) else {
+                                let _ = tx.send(encode(expired_event(last_rv, state.store.current_rv()))).await;
+                                return;
+                            };
                             live = caught_up.live;
                             for e in &caught_up.backlog {
                                 if e.rv <= last_rv {
@@ -3338,6 +3417,49 @@ impl ApiState {
             .insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         Ok(resp)
     }
+}
+
+/// How long an Event is kept after it was last recorded (kube-apiserver's
+/// `--event-ttl` default). Controllers like Argo CD's record several per
+/// sync; without a TTL they pile up in memory and in the object log.
+const EVENT_TTL: Duration = Duration::from_secs(3600);
+
+async fn expire_events(state: Arc<ApiState>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(60));
+    loop {
+        tick.tick().await;
+        state.expire_events_before(chrono::Utc::now() - chrono::Duration::from_std(EVENT_TTL).unwrap_or_default());
+    }
+}
+
+impl ApiState {
+    fn expire_events_before(&self, cutoff: chrono::DateTime<chrono::Utc>) {
+        // Deleting the core/v1 Event also deletes its events.k8s.io mirror.
+        for event in self.store.list("", "events", None).0 {
+            if event_last_seen(&event).is_some_and(|t| t < cutoff) {
+                let ns = meta(&event).get("namespace").and_then(Value::as_str).unwrap_or_default().to_string();
+                let _ = self.delete_named("", "events", &ns, &name_of(&event));
+            }
+        }
+    }
+}
+
+/// When a core/v1 Event was last recorded: the latest of its timestamps.
+fn event_last_seen(event: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    ["/lastTimestamp", "/eventTime", "/series/lastObservedTime", "/firstTimestamp", "/metadata/creationTimestamp"]
+        .iter()
+        .filter_map(|p| event.pointer(p).and_then(Value::as_str))
+        .filter_map(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| t.with_timezone(&chrono::Utc))
+        .max()
+}
+
+/// The watch event that ends a watch whose resourceVersion is too old.
+fn expired_event(rv: u64, current: u64) -> Value {
+    json!({"type": "ERROR", "object": {
+        "kind": "Status", "apiVersion": "v1", "metadata": {}, "status": "Failure",
+        "message": format!("too old resource version: {rv} ({current})"), "reason": "Expired", "code": 410,
+    }})
 }
 
 // ---------------------------------------------------------------------------
@@ -3457,6 +3579,7 @@ impl ApiState {
     fn render_metrics(&self) -> String {
         let mut out = String::new();
         self.metrics.render(&mut out);
+        out.push_str(&self.request_metrics.render());
         let st = self.store.stats();
         metrics::gauge(&mut out, "litek8s_store_objects", st.objects);
         metrics::gauge(&mut out, "litek8s_store_resource_version", st.resource_version);
@@ -3575,5 +3698,27 @@ mod tests {
         assert_eq!(q["labelSelector"], "app=web,tier in (a)");
         assert_eq!(q["watch"], "true");
         assert_eq!(q["x"], "");
+    }
+
+    #[test]
+    fn events_expire_after_their_last_timestamp() {
+        let api = ApiState::open(None, "127.0.0.1:0".into(), false).unwrap();
+        let now = chrono::Utc::now();
+        let event = |name: &str, last: chrono::DateTime<chrono::Utc>| {
+            json!({"metadata": {"name": name, "namespace": "default"}, "involvedObject": {"kind": "Pod", "name": "p"},
+                   "reason": "Started", "lastTimestamp": last.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)})
+        };
+        api.create_object("", "events", Some("default"), event("old", now - chrono::Duration::hours(2))).unwrap();
+        api.create_object("", "events", Some("default"), event("new", now)).unwrap();
+        assert!(api.get_object("events.k8s.io", "events", "default", "old").is_some(), "mirrored");
+        // Recorded two hours ago: the server stamped creation just now.
+        let mut old = api.get_object("", "events", "default", "old").unwrap();
+        old["metadata"]["creationTimestamp"] = old["lastTimestamp"].clone();
+        let key = ObjectKey::new("", "events", "default", "old");
+        api.store().update(key, old, None).unwrap();
+        api.expire_events_before(now - chrono::Duration::hours(1));
+        assert!(api.get_object("", "events", "default", "old").is_none());
+        assert!(api.get_object("events.k8s.io", "events", "default", "old").is_none());
+        assert!(api.get_object("", "events", "default", "new").is_some());
     }
 }

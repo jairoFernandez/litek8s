@@ -1,0 +1,55 @@
+{
+ "helm_install_s": 8.38,
+ "all_ready_s": 19.94,
+ "pods": {
+  "argocd-application-controller-0": {
+   "ready_s": 18.53,
+   "containers": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  "argocd-applicationset-controller-744798844f-25fjc": {
+   "ready_s": 8.44,
+   "containers": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  "argocd-dex-server-56f9c8697c-6vfsz": {
+   "ready_s": 17.19,
+   "containers": [
+    "ghcr.io/dexidp/dex:v2.46.0"
+   ],
+   "restarts": 0
+  },
+  "argocd-notifications-controller-84965d4bb9-twz75": {
+   "ready_s": 8.44,
+   "containers": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  "argocd-redis-66f6996d69-5vsgj": {
+   "ready_s": 11.41,
+   "containers": [
+    "ecr-public.aws.com/docker/library/redis:8.6.4-alpine"
+   ],
+   "restarts": 0
+  },
+  "argocd-repo-server-5f47b6d84b-rdh8t": {
+   "ready_s": 19.88,
+   "containers": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  "argocd-server-5c4f58b884-tj6lr": {
+   "ready_s": 18.53,
+   "containers": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  }
+ }
+}

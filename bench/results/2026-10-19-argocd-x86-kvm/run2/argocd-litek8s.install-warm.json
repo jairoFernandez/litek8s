@@ -1,0 +1,169 @@
+[
+{
+ "helm_install_s": 2.11,
+ "all_ready_s": 13.39,
+ "pods": {
+  "argocd-application-controller-0": {
+   "ready_s": 12.32,
+   "containers": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  "argocd-applicationset-controller-744798844f-8snf9": {
+   "ready_s": 2.16,
+   "containers": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  "argocd-dex-server-56f9c8697c-6sjz8": {
+   "ready_s": 3.59,
+   "containers": [
+    "ghcr.io/dexidp/dex:v2.46.0"
+   ],
+   "restarts": 0
+  },
+  "argocd-notifications-controller-84965d4bb9-6bx46": {
+   "ready_s": 2.16,
+   "containers": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  "argocd-redis-66f6996d69-l2wpz": {
+   "ready_s": 2.16,
+   "containers": [
+    "ecr-public.aws.com/docker/library/redis:8.6.4-alpine"
+   ],
+   "restarts": 0
+  },
+  "argocd-repo-server-5f47b6d84b-nmnnj": {
+   "ready_s": 13.33,
+   "containers": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  "argocd-server-5c4f58b884-j8b6d": {
+   "ready_s": 11.98,
+   "containers": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  }
+ }
+}
+,
+{
+ "helm_install_s": 2.12,
+ "all_ready_s": 13.44,
+ "pods": {
+  "argocd-application-controller-0": {
+   "ready_s": 12.04,
+   "containers": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  "argocd-applicationset-controller-744798844f-r5t5g": {
+   "ready_s": 2.16,
+   "containers": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  "argocd-dex-server-56f9c8697c-8mwc2": {
+   "ready_s": 3.63,
+   "containers": [
+    "ghcr.io/dexidp/dex:v2.46.0"
+   ],
+   "restarts": 0
+  },
+  "argocd-notifications-controller-84965d4bb9-6z9pk": {
+   "ready_s": 2.16,
+   "containers": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  "argocd-redis-66f6996d69-lmd7l": {
+   "ready_s": 2.16,
+   "containers": [
+    "ecr-public.aws.com/docker/library/redis:8.6.4-alpine"
+   ],
+   "restarts": 0
+  },
+  "argocd-repo-server-5f47b6d84b-hwjcv": {
+   "ready_s": 13.39,
+   "containers": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  "argocd-server-5c4f58b884-hl84q": {
+   "ready_s": 12.04,
+   "containers": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  }
+ }
+}
+,
+{
+ "helm_install_s": 2.09,
+ "all_ready_s": 13.29,
+ "pods": {
+  "argocd-application-controller-0": {
+   "ready_s": 12.23,
+   "containers": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  "argocd-applicationset-controller-744798844f-27vw5": {
+   "ready_s": 2.15,
+   "containers": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  "argocd-dex-server-56f9c8697c-p5gz2": {
+   "ready_s": 3.48,
+   "containers": [
+    "ghcr.io/dexidp/dex:v2.46.0"
+   ],
+   "restarts": 0
+  },
+  "argocd-notifications-controller-84965d4bb9-q454h": {
+   "ready_s": 2.15,
+   "containers": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  "argocd-redis-66f6996d69-r46hg": {
+   "ready_s": 2.15,
+   "containers": [
+    "ecr-public.aws.com/docker/library/redis:8.6.4-alpine"
+   ],
+   "restarts": 0
+  },
+  "argocd-repo-server-5f47b6d84b-svvpj": {
+   "ready_s": 13.24,
+   "containers": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  "argocd-server-5c4f58b884-zqqdp": {
+   "ready_s": 12.23,
+   "containers": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  }
+ }
+}
+]

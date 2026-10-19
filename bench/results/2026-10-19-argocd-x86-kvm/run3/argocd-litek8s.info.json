@@ -1,0 +1,73 @@
+{
+ "server_version": "v1.33.0+litek8s",
+ "k3s_version": "",
+ "crun_version": "crun version 1.14.1",
+ "chart": "[{\"name\":\"argocd\",\"namespace\":\"argocd\",\"revision\":\"1\",\"updated\":\"2026-10-19 10:02:28.918044588 +0000 UTC\",\"status\":\"deployed\",\"chart\":\"argo-cd-10.10.5\",\"app_version\":\"v3.5.5\"}]",
+ "pods": [
+  {
+   "ns": "argocd",
+   "name": "argocd-application-controller-0",
+   "images": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "argocd",
+   "name": "argocd-applicationset-controller-744798844f-mptw6",
+   "images": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "argocd",
+   "name": "argocd-dex-server-56f9c8697c-7cctm",
+   "images": [
+    "ghcr.io/dexidp/dex:v2.46.0"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "argocd",
+   "name": "argocd-notifications-controller-84965d4bb9-ptpl6",
+   "images": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "argocd",
+   "name": "argocd-redis-66f6996d69-rd2f6",
+   "images": [
+    "ecr-public.aws.com/docker/library/redis:8.6.4-alpine"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "argocd",
+   "name": "argocd-repo-server-5f47b6d84b-mvhr2",
+   "images": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "argocd",
+   "name": "argocd-server-5c4f58b884-s9gfk",
+   "images": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "guestbook",
+   "name": "guestbook-ui-d7f474ff7-qlt55",
+   "images": [
+    "gcr.io/google-samples/gb-frontend:v5"
+   ],
+   "restarts": 0
+  }
+ ],
+ "mem_total_kib": 2014840
+}
