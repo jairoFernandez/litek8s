@@ -180,6 +180,26 @@ pub(crate) fn foreground(api: &ApiState, ns: &str, encoded: &str) -> Result<supe
     }
 }
 
+/// Objects left part way through a foreground or orphan deletion (by a
+/// restart): `(namespace, "group|resource|name")` for [`foreground`].
+pub(crate) fn pending_finalization(api: &ApiState) -> Vec<(String, String)> {
+    let mut namespaces = vec![String::new()];
+    namespaces.extend(api.store().keys_of_resource("", "namespaces").into_iter().map(|k| k.name));
+    let mut out = Vec::new();
+    for ns in &namespaces {
+        for (key, obj) in api.store().objects_in_namespace(ns) {
+            let pending = obj
+                .pointer("/metadata/finalizers")
+                .and_then(Value::as_array)
+                .is_some_and(|f| f.iter().any(|x| x == FOREGROUND || x == ORPHAN));
+            if pending && util::is_deleting(&obj) {
+                out.push((ns.clone(), format!("{}|{}|{}", key.group, key.resource, key.name)));
+            }
+        }
+    }
+    out
+}
+
 /// Whether the owner an ownerReference names exists and is not being deleted.
 fn owner_alive(api: &ApiState, ns: &str, r: &Value) -> bool {
     let api_version = r.get("apiVersion").and_then(Value::as_str).unwrap_or_default();

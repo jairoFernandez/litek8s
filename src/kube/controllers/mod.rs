@@ -181,6 +181,9 @@ impl Manager {
                 self.enqueue(Kind::Schedule, &ns, &name);
             }
         }
+        for (ns, encoded) in gc::pending_finalization(&self.api) {
+            self.enqueue(Kind::Foreground, &ns, &encoded);
+        }
         gc::collect_orphans(&self.api);
     }
 
