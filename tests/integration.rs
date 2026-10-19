@@ -56,18 +56,27 @@ async fn apply_get_logs_and_delete_roundtrip() -> Result<()> {
         other => panic!("unexpected response: {other:?}"),
     }
 
-    let logs = request(
-        &harness.socket_path,
-        Request::Logs {
-            name: deployment.clone(),
-            tail: 20,
-        },
-    )
-    .await?;
-    match logs {
-        Response::Logs { content } => assert!(content.contains("ready")),
-        Response::Error { message } if message.contains("failed to fetch Docker logs") => {}
-        other => panic!("unexpected response: {other:?}"),
+    // Running means the container started, not that `echo ready` has run yet:
+    // poll the logs briefly instead of reading them once.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+    loop {
+        let logs = request(
+            &harness.socket_path,
+            Request::Logs {
+                name: deployment.clone(),
+                tail: 20,
+            },
+        )
+        .await?;
+        match logs {
+            Response::Logs { content } if content.contains("ready") => break,
+            Response::Logs { content } if tokio::time::Instant::now() >= deadline => {
+                panic!("logs never contained `ready`: {content:?}")
+            }
+            Response::Logs { .. } => tokio::time::sleep(Duration::from_millis(200)).await,
+            Response::Error { message } if message.contains("failed to fetch Docker logs") => break,
+            other => panic!("unexpected response: {other:?}"),
+        }
     }
 
     let top = request(&harness.socket_path, Request::Top).await?;
