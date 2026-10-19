@@ -38,6 +38,8 @@ tar = "0.4.44"
 terminal_size = "0.4"
 tokenizers = { version = "0.23.1", default-features = false, features = ["onig"], optional = true }
 tokio = { version = "1.44.1", features = ["full"] }
+# openraft logs through tracing; ha/mod.rs prints its warnings and errors.
+tracing = "0.1"
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 webpki-roots = "1"
 x25519-dalek = { version = "2", features = ["static_secrets"] }

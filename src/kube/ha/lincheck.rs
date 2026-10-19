@@ -84,6 +84,12 @@ const NIL: usize = usize::MAX;
 
 /// Check one key's history. `Ok` or the longest linearizable prefix found.
 fn check_single(ops: &[&Op]) -> Result<(), String> {
+    check_single_frontier(ops).map_err(|(e, _)| e)
+}
+
+/// [`check_single`], also returning on failure the operations left out of
+/// the longest partial linearization (where the search got stuck).
+fn check_single_frontier(ops: &[&Op]) -> Result<(), (String, Vec<usize>)> {
     let mut events: Vec<(u64, u8, usize)> = Vec::new();
     for (i, op) in ops.iter().enumerate() {
         events.push((op.call, 0, i));
@@ -114,6 +120,7 @@ fn check_single(ops: &[&Op]) -> Result<(), String> {
     let mut state: State = None;
     let mut entry = nodes[HEAD].next;
     let mut best = 0usize;
+    let mut best_lin: Vec<u64> = Vec::new();
     let lift = |nodes: &mut Vec<Node>, n: usize| {
         let (p, x) = (nodes[n].prev, nodes[n].next);
         nodes[p].next = x;
@@ -143,8 +150,8 @@ fn check_single(ops: &[&Op]) -> Result<(), String> {
     let mut steps: u64 = 0;
     while nodes[HEAD].next != NIL {
         steps += 1;
-        if steps > 50_000_000 {
-            return Err(format!("search too large ({} ops); inconclusive", ops.len()));
+        if steps > 200_000_000 {
+            return Err((format!("{INCONCLUSIVE} ({} ops)", ops.len()), Vec::new()));
         }
         if entry != NIL && nodes[entry].call {
             let i = nodes[entry].op;
@@ -156,7 +163,10 @@ fn check_single(ops: &[&Op]) -> Result<(), String> {
                     state = next;
                     linearized = lin;
                     lift(&mut nodes, entry);
-                    best = best.max(calls.len());
+                    if calls.len() > best {
+                        best = calls.len();
+                        best_lin = linearized.clone();
+                    }
                     entry = nodes[HEAD].next;
                     continue;
                 }
@@ -165,7 +175,8 @@ fn check_single(ops: &[&Op]) -> Result<(), String> {
         } else {
             // A return reached whose call is not linearized: backtrack.
             let Some((n, old)) = calls.pop() else {
-                return Err(format!("not linearizable: at most {best} of {} operations linearize", ops.len()));
+                let left = (0..ops.len()).filter(|i| best_lin.get(i / 64).is_none_or(|w| w & (1 << (i % 64)) == 0)).collect();
+                return Err((format!("not linearizable: at most {best} of {} operations linearize", ops.len()), left));
             };
             let i = nodes[n].op;
             state = old;
@@ -176,6 +187,9 @@ fn check_single(ops: &[&Op]) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// What [`check`] says when the search was too large to finish.
+pub const INCONCLUSIVE: &str = "search too large; inconclusive";
 
 /// Check a whole history, key by key.
 pub fn check(ops: &[Op]) -> Result<(), String> {
@@ -215,11 +229,14 @@ pub fn summarize(ops: &[Op]) -> Summary {
 // ---------------------------------------------------------------------------
 // The workload
 
+/// Prefix of [`http`] errors for requests that never left (connect failed).
+pub const NOT_SENT: &str = "not sent: ";
+
 /// One HTTP/1.1 request on a fresh connection, with a deadline.
 pub async fn http(addr: &str, method: &str, path: &str, body: Option<&Value>, timeout: Duration) -> Result<(u16, Value), String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let run = async {
-        let mut stream = tokio::net::TcpStream::connect(addr).await.map_err(|e| e.to_string())?;
+        let mut stream = tokio::net::TcpStream::connect(addr).await.map_err(|e| format!("{NOT_SENT}{e}"))?;
         let body = body.map(|b| b.to_string()).unwrap_or_default();
         let request = format!(
             "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
@@ -304,6 +321,12 @@ pub async fn run(w: Workload) -> Vec<Op> {
                     Input::Delete => http(server, "DELETE", &format!("{base}/{name}"), None, w.timeout).await,
                 };
                 let ret = start.elapsed().as_nanos() as u64;
+                // Never reached a server, or refused before doing anything:
+                // no effect, nothing learned.
+                if result.as_ref().is_err_and(|e| e.starts_with(NOT_SENT)) || matches!(result, Ok((503, _))) {
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    continue;
+                }
                 let output = match (input, &result) {
                     (Input::Read, Ok((200, body))) => Output::Value(body.pointer("/data/v").and_then(Value::as_str).and_then(|v| v.parse().ok())),
                     (Input::Read, Ok((404, _))) => Output::Value(None),
@@ -396,9 +419,57 @@ pub fn probe_report(samples: &[Sample], gap_ms: f64) -> Value {
     })
 }
 
+/// The shortest prefix (in call order) of one key's history that is not
+/// linearizable, to see where a violation starts.
+pub fn first_violation(ops: &[Op], key: u32) -> Option<Vec<Op>> {
+    let mut ops: Vec<Op> = ops.iter().filter(|o| o.key == key).cloned().collect();
+    ops.sort_by_key(|o| o.call);
+    let fails = |n: usize| check_single(&ops[..n].iter().collect::<Vec<_>>()).is_err();
+    if !fails(ops.len()) {
+        return None;
+    }
+    let (mut lo, mut hi) = (1, ops.len());
+    while lo < hi {
+        let mid = (lo + hi) / 2;
+        if fails(mid) { hi = mid } else { lo = mid + 1 }
+    }
+    Some(ops[..lo].to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `LITEK8S_HISTORY=<file> cargo test --lib analyze_history -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn analyze_history() {
+        let Ok(path) = std::env::var("LITEK8S_HISTORY") else { return };
+        let ops: Vec<Op> = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        let keys: std::collections::BTreeSet<u32> = ops.iter().map(|o| o.key).collect();
+        for key in keys {
+            let mine: Vec<&Op> = ops.iter().filter(|o| o.key == key).collect();
+            if let Err((e, left)) = check_single_frontier(&mine) {
+                let mut left: Vec<&Op> = left.into_iter().map(|i| mine[i]).collect();
+                left.sort_by_key(|o| o.call);
+                eprintln!("key {key}: {e}; first operations left out:");
+                for o in left.iter().take(12) {
+                    let ret = if o.ret == u64::MAX { "inf".to_string() } else { format!("{:.1}", o.ret as f64 / 1e6) };
+                    eprintln!("{:>9.1} {:>9} c{} {:?} -> {:?}", o.call as f64 / 1e6, ret, o.client, o.input, o.output);
+                }
+            }
+            match None::<Vec<Op>> {
+                None => {}
+                Some(prefix) => {
+                    eprintln!("key {key}: the first {} operations do not linearize; the last ones:", prefix.len());
+                    for o in prefix.iter().rev().take(30).rev() {
+                        let ret = if o.ret == u64::MAX { "inf".to_string() } else { format!("{:.1}", o.ret as f64 / 1e6) };
+                        eprintln!("{:>9.1} {:>9} c{} {:?} -> {:?}", o.call as f64 / 1e6, ret, o.client, o.input, o.output);
+                    }
+                }
+            }
+        }
+    }
 
     fn op(key: u32, input: Input, output: Output, call: u64, ret: u64) -> Op {
         Op { client: 0, key, input, output, call, ret }

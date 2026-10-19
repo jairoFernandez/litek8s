@@ -1504,6 +1504,7 @@ dependencies = [
  "tokenizers",
  "tokio",
  "tokio-rustls",
+ "tracing",
  "webpki-roots",
  "x25519-dalek",
 ]

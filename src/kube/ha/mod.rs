@@ -142,6 +142,9 @@ pub struct ServerInfo {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClusterStatus {
+    /// "ok", or the error that stopped Raft on this server.
+    #[serde(default)]
+    pub raft: String,
     pub servers: Vec<ServerInfo>,
     pub term: u64,
     pub last_log_index: Option<u64>,
@@ -193,6 +196,41 @@ pub async fn fetch_bootstrap(data_dir: &Path, server: &str, token: &str) -> Resu
     Ok(())
 }
 
+/// openraft's warnings and errors (or more: `LITEK8S_RAFT_LOG=info|debug`)
+/// on stderr, prefixed `raft:`.
+struct RaftLog(tracing::Level);
+
+struct Fields(String);
+
+impl tracing::field::Visit for Fields {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write;
+        if field.name() == "message" {
+            let _ = write!(self.0, " {value:?}");
+        } else {
+            let _ = write!(self.0, " {}={value:?}", field.name());
+        }
+    }
+}
+
+impl tracing::Subscriber for RaftLog {
+    fn enabled(&self, m: &tracing::Metadata<'_>) -> bool {
+        *m.level() <= self.0 && m.target().starts_with("openraft")
+    }
+    fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+        tracing::span::Id::from_u64(1)
+    }
+    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        let mut fields = Fields(String::new());
+        event.record(&mut fields);
+        eprintln!("raft: {}{}", event.metadata().level(), fields.0);
+    }
+    fn enter(&self, _: &tracing::span::Id) {}
+    fn exit(&self, _: &tracing::span::Id) {}
+}
+
 fn raft_config() -> Result<Config> {
     let config = Config {
         cluster_name: "litek8s".into(),
@@ -219,6 +257,12 @@ impl Cluster {
     /// single-server WAL, if any); a fresh joining server waits to be added
     /// ([`Cluster::join`] once it serves).
     pub async fn start(opts: &Options, store: Arc<Store>, ca_pem: &str, secret: &str) -> Result<Arc<Self>> {
+        let level = match std::env::var("LITEK8S_RAFT_LOG").as_deref() {
+            Ok("debug") => tracing::Level::DEBUG,
+            Ok("info") => tracing::Level::INFO,
+            _ => tracing::Level::WARN,
+        };
+        let _ = tracing::subscriber::set_global_default(RaftLog(level));
         let raft_dir = opts.data_dir.join("raft");
         std::fs::create_dir_all(&raft_dir)?;
         let id_path = raft_dir.join("id");
@@ -287,6 +331,15 @@ impl Cluster {
             loop {
                 let leading = {
                     let m = metrics.borrow_and_update();
+                    if let Err(fatal) = &m.running_state {
+                        // A stopped Raft is a dead member: exit, so the
+                        // service manager restarts it from its disk state.
+                        eprintln!("apiserver: raft stopped: {fatal}");
+                        if std::env::var_os("LITEK8S_HA_NO_EXIT").is_none() {
+                            std::process::exit(70);
+                        }
+                        return;
+                    }
                     m.state == ServerState::Leader && m.current_leader == Some(id)
                 };
                 leader_tx.send_if_modified(|v| std::mem::replace(v, leading) != leading);
@@ -324,6 +377,9 @@ impl Cluster {
             }
         }
         cluster.watch_membership();
+        if !(fresh && opts.cluster_init) {
+            cluster.hold_elections_until_leader_heard();
+        }
         Ok(cluster)
     }
 
@@ -370,6 +426,33 @@ impl Cluster {
                 drop(c);
                 if metrics.changed().await.is_err() {
                     return;
+                }
+            }
+        });
+    }
+
+    /// A server that just (re)started does not call an election until it
+    /// has heard from the leader or a few seconds passed without one: Raft
+    /// without pre-vote would otherwise depose a healthy leader every time a
+    /// follower restarts (its term goes up and the leader steps down when it
+    /// sees it).
+    fn hold_elections_until_leader_heard(self: &Arc<Self>) {
+        self.raft.runtime_config().elect(false);
+        let me = Arc::downgrade(self);
+        tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+            while tokio::time::Instant::now() < deadline {
+                let Some(c) = me.upgrade() else { return };
+                if c.leader_contact.load(Ordering::Relaxed) > 0 {
+                    break;
+                }
+                drop(c);
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            if let Some(c) = me.upgrade() {
+                let removed = !c.raft.metrics().borrow().membership_config.membership().voter_ids().any(|v| v == c.id) && c.raft_dir.join("joined").exists();
+                if !removed {
+                    c.raft.runtime_config().elect(true);
                 }
             }
         });
@@ -572,7 +655,11 @@ impl Cluster {
                 }),
             })
             .collect();
-        ClusterStatus { servers, term: m.current_term, last_log_index: m.last_log_index, applied: m.last_applied.map(|l| l.index) }
+        let raft = match &m.running_state {
+            Ok(()) => "ok".to_string(),
+            Err(e) => e.to_string(),
+        };
+        ClusterStatus { raft, servers, term: m.current_term, last_log_index: m.last_log_index, applied: m.last_applied.map(|l| l.index) }
     }
 
     async fn add_member(&self, req: MemberRequest) -> Result<()> {
@@ -753,7 +840,7 @@ pub async fn serve(state: &Arc<ApiState>, mut req: Request<Incoming>) -> Respons
             };
             let result = cluster.raft.append_entries(rpc).await;
             if result.as_ref().is_ok_and(|r| r.is_success()) {
-                cluster.leader_contact.store(cluster.started.elapsed().as_millis() as u64, Ordering::Relaxed);
+                cluster.leader_contact.store((cluster.started.elapsed().as_millis() as u64).max(1), Ordering::Relaxed);
             }
             json_reply(StatusCode::OK, &result)
         }

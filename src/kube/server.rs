@@ -1232,8 +1232,9 @@ async fn ha_route(state: &Arc<ApiState>, cluster: &super::ha::Cluster, path: &st
     // leader cut off from the others would otherwise answer from a stale
     // state.
     let barrier = || async {
+        // 503: nothing was done (a write was not applied); clients retry.
         cluster.read_barrier().await.map(|_| None).map_err(|e| {
-            ApiError::new(StatusCode::GATEWAY_TIMEOUT, "Timeout", format!("cannot confirm the latest state with the cluster: {e}"))
+            ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailable", format!("cannot confirm the latest state with the cluster: {e}"))
         })
     };
     if write {
@@ -3871,8 +3872,15 @@ impl ApiState {
             Ok(builder.header(hyper::header::HOST, addr).header(FORWARDED_HEADER, &cluster.name).body(super::ha::net::body(req.body.clone()))?)
         };
         let unreachable = |e: anyhow::Error| {
+            // 503 when the request surely never got there; else it may
+            // have been applied (504, as an etcd timeout).
             let not_sent = super::ha::net::not_sent(&e);
-            (ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailable", format!("cannot reach the API server at {addr}: {e:#}")), not_sent)
+            let error = if not_sent {
+                ApiError::new(StatusCode::SERVICE_UNAVAILABLE, "ServiceUnavailable", format!("cannot reach the API server at {addr}: {e:#}"))
+            } else {
+                ApiError::new(StatusCode::GATEWAY_TIMEOUT, "Timeout", format!("no answer from the API server at {addr}: {e:#}"))
+            };
+            (error, not_sent)
         };
         if write {
             let (mut parts, bytes) = cluster.peers.send(addr, Duration::from_secs(60), build).await.map_err(unreachable)?;
