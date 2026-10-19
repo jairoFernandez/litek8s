@@ -12,7 +12,9 @@
 # Knobs (env): IDLE_SECS=300 SETTLE_SECS=60 TTR_RUNS=5 RPC_RUNS=50 COUNT_SECS=60
 #              K3S_VERSION=<tag, default: k3s stable channel> VM_MEM=1024 VM_CPUS=2
 #              KEEP_VMS=1 (leave VMs running) LITEK8S_BIN=<prebuilt linux binary>
-#              LITEK8S_ARCH=amd64 (x86 hosts) NODE_ADDR/NODE_SSH_PORT (rpc on real hosts)
+#              LITEK8S_ARCH=amd64|arm64 (default: the host's; on x86_64 Linux the VMs are
+#              amd64 under KVM, see vm.sh) NODE_ADDR/NODE_SSH_PORT (rpc on real hosts)
+#              LITEK8S_COMMIT=<id> (recorded when the checkout has no .git)
 #              argocd phases: ARGO_VM_MEM=2048 ARGO_VM_CPUS=2 ARGO_RUNS=3 ARGO_CHART_VERSION=10.10.5
 # Real hosts instead of local VMs: see the BENCH_HOST_<name> note in bench/vm.sh
 # (names: lk, lknode, k3s, k3smin).
@@ -34,6 +36,7 @@ IMAGE="nginx:alpine"
 LK_SOCK=/run/litek8s/daemon.sock
 PORT_LK=2291 PORT_K3S=2292 PORT_K3SMIN=2293 PORT_NODE=2294 PORT_KUBE=2295 PORT_KUBECRUN=2296
 PORT_ARGOK3S=2297 PORT_ARGOLK=2298
+GUEST_ARCH="${LITEK8S_ARCH:-$([[ "$(uname -m)" == x86_64 ]] && echo amd64 || echo arm64)}"
 ARGO_VM_MEM="${ARGO_VM_MEM:-2048}"
 ARGO_VM_CPUS="${ARGO_VM_CPUS:-2}"
 ARGO_RUNS="${ARGO_RUNS:-3}"
@@ -169,7 +172,7 @@ install_docker() {
 linux_binary() {
   if [[ -n "${LITEK8S_BIN:-}" ]]; then echo "$LITEK8S_BIN"; return; fi
   log "building linux/arm64 litek8s release binary"
-  "$HERE/build-linux.sh" "${LITEK8S_ARCH:-arm64}"
+  "$HERE/build-linux.sh" "$GUEST_ARCH"
 }
 
 lk_wait_ready() { # vm names...
@@ -500,16 +503,32 @@ EOF"
 #   phase_argocd k3s | litek8s
 
 argo_tools() { # -> dir with helm, kubectl and the chart for the guest arch
-  local arch="${LITEK8S_ARCH:-arm64}" dir="$HERE/.work/argocd"
+  local arch="$GUEST_ARCH" dir="$HERE/.work/argocd" helm=helm
   mkdir -p "$dir/$arch"
   [[ -x "$dir/$arch/helm" ]] || curl -fsSL "https://get.helm.sh/helm-$HELM_VERSION-linux-$arch.tar.gz" | tar xz -C "$dir/$arch" --strip-components 1 "linux-$arch/helm"
   [[ -x "$dir/$arch/kubectl" ]] || { curl -fsSL -o "$dir/$arch/kubectl" "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/$arch/kubectl"; chmod +x "$dir/$arch/kubectl"; }
   if [[ ! -f "$dir/argo-cd-$ARGO_CHART_VERSION.tgz" ]]; then
     # Private helm dirs: other checkouts share the default cache.
+    command -v helm >/dev/null || helm="$dir/$arch/helm"  # a Linux host of the guests' arch
     HELM_CACHE_HOME="$dir/helm/cache" HELM_CONFIG_HOME="$dir/helm/config" HELM_DATA_HOME="$dir/helm/data" \
-      helm pull argo-cd --repo https://argoproj.github.io/argo-helm --version "$ARGO_CHART_VERSION" -d "$dir" >&2
+      "$helm" pull argo-cd --repo https://argoproj.github.io/argo-helm --version "$ARGO_CHART_VERSION" -d "$dir" >&2
   fi
   echo "$dir"
+}
+
+# The machine running the VMs: load average and CPU busy counters (Linux
+# only; on macOS an empty object). Saved around each phase and idle window,
+# so a busy host shows up next to the numbers it may have skewed.
+host_snap() {
+  python3 - <<'PY'
+import json, os, time
+try:
+    cpu = [int(x) for x in open("/proc/stat").readline().split()[1:]]
+    print(json.dumps({"t": time.time(), "loadavg": open("/proc/loadavg").read().split()[:3],
+                      "busy_ticks": sum(cpu) - cpu[3] - cpu[4], "total_ticks": sum(cpu), "ncpu": os.cpu_count()}))
+except OSError:
+    print("{}")
+PY
 }
 
 phase_argocd() {
@@ -519,10 +538,11 @@ phase_argocd() {
   else vm=argolk port="$PORT_ARGOLK" kc=/root/litek8s.kubeconfig; fi
   tag="argocd-$sys"
   local tools; tools="$(argo_tools)"
+  host_snap | save "$tag.host.start.json"
   local bin=""; [[ "$sys" == litek8s ]] && bin="$(linux_binary)"
   log "$tag: preparing VM (${VM_MEM} MiB, ${VM_CPUS} vCPU)"
   vm_prepare "$vm" "$port"
-  local a="${LITEK8S_ARCH:-arm64}"
+  local a="$GUEST_ARCH"
   "$VM" scp "$vm" "$tools/$a/helm" /tmp/helm
   "$VM" scp "$vm" "$tools/$a/kubectl" /tmp/kubectl
   "$VM" scp "$vm" "$tools/argo-cd-$ARGO_CHART_VERSION.tgz" /tmp/argo-cd.tgz
@@ -623,7 +643,9 @@ phase_argocd() {
   sleep "$SETTLE_SECS"
   rroot "$vm" "probe.py mem" | save "$tag.idle-app.mem.json"
   rroot "$vm" "$K argocd.py metrics" | save "$tag.api-idle.before.json"
+  host_snap | save "$tag.host.idle-start.json"
   rroot "$vm" "probe.py cpu $IDLE_SECS" | save "$tag.idle-app.cpu.json"
+  host_snap | save "$tag.host.idle-end.json"
   rroot "$vm" "$K argocd.py metrics" | save "$tag.api-idle.after.json"
   rroot "$vm" "probe.py mem" | save "$tag.idle-app-end.mem.json"
 
@@ -643,6 +665,7 @@ print(json.dumps({
 }, indent=1))
 PY' | save "$tag.info.json"
   rroot "$vm" "dmesg | grep -iE 'out of memory|oom-kill|killed process' || true" | save "$tag.oom.txt"
+  host_snap | save "$tag.host.end.json"
   [[ -n "${KEEP_VMS:-}" ]] || "$VM" down "$vm"
 }
 
@@ -653,8 +676,9 @@ PY' | save "$tag.info.json"
   echo " \"ttr_runs\": $TTR_RUNS, \"rpc_runs\": $RPC_RUNS, \"vm_mem_mib\": $VM_MEM, \"vm_cpus\": $VM_CPUS,"
   echo " \"argo_vm_mem_mib\": $ARGO_VM_MEM, \"argo_vm_cpus\": $ARGO_VM_CPUS, \"argo_runs\": $ARGO_RUNS,"
   echo " \"argo_chart_version\": \"$ARGO_CHART_VERSION\", \"helm\": \"$HELM_VERSION\", \"kubectl\": \"$KUBECTL_VERSION\","
-  echo " \"host\": \"$(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -m)\","
-  echo " \"litek8s_commit\": \"$(git -C "$ROOT" rev-parse --short HEAD)\", \"phases\": \"${PHASES[*]}\"}"
+  echo " \"host\": \"$(sysctl -n machdep.cpu.brand_string 2>/dev/null || sed -n 's/^model name[^:]*: //p' /proc/cpuinfo 2>/dev/null | head -1 || uname -m)\","
+  echo " \"host_cpus\": $(getconf _NPROCESSORS_ONLN), \"guest_arch\": \"$GUEST_ARCH\","
+  echo " \"litek8s_commit\": \"${LITEK8S_COMMIT:-$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null)}\", \"phases\": \"${PHASES[*]}\"}"
 } >"$OUT/env.json"
 
 for p in "${PHASES[@]}"; do

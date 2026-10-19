@@ -97,7 +97,7 @@ def main():
         sys.exit("no argocd phase results")
     env = load(dirs[0], "env.json") or {}
     p(f"Argo CD chart {env.get('argo_chart_version')} (defaults), {env.get('argo_vm_cpus')} vCPU / "
-      f"{env.get('argo_vm_mem_mib')} MiB guests on {env.get('host')}, litek8s `{env.get('litek8s_commit')}`; "
+      f"{env.get('argo_vm_mem_mib')} MiB {env.get('guest_arch', 'arm64')} guests on {env.get('host')}, litek8s `{env.get('litek8s_commit')}`; "
       f"runs: {', '.join(os.path.basename(d.rstrip('/')) for d in dirs)}\n")
 
     # ---------------------------------------------------------------- times
@@ -183,6 +183,28 @@ def main():
             p("| whole guest busy | " + " | ".join(f"{100 * c['busy_cpu_s'] / c['window_s']:.2f}" for c in cpus.values()) + " |")
             for k in ("control-plane", "runtime", "addons", "argocd", "workload", "os/other"):
                 p(f"| {k} | " + " | ".join(f"{c['categories'].get(k, {}).get('pct_one_core', 0):.2f}" for c in cpus.values()) + " |")
+
+    # ---------------------------------------------------------------- host
+    def busy(a, b):
+        if not a or not b or "busy_ticks" not in a:
+            return None
+        return 100.0 * (b["busy_ticks"] - a["busy_ticks"]) / max(1, b["total_ticks"] - a["total_ticks"])
+
+    rows = []
+    for d in dirs:
+        for t, label in present:
+            snaps = {k: load(d, f"{t}.host.{k}.json") for k in ("start", "idle-start", "idle-end", "end")}
+            if not snaps["start"] or "loadavg" not in snaps["start"]:
+                continue
+            phase, idle = busy(snaps["start"], snaps["end"]), busy(snaps["idle-start"], snaps["idle-end"])
+            rows.append(f"| {os.path.basename(d.rstrip('/'))} | {label} | {phase:.1f} % | {idle:.1f} % | "
+                        f"{snaps['start']['loadavg'][0]} → {snaps['end']['loadavg'][0]} |")
+    if rows:
+        p("\n### Host load while each phase ran (all host CPUs, the VM included)\n")
+        p("| run | system | host busy, whole phase | host busy, idle window | load avg (1 min) start → end |")
+        p("|---|---|---|---|---|")
+        for r in rows:
+            p(r)
 
     # ---------------------------------------------------------------- api
     for d in dirs:
