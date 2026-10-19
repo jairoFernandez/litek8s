@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -10,6 +11,7 @@ use bollard::Docker;
 use bollard::container::{
     Config, CreateContainerOptions, InspectContainerOptions, ListContainersOptions, LogOutput,
     LogsOptions, RemoveContainerOptions, StartContainerOptions, Stats, StatsOptions,
+    WaitContainerOptions,
 };
 use bollard::errors::Error as BollardError;
 use bollard::image::CreateImageOptions;
@@ -29,6 +31,48 @@ const LABEL_MANAGED: &str = "litek8s.managed";
 const LABEL_DEPLOYMENT: &str = "litek8s.deployment";
 const LABEL_HASH: &str = "litek8s.spec-hash";
 const LABEL_ORDINAL: &str = "litek8s.ordinal";
+/// Marks the throwaway containers of [`DockerRuntime::probe_in_network_namespace`].
+const LABEL_PROBE: &str = "litek8s.probe";
+/// Image of those containers (`nc`), the one the Kubernetes Docker runtime's
+/// sandboxes use.
+const PROBE_IMAGE: &str = "busybox:1.36";
+
+/// How long a direct connect to a container IP may take before the bridge
+/// counts as unreachable from this host. A local bridge answers, or refuses,
+/// in well under a millisecond; a missing route never answers.
+pub const DIRECT_CONNECT_TIMEOUT: Duration = Duration::from_millis(300);
+
+/// Set once a container IP did not answer at all: Docker runs in a VM whose
+/// bridge this host has no route to (Docker Desktop, `litek8s dev` on macOS).
+/// Linux and OrbStack route container IPs, so it stays false there.
+static CONTAINER_IPS_UNREACHABLE: AtomicBool = AtomicBool::new(false);
+
+/// Whether container IPs proved unreachable from this host (see
+/// [`connect_container_ip`]); callers then use published ports instead.
+pub fn container_ips_unreachable() -> bool {
+    CONTAINER_IPS_UNREACHABLE.load(Ordering::Relaxed)
+}
+
+/// Connect to a container's bridge IP, giving up after
+/// [`DIRECT_CONNECT_TIMEOUT`] (or `timeout`, if shorter). `Ok(None)` means
+/// no answer: container IPs are unreachable from this host, which is
+/// remembered for the process. A refusal is an error.
+pub async fn connect_container_ip(ip: &str, port: u16, timeout: Duration) -> Result<Option<TcpStream>> {
+    if container_ips_unreachable() {
+        return Ok(None);
+    }
+    match tokio::time::timeout(timeout.min(DIRECT_CONNECT_TIMEOUT), TcpStream::connect((ip, port))).await {
+        Ok(Ok(stream)) => Ok(Some(stream)),
+        Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+            Err(error).with_context(|| format!("connection to {ip}:{port} refused"))
+        }
+        // Timeout, no route, host unreachable.
+        _ => {
+            CONTAINER_IPS_UNREACHABLE.store(true, Ordering::Relaxed);
+            Ok(None)
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct DockerRuntime {
@@ -432,11 +476,75 @@ impl DockerRuntime {
             .await?
             .context("container has no IPv4 address to probe")?;
 
-        tokio::time::timeout(timeout, TcpStream::connect((ip_address.as_str(), port)))
+        if connect_container_ip(&ip_address, port, timeout)
             .await
-            .context("tcp readiness probe timed out")?
-            .with_context(|| format!("tcp readiness probe failed for {ip_address}:{port}"))?;
-        Ok(())
+            .with_context(|| format!("tcp readiness probe failed for {ip_address}:{port}"))?
+            .is_some()
+        {
+            return Ok(());
+        }
+        self.probe_in_network_namespace(container_id, port, timeout)
+            .await
+            .with_context(|| format!("tcp readiness probe failed for {container_id}:{port}"))
+    }
+
+    /// TCP probe of `127.0.0.1:port` from inside the container's network
+    /// namespace, for hosts that cannot reach container IPs: a throwaway
+    /// busybox container joins the namespace and runs `nc`.
+    async fn probe_in_network_namespace(
+        &self,
+        container_id: &str,
+        port: u16,
+        timeout: Duration,
+    ) -> Result<()> {
+        self.ensure_image(PROBE_IMAGE).await?;
+        let wait_secs = timeout.as_secs().max(1).to_string();
+        let config = Config {
+            image: Some(PROBE_IMAGE.to_string()),
+            cmd: Some(vec![
+                "nc".to_string(),
+                "-w".to_string(),
+                wait_secs,
+                "127.0.0.1".to_string(),
+                port.to_string(),
+                "-e".to_string(),
+                "true".to_string(),
+            ]),
+            labels: Some(HashMap::from([(LABEL_PROBE.to_string(), "true".to_string())])),
+            host_config: Some(HostConfig {
+                network_mode: Some(format!("container:{container_id}")),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let probe_id = self
+            .docker
+            .create_container(None::<CreateContainerOptions<String>>, config)
+            .await
+            .context("failed to create the probe container")?
+            .id;
+        let outcome = async {
+            self.docker
+                .start_container(&probe_id, None::<StartContainerOptions<String>>)
+                .await
+                .context("failed to start the probe container")?;
+            let mut wait = self
+                .docker
+                .wait_container(&probe_id, None::<WaitContainerOptions<String>>);
+            match tokio::time::timeout(timeout + Duration::from_secs(5), wait.next()).await {
+                Ok(Some(Ok(exit))) if exit.status_code == 0 => Ok(()),
+                Ok(Some(Ok(exit))) => bail!("port {port} not open (nc exited {})", exit.status_code),
+                Ok(Some(Err(BollardError::DockerContainerWaitError { code, .. }))) => {
+                    bail!("port {port} not open (nc exited {code})")
+                }
+                Ok(Some(Err(error))) => Err(error).context("failed to wait for the probe container"),
+                Ok(None) => bail!("probe container wait ended without a status"),
+                Err(_) => bail!("tcp readiness probe timed out"),
+            }
+        }
+        .await;
+        let _ = self.remove_container(&probe_id).await;
+        outcome
     }
 
     async fn ensure_image(&self, image: &str) -> Result<()> {

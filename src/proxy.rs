@@ -1,4 +1,5 @@
 use std::process::Stdio;
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -6,6 +7,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 
 use crate::protocol::ProxyTarget;
+use crate::runtime::docker::connect_container_ip;
 
 pub async fn bind_listener(listen_addr: &str) -> Result<TcpListener> {
     TcpListener::bind(listen_addr)
@@ -47,13 +49,32 @@ fn upstream_endpoint(target: &ProxyTarget) -> Result<(String, u16)> {
     Ok(("127.0.0.1".to_string(), host_port))
 }
 
+/// Connect to a local target. A replica that also publishes a host port is
+/// reached there when this host cannot reach container IPs (Docker in a VM:
+/// Docker Desktop, `litek8s dev` on macOS).
+async fn connect_local_upstream(target: &ProxyTarget) -> Result<TcpStream> {
+    let (host, port) = match (target.container_ip.as_deref(), target.host_port) {
+        (Some(ip), Some(host_port)) => {
+            let port = target.container_port;
+            if let Some(stream) = connect_container_ip(ip, port, Duration::from_secs(5))
+                .await
+                .with_context(|| format!("failed to connect to local upstream {ip}:{port}"))?
+            {
+                return Ok(stream);
+            }
+            ("127.0.0.1".to_string(), host_port)
+        }
+        _ => upstream_endpoint(target)?,
+    };
+    TcpStream::connect((host.as_str(), port))
+        .await
+        .with_context(|| format!("failed to connect to local upstream {host}:{port}"))
+}
+
 pub async fn forward_connection(mut inbound: TcpStream, target: ProxyTarget) -> Result<()> {
     match target.transport.as_str() {
         "local" => {
-            let (host, port) = upstream_endpoint(&target)?;
-            let mut upstream = TcpStream::connect((host.as_str(), port))
-                .await
-                .with_context(|| format!("failed to connect to local upstream {host}:{port}"))?;
+            let mut upstream = connect_local_upstream(&target).await?;
             tokio::io::copy_bidirectional(&mut inbound, &mut upstream)
                 .await
                 .context("failed to proxy TCP stream")?;
@@ -172,7 +193,7 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
-    use super::handle_connection;
+    use super::{connect_local_upstream, handle_connection};
     use crate::protocol::ProxyTarget;
 
     #[tokio::test]
@@ -224,6 +245,30 @@ mod tests {
 
         proxy_task.await??;
         upstream_task.await??;
+        Ok(())
+    }
+
+    /// Docker in a VM: the container IP never answers, so a replica that
+    /// publishes a host port is reached there.
+    #[tokio::test]
+    async fn unreachable_container_ip_falls_back_to_the_host_port() -> Result<()> {
+        let published = TcpListener::bind("127.0.0.1:0").await?;
+        let target = ProxyTarget {
+            deployment_name: "echo".to_string(),
+            node_name: "local".to_string(),
+            transport: "local".to_string(),
+            ssh_target: None,
+            ssh_identity_file: None,
+            container_port: 5678,
+            host_port: Some(published.local_addr()?.port()),
+            // TEST-NET-1: routed nowhere.
+            container_ip: Some("192.0.2.1".to_string()),
+            protocol: "TCP".to_string(),
+        };
+        let accepted = tokio::spawn(async move { published.accept().await.map(|_| ()) });
+        connect_local_upstream(&target).await?;
+        accepted.await??;
+        assert!(crate::runtime::docker::container_ips_unreachable());
         Ok(())
     }
 }

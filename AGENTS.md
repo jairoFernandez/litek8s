@@ -15,7 +15,7 @@ cargo run -- serve             # start daemon
 cargo run -- apply -f examples/nginx.yaml  # deploy a workload
 ```
 
-Integration tests require a running Docker daemon. Tests use `tokio::test(flavor = "multi_thread")` and serialize via an async mutex to avoid Docker socket conflicts. There are no unit tests — all testing is integration-based.
+Integration tests require a Docker API (Docker, OrbStack, or litek8s's own: docs/develop-without-docker.md). Tests use `tokio::test(flavor = "multi_thread")` and serialize via an async mutex to avoid Docker socket conflicts. There are no unit tests — all testing is integration-based.
 
 To run a single test:
 ```bash

@@ -17,7 +17,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use super::attach;
 use super::engine::{Engine, LogOpts};
 use super::error::{ApiError, ApiResult};
-use super::filters::Filters;
+use super::filters::{self, Filters};
 use super::images;
 use super::model::parse_time;
 use crate::kube::agent::crun::image::{self as cimage, PullOptions};
@@ -623,11 +623,8 @@ fn list_containers(engine: &Engine, q: &HashMap<String, String>) -> Value {
             continue;
         }
         let labels = r.labels();
-        let ok = f.any("id", |v| r.id.starts_with(v))
-            && f.any("name", |v| {
-                let v = v.trim_start_matches('/');
-                r.name == v || r.name.contains(v) || (v.starts_with('^') && r.name.starts_with(v.trim_start_matches('^').trim_end_matches('$')))
-            })
+        let ok = f.any("id", |v| filters::id_matches(v, &r.id))
+            && f.any("name", |v| filters::name_matches(v, &r.name))
             && f.labels_match("label", &labels)
             && f.any("status", |v| r.state.status == v)
             && f.any("exited", |v| r.state.status == "exited" && v.parse::<i64>().ok() == Some(r.state.exit_code))
@@ -1467,8 +1464,8 @@ fn list_networks(engine: &Engine, q: &HashMap<String, String>) -> Value {
     let f = Filters::parse(q.get("filters").map(String::as_str));
     let mut out = Vec::new();
     for n in engine.networks() {
-        let ok = f.any("name", |v| n.name == v || n.name.contains(v))
-            && f.any("id", |v| n.id.starts_with(v))
+        let ok = f.any("name", |v| filters::name_matches(v, &n.name))
+            && f.any("id", |v| filters::id_matches(v, &n.id))
             && f.any("driver", |v| n.driver == v)
             && f.labels_match("label", &n.labels)
             && f.any("type", |v| (v == "builtin") == n.predefined)

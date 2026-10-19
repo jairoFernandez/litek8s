@@ -408,6 +408,55 @@ fn devices(privileged: bool) -> Value {
     ])
 }
 
+/// Device nodes crun creates in every container itself.
+const DEFAULT_DEVICE_NODES: &[&str] = &["null", "zero", "full", "random", "urandom", "tty", "console", "ptmx"];
+
+/// The character and block devices under `dev` as OCI `linux.devices`
+/// entries (path, type, numbers, mode, owner), skipping the nodes crun makes
+/// anyway and the directories every container mounts its own of.
+pub fn host_devices(dev: &std::path::Path) -> Vec<Value> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let mut out = Vec::new();
+    let mut dirs = vec![dev.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+            let rel = path.strip_prefix(dev).unwrap_or(&path).to_string_lossy().to_string();
+            let ft = meta.file_type();
+            if ft.is_dir() {
+                if !matches!(rel.as_str(), "pts" | "shm" | "mqueue") {
+                    dirs.push(path);
+                }
+                continue;
+            }
+            let kind = if ft.is_char_device() {
+                "c"
+            } else if ft.is_block_device() {
+                "b"
+            } else {
+                continue;
+            };
+            if DEFAULT_DEVICE_NODES.contains(&rel.as_str()) {
+                continue;
+            }
+            let rdev = meta.rdev();
+            out.push(json!({
+                "path": format!("/dev/{rel}"),
+                "type": kind,
+                "major": (rdev >> 8) & 0xfff | (rdev >> 32) & !0xfff,
+                "minor": rdev & 0xff | (rdev >> 12) & !0xff,
+                "fileMode": meta.mode() & 0o7777,
+                "uid": meta.uid(),
+                "gid": meta.gid(),
+            }));
+        }
+    }
+    out.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+    out
+}
+
 fn seccomp() -> Value {
     json!({
         "defaultAction": "SCMP_ACT_ALLOW",
@@ -555,7 +604,11 @@ pub(crate) fn config(p: &BundleParams) -> Result<Value> {
         "cgroupsPath": p.cgroups_path,
         "resources": resources(spec),
     });
-    if !spec.privileged {
+    if spec.privileged {
+        // Every device node of the host, as Docker's --privileged gives
+        // (kubelets in k3d/kind nodes read /dev/kmsg, loop devices, fuse, tun).
+        linux["devices"] = json!(host_devices(std::path::Path::new("/dev")));
+    } else {
         linux["maskedPaths"] = json!(MASKED_PATHS);
         linux["readonlyPaths"] = json!(READONLY_PATHS);
         if !spec.seccomp_unconfined {
@@ -698,6 +751,7 @@ mod tests {
         assert_eq!(c["process"]["capabilities"]["bounding"].as_array().unwrap().len(), ALL_CAPS.len());
         assert!(c["linux"].get("seccomp").is_none() && c["linux"].get("maskedPaths").is_none());
         assert_eq!(c["linux"]["resources"]["devices"], json!([{"allow": true, "access": "rwm"}]));
+        assert!(c["linux"]["devices"].is_array());
         assert!(c.get("hostname").is_none());
         assert!(!c["linux"]["namespaces"].as_array().unwrap().iter().any(|n| n["type"] == "network" || n["type"] == "uts"));
     }

@@ -4,6 +4,10 @@
 #
 #   compat/baseline-k3d.sh [run.sh args...]     e.g. --tiers L0,L1
 #
+# k3d runs on any Docker API: Docker, OrbStack, or litek8s's own
+# (DOCKER_HOST=unix://$HOME/.litek8s/docker.sock, docs/develop-without-docker.md).
+# Without any, compat/baseline-k3s-vm.sh runs k3s in a qemu VM instead.
+#
 # Uses its own kubeconfig file, so the user's current context is untouched.
 # traefik and metrics-server are disabled because L4 installs both via Helm.
 set -euo pipefail

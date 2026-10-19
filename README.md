@@ -13,6 +13,8 @@ The same cluster serves the Docker Engine API on `~/.litek8s/docker.sock`:
 `docker`, `docker compose`, Dev Containers and Testcontainers work against it
 (`export DOCKER_HOST=unix://$HOME/.litek8s/docker.sock`), next to (not
 instead of) an installed Docker or OrbStack. See [docs/docker.md](docs/docker.md).
+litek8s itself is developed on it, with no Docker or OrbStack needed:
+[docs/develop-without-docker.md](docs/develop-without-docker.md).
 
 `litek8s ui` is a terminal UI for all of it, what OrbStack's window is to
 OrbStack: the cluster's state and resources, containers by compose project

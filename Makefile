@@ -12,7 +12,7 @@ build: ## debug build
 release: ## release build
 	cargo build --release
 
-test: ## integration tests (needs Docker)
+test: ## integration tests (needs a Docker API; docs/develop-without-docker.md)
 	cargo test
 
 test-one: ## run one test: make test-one T=name

@@ -2,11 +2,28 @@
 # Build the static (musl) linux/arm64 litek8s that runs as PID 1 of the macOS
 # dev VM, in a rust:alpine container. Prints the binary's path.
 # Usage: dev/vm/build-guest-binary.sh
+#
+# Any Docker API does: OrbStack, Docker Desktop, or litek8s's own
+# (DOCKER_HOST=unix://$HOME/.litek8s/docker.sock, docs/develop-without-docker.md).
+#   LITEK8S_BUILD_VOLUME=<name>  keep cargo's target dir and registry in that
+#       Docker volume instead of target/ in the bind-mounted checkout; only the
+#       binary is copied out (to the same path).
+#   CARGO_BUILD_JOBS=<n>         passed to cargo in the container.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TARGET_DIR="target/guest-musl-arm64"
-docker run --rm --platform linux/arm64 \
-  -e "CARGO_TARGET_DIR=/work/${TARGET_DIR}" -e CARGO_HOME=/work/target/guest-cargo-home -e CARGO_PROFILE_RELEASE_STRIP=symbols \
-  -v "${ROOT}:/work" -w /work \
-  rust:1.90-alpine sh -c 'apk add -q musl-dev gcc g++ make perl >/dev/null && cargo build --release --no-default-features && chown -R '"$(id -u):$(id -g)"' /work/target/guest-musl-arm64 /work/target/guest-cargo-home' >&2
+SETUP='apk add -q musl-dev gcc g++ make perl >/dev/null'
+args=(--rm --platform linux/arm64 -e CARGO_PROFILE_RELEASE_STRIP=symbols -v "${ROOT}:/work" -w /work)
+[[ -n "${CARGO_BUILD_JOBS:-}" ]] && args+=(-e "CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}")
+if [[ -n "${LITEK8S_BUILD_VOLUME:-}" ]]; then
+  mkdir -p "${ROOT}/${TARGET_DIR}/release"
+  docker run "${args[@]}" -v "${LITEK8S_BUILD_VOLUME}:/cache" \
+    -e CARGO_TARGET_DIR=/cache/target -e CARGO_HOME=/cache/cargo-home \
+    rust:1.90-alpine sh -c "${SETUP} && cargo build --release --no-default-features && cp /cache/target/release/litek8s /work/${TARGET_DIR}/release/litek8s.tmp && chown $(id -u):$(id -g) /work/${TARGET_DIR}/release/litek8s.tmp" >&2
+  mv "${ROOT}/${TARGET_DIR}/release/litek8s.tmp" "${ROOT}/${TARGET_DIR}/release/litek8s"
+else
+  docker run "${args[@]}" \
+    -e "CARGO_TARGET_DIR=/work/${TARGET_DIR}" -e CARGO_HOME=/work/target/guest-cargo-home \
+    rust:1.90-alpine sh -c "${SETUP} && cargo build --release --no-default-features && chown -R $(id -u):$(id -g) /work/${TARGET_DIR} /work/target/guest-cargo-home" >&2
+fi
 echo "${ROOT}/${TARGET_DIR}/release/litek8s"
