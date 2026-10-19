@@ -1213,6 +1213,7 @@ pub async fn run() -> Result<()> {
                 wireguard_port: (!no_wireguard).then_some(wireguard_port),
                 listener: None,
                 extra_listen: None,
+                disk_root: None,
                 node_port_offset: 0,
                 docker,
             })

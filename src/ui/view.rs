@@ -85,7 +85,7 @@ fn hints(f: &mut Frame, app: &App, area: Rect) {
             &[("esc", "back"), ("f", "follow"), ("w", "wrap"), ("↑↓", "scroll"), ("g/G", "top/end")]
         } else {
             match app.tab {
-                Tab::Home => &[("u", "up"), ("d", "down"), ("R", "delete"), ("2", "clusters"), ("8", "settings")],
+                Tab::Home => &[("u", "up"), ("d", "down"), ("R", "delete"), ("b", "breakdown"), ("2", "clusters")],
                 Tab::Clusters => &[("n", "new"), ("u", "up"), ("d", "down"), ("D", "delete"), ("enter", "use")],
                 Tab::Containers => &[("l", "logs"), ("s", "shell"), ("u", "start"), ("x", "stop"), ("r", "restart"), ("d", "remove"), ("/", "filter")],
                 Tab::Images | Tab::Volumes => &[("d", "remove"), ("/", "filter"), ("6", "free space")],
@@ -181,12 +181,34 @@ fn home(f: &mut Frame, app: &App, area: Rect) {
     let inner_w = area.width.saturating_sub(2).max(1) as usize;
     let wrapped: usize = app.dev_output.iter().map(|l| l.chars().count().max(1).div_ceil(inner_w)).sum();
     let output_rows = if app.dev_output.is_empty() { 1 } else { (wrapped as u16 + 2).clamp(3, 12) };
-    // The memory breakdown when there is room for it next to the output.
-    let mem_rows = h.memory.as_ref().map(|m| m.lines.len() as u16 + 2).filter(|r| 7 + r + 5 + output_rows <= area.height).unwrap_or(0);
-    let [upper, mem, ctx, out, _] =
-        Layout::vertical([Constraint::Length(7), Constraint::Length(mem_rows), Constraint::Length(5), Constraint::Length(output_rows), Constraint::Fill(1)]).areas(area);
-    if let (Some(m), true) = (&h.memory, mem_rows > 0) {
-        memory_box(f, m, mem);
+    // The breakdowns (memory, CPU, disk), from the one `b` picked, as many
+    // as there is room for next to the output.
+    // The one `b` picked first (before the contexts if both do not fit),
+    // then the others while there is room.
+    let all = explain_boxes(app);
+    let n = all.len();
+    let mut avail = area.height.saturating_sub(7 + output_rows);
+    let mut boxes: Vec<(&Explain, u16)> = Vec::new();
+    let start = all.iter().position(|b| b.kind >= app.explain).unwrap_or(0);
+    for i in 0..n {
+        let b = &all[(start + i) % n];
+        let want = b.lines.len() as u16 + 2;
+        let room = if i == 0 { avail } else { avail.saturating_sub(5) };
+        if room < 4 || (i > 0 && want > room) {
+            break;
+        }
+        let r = want.min(room);
+        avail -= r;
+        boxes.push((b, r));
+    }
+    let ctx_rows = if avail >= 5 { 5 } else { 0 };
+    let rows: u16 = boxes.iter().map(|(_, r)| r).sum();
+    let [upper, explained, ctx, out, _] =
+        Layout::vertical([Constraint::Length(7), Constraint::Length(rows), Constraint::Length(ctx_rows), Constraint::Length(output_rows), Constraint::Fill(1)]).areas(area);
+    let mut y = explained.y;
+    for (b, r) in &boxes {
+        explain_box(f, b, Rect { y, height: *r, ..explained }, boxes.len() < n);
+        y += r;
     }
     let [left, right] = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(upper);
 
@@ -245,7 +267,7 @@ fn home(f: &mut Frame, app: &App, area: Rect) {
     let cpus = limits.and_then(|s| s.cpus).map(|c| c as u64).or(app.vm_cpus).map(|c| c as f64);
     let mem_total = limits.and_then(|s| s.memory_mib).map(|m| m << 20).or(app.vm_memory);
     let cpu_text = match (h.cpu_pct, cpus) {
-        (Some(p), Some(c)) => format!("{p:.0}% of {c:.0} CPUs"),
+        (Some(p), Some(c)) => format!("{p:.0}% of 1 CPU = {:.0}% of {c:.0}", p / c),
         (Some(p), None) => format!("{p:.0}%"),
         (None, Some(c)) => format!("{c:.0} CPUs"),
         (None, None) => "-".into(),
@@ -323,14 +345,53 @@ fn home(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-/// Where the memory figure goes: litek8s, pods, the kernel, cache.
-fn memory_box(f: &mut Frame, m: &crate::dev::memory::Breakdown, area: Rect) {
-    let lines: Vec<Line> = m
+/// One of Home's breakdowns: a figure and what it is made of.
+struct Explain {
+    /// 0 memory, 1 CPU, 2 disk (the order `b` cycles).
+    kind: usize,
+    title: String,
+    /// (label, value, note, indented)
+    lines: Vec<(String, String, String, bool)>,
+}
+
+fn explain_boxes(app: &App) -> Vec<Explain> {
+    let mut out = Vec::new();
+    if let Some(m) = &app.home.memory {
+        out.push(Explain {
+            kind: 0,
+            title: format!("Memory · {} ({})", bytes(m.total), m.what),
+            lines: m.lines.iter().map(|l| (l.label.clone(), bytes(l.bytes), l.note.to_string(), false)).collect(),
+        });
+    }
+    if let Some(c) = &app.cpu {
+        let share = if c.cpus > 0.0 { format!(" = {:.0}% of {:.0} CPUs", c.total_pct / c.cpus, c.cpus) } else { String::new() };
+        out.push(Explain {
+            kind: 1,
+            title: format!("CPU · {:.1}% of one CPU{share} ({})", c.total_pct, c.what),
+            lines: c.lines.iter().map(|l| (l.label.clone(), format!("{:.1}%", l.pct), l.note.clone(), l.indent)).collect(),
+        });
+    }
+    if let Some(d) = &app.disk_breakdown() {
+        out.push(Explain {
+            kind: 2,
+            title: format!("Disk · {} ({})", bytes(d.total), d.what),
+            lines: d.lines.iter().filter(|l| l.bytes > 0 || !l.indent).map(|l| (l.label.clone(), bytes(l.bytes), l.note.clone(), l.indent)).collect(),
+        });
+    }
+    out
+}
+
+/// A breakdown box; `more`: some did not fit (`b` shows the next).
+fn explain_box(f: &mut Frame, b: &Explain, area: Rect, more: bool) {
+    let lines: Vec<Line> = b
         .lines
         .iter()
-        .map(|l| Line::from(vec![Span::raw(format!("{:<22}", l.label)), Span::styled(format!("{:>9}", bytes(l.bytes)), BOLD), Span::styled(format!("   {}", l.note), DIM)]))
+        .map(|(label, value, note, indent)| {
+            let label = if *indent { format!("  {label}") } else { label.clone() };
+            Line::from(vec![Span::raw(format!("{:<22}", trunc(&label, 22))), Span::styled(format!("{value:>9}"), if *indent { Style::new() } else { BOLD }), Span::styled(format!("   {note}"), DIM)])
+        })
         .collect();
-    let title = format!("Memory · {} ({})", bytes(m.total), m.what);
+    let title = if more { format!("{}  b: next", b.title) } else { b.title.clone() };
     f.render_widget(Paragraph::new(lines).block(block(&trunc(&title, area.width.saturating_sub(4) as usize))), area);
 }
 
@@ -867,7 +928,7 @@ fn input(f: &mut Frame, prompt: &str, value: &str, error: Option<&str>, kind: &I
 /// The help screen: per view, its keys (each line fits 76 columns).
 pub const HELP: &[(&str, &[(&str, &str)])] = &[
     ("Everywhere", &[("1-8 tab", "views"), ("↑↓ jk", "move"), ("/", "filter"), ("ctrl-r", "refresh"), ("q", "quit")]),
-    ("Home", &[("u", "start"), ("d", "stop (asks)"), ("R", "delete it and its data (asks)")]),
+    ("Home", &[("u", "start"), ("d", "stop (asks)"), ("R", "delete (asks)"), ("b", "memory/CPU/disk")]),
     ("Clusters", &[("n", "new"), ("u", "start"), ("d", "stop"), ("D", "delete (asks)"), ("enter", "show / use it")]),
     ("Containers", &[("l", "logs"), ("s", "shell"), ("u x r", "start stop restart"), ("d", "remove"), ("space", "fold")]),
     ("Images", &[("d", "remove (asks)")]),
@@ -893,8 +954,8 @@ fn help(f: &mut Frame, app: &App, area: Rect) {
     }
     let ctx = if app.kube_context.is_empty() { "litek8s-dev" } else { &app.kube_context };
     lines.push(Line::raw(""));
-    lines.push(Line::styled("Memory (Home): litek8s = its own processes; pods & containers; kernel", DIM));
-    lines.push(Line::styled("+ base = the VM's fixed cost; cache = reclaimable; freed = macOS reclaims it", DIM));
+    lines.push(Line::styled("Home's breakdowns (b): litek8s = its own processes; pods & containers;", DIM));
+    lines.push(Line::styled("kernel/VM = fixed cost; cache, reclaimable = can go (6 Free space for disk)", DIM));
     lines.push(Line::from(vec![Span::styled("More Kubernetes: ", DIM), Span::styled(format!("k9s --context {ctx}"), BOLD), Span::styled(" (https://k9scli.io)", DIM)]));
     lines.push(Line::styled("Destructive actions always ask. Mouse: litek8s ui --mouse. Docs: docs/ui.md", DIM));
     lines.push(Line::styled("Any key closes this.", DIM));

@@ -20,6 +20,8 @@ pub mod broker;
 pub mod cells;
 pub mod cluster;
 pub mod config;
+pub mod cpu;
+pub mod disk;
 pub mod env;
 pub mod memory;
 pub mod hostinfo;
@@ -684,27 +686,58 @@ async fn stop(state: &DevState) -> Result<()> {
     Ok(())
 }
 
-/// The shown cluster's memory explained (Home): the VM's footprint on
-/// macOS, the sandbox's cgroup on Linux, split by owner. `None` without a
-/// running VM or sandbox.
-pub async fn memory_breakdown(cluster: &str) -> Option<memory::Breakdown> {
-    let home = dev_home().ok()?;
-    let e = env::running(&home)?;
+/// The shown cluster's memory explained and a CPU sample (Home): the VM's
+/// footprint and CPU time on macOS, the sandbox's cgroup on Linux, split
+/// by owner. `None`s without a running VM or sandbox.
+pub async fn resources(cluster: &str) -> (Option<memory::Breakdown>, Option<cpu::Sample>) {
+    let Some((home, e)) = dev_home().ok().and_then(|h| Some((h.clone(), env::running(&h)?))) else { return (None, None) };
     let split = |stats: &[env::CellStats]| {
         let shown = stats.iter().find(|s| s.name == cluster).and_then(|s| s.usage).unwrap_or_default();
         let others: Vec<memory::Usage> = stats.iter().filter(|s| s.name != cluster).filter_map(|s| s.usage).collect();
         (shown, others)
     };
+    let cpu_split = |stats: &[env::CellStats]| {
+        let shown = stats.iter().find(|s| s.name == cluster).and_then(|s| s.cpu.clone()).unwrap_or_default();
+        let others: Vec<&env::CellStats> = stats.iter().filter(|s| s.name != cluster).collect();
+        let others_usec = others.iter().filter_map(|s| s.cpu.as_ref()).map(|c| c.litek8s_usec + c.containers_usec()).sum();
+        (shown, others_usec, others.len())
+    };
+    let host_cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) as f64;
     if e.mode == "vm" {
-        let r = env::request(&home, &env::Request::Stats, Duration::from_secs(3)).await.ok()?;
+        let Ok(r) = env::request(&home, &env::Request::Stats, Duration::from_secs(3)).await else { return (None, None) };
         let (shown, others) = split(&r.stats);
-        return Some(memory::vm_breakdown(env_memory(&e)?, e.memory_mib? << 20, &r.meminfo?, cluster, shown, &others));
+        let mem = (|| Some(memory::vm_breakdown(env_memory(&e)?, e.memory_mib? << 20, r.meminfo.as_ref()?, cluster, shown, &others)))();
+        let (cshown, others_usec, n) = cpu_split(&r.stats);
+        let cpu = env_cpu_time_ns(&e).map(|ns| cpu::Sample {
+            at: Some(std::time::Instant::now()),
+            total_usec: ns / 1000,
+            shown: cshown,
+            others_usec,
+            others: n,
+            guest_busy_usec: r.proc_stat.map(|p| p.busy_usec),
+            cpus: e.cpus.map(|c| c as f64).unwrap_or(host_cpus),
+            kind: cpu::Kind::Vm,
+        });
+        return (mem, cpu);
     }
-    let base = e.cgroup?;
-    let (used, cache) = memory::cgroup(&base)?;
+    let Some(base) = e.cgroup.clone() else { return (None, None) };
     let stats = env::cell_stats(&base.join("sandbox"));
-    let (shown, others) = split(&stats);
-    Some(memory::sandbox_breakdown(used, cache, cluster, shown, &others))
+    let mem = memory::cgroup(&base).map(|(used, cache)| {
+        let (shown, others) = split(&stats);
+        memory::sandbox_breakdown(used, cache, cluster, shown, &others)
+    });
+    let (cshown, others_usec, n) = cpu_split(&stats);
+    let cpu = cpu::usage_usec(&base).map(|total| cpu::Sample {
+        at: Some(std::time::Instant::now()),
+        total_usec: total,
+        shown: cshown,
+        others_usec,
+        others: n,
+        guest_busy_usec: None,
+        cpus: e.cpus.map(|c| c as f64).unwrap_or(host_cpus),
+        kind: cpu::Kind::Sandbox,
+    });
+    (mem, cpu)
 }
 
 /// Memory and CPU time of each running cluster, from the VM or sandbox.
@@ -1193,6 +1226,7 @@ async fn inner_apiserver(o: InnerOptions) -> Result<()> {
         wireguard_port: o.wireguard_port,
         listener,
         extra_listen: o.listen_also,
+        disk_root: Some(o.data_dir.clone()),
         node_port_offset: o.node_port_offset,
         docker,
     })

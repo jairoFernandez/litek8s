@@ -98,6 +98,12 @@ async fn reports_where_its_nodes_memory_goes() -> Result<()> {
     if cfg!(target_os = "linux") {
         assert!(mem["meminfo"]["total"].as_u64().is_some_and(|t| t > 0), "{mem}");
     }
+    let (code, cpu) = get(&addr, "/litek8s/v1/cpu").await?;
+    assert_eq!(code, 200);
+    assert!(cpu["litek8s_usec"].is_u64() && cpu["cgroups"].is_array(), "{cpu}");
+    // An in-memory server keeps nothing on disk.
+    let (code, _) = get(&addr, "/litek8s/v1/disk").await?;
+    assert_eq!(code, 404);
     Ok(())
 }
 

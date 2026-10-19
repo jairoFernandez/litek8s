@@ -210,7 +210,7 @@ mod init {
         }
         let text = String::from_utf8_lossy(&line).to_string();
         if text.trim() == "stats" {
-            let stats = super::super::env::GuestStats { cells: super::super::env::cell_stats(std::path::Path::new("/sys/fs/cgroup")), meminfo: super::super::memory::meminfo() };
+            let stats = super::super::env::GuestStats { cells: super::super::env::cell_stats(std::path::Path::new("/sys/fs/cgroup")), meminfo: super::super::memory::meminfo(), proc_stat: super::super::cpu::proc_stat() };
             let _ = (&conn).write_all(&serde_json::to_vec(&stats).unwrap_or_default());
             return;
         }

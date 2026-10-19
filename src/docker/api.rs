@@ -512,8 +512,26 @@ fn info(engine: &Engine) -> Value {
 }
 
 fn system_df(engine: &Engine) -> Value {
-    let imgs: Vec<Value> = images::all(&engine.images).iter().map(|i| images::summary(&engine.images, i, -1)).collect();
-    let layers: u64 = imgs.iter().filter_map(|i| i["Size"].as_u64()).sum();
+    let all = images::all(&engine.images);
+    // As Docker counts them: LayersSize is the store's unique bytes, an
+    // image's SharedSize what it shares with other images.
+    let mut users: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for i in &all {
+        let mine: std::collections::BTreeSet<&str> = i.entry.layers.iter().map(String::as_str).collect();
+        for l in mine {
+            *users.entry(l).or_default() += 1;
+        }
+    }
+    let layers: u64 = users.keys().map(|l| engine.images.layer_size(l)).sum();
+    let imgs: Vec<Value> = all
+        .iter()
+        .map(|i| {
+            let mut v = images::summary(&engine.images, i, -1);
+            let mine: std::collections::BTreeSet<&str> = i.entry.layers.iter().map(String::as_str).collect();
+            v["SharedSize"] = json!(mine.iter().filter(|l| users.get(*l).is_some_and(|n| *n > 1)).map(|l| engine.images.layer_size(l)).sum::<u64>());
+            v
+        })
+        .collect();
     let ctrs: Vec<Value> = engine
         .list()
         .iter()

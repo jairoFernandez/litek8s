@@ -261,6 +261,12 @@ pub struct HomeSample {
     pub running: Option<crate::dev::DevState>,
     /// The memory figure explained, when it can be.
     pub memory: Option<crate::dev::memory::Breakdown>,
+    /// CPU counters (the App turns two into percentages: it knows the
+    /// pods' and containers' names).
+    pub cpu_sample: Option<crate::dev::cpu::Sample>,
+    /// The node's disk by category, litek8s's own files, and (macOS) the
+    /// VM disk image's allocated bytes.
+    pub disk_node: Option<(crate::dev::disk::NodeDisk, u64, Option<u64>)>,
     pub contexts: Contexts,
 }
 
@@ -386,6 +392,11 @@ pub struct App {
     /// A kubeconfig context the Kubernetes view shows instead (read-only).
     pub context_override: Option<String>,
     pub clusters: ClustersSample,
+    /// The CPU figure explained (from the last two samples).
+    pub cpu: Option<crate::dev::cpu::Breakdown>,
+    cpu_prev: Option<crate::dev::cpu::Sample>,
+    /// Which breakdown Home shows first: 0 memory, 1 CPU, 2 disk (`b`).
+    pub explain: usize,
     pub dev_busy: Option<DevOp>,
     pub dev_output: VecDeque<String>,
 
@@ -438,6 +449,9 @@ impl App {
             cluster: crate::dev::cluster::DEFAULT.into(),
             context_override: None,
             clusters: ClustersSample::default(),
+            cpu: None,
+            cpu_prev: None,
+            explain: 0,
             dev_busy: None,
             dev_output: VecDeque::new(),
             config: DevConfig::default(),
@@ -762,6 +776,18 @@ impl App {
                 if let Some(op) = self.dev_busy.as_ref().filter(|op| op.cluster() == self.cluster) {
                     sample.status = if op.starts() { DevStatus::Starting } else { DevStatus::Stopping };
                 }
+                if let Some(now) = sample.cpu_sample.take() {
+                    if let Some(prev) = &self.cpu_prev {
+                        let name = |id: &str| self.cgroup_name(id);
+                        if let Some(b) = crate::dev::cpu::breakdown(prev, &now, &self.cluster, &name) {
+                            self.cpu = Some(b);
+                        }
+                    }
+                    self.cpu_prev = Some(now);
+                } else if sample.status != DevStatus::Up {
+                    self.cpu = None;
+                    self.cpu_prev = None;
+                }
                 self.home = sample;
             }
             Msg::Clusters(sample) => {
@@ -819,6 +845,44 @@ impl App {
             Msg::Config(Err(e)) => self.config_error = Some(e),
         }
         self.clamp();
+    }
+
+    /// The disk figure explained: the node's categories, with what the
+    /// Free space view can reclaim.
+    pub fn disk_breakdown(&self) -> Option<crate::dev::disk::Breakdown> {
+        let (n, own, image) = self.home.disk_node.as_ref()?;
+        let r = crate::dev::disk::Reclaimable {
+            images: self.reclaimable(Reclaim::DanglingImages).0 + self.reclaimable(Reclaim::UnusedImages).0 + self.reclaimable(Reclaim::BuildCache).0,
+            containers: self.reclaimable(Reclaim::StoppedContainers).0,
+            volumes: self.reclaimable(Reclaim::UnusedVolumes).0,
+        };
+        Some(match (self.home.status, image) {
+            (DevStatus::Remote, _) => crate::dev::disk::node_breakdown(n, &r),
+            (_, Some(img)) => crate::dev::disk::vm_breakdown(*own, *img, n, &r, &self.cluster),
+            (_, None) => crate::dev::disk::host_breakdown(*own, n, &r),
+        })
+    }
+
+    /// A pod's or container's name for its cgroup (`pod<uid>`,
+    /// `docker/<id>`, `build/<id>`).
+    pub fn cgroup_name(&self, id: &str) -> String {
+        if let Some(uid) = id.strip_prefix("pod") {
+            let uid = uid.replace('_', "-");
+            return match self.pods.iter().find(|p| p.uid == uid) {
+                Some(p) => format!("pod {}/{}", p.namespace, p.name),
+                None => format!("pod {}", &uid[..uid.len().min(8)]),
+            };
+        }
+        if let Some(cid) = id.strip_prefix("docker/") {
+            return match self.containers.iter().find(|c| c.id.starts_with(cid) || cid.starts_with(&c.id)) {
+                Some(c) => format!("container {}", c.name),
+                None => format!("container {}", &cid[..cid.len().min(12)]),
+            };
+        }
+        match id.strip_prefix("build/") {
+            Some(b) => format!("build {}", &b[..b.len().min(12)]),
+            None => id.to_string(),
+        }
     }
 
     fn relink(&mut self) {
@@ -985,6 +1049,7 @@ impl App {
         let code = key.code;
         match self.tab {
             Tab::Home => match code {
+                KeyCode::Char('b') => self.explain = (self.explain + 1) % 3,
                 KeyCode::Char('u') if self.dev_busy.is_none() => {
                     let op = DevOp::Up { cluster: self.cluster.clone(), switch: true };
                     self.busy(op.clone());

@@ -54,11 +54,13 @@ Home:
 └──────────────────────────────────────────────────────────────────────────────┘
  Switch docker/kubectl to litek8s in Settings (8). Help: ?
 
- u up  d down  R delete  2 clusters  8 settings                          ? help
+ u up  d down  R delete  b breakdown  2 clusters                         ? help
 ```
 
-Under it, Home explains its memory figure: who uses what the Resources box
-counts. On the Mac (a fresh VM, `dev` and a second cluster idle):
+Under it, Home explains its figures: what the Resources box's memory, CPU
+and disk are made of, one box at a time on 80x24 (`b` shows the next; a
+tall terminal shows all three). Memory, on the Mac (a fresh VM, `dev` and a
+second cluster idle):
 
 ```
 ┌ Memory · 388 MB (what macOS charges the VM) ─────────────────────────────────┐
@@ -89,6 +91,81 @@ VM's control channel; a remote litek8s (`--context`) answers
 pods and containers, cache) and its meminfo, which Home shows instead. It
 is sampled with the rest of Home: every 2 s while Home is on screen, not
 otherwise.
+
+CPU, between the last two samples (2 s), in % of one CPU, on the Mac with
+a busy-looping pod:
+
+```
+┌ CPU · 100.4% of one CPU = 25% of 4 CPUs (the VM process)  b: next ───────────┐
+│litek8s (dev)              0.0%   API server, controllers, node agent         │
+│pods & containers        100.0%                                               │
+│  pod default/burn       100.0%                                               │
+│other clusters (1)         0.0%   litek8s and pods of the rest                │
+│guest kernel & other       0.3%   interrupts, network, the VM's init          │
+│VM overhead                0.1%   virtual devices, vCPU exits (macOS side)    │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+| line | what it is | from |
+|---|---|---|
+| litek8s (cluster) | the shown cluster's own processes on all its nodes | its cells' `cpu.stat` less its pods' |
+| pods & containers, and the top 3 | every pod, Docker container and build of the cluster, the busiest by name | the `pod*`, `docker/*`, `build/*` cgroups (`usage_usec`) |
+| other clusters | the rest of the clusters together | their cells |
+| guest kernel & other (macOS) | busy time the guest does not account to a cluster: interrupts, the network stack, the VM's init | the guest's `/proc/stat` less the clusters |
+| VM overhead (macOS) | what the VM process ran beyond the guest's busy time: virtual devices, vCPU exits | the VM process's CPU time (macOS) less the guest's `/proc/stat` |
+| sandbox (Linux) | the supervisor, pasta and the cell manager | the sandbox's cgroup less the clusters' |
+
+The title's figure is the VM process's CPU time as macOS counts it, or the
+sandbox's cgroup; the Resources box says the same as `100% of 1 CPU = 25%
+of 4`.
+
+Disk, on the Mac after a container wrote 20 MB and a volume 50 MB and both
+were removed (the walk is at most a minute old):
+
+```
+┌ Disk · 306 MB (litek8s and its VM disk)  b: next ────────────────────────────┐
+│litek8s itself           143 MB   binary, VM kernel and initramfs             │
+│cluster dev             78.0 MB                                               │
+│  images                77.2 MB   layers shared by pods, Docker, builds       │
+│  container layers       250 kB   what containers wrote                       │
+│  volumes               81.9 kB   Docker volumes, emptyDirs, PVs              │
+│  logs                   8.2 kB   pods and containers, 10 MiB each            │
+│  objects                172 kB   Kubernetes objects, keys                    │
+│  other                  254 kB   metadata, IP allocations                    │
+│rest of the VM disk      2.3 MB   other clusters, filesystem                  │
+│deleted in the VM       83.2 MB   kept by disk.img (it never shrinks)         │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+| line | what it is |
+|---|---|
+| litek8s itself | the `litek8s` binary; on macOS also the VM's kernel and initramfs and the signed copy of the binary the VM runs from |
+| images | the unpacked layers of every image and of the build cache: one content-addressed store per node, shared by pods, Docker and builds, each layer once |
+| container layers | what pod containers and Docker containers wrote (their overlay upper directories) |
+| volumes | Docker volumes (named and anonymous), pods' emptyDirs, local PVs, ConfigMap and Secret files |
+| logs | pod and container logs (10 MiB and one rotated file each) |
+| builds | builds in progress and `RUN --mount=type=cache` directories |
+| objects | Kubernetes objects (the write-ahead log, compacted) and the cluster's keys |
+| other nodes | a multi-node cluster's workers (each with its own image store) |
+| other | metadata, IP allocations, staging |
+| rest of the VM disk (macOS) | the other clusters and the filesystem's own blocks |
+| deleted in the VM (macOS) | blocks the guest freed that `disk.img` still holds: it is sparse but never shrinks (no TRIM); deleting the last cluster removes it |
+
+Where images, container layers and volumes have something to reclaim, the
+note says how much and points at the Free space view (6), which frees it:
+those amounts come from the Docker API's `/system/df` (unused images and
+build cache, stopped containers, unused volumes). The categories come from
+`GET /litek8s/v1/disk` on the cluster's API server: one walk of the node's
+data directory that counts allocated blocks and hard links once, classifies
+each file by where it is (so the parts add up to the whole), and runs at
+most once a minute, in the background (Home asks every 30 s while it is on
+screen). `/system/df`'s `LayersSize` now counts each layer once and images
+report their `SharedSize`, as Docker does.
+
+Against a remote litek8s (`--context`), the three boxes show its API server's
+node: `GET /litek8s/v1/memory`, `/litek8s/v1/cpu` (cumulative counters, two
+samples make the percentages) and `/litek8s/v1/disk`, and its machine's
+`/proc/stat` for the rest of its CPU.
 
 After `u` on a stopped cluster, the output of `litek8s dev up` shows under
 it (here on Linux, over SSH):
@@ -389,6 +466,12 @@ on screen, and waits on sockets otherwise:
   (their files, one memory request to the VM or sandbox, a node list from
   each running cluster) and not at all otherwise: a cluster nobody looks
   at is not polled.
+- **Home's breakdowns** come with its samples: memory and CPU counters
+  every 2 s while Home is on screen (on the Mac one request over the VM's
+  control channel), the disk categories every 30 s from a walk the API
+  server repeats at most once a minute; nothing while Home is hidden.
+  Measured on omarchy, Home with the CPU box over a busy pod: 0.08 % CPU,
+  1.8 wake-ups/s, 18 MiB RSS.
 - **Home** samples the shown cluster's state, CPU and memory every 2 s while Home
   or Free space is on screen, every 10 s on Settings (for its restart
   note), every 60 s otherwise (to notice the API port moving); the data
@@ -465,7 +548,7 @@ crossterm are about 200 KiB.
 | where | keys |
 |---|---|
 | everywhere | `1`-`8`/`tab`/`shift-tab` views, `↑↓`/`jk`/`PgUp`/`PgDn`/`g`/`G` move, `/` filter the list (`esc` clears), `ctrl-r` refresh, `?` help, `q` or `ctrl-c` quit |
-| Home | `u` up, `d` down (asks), `R` delete the cluster (asks) |
+| Home | `u` up, `d` down (asks), `R` delete the cluster (asks), `b` the next breakdown (memory, CPU, disk) |
 | Clusters | `n` new (`tab` between name and nodes), `u` up, `d` down (asks), `D`/`del` delete (asks), `enter` show it (a local cluster: every view, then asks about `kubectl`/`docker`; another context: the Kubernetes view) |
 | Containers | `l`/`enter` logs, `s` shell, `u` start, `x` stop (asks), `r` restart (asks), `d`/`del` remove (asks), `space` fold a project |
 | Images, Volumes | `d`/`del` remove (asks) |

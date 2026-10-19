@@ -515,7 +515,7 @@ impl VmHandle {
         tokio::time::timeout(Duration::from_secs(3), stream.read_to_end(&mut buf)).await??;
         // A guest from before the meminfo answers with the list alone.
         if let Ok(cells) = serde_json::from_slice::<Vec<CellStats>>(&buf) {
-            return Ok(super::env::GuestStats { cells, meminfo: None });
+            return Ok(super::env::GuestStats { cells, meminfo: None, proc_stat: None });
         }
         Ok(serde_json::from_slice(&buf)?)
     }
@@ -683,7 +683,7 @@ impl Shared {
             }
             Request::Stats => {
                 return match self.vm.stats().await {
-                    Ok(s) => Response { stats: s.cells, meminfo: s.meminfo, running: self.names(), ..Default::default() },
+                    Ok(s) => Response { stats: s.cells, meminfo: s.meminfo, proc_stat: s.proc_stat, running: self.names(), ..Default::default() },
                     Err(e) => Response::error(format!("{e:#}")),
                 };
             }

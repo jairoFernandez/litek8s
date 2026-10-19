@@ -103,6 +103,9 @@ pub struct ApiServerConfig {
     pub extra_listen: Option<SocketAddr>,
     /// NodePorts are allocated from 30000 + this offset on (wrapping).
     pub node_port_offset: u16,
+    /// The directory whose disk use `GET /litek8s/v1/disk` explains
+    /// (default: `data_dir`).
+    pub disk_root: Option<PathBuf>,
     /// Serve the Docker API with the local node's crun runtime.
     pub docker: Option<crate::docker::Settings>,
 }
@@ -138,6 +141,8 @@ pub struct ApiState {
     /// Where NodePort allocation starts in 30000-32767 (several local dev
     /// clusters share the host's ports: each starts somewhere else).
     pub(crate) node_port_offset: u16,
+    /// What `GET /litek8s/v1/disk` walks.
+    pub(crate) disk_root: Option<PathBuf>,
     pub(crate) lifecycle: super::controllers::NodeLifecycle,
     pub(crate) metrics: Metrics,
     /// Where pods on other nodes reach this server over the pod overlay
@@ -186,6 +191,7 @@ impl ApiState {
             join_lock: std::sync::Mutex::default(),
             network: join::ClusterNetwork::default(),
             node_port_offset: 0,
+            disk_root: None,
             lifecycle: super::controllers::NodeLifecycle::default(),
             metrics: Metrics::default(),
             overlay_endpoint: std::sync::OnceLock::new(),
@@ -369,6 +375,7 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
     }
     state.network = config.network.clone();
     state.node_port_offset = config.node_port_offset;
+    state.disk_root = config.disk_root.clone().or_else(|| config.data_dir.clone());
     state.lifecycle = config.lifecycle.clone();
     let state = Arc::new(state);
     let token = state.join_token();
@@ -875,6 +882,17 @@ async fn handle(state: Arc<ApiState>, mut req: Request<Incoming>) -> Response<Bo
     if path == IMAGES_PATH && parts.method == Method::POST {
         return load_images(&state, body).await;
     }
+    if path == DISK_PATH && parts.method == Method::GET {
+        let Some(root) = state.disk_root.clone() else {
+            return ApiError::new(StatusCode::NOT_FOUND, "NotFound", "this API server keeps no data on disk").into_response();
+        };
+        let node = crate::dev::disk::cached(root, super::agent::default_node_name()).await;
+        return json_response(StatusCode::OK, &serde_json::to_value(node).unwrap_or_default());
+    }
+    if path == CPU_PATH && parts.method == Method::GET {
+        let node = tokio::task::spawn_blocking(|| crate::dev::cpu::this_node(&super::agent::default_node_name())).await.unwrap_or_default();
+        return json_response(StatusCode::OK, &serde_json::to_value(node).unwrap_or_default());
+    }
     if path == MEMORY_PATH && parts.method == Method::GET {
         let node = tokio::task::spawn_blocking(|| crate::dev::memory::this_node(&super::agent::default_node_name())).await.unwrap_or_default();
         return json_response(StatusCode::OK, &serde_json::to_value(node).unwrap_or_default());
@@ -953,6 +971,12 @@ pub const IMAGES_PATH: &str = "/litek8s/v1/images";
 /// Where this server's node's memory goes (litek8s, pods, cache) and the
 /// machine's meminfo: what `litek8s ui` explains its memory figure with.
 pub const MEMORY_PATH: &str = "/litek8s/v1/memory";
+/// CPU time of this server's node by owner (litek8s, each pod and
+/// container), cumulative, and the machine's /proc/stat.
+pub const CPU_PATH: &str = "/litek8s/v1/cpu";
+/// Disk use of this server's node by category (images, layers, volumes,
+/// logs, objects, ...), from a walk at most once a minute.
+pub const DISK_PATH: &str = "/litek8s/v1/disk";
 
 /// Stream an uploaded image archive to disk (it can be far larger than an
 /// API request body) and import it.

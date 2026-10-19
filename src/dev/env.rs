@@ -72,6 +72,9 @@ pub struct Response {
     /// The VM's `/proc/meminfo` (macOS).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meminfo: Option<super::memory::MemInfo>,
+    /// The VM's `/proc/stat` (macOS).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proc_stat: Option<super::cpu::ProcStat>,
     /// Clusters still running after the request.
     #[serde(default)]
     pub running: Vec<String>,
@@ -93,6 +96,9 @@ pub struct CellStats {
     /// By owner: litek8s, pods and containers, cache (all its nodes).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<super::memory::Usage>,
+    /// CPU time by owner (all its nodes), cumulative.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<super::cpu::Split>,
 }
 
 /// What the VM's init answers to `stats` over vsock.
@@ -101,6 +107,8 @@ pub struct GuestStats {
     pub cells: Vec<CellStats>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub meminfo: Option<super::memory::MemInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proc_stat: Option<super::cpu::ProcStat>,
 }
 
 /// Requests from the environment's owner to the cell manager inside it.
@@ -157,7 +165,7 @@ pub fn cell_stats(cgroup: &Path) -> Vec<CellStats> {
                 .ok()
                 .and_then(|s| s.lines().find_map(|l| l.strip_prefix("usage_usec ")?.trim().parse().ok()))
                 .unwrap_or(0);
-            CellStats { name: e.file_name().to_string_lossy().into(), memory_bytes, cpu_usec, usage: super::memory::cluster(&dir) }
+            CellStats { name: e.file_name().to_string_lossy().into(), memory_bytes, cpu_usec, usage: super::memory::cluster(&dir), cpu: super::cpu::cluster(&dir) }
         })
         .collect();
     out.sort_by(|a, b| a.name.cmp(&b.name));

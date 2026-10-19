@@ -114,7 +114,7 @@ fn home_shows_state_resources_and_contexts() {
     assert!(s.contains("● up"), "{s}");
     assert!(s.contains("macOS VM"), "{s}");
     assert!(s.contains("up 2h 1m"), "{s}");
-    assert!(s.contains("12% of 4 CPUs"), "{s}");
+    assert!(s.contains("12% of 1 CPU = 3% of 4"), "{s}");
     assert!(s.contains("1.2 GB / 4.3 GB"), "{s}");
     assert!(s.contains("150 GB free"), "{s}");
     assert!(s.contains("✓ docker context"), "{s}");
@@ -572,5 +572,43 @@ fn home_explains_the_memory_figure() {
     assert!(s.contains("✓ docker context"), "the contexts still fit:\n{s}");
     app.key(key('?'));
     let s = render(&app, 80, 24);
-    assert!(s.contains("fixed cost") && s.contains("Any key closes"), "{s}");
+    assert!(s.contains("fixed cost") && s.contains("Any key closes") && s.contains("memory/CPU/disk"), "{s}");
+}
+
+#[test]
+fn home_explains_cpu_and_disk_with_b() {
+    use crate::dev::cpu::{Kind, Sample, Split};
+    let mut app = sample_app();
+    let mut pods = app.pods.clone();
+    pods[0].uid = "0f1e-22".into();
+    app.apply(Msg::Pods(pods));
+    let t0 = std::time::Instant::now();
+    let split = |l: u64, p: u64| Split { litek8s_usec: l, cgroups: vec![("pod0f1e_22".into(), p)] };
+    let sample = |at, total, l, p, busy| Sample { at: Some(at), total_usec: total, shown: split(l, p), guest_busy_usec: Some(busy), cpus: 4.0, kind: Kind::Vm, ..Default::default() };
+    for (at, total, l, p, busy) in [(t0, 0, 0, 0, 0), (t0 + std::time::Duration::from_secs(2), 600_000, 100_000, 400_000, 560_000)] {
+        let mut home = app.home.clone();
+        home.cpu_sample = Some(sample(at, total, l, p, busy));
+        home.disk_node = Some((
+            crate::dev::disk::NodeDisk { images: 300_000_000, container_layers: 2_000_000, volumes: 50_000_000, logs: 1_000_000, objects: 3_000_000, other: 1_000_000, fs_used: 500_000_000, ..Default::default() },
+            90_000_000,
+            Some(900_000_000),
+        ));
+        app.apply(Msg::Home(Box::new(home)));
+    }
+    let c = app.cpu.as_ref().unwrap();
+    assert!((c.total_pct - 30.0).abs() < 1e-6, "{c:?}");
+    // `b`: CPU first, then disk.
+    app.key(key('b'));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("CPU · 30.0% of one CPU = 8% of 4 CPUs (the VM process)"), "{s}");
+    assert!(s.contains("pod default/web-7d9") && s.contains("20.0%") && s.contains("VM overhead"), "{s}");
+    app.key(key('b'));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("Disk · 990 MB (litek8s and its VM disk)"), "{s}");
+    assert!(s.contains("litek8s itself") && s.contains("images") && s.contains("deleted in the VM"), "{s}");
+    // Unused images show as reclaimable, pointing at Free space.
+    assert!(s.contains("reclaimable (6 Free space)"), "{s}");
+    // A tall terminal shows all three.
+    let s = render(&app, 100, 60);
+    assert!(s.contains("Memory ·") || s.contains("CPU ·") && s.contains("Disk ·"), "{s}");
 }
