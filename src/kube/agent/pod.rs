@@ -53,6 +53,9 @@ struct Container {
     init: bool,
     /// An init container with `restartPolicy: Always` (a native sidecar).
     sidecar: bool,
+    /// Added through `pods/ephemeralcontainers`: runs once, never restarts,
+    /// and is not part of the pod's phase or readiness.
+    ephemeral: bool,
     id: Option<String>,
     previous_id: Option<String>,
     attempts: u32,
@@ -77,6 +80,7 @@ impl Container {
             spec: spec.clone(),
             init,
             sidecar,
+            ephemeral: false,
             id: None,
             previous_id: None,
             attempts: 0,
@@ -174,7 +178,13 @@ pub(crate) async fn run<R: PodRuntime>(
         ns: s(&pod, "/metadata/namespace").to_string(),
         name: s(&pod, "/metadata/name").to_string(),
         init: containers("/spec/initContainers", true),
-        main: containers("/spec/containers", false),
+        main: containers("/spec/containers", false)
+            .into_iter()
+            .chain(containers("/spec/ephemeralContainers", false).into_iter().map(|mut c| {
+                c.ephemeral = true;
+                c
+            }))
+            .collect(),
         initialized: false,
         uid,
         tx,
@@ -214,8 +224,9 @@ pub(crate) async fn run<R: PodRuntime>(
         return;
     }
     let mut link = agent.subscribe_link();
+    let deleting = |pod: &Value| pod.pointer("/metadata/deletionTimestamp").is_some_and(|v| !v.is_null());
     loop {
-        if w.pod.pointer("/metadata/deletionTimestamp").is_some_and(|v| !v.is_null()) {
+        if deleting(&w.pod) {
             break;
         }
         w.step().await;
@@ -248,6 +259,12 @@ pub(crate) async fn run<R: PodRuntime>(
         }
     }
     w.teardown().await;
+    if deleting(&w.pod) {
+        // Graceful deletion: the object goes once its containers are gone.
+        if let Some(link) = agent.link() {
+            link.send(Message::PodTerminated { namespace: w.ns.clone(), name: w.name.clone(), uid: w.uid.clone() }).await;
+        }
+    }
 }
 
 async fn sleep_until(at: Option<Instant>) {
@@ -294,6 +311,7 @@ impl<R: PodRuntime> Worker<R> {
             (LABEL_POD_UID.to_string(), self.uid.clone()),
             (LABEL_POD_NAME.to_string(), self.name.clone()),
             (LABEL_POD_NAMESPACE.to_string(), self.ns.clone()),
+            (super::runtime::LABEL_NODE.to_string(), self.agent.config().node_name.clone()),
         ])
     }
 
@@ -386,10 +404,45 @@ impl<R: PodRuntime> Worker<R> {
                 }
             }
         }
+        for ec in pod.pointer("/spec/ephemeralContainers").and_then(Value::as_array).into_iter().flatten() {
+            let name = s(ec, "/name");
+            if !self.main.iter().any(|c| c.name == name) {
+                let mut c = Container::new(ec, false);
+                c.ephemeral = true;
+                self.main.push(c);
+            }
+        }
+        let metadata_changed = ["/metadata/labels", "/metadata/annotations"].iter().any(|p| self.pod.pointer(p) != pod.pointer(p));
         self.pod = pod;
+        // downwardAPI volumes show labels and annotations: refresh them.
+        if metadata_changed && self.volumes.is_some() && self.pod.pointer("/spec/volumes").is_some_and(|v| v.to_string().contains("\"fieldRef\"")) {
+            if let Ok(v) = self.agent.prepare_volumes(&self.pod, &self.dir, &self.node).await {
+                self.volumes = Some(v);
+            }
+        }
     }
 
     async fn step(&mut self) {
+        // spec.activeDeadlineSeconds: the pod fails once it has been active
+        // that long, and its containers are stopped.
+        if self.failed.is_none() && !self.succeeded() {
+            if let Some(deadline) = self.pod.pointer("/spec/activeDeadlineSeconds").and_then(Value::as_i64) {
+                let started = chrono::DateTime::parse_from_rfc3339(&self.start_time).map(|t| t.with_timezone(&chrono::Utc)).unwrap_or_else(|_| chrono::Utc::now());
+                let left = deadline - (chrono::Utc::now() - started).num_seconds();
+                if left <= 0 {
+                    self.failed = Some(("DeadlineExceeded".into(), format!("Pod was active on the node longer than the specified deadline")));
+                    let rt = self.agent.runtime().clone();
+                    for c in self.main.iter().chain(self.init.iter()).filter(|c| c.running()) {
+                        if let Some(id) = c.id.clone() {
+                            let rt = rt.clone();
+                            tokio::spawn(async move { rt.stop(&id, Duration::from_secs(2)).await });
+                        }
+                    }
+                } else {
+                    self.wake_in(Duration::from_secs(left as u64));
+                }
+            }
+        }
         if self.failed.is_some() || self.succeeded() {
             // Finished: free the sandbox (and its address); exited
             // containers stay for `kubectl logs`.
@@ -465,12 +518,19 @@ impl<R: PodRuntime> Worker<R> {
             let c = &self.main[i];
             let wants_start = match &c.state {
                 State::Running { .. } => false,
-                State::Waiting { .. } => true,
+                State::Waiting { .. } => !c.ephemeral || c.attempts == 0,
+                State::Terminated { .. } if c.ephemeral => false,
                 State::Terminated { exit_code, .. } => policy == "Always" || (policy == "OnFailure" && *exit_code != 0),
             };
             if wants_start {
+                let first = c.attempts == 0 && !c.ephemeral;
                 if c.due() {
-                    self.start(false, i).await;
+                    // Like the kubelet, containers first start in order: one
+                    // still pulling its image holds back the ones after it.
+                    let pulling = |c: &Container| matches!(&c.state, State::Waiting { reason, .. } if reason == "ContainerCreating");
+                    if !self.start(false, i).await && first && pulling(&self.main[i]) {
+                        break;
+                    }
                 } else {
                     self.wake_until(false, i);
                 }
@@ -497,6 +557,88 @@ impl<R: PodRuntime> Worker<R> {
         }
     }
 
+    /// A fresh, world-writable file for this attempt's termination message.
+    fn termination_file(&self, c: &Container) -> Option<PathBuf> {
+        let dir = self.dir.join("termination");
+        std::fs::create_dir_all(&dir).ok()?;
+        let path = dir.join(format!("{}-{}", c.name, c.attempts));
+        std::fs::write(&path, b"").ok()?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777));
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666));
+        }
+        Some(path)
+    }
+
+    /// The message of a container that just exited: its termination message
+    /// file, or with `FallbackToLogsOnError` the end of its log on failure.
+    async fn termination_message(&self, c: &Container, id: &str, exit_code: i64) -> Option<String> {
+        let path = self.dir.join("termination").join(format!("{}-{}", c.name, c.attempts.saturating_sub(1)));
+        let bytes = std::fs::read(&path).unwrap_or_default();
+        let text = String::from_utf8_lossy(&bytes[..bytes.len().min(4096)]).to_string();
+        if !text.is_empty() {
+            return Some(text);
+        }
+        if exit_code == 0 || s(&c.spec, "/terminationMessagePolicy") != "FallbackToLogsOnError" {
+            return None;
+        }
+        use futures_util::StreamExt;
+        let mut logs = self.agent.runtime().logs(id, super::runtime::LogOptions { follow: false, tail_lines: Some(80), timestamps: false, since_seconds: None });
+        let mut out = Vec::new();
+        while let Some(Ok((_, chunk))) = logs.next().await {
+            out.extend_from_slice(&chunk);
+        }
+        let start = out.len().saturating_sub(2048);
+        Some(String::from_utf8_lossy(&out[start..]).to_string()).filter(|m| !m.is_empty())
+    }
+
+    /// Kubelet-style `/etc/hosts` and `/etc/resolv.conf` for the pod's
+    /// containers (mounted by [`Self::container_spec`]). Docker's own would
+    /// show its embedded DNS server (127.0.0.11) and miss the managed header.
+    fn write_pod_files(&self, spec: &SandboxSpec, ip: Option<&str>, gateway: &str) {
+        let _ = std::fs::create_dir_all(&self.dir);
+        let mut hosts = String::from("# Kubernetes-managed hosts file.\n127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n");
+        hosts.push_str("fe00::0\tip6-localnet\nfe00::0\tip6-mcastprefix\nfe00::1\tip6-allnodes\nfe00::2\tip6-allrouters\n");
+        if let Some(ip) = ip {
+            match &spec.fqdn {
+                None => hosts.push_str(&format!("{ip}\t{}\n", spec.hostname)),
+                Some(fqdn) => hosts.push_str(&format!("{ip}\t{fqdn}\t{}\n", spec.hostname)),
+            }
+        }
+        let mut aliases = String::new();
+        for entry in &spec.extra_hosts {
+            if let Some((name, addr)) = entry.rsplit_once(':') {
+                let addr = if addr == "host-gateway" { gateway } else { addr };
+                let line = format!("{addr}\t{name}\n");
+                if self.pod.pointer("/spec/hostAliases").and_then(Value::as_array).into_iter().flatten().any(|a| s(a, "/ip") == addr) {
+                    aliases.push_str(&line);
+                } else {
+                    hosts.push_str(&line);
+                }
+            }
+        }
+        if !aliases.is_empty() {
+            hosts.push_str("\n# Entries added by HostAliases.\n");
+            hosts.push_str(&aliases);
+        }
+        let _ = std::fs::write(self.dir.join("etc-hosts"), hosts);
+        if !spec.dns_servers.is_empty() || !spec.dns_search.is_empty() {
+            let mut r = String::new();
+            for ns in &spec.dns_servers {
+                r.push_str(&format!("nameserver {ns}\n"));
+            }
+            if !spec.dns_search.is_empty() {
+                r.push_str(&format!("search {}\n", spec.dns_search.join(" ")));
+            }
+            if !spec.dns_options.is_empty() {
+                r.push_str(&format!("options {}\n", spec.dns_options.join(" ")));
+            }
+            let _ = std::fs::write(self.dir.join("resolv.conf"), r);
+        }
+    }
+
     fn succeeded(&self) -> bool {
         self.phase() == "Succeeded"
     }
@@ -512,8 +654,11 @@ impl<R: PodRuntime> Worker<R> {
             .collect();
         for alias in self.pod.pointer("/spec/hostAliases").and_then(Value::as_array).into_iter().flatten() {
             let ip = s(alias, "/ip");
-            for host in alias.get("hostnames").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str) {
-                extra_hosts.push(format!("{host}:{ip}"));
+            let hosts: Vec<&str> = alias.get("hostnames").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).collect();
+            // One line per alias, `ip<TAB>name<TAB>name` as the kubelet writes
+            // it; both runtimes write `ip<TAB>name` for each entry.
+            if !hosts.is_empty() && !ip.is_empty() {
+                extra_hosts.push(format!("{}:{ip}", hosts.join("\t")));
             }
         }
         let hostname = match s(&self.pod, "/spec/hostname") {
@@ -522,11 +667,13 @@ impl<R: PodRuntime> Worker<R> {
         };
         let hostname: String = hostname.chars().take(63).collect();
         let mut host_ports = Vec::new();
+        let mut host_port_ips = Vec::new();
         for c in self.pod.pointer("/spec/containers").and_then(Value::as_array).into_iter().flatten() {
             for p in c.get("ports").and_then(Value::as_array).into_iter().flatten() {
                 if let Some(hp) = p.get("hostPort").and_then(Value::as_u64).filter(|h| *h > 0) {
                     let cp = p.get("containerPort").and_then(Value::as_u64).unwrap_or(hp);
                     host_ports.push((cp as u16, hp as u16, p.get("protocol").and_then(Value::as_str).unwrap_or("TCP").to_string()));
+                    host_port_ips.push(s(p, "/hostIP").to_string());
                 }
             }
         }
@@ -554,6 +701,16 @@ impl<R: PodRuntime> Worker<R> {
         for sr in self.pod.pointer("/spec/dnsConfig/searches").and_then(Value::as_array).into_iter().flatten() {
             dns_search.extend(sr.as_str().map(str::to_string));
         }
+        for opt in self.pod.pointer("/spec/dnsConfig/options").and_then(Value::as_array).into_iter().flatten() {
+            let name = s(opt, "/name");
+            let entry = match opt.get("value").and_then(Value::as_str) {
+                Some(v) if !v.is_empty() => format!("{name}:{v}"),
+                _ => name.to_string(),
+            };
+            let key = entry.split(':').next().unwrap_or_default().to_string();
+            dns_options.retain(|o| o.split(':').next() != Some(key.as_str()));
+            dns_options.push(entry);
+        }
         // The sandbox mounts the pod's runtime volumes to prepare them.
         let mut mounts = Vec::new();
         let mut fresh: Vec<String> = Vec::new();
@@ -568,18 +725,36 @@ impl<R: PodRuntime> Worker<R> {
         }
         let spec = SandboxSpec {
             name: format!("k8s_POD_{}_{}_{}", self.name, self.ns, &self.uid[..8.min(self.uid.len())]),
+            fqdn: match s(&self.pod, "/spec/subdomain") {
+                "" => None,
+                sub => Some(format!("{hostname}.{sub}.{}.svc.{}", self.ns, crate::kube::dns::DOMAIN)),
+            },
             hostname,
             labels,
             host_network: self.host_network(),
             extra_hosts,
             host_ports,
+            host_port_ips,
             dns_servers,
             dns_search,
             dns_options,
             mounts,
+            sysctls: self
+                .pod
+                .pointer("/spec/securityContext/sysctls")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .map(|kv| (s(kv, "/name").to_string(), s(kv, "/value").to_string()))
+                .filter(|(k, _)| !k.is_empty())
+                .collect(),
         };
         let sandbox = self.agent.runtime().run_sandbox(&spec).await?;
         self.agent.track_container(&sandbox.id, &self.uid);
+        if !self.agent.runtime().writes_pod_files() && !spec.host_network {
+            let gateway = self.agent.resolve_host("host-gateway").await.unwrap_or_default();
+            self.write_pod_files(&spec, sandbox.ip.as_deref(), &gateway);
+        }
         // emptyDir volumes are world-writable in Kubernetes, and fresh
         // persistent volumes start out that way too (like local-path).
         let mut subdirs = Vec::new();
@@ -672,6 +847,7 @@ impl<R: PodRuntime> Worker<R> {
                     }
                 }
                 self.start_probes(init, i);
+                self.post_start(init, i);
                 true
             }
             Err(e) => {
@@ -681,6 +857,42 @@ impl<R: PodRuntime> Worker<R> {
                 false
             }
         }
+    }
+
+    /// Where a container's hooks and probes connect.
+    fn hook_target(&self, c: &Container, id: &str) -> ProbeTarget {
+        let rt = self.agent.runtime();
+        ProbeTarget {
+            container: c.name.clone(),
+            container_id: id.to_string(),
+            sandbox_id: self.sandbox.as_ref().map(|s| s.id.clone()).filter(|_| !rt.reaches_pods_directly()),
+            host_network: self.host_network(),
+            host: if self.host_network() { "127.0.0.1".to_string() } else { self.pod_ip() },
+            ports: c
+                .spec
+                .get("ports")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|p| Some((s(p, "/name").to_string(), p.get("containerPort")?.as_u64()? as u16)))
+                .collect(),
+        }
+    }
+
+    /// Run the container's postStart hook; a failed hook kills the container.
+    fn post_start(&self, init: bool, i: usize) {
+        let c = if init { &self.init[i] } else { &self.main[i] };
+        let (Some(hook), Some(id)) = (c.spec.pointer("/lifecycle/postStart").filter(|h| h.is_object()).cloned(), c.id.clone()) else {
+            return;
+        };
+        let target = self.hook_target(c, &id);
+        let rt = self.agent.runtime().clone();
+        tokio::spawn(async move {
+            let ok = tokio::time::timeout(Duration::from_secs(120), probe::run_handler(&*rt, &hook, &target)).await.unwrap_or(false);
+            if !ok {
+                let _ = rt.stop(&id, Duration::from_secs(2)).await;
+            }
+        });
     }
 
     fn start_probes(&mut self, init: bool, i: usize) {
@@ -819,14 +1031,18 @@ impl<R: PodRuntime> Worker<R> {
             return;
         }
         let policy = self.restart_policy().to_string();
+        let info = info.unwrap_or_default();
+        let exit_code = info.exit_code.unwrap_or(137);
+        let message = match self.main.iter().chain(self.init.iter()).find(|c| c.id.as_deref() == Some(id)) {
+            Some(c) if c.running() => self.termination_message(c, id, exit_code).await,
+            _ => None,
+        };
         let Some(c) = self.main.iter_mut().chain(self.init.iter_mut()).find(|c| c.id.as_deref() == Some(id)) else {
             return;
         };
         if !c.running() {
             return;
         }
-        let info = info.unwrap_or_default();
-        let exit_code = info.exit_code.unwrap_or(137);
         let reason = if info.oom_killed {
             "OOMKilled"
         } else if exit_code == 0 {
@@ -844,7 +1060,7 @@ impl<R: PodRuntime> Worker<R> {
         let terminated = State::Terminated {
             exit_code,
             reason: reason.into(),
-            message: info.error.clone(),
+            message: message.or_else(|| info.error.clone()),
             started_at,
             finished_at: info.finished_at.as_deref().map(normalize_time).unwrap_or_else(now_str),
             id: id.to_string(),
@@ -897,6 +1113,40 @@ impl<R: PodRuntime> Worker<R> {
                 (&format!("KUBERNETES_PORT_{port}_TCP_ADDR"), host.to_string()),
             ] {
                 set(&mut env, k.to_string(), v);
+            }
+        }
+        // Docker-link style variables for the namespace's Services.
+        if self.pod.pointer("/spec/enableServiceLinks").and_then(Value::as_bool) != Some(false) {
+            for svc in self.agent.service_proxy().namespace_services(&self.ns) {
+                let ip = s(&svc, "/spec/clusterIP");
+                // The API server's own variables (set above) name a host pods
+                // always reach, not its ClusterIP.
+                if ip.is_empty() || ip == "None" || (self.ns == "default" && s(&svc, "/metadata/name") == "kubernetes") {
+                    continue;
+                }
+                let prefix = s(&svc, "/metadata/name").to_uppercase().replace('-', "_");
+                let ports: Vec<&Value> = svc.pointer("/spec/ports").and_then(Value::as_array).into_iter().flatten().collect();
+                let Some(first) = ports.first() else { continue };
+                let first_port = first.get("port").and_then(Value::as_u64).unwrap_or(0);
+                let proto_of = |p: &Value| match s(p, "/protocol") {
+                    "" => "tcp".to_string(),
+                    other => other.to_lowercase(),
+                };
+                set(&mut env, format!("{prefix}_SERVICE_HOST"), ip.to_string());
+                set(&mut env, format!("{prefix}_SERVICE_PORT"), first_port.to_string());
+                set(&mut env, format!("{prefix}_PORT"), format!("{}://{ip}:{first_port}", proto_of(first)));
+                for p in &ports {
+                    let port = p.get("port").and_then(Value::as_u64).unwrap_or(0);
+                    let proto = proto_of(p);
+                    if !s(p, "/name").is_empty() {
+                        set(&mut env, format!("{prefix}_SERVICE_PORT_{}", s(p, "/name").to_uppercase().replace('-', "_")), port.to_string());
+                    }
+                    let base = format!("{prefix}_PORT_{port}_{}", proto.to_uppercase());
+                    set(&mut env, base.clone(), format!("{proto}://{ip}:{port}"));
+                    set(&mut env, format!("{base}_PROTO"), proto.clone());
+                    set(&mut env, format!("{base}_PORT"), port.to_string());
+                    set(&mut env, format!("{base}_ADDR"), ip.to_string());
+                }
             }
         }
         let b64 = base64::engine::general_purpose::STANDARD;
@@ -984,10 +1234,19 @@ impl<R: PodRuntime> Worker<R> {
             let vname = s(m, "/name");
             let target = s(m, "/mountPath").to_string();
             let read_only = m.get("readOnly").and_then(Value::as_bool) == Some(true);
-            let sub = match m.get("subPathExpr").and_then(Value::as_str) {
-                Some(expr) => expand(expr, &env_pairs),
+            let from_expr = m.get("subPathExpr").and_then(Value::as_str).filter(|e| !e.is_empty());
+            let sub = match from_expr {
+                Some(expr) => {
+                    if expr.contains('`') {
+                        return Err(format!("failed to prepare subPath for volumeMount \"{vname}\" of container \"{}\": subpath may not contain backticks", c.name));
+                    }
+                    expand(expr, &env_pairs)
+                }
                 None => s(m, "/subPath").to_string(),
             };
+            if from_expr.is_some() && (sub.starts_with('/') || sub.split('/').any(|p| p == "..")) {
+                return Err(format!("failed to prepare subPath for volumeMount \"{vname}\" of container \"{}\": subPath {sub:?} must be a relative path without \"..\"", c.name));
+            }
             let sub = sub.trim_matches('/').to_string();
             let Some(prepared) = volumes.and_then(|v| v.get(vname)) else {
                 return Err(format!("volume \"{vname}\" not found"));
@@ -995,12 +1254,20 @@ impl<R: PodRuntime> Worker<R> {
             let source = match prepared {
                 Prepared::Dir(dir) => {
                     let path = if sub.is_empty() { dir.clone() } else { dir.join(&sub) };
+                    if from_expr.is_some() {
+                        let _ = std::fs::create_dir_all(&path);
+                    }
                     MountSource::Bind(path.to_string_lossy().to_string())
                 }
                 Prepared::Named { volume, .. } => {
+                    // Expanded subpaths are only known now: create them.
+                    if from_expr.is_some() && !sub.is_empty() {
+                        if let Some(sb) = self.sandbox.as_ref() {
+                            let _ = self.agent.runtime().prepare_sandbox_dirs(&sb.id, Vec::new(), vec![format!("/.litek8s/volumes/{vname}/{sub}")]).await;
+                        }
+                    }
                     MountSource::Volume { name: volume.clone(), subpath: (!sub.is_empty()).then_some(sub.clone()) }
                 }
-                Prepared::Tmpfs => MountSource::Tmpfs,
                 Prepared::HostPath(path) => {
                     let p = if sub.is_empty() { path.clone() } else { format!("{}/{sub}", path.trim_end_matches('/')) };
                     MountSource::Bind(p)
@@ -1008,6 +1275,22 @@ impl<R: PodRuntime> Worker<R> {
             };
             let read_only = read_only || (matches!(prepared, Prepared::Dir(_)) && target == SA_MOUNT);
             mounts.push(MountSpec { source, target, read_only });
+        }
+        // The termination message file, read back when the container exits.
+        if let Some(path) = self.termination_file(c) {
+            let target = match s(spec, "/terminationMessagePath") {
+                "" => "/dev/termination-log".to_string(),
+                t => t.to_string(),
+            };
+            if !mounts.iter().any(|m: &MountSpec| m.target == target) {
+                mounts.push(MountSpec { source: MountSource::Bind(path.to_string_lossy().to_string()), target, read_only: false });
+            }
+        }
+        for (file, target) in [("etc-hosts", "/etc/hosts"), ("resolv.conf", "/etc/resolv.conf")] {
+            let path = self.dir.join(file);
+            if path.exists() && !mounts.iter().any(|m: &MountSpec| m.target == target) {
+                mounts.push(MountSpec { source: MountSource::Bind(path.to_string_lossy().to_string()), target: target.into(), read_only: false });
+            }
         }
         let security = spec.get("securityContext").cloned().unwrap_or(Value::Null);
         let pod_security = self.pod.pointer("/spec/securityContext").cloned().unwrap_or(Value::Null);
@@ -1088,15 +1371,23 @@ impl<R: PodRuntime> Worker<R> {
             return "Pending";
         }
         let policy = self.restart_policy();
-        let all_done = !self.main.is_empty()
-            && self.main.iter().all(|c| match c.exit_code() {
+        let regular = || self.main.iter().filter(|c| !c.ephemeral);
+        let all_done = regular().next().is_some()
+            && regular().all(|c| match c.exit_code() {
                 Some(code) => !(policy == "Always" || (policy == "OnFailure" && code != 0)),
                 None => false,
             });
         if all_done {
-            return if self.main.iter().all(|c| c.exit_code() == Some(0)) { "Succeeded" } else { "Failed" };
+            return if regular().all(|c| c.exit_code() == Some(0)) { "Succeeded" } else { "Failed" };
         }
-        if self.main.iter().any(|c| c.running() || c.exit_code().is_some()) {
+        // The kubelet publishes a new pod's status after its first sync,
+        // which pulls every image: while one is still being pulled for the
+        // first time, the pod is Pending even if others already started.
+        let first_pull = |c: &Container| c.attempts == 0 && matches!(&c.state, State::Waiting { reason, .. } if reason == "ContainerCreating");
+        if regular().any(first_pull) {
+            return "Pending";
+        }
+        if regular().any(|c| c.running() || c.exit_code().is_some()) {
             "Running"
         } else {
             "Pending"
@@ -1159,7 +1450,8 @@ impl<R: PodRuntime> Worker<R> {
             "name": c.name,
             "image": c.image(),
             "imageID": c.image_id,
-            "ready": c.ready && c.running(),
+            // A plain init container that completed counts as ready.
+            "ready": (c.ready && c.running()) || (c.init && !c.sidecar && c.exit_code() == Some(0)),
             "started": c.running() && c.started,
             "restartCount": c.attempts.saturating_sub(1),
             "state": render(&state),
@@ -1169,6 +1461,14 @@ impl<R: PodRuntime> Worker<R> {
             status["containerID"] = json!(format!("{}://{id}", self.agent.runtime().scheme()));
         }
         status
+    }
+
+    fn condition_msg(&mut self, type_: &str, ok: bool, reason: Option<&str>, message: Option<String>) -> Value {
+        let mut c = self.condition(type_, ok, reason);
+        if let (Some(m), false) = (message, ok) {
+            c["message"] = json!(m);
+        }
+        c
     }
 
     fn condition(&mut self, type_: &str, ok: bool, reason: Option<&str>) -> Value {
@@ -1190,17 +1490,34 @@ impl<R: PodRuntime> Worker<R> {
     fn status(&mut self) -> Value {
         let phase = self.phase();
         let terminal = matches!(phase, "Succeeded" | "Failed");
-        let main_ready = !self.main.is_empty()
-            && self.main.iter().all(|c| c.ready && c.running())
+        let main_ready = self.main.iter().any(|c| !c.ephemeral)
+            && self.main.iter().filter(|c| !c.ephemeral).all(|c| c.ready && c.running())
             && self.init.iter().filter(|c| c.sidecar).all(|c| c.ready && c.running());
         let containers_ready = main_ready && !terminal;
         let sandbox_ok = self.sandbox.is_some() && !terminal;
         let initialized = self.initialized;
+        let incomplete: Vec<String> = self
+            .init
+            .iter()
+            .filter(|c| if c.sidecar { !c.started } else { c.exit_code() != Some(0) })
+            .map(|c| c.name.clone())
+            .collect();
+        let unready: Vec<String> = self
+            .init
+            .iter()
+            .filter(|c| c.sidecar)
+            .chain(self.main.iter().filter(|c| !c.ephemeral))
+            .filter(|c| !(c.ready && c.running()))
+            .map(|c| c.name.clone())
+            .collect();
+        let list = |what: &str, names: &[String]| (!names.is_empty()).then(|| format!("containers with {what} status: [{}]", names.join(" ")));
+        let not_ready = if terminal { "PodCompleted" } else { "ContainersNotReady" };
+        let unready_msg = list("unready", &unready);
         let conditions = vec![
             self.condition("PodReadyToStartContainers", sandbox_ok, None),
-            self.condition("Initialized", initialized, Some("ContainersNotInitialized")),
-            self.condition("Ready", containers_ready, Some(if terminal { "PodCompleted" } else { "ContainersNotReady" })),
-            self.condition("ContainersReady", containers_ready, Some(if terminal { "PodCompleted" } else { "ContainersNotReady" })),
+            self.condition_msg("Initialized", initialized, Some("ContainersNotInitialized"), list("incomplete", &incomplete)),
+            self.condition_msg("Ready", containers_ready, Some(not_ready), unready_msg.clone()),
+            self.condition_msg("ContainersReady", containers_ready, Some(not_ready), unready_msg),
         ];
         let pod_ip = self.pod_ip();
         let host_ip = self.agent.config().node_ip.clone();
@@ -1210,8 +1527,11 @@ impl<R: PodRuntime> Worker<R> {
             "hostIP": host_ip,
             "hostIPs": [{"ip": host_ip}],
             "startTime": self.start_time,
-            "containerStatuses": self.main.iter().map(|c| self.container_status(c)).collect::<Vec<_>>(),
+            "containerStatuses": self.main.iter().filter(|c| !c.ephemeral).map(|c| self.container_status(c)).collect::<Vec<_>>(),
         });
+        if self.main.iter().any(|c| c.ephemeral) {
+            status["ephemeralContainerStatuses"] = json!(self.main.iter().filter(|c| c.ephemeral).map(|c| self.container_status(c)).collect::<Vec<_>>());
+        }
         if !self.init.is_empty() {
             status["initContainerStatuses"] = json!(self.init.iter().map(|c| self.container_status(c)).collect::<Vec<_>>());
         }
@@ -1219,8 +1539,11 @@ impl<R: PodRuntime> Worker<R> {
             status["podIP"] = json!(pod_ip);
             status["podIPs"] = json!([{"ip": pod_ip}]);
         }
-        if let Some((_, message)) = &self.failed {
+        if let Some((reason, message)) = &self.failed {
             status["message"] = json!(message);
+            if reason != "Failed" {
+                status["reason"] = json!(reason);
+            }
         }
         status
     }
@@ -1255,11 +1578,30 @@ impl<R: PodRuntime> Worker<R> {
     async fn teardown(&mut self) {
         let grace = self
             .pod
-            .pointer("/spec/terminationGracePeriodSeconds")
+            .pointer("/metadata/deletionGracePeriodSeconds")
+            .or_else(|| self.pod.pointer("/spec/terminationGracePeriodSeconds"))
             .and_then(Value::as_u64)
             .unwrap_or(30)
             .min(30);
         let rt = self.agent.runtime().clone();
+        // preStop hooks of running containers, within the grace period.
+        let hooks: Vec<_> = self
+            .main
+            .iter()
+            .chain(self.init.iter())
+            .filter(|c| c.running())
+            .filter_map(|c| {
+                let hook = c.spec.pointer("/lifecycle/preStop").filter(|h| h.is_object())?.clone();
+                let target = self.hook_target(c, c.id.as_deref()?);
+                let rt = rt.clone();
+                Some(tokio::spawn(async move {
+                    let _ = tokio::time::timeout(Duration::from_secs(grace.max(1)), probe::run_handler(&*rt, &hook, &target)).await;
+                }))
+            })
+            .collect();
+        for h in hooks {
+            let _ = h.await;
+        }
         let mut ids = Vec::new();
         for c in self.main.iter_mut().chain(self.init.iter_mut()) {
             c.stop_probes();

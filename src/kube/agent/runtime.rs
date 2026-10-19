@@ -37,6 +37,11 @@ pub const LABEL_CONTAINER: &str = "litek8s.container.name";
 pub const LABEL_ROLE: &str = "litek8s.role";
 pub const LABEL_ATTEMPT: &str = "litek8s.container.attempt";
 pub const LABEL_HASH: &str = "litek8s.container.hash";
+/// The node whose agent made a container or volume (several agents may
+/// share one runtime).
+pub const LABEL_NODE: &str = "litek8s.node";
+/// A volume backed by memory (`emptyDir.medium: Memory`).
+pub const LABEL_TMPFS: &str = "litek8s.tmpfs";
 
 /// The network pods join, so they get an address of their own.
 const POD_NETWORK: &str = "litek8s-pods";
@@ -66,17 +71,25 @@ pub struct MountSpec {
 pub struct SandboxSpec {
     pub name: String,
     pub hostname: String,
+    /// `<hostname>.<subdomain>.<ns>.svc.<domain>` when the pod has a
+    /// subdomain: listed before the hostname in `/etc/hosts`.
+    pub fqdn: Option<String>,
     pub labels: HashMap<String, String>,
     pub host_network: bool,
     /// `name:ip` entries for `/etc/hosts` (`ip` may be `host-gateway`).
     pub extra_hosts: Vec<String>,
     /// (container port, host port, protocol)
     pub host_ports: Vec<(u16, u16, String)>,
+    /// The `hostIP` of each entry of `host_ports` (empty: all addresses).
+    pub host_port_ips: Vec<String>,
     pub dns_servers: Vec<String>,
     pub dns_search: Vec<String>,
     pub dns_options: Vec<String>,
     /// Volumes mounted into the sandbox too, so the agent can prepare them.
     pub mounts: Vec<MountSpec>,
+    /// Pod sysctls (`spec.securityContext.sysctls`), set in the pod's
+    /// network and IPC namespaces.
+    pub sysctls: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -208,6 +221,12 @@ pub trait PodRuntime: Send + Sync + 'static {
     /// VM: then probes, NodePort relays and port-forwards fall back to
     /// running `nc`/`wget` inside the pod's sandbox.
     fn reaches_pods_directly(&self) -> bool {
+        false
+    }
+    /// Whether the runtime writes each pod's `/etc/hosts` and
+    /// `/etc/resolv.conf` itself; otherwise the agent writes kubelet-style
+    /// ones and bind-mounts them into the containers.
+    fn writes_pod_files(&self) -> bool {
         false
     }
     /// Connect to `port` on the pod's loopback from inside its network
@@ -506,8 +525,15 @@ impl PodRuntime for DockerPods {
         if self.docker.inspect_volume(name).await.is_ok() {
             return Ok(false);
         }
+        // `medium: Memory` emptyDirs: a tmpfs-backed volume, so every
+        // container of the pod (and each restart) sees the same files.
+        let driver_opts = if labels.get(LABEL_TMPFS).is_some_and(|v| v == "true") {
+            HashMap::from([("type".to_string(), "tmpfs".to_string()), ("device".to_string(), "tmpfs".to_string()), ("o".to_string(), "mode=1777".to_string())])
+        } else {
+            HashMap::new()
+        };
         self.docker
-            .create_volume(CreateVolumeOptions { name: name.to_string(), driver: "local".to_string(), labels, ..Default::default() })
+            .create_volume(CreateVolumeOptions { name: name.to_string(), driver: "local".to_string(), labels, driver_opts })
             .await
             .with_context(|| format!("failed to create volume {name}"))?;
         Ok(true)
@@ -537,13 +563,15 @@ impl PodRuntime for DockerPods {
         self.pull_image(SANDBOX_IMAGE, false).await?;
         let mut exposed = HashMap::new();
         let mut bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
-        for (container_port, host_port, protocol) in &spec.host_ports {
+        for (i, (container_port, host_port, protocol)) in spec.host_ports.iter().enumerate() {
             let key = format!("{container_port}/{}", protocol.to_lowercase());
+            let host_ip = spec.host_port_ips.get(i).filter(|ip| !ip.is_empty()).cloned().unwrap_or_else(|| "0.0.0.0".into());
             exposed.insert(key.clone(), HashMap::new());
-            bindings.insert(
-                key,
-                Some(vec![PortBinding { host_ip: Some("0.0.0.0".into()), host_port: Some(host_port.to_string()) }]),
-            );
+            bindings
+                .entry(key)
+                .or_insert_with(|| Some(Vec::new()))
+                .get_or_insert_with(Vec::new)
+                .push(PortBinding { host_ip: Some(host_ip), host_port: Some(host_port.to_string()) });
         }
         let host_config = HostConfig {
             network_mode: Some(if spec.host_network { "host".into() } else { POD_NETWORK.into() }),
@@ -555,6 +583,7 @@ impl PodRuntime for DockerPods {
             mounts: (!spec.mounts.is_empty()).then(|| spec.mounts.iter().map(docker_mount).collect()),
             ipc_mode: Some("shareable".into()),
             init: Some(true),
+            sysctls: (!spec.sysctls.is_empty()).then(|| spec.sysctls.iter().cloned().collect()),
             ..Default::default()
         };
         // A few attempts: a chosen address may be in use by a pod that
@@ -872,9 +901,15 @@ impl PodRuntime for DockerPods {
             return apply_rules_on_host(rules).await;
         }
         let id = self.ensure_proxy_helper().await?;
-        let mut session = self
-            .exec(&id, vec!["iptables-restore".into(), "--noflush".into()], false, true)
-            .await?;
+        // Re-check the PREROUTING/OUTPUT jumps every time: Docker (or its VM)
+        // restarting rebuilds those chains without them.
+        let script = format!(
+            "iptables -t nat -N {chain} 2>/dev/null; for c in PREROUTING OUTPUT; do \
+             iptables -t nat -C $c -j {chain} 2>/dev/null || iptables -t nat -I $c 1 -j {chain}; done; \
+             exec iptables-restore --noflush",
+            chain = super::proxy::CHAIN
+        );
+        let mut session = self.exec(&id, vec!["sh".into(), "-c".into(), script], false, true).await?;
         session.input.write_all(rules.as_bytes()).await?;
         session.input.shutdown().await?;
         let mut errors = String::new();
@@ -1078,6 +1113,9 @@ impl PodRuntime for NodeRuntime {
     }
     fn reaches_pods_directly(&self) -> bool {
         each!(self, rt => rt.reaches_pods_directly())
+    }
+    fn writes_pod_files(&self) -> bool {
+        each!(self, rt => rt.writes_pod_files())
     }
     async fn connect(&self, sandbox: &str, port: u16) -> std::io::Result<Option<tokio::net::TcpStream>> {
         each!(self, rt => rt.connect(sandbox, port).await)

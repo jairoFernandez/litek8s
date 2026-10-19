@@ -14,6 +14,7 @@ mod cronjob;
 mod daemonset;
 mod deployment;
 mod gc;
+mod history;
 mod job;
 mod misc;
 mod replicaset;
@@ -36,6 +37,7 @@ use super::store::{EventType, WatchEvent};
 pub(crate) enum Kind {
     Deployment,
     ReplicaSet,
+    ReplicationController,
     StatefulSet,
     DaemonSet,
     Job,
@@ -48,6 +50,14 @@ pub(crate) enum Kind {
     Namespace,
     /// Reclaim the volume of a deleted claim.
     VolumeClaim,
+    /// `status.used` of a ResourceQuota.
+    Quota,
+    /// Status of a PodDisruptionBudget.
+    Pdb,
+    /// Evict pods a node's NoExecute taints no longer let run.
+    Taints,
+    /// Foreground deletion (`group|resource|name`).
+    Foreground,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -148,11 +158,14 @@ impl Manager {
         for (group, plural, kind) in [
             ("apps", "deployments", Kind::Deployment),
             ("apps", "replicasets", Kind::ReplicaSet),
+            ("", "replicationcontrollers", Kind::ReplicationController),
             ("apps", "statefulsets", Kind::StatefulSet),
             ("apps", "daemonsets", Kind::DaemonSet),
             ("batch", "jobs", Kind::Job),
             ("batch", "cronjobs", Kind::CronJob),
             ("", "services", Kind::Service),
+            ("", "resourcequotas", Kind::Quota),
+            ("policy", "poddisruptionbudgets", Kind::Pdb),
         ] {
             for key in store.keys_of_resource(group, plural) {
                 self.enqueue(kind, &key.namespace, &key.name);
@@ -181,12 +194,31 @@ impl Manager {
                 self.deleted.entry(ns.to_string()).or_default().insert(uid.to_string());
             }
         }
+        if event.event != EventType::Deleted
+            && util::is_deleting(obj)
+            && obj.pointer("/metadata/finalizers").and_then(Value::as_array).is_some_and(|f| f.iter().any(|x| x == "foregroundDeletion" || x == "orphan"))
+        {
+            self.enqueue(Kind::Foreground, ns, &format!("{}|{}|{}", key.group, key.resource, name));
+        }
+        if !ns.is_empty() && key.resource != "events" {
+            if key.group.is_empty() && key.resource == "resourcequotas" {
+                if event.event != EventType::Deleted {
+                    self.enqueue(Kind::Quota, ns, name);
+                }
+            } else {
+                for q in self.api.store().list("", "resourcequotas", Some(ns)).0 {
+                    let qname = util::name(&q);
+                    self.enqueue(Kind::Quota, ns, &qname);
+                }
+            }
+        }
         match (key.group.as_str(), key.resource.as_str()) {
             ("apps", "deployments") => self.enqueue(Kind::Deployment, ns, name),
             ("apps", "replicasets") => {
                 self.enqueue(Kind::ReplicaSet, ns, name);
                 self.enqueue_owner(ns, obj);
             }
+            ("", "replicationcontrollers") => self.enqueue(Kind::ReplicationController, ns, name),
             ("apps", "statefulsets") => self.enqueue(Kind::StatefulSet, ns, name),
             ("apps", "daemonsets") => self.enqueue(Kind::DaemonSet, ns, name),
             ("batch", "jobs") => {
@@ -194,8 +226,20 @@ impl Manager {
                 self.enqueue_owner(ns, obj);
             }
             ("batch", "cronjobs") => self.enqueue(Kind::CronJob, ns, name),
+            ("policy", "poddisruptionbudgets") if event.event != EventType::Deleted => self.enqueue(Kind::Pdb, ns, name),
             ("", "pods") => {
+                let node = util::s(obj, "/spec/nodeName").to_string();
+                if !node.is_empty() && event.event != EventType::Deleted {
+                    self.enqueue(Kind::Taints, "", &node);
+                }
+                for pdb in self.api.store().list("policy", "poddisruptionbudgets", Some(ns)).0 {
+                    let pname = util::name(&pdb);
+                    self.enqueue(Kind::Pdb, ns, &pname);
+                }
                 self.enqueue_owner(ns, obj);
+                if util::controller_of(obj).is_none() {
+                    self.enqueue_adopters(ns);
+                }
                 if event.event != EventType::Deleted && util::needs_scheduling(obj) {
                     self.enqueue(Kind::Schedule, ns, name);
                 }
@@ -207,6 +251,7 @@ impl Manager {
                 self.enqueue_services_for(ns);
             }
             ("", "nodes") => {
+                self.enqueue(Kind::Taints, "", name);
                 for ds in self.api.store().keys_of_resource("apps", "daemonsets") {
                     self.enqueue(Kind::DaemonSet, &ds.namespace, &ds.name);
                 }
@@ -216,10 +261,18 @@ impl Manager {
                 }
             }
             ("", "services") => self.enqueue(Kind::Service, ns, name),
-            ("", "namespaces") if event.event != EventType::Deleted => self.enqueue(Kind::Namespace, "", name),
-            ("", "configmaps") if name == super::defaults::ROOT_CA_CONFIGMAP && event.event == EventType::Deleted => {
-                self.enqueue(Kind::Namespace, "", ns)
+            // Hand-written Endpoints of selector-less Services are mirrored.
+            ("", "endpoints") => self.enqueue(Kind::Service, ns, name),
+            // A deleted or edited slice of ours is put back.
+            ("discovery.k8s.io", "endpointslices") => {
+                let svc = obj.pointer("/metadata/labels/kubernetes.io~1service-name").and_then(Value::as_str).unwrap_or_default().to_string();
+                if !svc.is_empty() && util::s(obj, "/metadata/labels/endpointslice.kubernetes.io~1managed-by") == "endpointslice-controller.k8s.io" {
+                    self.enqueue(Kind::Service, ns, &svc);
+                }
             }
+            ("", "namespaces") if event.event != EventType::Deleted => self.enqueue(Kind::Namespace, "", name),
+            // Deleted or edited: put the CA bundle back.
+            ("", "configmaps") if name == super::defaults::ROOT_CA_CONFIGMAP => self.enqueue(Kind::Namespace, "", ns),
             ("", "persistentvolumeclaims") => {
                 if event.event == EventType::Deleted {
                     self.enqueue(Kind::VolumeClaim, ns, name);
@@ -234,6 +287,7 @@ impl Manager {
         let Some((kind, name)) = util::controller_of(obj) else { return };
         let kind = match kind.as_str() {
             "ReplicaSet" => Kind::ReplicaSet,
+            "ReplicationController" => Kind::ReplicationController,
             "Deployment" => Kind::Deployment,
             "StatefulSet" => Kind::StatefulSet,
             "DaemonSet" => Kind::DaemonSet,
@@ -242,6 +296,20 @@ impl Manager {
             _ => return,
         };
         self.enqueue(kind, ns, &name);
+    }
+
+    /// An orphan pod may be adopted by a ReplicaSet or ReplicationController.
+    fn enqueue_adopters(&mut self, ns: &str) {
+        for (group, plural, kind) in [
+            ("apps", "replicasets", Kind::ReplicaSet),
+            ("", "replicationcontrollers", Kind::ReplicationController),
+            ("batch", "jobs", Kind::Job),
+        ] {
+            let (items, _) = self.api.store().list(group, plural, Some(ns));
+            for o in items {
+                self.enqueue(kind, ns, &util::name(&o));
+            }
+        }
     }
 
     fn enqueue_services_for(&mut self, ns: &str) {
@@ -288,6 +356,7 @@ impl Manager {
         let result = match key.kind {
             Kind::Deployment => deployment::reconcile(&api, ns, name),
             Kind::ReplicaSet => replicaset::reconcile(&api, ns, name),
+            Kind::ReplicationController => replicaset::reconcile_rc(&api, ns, name),
             Kind::StatefulSet => statefulset::reconcile(&api, ns, name),
             Kind::DaemonSet => daemonset::reconcile(&api, ns, name),
             Kind::Job => job::reconcile(&api, ns, name),
@@ -303,6 +372,10 @@ impl Manager {
             Kind::Service => misc::reconcile_service(&api, ns, name),
             Kind::Namespace => misc::reconcile_namespace(&api, name),
             Kind::VolumeClaim => misc::reclaim_volumes(&api, ns, name),
+            Kind::Quota => misc::reconcile_quota(&api, ns, name),
+            Kind::Pdb => misc::reconcile_pdb(&api, ns, name),
+            Kind::Taints => scheduler::evict_for_taints(&api, name),
+            Kind::Foreground => gc::foreground(&api, ns, name),
         };
         match result {
             Ok(requeue) => requeue,

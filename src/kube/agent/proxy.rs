@@ -74,6 +74,12 @@ fn backends(svc_port: &Value, endpoints: Option<&Value>) -> Vec<Backend> {
     out
 }
 
+/// The ClientIP session affinity timeout of a Service, if it has one.
+fn affinity_seconds(svc: &Value) -> Option<u64> {
+    (s(svc, "/spec/sessionAffinity") == "ClientIP")
+        .then(|| svc.pointer("/spec/sessionAffinityConfig/clientIP/timeoutSeconds").and_then(Value::as_u64).unwrap_or(10800))
+}
+
 impl Proxy {
     pub(crate) fn update(&self, namespace: String, name: String, service: Option<Value>, endpoints: Option<Value>) {
         let mut services = self.services.lock().unwrap();
@@ -87,6 +93,17 @@ impl Proxy {
         }
         drop(services);
         self.changed.notify_one();
+    }
+
+    /// The Services of a namespace, for pods' service environment variables.
+    pub(crate) fn namespace_services(&self, namespace: &str) -> Vec<Value> {
+        self.services
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|((ns, _), _)| ns == namespace)
+            .map(|(_, (svc, _))| svc.clone())
+            .collect()
     }
 
     /// The NAT table for the current Services.
@@ -106,10 +123,31 @@ impl Proxy {
                 let Some(svc_port) = port.get("port").and_then(Value::as_u64) else { continue };
                 let backends = backends(port, eps.as_ref());
                 let n = backends.len();
+                // sessionAffinity ClientIP: a client sticks to the backend it
+                // was first sent to (xt_recent, as kube-proxy does).
+                let affinity = affinity_seconds(svc);
+                let tag = |b: &Backend| {
+                    use std::hash::{DefaultHasher, Hash, Hasher};
+                    let mut h = DefaultHasher::new();
+                    (ip, svc_port, &b.ip, b.port).hash(&mut h);
+                    format!("LK{:016X}", h.finish())
+                };
+                if let Some(secs) = affinity {
+                    for b in &backends {
+                        let _ = writeln!(
+                            out,
+                            "-A {CHAIN} -d {ip}/32 -p {protocol} -m {protocol} --dport {svc_port} -m recent --name {} --rcheck --seconds {secs} --reap --rsource -j DNAT --to-destination {}:{}",
+                            tag(b), b.ip, b.port
+                        );
+                    }
+                }
                 for (i, b) in backends.iter().enumerate() {
                     let _ = write!(out, "-A {CHAIN} -d {ip}/32 -p {protocol} -m {protocol} --dport {svc_port}");
                     if i + 1 < n {
                         let _ = write!(out, " -m statistic --mode random --probability {:.5}", 1.0 / (n - i) as f64);
+                    }
+                    if affinity.is_some() {
+                        let _ = write!(out, " -m recent --name {} --set --rsource", tag(b));
                     }
                     let _ = writeln!(out, " -j DNAT --to-destination {}:{}", b.ip, b.port);
                 }
@@ -120,15 +158,21 @@ impl Proxy {
     }
 
     /// NodePort → backends, for the userspace listeners.
+    #[cfg(test)]
     fn node_port_backends(&self, node_port: u16) -> Vec<Backend> {
+        self.node_port_target(node_port).0
+    }
+
+    /// NodePort → (backends, ClientIP affinity timeout).
+    fn node_port_target(&self, node_port: u16) -> (Vec<Backend>, Option<u64>) {
         for (svc, eps) in self.services.lock().unwrap().values() {
             for port in svc.pointer("/spec/ports").and_then(Value::as_array).into_iter().flatten() {
                 if port.get("nodePort").and_then(Value::as_u64) == Some(node_port as u64) {
-                    return backends(port, eps.as_ref());
+                    return (backends(port, eps.as_ref()), affinity_seconds(svc));
                 }
             }
         }
-        Vec::new()
+        (Vec::new(), None)
     }
 
     fn wanted_node_ports(&self) -> Vec<u16> {
@@ -261,14 +305,30 @@ async fn serve_node_port(proxy: Arc<Proxy>, port: u16) {
 /// `port`'s Service.
 async fn relay_node_port(proxy: Arc<Proxy>, listener: TcpListener, port: u16) {
     let mut next = 0usize;
+    let mut sticky: HashMap<std::net::IpAddr, (Backend, std::time::Instant)> = HashMap::new();
     loop {
-        let Ok((mut client, _)) = listener.accept().await else { continue };
-        let backends = proxy.node_port_backends(port);
+        let Ok((mut client, peer)) = listener.accept().await else { continue };
+        let (backends, affinity) = proxy.node_port_target(port);
         if backends.is_empty() {
             continue;
         }
-        let b = backends[next % backends.len()].clone();
-        next = next.wrapping_add(1);
+        let remembered = affinity.and_then(|secs| {
+            sticky
+                .get(&peer.ip())
+                .filter(|(b, at)| at.elapsed().as_secs() < secs && backends.contains(b))
+                .map(|(b, _)| b.clone())
+        });
+        let b = match remembered {
+            Some(b) => b,
+            None => {
+                let b = backends[next % backends.len()].clone();
+                next = next.wrapping_add(1);
+                b
+            }
+        };
+        if affinity.is_some() {
+            sticky.insert(peer.ip(), (b.clone(), std::time::Instant::now()));
+        }
         let in_pod = proxy.in_pod.get().cloned();
         tokio::spawn(async move {
             let _ = client.set_nodelay(true);

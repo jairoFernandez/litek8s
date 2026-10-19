@@ -147,11 +147,16 @@ COMMIT\n"
 
 /// The hostPort chain for every running sandbox's ports:
 /// (host port, protocol, pod ip, container port).
-pub(crate) fn hostport_rules(ports: &[(u16, String, String, u16)]) -> String {
+pub(crate) fn hostport_rules(ports: &[(u16, String, String, u16, String)]) -> String {
     let mut out = String::from("*nat\n:LITEK8S-HOSTPORTS - [0:0]\n");
-    for (host_port, proto, ip, port) in ports {
+    for (host_port, proto, ip, port, host_ip) in ports {
         let proto = proto.to_lowercase();
-        out.push_str(&format!("-A LITEK8S-HOSTPORTS -p {proto} -m {proto} --dport {host_port} -j DNAT --to-destination {ip}:{port}\n"));
+        // A hostIP narrows the port to that address of the node.
+        let dst = match host_ip.as_str() {
+            "" | "0.0.0.0" => String::new(),
+            h => format!("-d {h}/32 "),
+        };
+        out.push_str(&format!("-A LITEK8S-HOSTPORTS {dst}-p {proto} -m {proto} --dport {host_port} -j DNAT --to-destination {ip}:{port}\n"));
     }
     out.push_str("COMMIT\n");
     out
@@ -240,8 +245,9 @@ mod tests {
     fn rules_render() {
         let s = Subnet::parse("10.42.0.0/24").unwrap();
         assert!(base_rules(&s).contains("-A LITEK8S-POSTROUTING -s 10.42.0.0/24 ! -o litek8s0 -j MASQUERADE\n"));
-        let r = hostport_rules(&[(8080, "TCP".into(), "10.42.0.5".into(), 80)]);
+        let r = hostport_rules(&[(8080, "TCP".into(), "10.42.0.5".into(), 80, String::new()), (53, "UDP".into(), "10.42.0.6".into(), 53, "192.168.1.7".into())]);
         assert!(r.contains("-A LITEK8S-HOSTPORTS -p tcp -m tcp --dport 8080 -j DNAT --to-destination 10.42.0.5:80\n"));
+        assert!(r.contains("-A LITEK8S-HOSTPORTS -d 192.168.1.7/32 -p udp -m udp --dport 53 -j DNAT --to-destination 10.42.0.6:53\n"));
         let cmds = pod_link_commands("lk1234", Ipv4Addr::new(10, 42, 0, 5), &s);
         assert!(cmds.contains("addr add 10.42.0.5/24 dev eth0\n") && cmds.contains("route add default via 10.42.0.1 dev eth0\n"));
     }

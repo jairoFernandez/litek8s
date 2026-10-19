@@ -35,6 +35,9 @@ pub enum Message {
     /// First message: the Node object to register (labels, capacity, ...).
     Hello { node: Value },
     PodStatus { namespace: String, name: String, uid: String, status: Value },
+    /// A pod marked for graceful deletion has stopped on this node: the
+    /// server may now remove the object.
+    PodTerminated { namespace: String, name: String, uid: String },
     /// Look up an object a pod needs (configmaps, secrets, claims, volumes)
     /// or mint a service account token (`resource: "token"`).
     Get { id: u64, resource: String, namespace: String, name: String },

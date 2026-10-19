@@ -41,6 +41,11 @@ pub(crate) fn reconcile(api: &ApiState, ns: &str, name: &str) -> Result<Requeue,
     }
     let template = ds.pointer("/spec/template").cloned().unwrap_or_else(|| json!({}));
     let hash = util::hash_of(&template);
+    let in_use: Vec<String> = util::owned(api, "", "pods", ns, &ds)
+        .iter()
+        .filter_map(|p| util::labels_of(p).get(REVISION_LABEL).and_then(Value::as_str).map(|h| format!("{name}-{h}")))
+        .collect();
+    super::history::sync(api, &ds, &template, &hash, &in_use)?;
     let min_ready = i(&ds, "/spec/minReadySeconds").unwrap_or(0);
     let mut probe_spec = template.get("spec").cloned().unwrap_or_else(|| json!({}));
     daemon_tolerations(&mut probe_spec);
@@ -118,7 +123,8 @@ pub(crate) fn reconcile(api: &ApiState, ns: &str, name: &str) -> Result<Requeue,
     // Rolling update within maxUnavailable, unavailable outdated pods first.
     if s(&ds, "/spec/updateStrategy/type") != "OnDelete" && !outdated.is_empty() {
         let max_unavailable = util::int_or_percent(ds.pointer("/spec/updateStrategy/rollingUpdate/maxUnavailable"), desired, true, 1).max(1);
-        let unavailable = current - available;
+        // Nodes whose pod is being replaced count as unavailable too.
+        let unavailable = (eligible.len() as i64 - available).max(current - available);
         outdated.sort();
         let mut budget = max_unavailable - unavailable;
         for (is_available, pod) in outdated {

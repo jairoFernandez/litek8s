@@ -101,6 +101,16 @@ pub(crate) async fn run<R: PodRuntime>(
     }
 }
 
+/// Run a lifecycle hook handler (`postStart`/`preStop`: exec, httpGet,
+/// tcpSocket or sleep); true when it succeeded.
+pub(crate) async fn run_handler<R: PodRuntime>(rt: &R, handler: &Value, target: &ProbeTarget) -> bool {
+    if let Some(seconds) = handler.pointer("/sleep/seconds").and_then(Value::as_u64) {
+        tokio::time::sleep(Duration::from_secs(seconds)).await;
+        return true;
+    }
+    check(rt, handler, target).await
+}
+
 async fn check<R: PodRuntime>(rt: &R, probe: &Value, target: &ProbeTarget) -> bool {
     if let Some(command) = probe.pointer("/exec/command").and_then(Value::as_array) {
         let command: Vec<String> = command.iter().filter_map(Value::as_str).map(str::to_string).collect();
@@ -287,6 +297,15 @@ async fn read_status_line<S: AsyncReadExt + Unpin>(s: &mut S, buf: &mut [u8]) ->
 
 /// Kubernetes does not verify certificates of HTTPS probes; neither do we.
 async fn tls_connect(tcp: TcpStream, host: &str) -> std::io::Result<tokio_rustls::client::TlsStream<TcpStream>> {
+    tls_connect_any(tcp, host).await
+}
+
+/// TLS over any stream without verifying the peer (probes, the API
+/// server's `https:` pod proxy).
+pub(crate) async fn tls_connect_any<IO>(tcp: IO, host: &str) -> std::io::Result<tokio_rustls::client::TlsStream<IO>>
+where
+    IO: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
     use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
     use rustls::{DigitallySignedStruct, SignatureScheme};

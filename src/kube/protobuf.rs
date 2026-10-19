@@ -83,6 +83,8 @@ fn message_for(api_version: &str, kind: &str) -> Option<MessageDescriptor> {
         format!("k8s.io.api.{short}.{version}.{kind}"),
         // CustomResourceDefinition lives outside k8s.io/api.
         format!("k8s.io.{short}_apiserver.pkg.apis.{short}.{version}.{kind}"),
+        // So does APIService.
+        format!("k8s.io.kube_aggregator.pkg.apis.{short}.{version}.{kind}"),
         format!("{META}.{kind}"),
     ]
     .iter()
@@ -159,7 +161,16 @@ fn to_json(msg: &DynamicMessage) -> Value {
                         None => other.to_string(),
                     },
                 };
-                out.insert(key, scalar_or_nested(value));
+                let v = scalar_or_nested(value);
+                // Non-pointer bools are always on the wire; JSON omits false.
+                let omit_false = matches!(
+                    key.as_str(),
+                    "x-kubernetes-embedded-resource" | "x-kubernetes-int-or-string" | "uniqueItems" | "exclusiveMaximum" | "exclusiveMinimum" | "nullable"
+                );
+                if (omit_false && v == json!(false)) || v == json!("") || v.is_null() {
+                    continue;
+                }
+                out.insert(key, v);
             }
             Value::Object(out)
         }
@@ -172,11 +183,135 @@ fn to_json(msg: &DynamicMessage) -> Value {
                 if v == json!("") || v.is_null() {
                     continue;
                 }
-                out.insert(field.name().to_string(), v);
+                // Zero scalars of non-pointer Go fields: JSON leaves them out.
+                if (v == json!(false) || v == json!(0)) && !field.is_list() && !field.is_map() && !is_pointer(msg.descriptor().full_name(), json_name(field.name())) {
+                    continue;
+                }
+                // Embedded Go structs (`json:",inline"`) are a nested message
+                // on the wire but flattened into the parent in JSON.
+                if let (Pv::Message(m), Value::Object(inner)) = (value, &v)
+                    && is_inline(field.name(), m.descriptor().name())
+                {
+                    out.extend(inner.clone());
+                    continue;
+                }
+                out.insert(json_name(field.name()).to_string(), v);
             }
             Value::Object(out)
         }
     }
+}
+
+/// The JSON name of a protobuf field. They match except for a few fields
+/// whose generated.proto name is the Go field name.
+fn json_name(proto: &str) -> &str {
+    match proto {
+        "Webhooks" => "webhooks",
+        "Expression" => "expression",
+        "Name" => "name",
+        "aPIGroup" => "apiGroup",
+        "uID" => "uid",
+        other => other,
+    }
+}
+
+/// Paths of fields in `obj` that its built-in type does not have
+/// (`spec.unknownField`, `spec.containers[0].foo`); `None` when no schema is
+/// known for the type.
+pub fn unknown_fields(api_version: &str, kind: &str, obj: &Value) -> Option<Vec<String>> {
+    let desc = message_for(api_version, kind)?;
+    let mut out = Vec::new();
+    walk_known(obj, &desc, "", true, &mut out);
+    Some(out)
+}
+
+/// Types whose JSON form is not their message's fields.
+fn opaque(desc: &MessageDescriptor) -> bool {
+    let name = desc.full_name();
+    name.starts_with(APIEXT)
+        || name == "k8s.io.apimachinery.pkg.util.intstr.IntOrString"
+        || name == "k8s.io.apimachinery.pkg.api.resource.Quantity"
+        || name == "k8s.io.apimachinery.pkg.runtime.RawExtension"
+        || [format!("{META}.Time"), format!("{META}.MicroTime"), format!("{META}.Duration"), format!("{META}.FieldsV1")].iter().any(|n| n == name)
+}
+
+/// JSON key -> field, with embedded (inline) structs flattened.
+fn json_fields(desc: &MessageDescriptor, out: &mut Vec<(String, prost_reflect::FieldDescriptor)>) {
+    for f in desc.fields() {
+        if let prost_reflect::Kind::Message(m) = f.kind() {
+            if !f.is_list() && !f.is_map() && is_inline(f.name(), m.name()) {
+                json_fields(&m, out);
+                continue;
+            }
+        }
+        out.push((json_name(f.name()).to_string(), f));
+    }
+}
+
+fn walk_known(v: &Value, desc: &MessageDescriptor, path: &str, root: bool, out: &mut Vec<String>) {
+    if opaque(desc) {
+        return;
+    }
+    let Value::Object(map) = v else { return };
+    let mut fields = Vec::new();
+    json_fields(desc, &mut fields);
+    // A whole object embedded in another (a StatefulSet's
+    // volumeClaimTemplates) carries TypeMeta too; kinds are the messages
+    // with a List.
+    let typed = root || pool().get_message_by_name(&format!("{}List", desc.full_name())).is_some();
+    for (k, child) in map {
+        let p = if path.is_empty() { k.clone() } else { format!("{path}.{k}") };
+        if typed && (k == "apiVersion" || k == "kind") {
+            continue;
+        }
+        let Some((_, f)) = fields.iter().find(|(name, _)| name == k) else {
+            out.push(p);
+            continue;
+        };
+        let prost_reflect::Kind::Message(m) = f.kind() else { continue };
+        if f.is_map() {
+            let value_field = m.map_entry_value_field();
+            if let (prost_reflect::Kind::Message(vm), Value::Object(entries)) = (value_field.kind(), child) {
+                for (ek, ev) in entries {
+                    walk_known(ev, &vm, &format!("{p}.{ek}"), false, out);
+                }
+            }
+        } else if f.is_list() {
+            for (i, item) in child.as_array().into_iter().flatten().enumerate() {
+                walk_known(item, &m, &format!("{p}[{i}]"), false, out);
+            }
+        } else {
+            walk_known(child, &m, &p, false, out);
+        }
+    }
+}
+
+/// Whether a scalar field is a pointer in Go (zero values are meaningful).
+fn is_pointer(message: &str, field: &str) -> bool {
+    let short = message
+        .strip_prefix("k8s.io.api.")
+        .or_else(|| message.strip_prefix("k8s.io.apimachinery.pkg.apis."))
+        .or_else(|| message.strip_prefix("k8s.io.kube_aggregator.pkg.apis."))
+        .unwrap_or(message);
+    super::proto_pointers::POINTER_FIELDS.binary_search(&format!("{short}.{field}").as_str()).is_ok()
+}
+
+/// Embedded struct fields in k8s.io/api (`json:",inline"` or `json:""`):
+/// protobuf field name and message type.
+fn is_inline(field: &str, message: &str) -> bool {
+    matches!(
+        (field, message),
+        ("localObjectReference", "LocalObjectReference")
+            | ("volumeSource", "VolumeSource")
+            | ("persistentVolumeSource", "PersistentVolumeSource")
+            | ("handler", "ProbeHandler")
+            | ("ephemeralContainerCommon", "EphemeralContainerCommon")
+            | ("ingressRuleValue", "IngressRuleValue")
+            | ("rule", "Rule")
+            | ("ruleWithOperations", "RuleWithOperations")
+            | ("deviceConfiguration", "DeviceConfiguration")
+            | ("typeMeta", "TypeMeta")
+    )
 }
 
 fn scalar_or_nested(value: &Pv) -> Value {
@@ -250,6 +385,29 @@ mod tests {
     }
 
     #[test]
+    fn decodes_an_apiservice() {
+        let agg = "k8s.io.kube_aggregator.pkg.apis.apiregistration.v1";
+        let msg = |name: &str| DynamicMessage::new(pool().get_message_by_name(&format!("{agg}.{name}")).unwrap());
+        let mut svc = msg("ServiceReference");
+        svc.set_field_by_name("namespace", Pv::String("ns".into()));
+        svc.set_field_by_name("name", Pv::String("api".into()));
+        svc.set_field_by_name("port", Pv::I32(443));
+        let mut spec = msg("APIServiceSpec");
+        spec.set_field_by_name("service", Pv::Message(svc));
+        spec.set_field_by_name("group", Pv::String("wardle.example.com".into()));
+        spec.set_field_by_name("version", Pv::String("v1alpha1".into()));
+        spec.set_field_by_name("insecureSkipTLSVerify", Pv::Bool(false));
+        spec.set_field_by_name("groupPriorityMinimum", Pv::I32(2000));
+        let mut api = msg("APIService");
+        api.set_field_by_name("spec", Pv::Message(spec));
+        let v = decode(&envelope("apiregistration.k8s.io/v1", "APIService", api.encode_to_vec())).unwrap();
+        assert_eq!(
+            v["spec"],
+            json!({"service": {"namespace": "ns", "name": "api", "port": 443}, "group": "wardle.example.com", "version": "v1alpha1", "groupPriorityMinimum": 2000})
+        );
+    }
+
+    #[test]
     fn decodes_intorstring_and_quantity() {
         let pool = pool();
         let mut port = DynamicMessage::new(pool.get_message_by_name("k8s.io.api.core.v1.ServicePort").unwrap());
@@ -259,6 +417,26 @@ mod tests {
         port.set_field_by_name("port", Pv::I32(80));
         port.set_field_by_name("targetPort", Pv::Message(ios));
         assert_eq!(to_json(&port), json!({"port": 80, "targetPort": "http"}));
+        // Embedded structs flatten: configMapKeyRef.localObjectReference.name -> configMapKeyRef.name.
+        let dep = json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "a", "unknownMeta": 1},
+            "spec": {"unknownField": 1, "replicas": 1, "template": {"spec": {"containers": [{"name": "c", "image": "x",
+            "resources": {"limits": {"cpu": "1"}}, "env": [{"name": "A", "valueFrom": {"configMapKeyRef": {"name": "cm", "key": "k"}}}],
+            "livenessProbe": {"exec": {"command": ["true"]}}, "bogus": 2}], "volumes": [{"name": "v", "emptyDir": {}}]}}}});
+        assert_eq!(
+            unknown_fields("apps/v1", "Deployment", &dep),
+            Some(vec!["metadata.unknownMeta".to_string(), "spec.template.spec.containers[0].bogus".into(), "spec.unknownField".into()])
+        );
+        // Embedded objects may carry apiVersion/kind; templates may not.
+        let sts = json!({"apiVersion": "apps/v1", "kind": "StatefulSet", "metadata": {"name": "a"}, "spec": {
+            "template": {"kind": "Pod", "spec": {"containers": []}},
+            "volumeClaimTemplates": [{"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": {"name": "data"}}]}});
+        assert_eq!(unknown_fields("apps/v1", "StatefulSet", &sts), Some(vec!["spec.template.kind".to_string()]));
+        let mut sel = DynamicMessage::new(pool.get_message_by_name("k8s.io.api.core.v1.ConfigMapKeySelector").unwrap());
+        let mut lor = DynamicMessage::new(pool.get_message_by_name("k8s.io.api.core.v1.LocalObjectReference").unwrap());
+        lor.set_field_by_name("name", Pv::String("cm".into()));
+        sel.set_field_by_name("localObjectReference", Pv::Message(lor));
+        sel.set_field_by_name("key", Pv::String("k".into()));
+        assert_eq!(to_json(&sel), json!({"name": "cm", "key": "k"}));
         assert!(message_for("apps/v1", "Deployment").is_some());
         assert!(message_for("networking.k8s.io/v1", "Ingress").is_some());
         assert!(message_for("v1", "DeleteOptions").is_some());
