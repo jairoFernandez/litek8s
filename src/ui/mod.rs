@@ -165,9 +165,14 @@ fn setup(mouse: bool) -> Result<Term> {
         restore(mouse);
         hook(info);
     }));
+    // Clear with a plain escape sequence: ratatui's `Terminal::clear` first asks
+    // the terminal for the cursor position, and terminals that never answer
+    // that query (some embedded or non-interactive ptys) fail the start with
+    // "the cursor position could not be read". A new Terminal draws its first
+    // frame in full anyway.
+    execute!(std::io::stdout(), terminal::Clear(terminal::ClearType::All))?;
     let mut t = ratatui::Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
     t.hide_cursor()?;
-    t.clear()?;
     Ok(t)
 }
 
