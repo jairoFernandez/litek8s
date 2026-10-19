@@ -59,6 +59,24 @@ impl Filters {
     }
 }
 
+/// Docker's `name` filter: a regular expression searched for in the name, so
+/// a plain string matches every name containing it (an invalid expression
+/// falls back to that). Container names match with and without their
+/// leading `/`, as k3d's `^/?k3d-x$` expects.
+pub fn name_matches(pattern: &str, name: &str) -> bool {
+    let bare = name.trim_start_matches('/');
+    match regex::Regex::new(pattern) {
+        Ok(re) => re.is_match(bare) || re.is_match(&format!("/{bare}")),
+        Err(_) => bare.contains(pattern.trim_start_matches('/')),
+    }
+}
+
+/// Docker's `id` filter: a regular expression as well (k3d sends
+/// `^/?<id>$`); a plain prefix matches, as in Docker.
+pub fn id_matches(pattern: &str, id: &str) -> bool {
+    id.starts_with(pattern) || regex::Regex::new(pattern).is_ok_and(|re| re.is_match(id) || re.is_match(&format!("/{id}")))
+}
+
 /// `filters` for labels given as a JSON object of strings.
 pub fn labels_of(v: &Value) -> BTreeMap<String, String> {
     v.as_object()
@@ -80,6 +98,22 @@ mod tests {
         assert!(f.labels_match("label", &labels));
         assert_eq!(f.get("status"), ["running"]);
         assert!(f.any("name", |_| false));
+        let f = Filters::parse(Some(r#"{"label":["a!=b"]}"#));
+        assert!(f.labels_match("label", &BTreeMap::new()));
+    }
+
+    #[test]
+    fn name_filters_are_regular_expressions() {
+        assert!(name_matches("web", "my-web-1"));
+        assert!(name_matches("^/?(k3d-)?k3d-x-tools$", "k3d-x-tools"));
+        assert!(!name_matches("^/?(k3d-)?k3d-x-tools$", "k3d-x-tools-2"));
+        assert!(name_matches("^/web$", "web"));
+        assert!(name_matches("^web$", "/web"));
+        assert!(name_matches("/web", "web"));
+        assert!(name_matches("a[", "a[1"));
+        assert!(id_matches("9f84", "9f84c7cb"));
+        assert!(id_matches("^/?9f84c7cb$", "9f84c7cb"));
+        assert!(!id_matches("^/?9f84$", "9f84c7cb"));
         let f = Filters::parse(Some(r#"{"label":["a!=b"]}"#));
         assert!(f.labels_match("label", &BTreeMap::new()));
     }
