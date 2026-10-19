@@ -2,6 +2,8 @@
 """In-guest measurement helper for bench/run.sh. Runs as root on the host under test.
 
   probe.py mem                         -> JSON: per-bucket RSS/PSS + system memory
+  probe.py mem-sample <secs> <file>    -> append one compact `mem` line (plus "t") to
+                                          <file> every <secs> until killed
   probe.py cpu <seconds>               -> JSON: per-bucket CPU over a sleep window
   probe.py cpu-snap <file>             -> save a CPU snapshot
   probe.py cpu-diff <file>             -> JSON: per-bucket CPU since the snapshot
@@ -48,6 +50,7 @@ CATEGORY = {
     "litek8s.service (short-lived)": "control-plane",
     "pod sandbox (pause)": "runtime",
     "k8s addon pods": "addons",
+    "argocd": "argocd",
     "workload": "workload",
     "litek8s-agent": "node-agent",
     "sshd": "node-agent",
@@ -105,8 +108,22 @@ def pod_kind(anchor):
             if "cgroup.procs" in files:
                 for pid in read(os.path.join(root, "cgroup.procs")).split():
                     comms.add(comm_of(pid))
-        _pod_kind[anchor] = "workload" if "nginx" in comms else "k8s addon pods"
+        _pod_kind[anchor] = kind_of_comms(comms)
     return _pod_kind[anchor]
+
+
+# Argo CD's processes (comm is cut at 15 characters): its controllers and
+# servers, and the Redis and Dex it ships with. The guestbook apps it deploys
+# run Apache.
+ARGOCD_COMMS = ("argocd", "redis-server", "dex")
+
+
+def kind_of_comms(comms):
+    if "nginx" in comms or "apache2" in comms:
+        return "workload"
+    if any(c.startswith(ARGOCD_COMMS) for c in comms):
+        return "argocd"
+    return "k8s addon pods"
 
 
 def bucket(cg, comm):
@@ -176,6 +193,7 @@ def pids():
 
 def mem():
     buckets = {}
+    pods = {}
     for pid in pids():
         status = read(f"/proc/{pid}/status")
         rss = next((int(l.split()[1]) for l in status.splitlines() if l.startswith("VmRSS:")), None)
@@ -186,7 +204,12 @@ def mem():
             0,
         )
         comm = comm_of(pid)
-        b = bucket(cgroup_of(pid), comm) or "os/other"
+        cg = cgroup_of(pid)
+        b = bucket(cg, comm) or "os/other"
+        if b in ("argocd", "workload", "k8s addon pods", "pod sandbox (pause)"):
+            p = pods.setdefault(anchor_of(cg), {"kind": b, "pss_kib": 0, "comms": []})
+            p["pss_kib"] += pss
+            p["comms"] = sorted(set(p["comms"]) | {comm})
         e = buckets.setdefault(b, {"rss_kib": 0, "pss_kib": 0, "procs": 0, "comms": {}})
         e["rss_kib"] += rss
         e["pss_kib"] += pss
@@ -201,6 +224,7 @@ def mem():
             cg_mem[unit] = int(v) // 1024
     return {
         "buckets": buckets,
+        "pods": pods,
         "categories": rollup(buckets, ("rss_kib", "pss_kib")),
         "system": {
             "mem_total_kib": meminfo["MemTotal"],
@@ -471,6 +495,13 @@ def main():
     cmd, args = sys.argv[1], sys.argv[2:]
     if cmd == "mem":
         out = mem()
+    elif cmd == "mem-sample":
+        while True:
+            line = mem()
+            line["t"] = time.time()
+            with open(args[1], "a") as f:
+                f.write(json.dumps(line, separators=(",", ":")) + "\n")
+            time.sleep(float(args[0]))
     elif cmd == "cpu":
         a = cpu_snapshot()
         time.sleep(float(args[0]))

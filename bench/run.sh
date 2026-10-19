@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Reproducible litek8s vs k3s footprint benchmark on a small Linux node.
 #
-#   bench/run.sh [phase...]      phases: litek8s rpc k3s k3s-minimal kube kube-crun   (default: litek8s rpc k3s k3s-minimal)
+#   bench/run.sh [phase...]      phases: litek8s rpc k3s k3s-minimal kube kube-crun
+#                                        argocd-k3s argocd-litek8s   (default: litek8s rpc k3s k3s-minimal)
 #
 # Each system gets a fresh throwaway VM from bench/vm.sh (Ubuntu 24.04 arm64,
 # 2 vCPU, 1 GiB RAM, no swap: an AWS t4g.micro shape). The `rpc` phase reuses
@@ -12,6 +13,7 @@
 #              K3S_VERSION=<tag, default: k3s stable channel> VM_MEM=1024 VM_CPUS=2
 #              KEEP_VMS=1 (leave VMs running) LITEK8S_BIN=<prebuilt linux binary>
 #              LITEK8S_ARCH=amd64 (x86 hosts) NODE_ADDR/NODE_SSH_PORT (rpc on real hosts)
+#              argocd phases: ARGO_VM_MEM=2048 ARGO_VM_CPUS=2 ARGO_RUNS=3 ARGO_CHART_VERSION=10.10.5
 # Real hosts instead of local VMs: see the BENCH_HOST_<name> note in bench/vm.sh
 # (names: lk, lknode, k3s, k3smin).
 set -euo pipefail
@@ -31,6 +33,13 @@ OUT="${OUT:-$HERE/results/$(date -u +%Y%m%dT%H%M%SZ)}"
 IMAGE="nginx:alpine"
 LK_SOCK=/run/litek8s/daemon.sock
 PORT_LK=2291 PORT_K3S=2292 PORT_K3SMIN=2293 PORT_NODE=2294 PORT_KUBE=2295 PORT_KUBECRUN=2296
+PORT_ARGOK3S=2297 PORT_ARGOLK=2298
+ARGO_VM_MEM="${ARGO_VM_MEM:-2048}"
+ARGO_VM_CPUS="${ARGO_VM_CPUS:-2}"
+ARGO_RUNS="${ARGO_RUNS:-3}"
+ARGO_CHART_VERSION="${ARGO_CHART_VERSION:-10.10.5}"
+HELM_VERSION="${HELM_VERSION:-v3.19.0}"
+KUBECTL_VERSION="${KUBECTL_VERSION:-v1.34.1}"
 KUBE_URL=http://127.0.0.1:6443
 
 PHASES=("$@")
@@ -483,11 +492,167 @@ EOF"
   [[ -n "${KEEP_VMS:-}" ]] || { "$VM" down "$node"; "$VM" down "$cp"; }
 }
 
+# ------------------------------------------------------------------ argocd
+
+# Argo CD (pinned Helm chart, chart defaults, non-HA) on k3s minimal and on
+# litek8s apiserver with crun, on identical VMs (ARGO_VM_MEM / ARGO_VM_CPUS).
+# The same kubectl, helm, chart and node/argocd.py driver run on both.
+#   phase_argocd k3s | litek8s
+
+argo_tools() { # -> dir with helm, kubectl and the chart for the guest arch
+  local arch="${LITEK8S_ARCH:-arm64}" dir="$HERE/.work/argocd"
+  mkdir -p "$dir/$arch"
+  [[ -x "$dir/$arch/helm" ]] || curl -fsSL "https://get.helm.sh/helm-$HELM_VERSION-linux-$arch.tar.gz" | tar xz -C "$dir/$arch" --strip-components 1 "linux-$arch/helm"
+  [[ -x "$dir/$arch/kubectl" ]] || { curl -fsSL -o "$dir/$arch/kubectl" "https://dl.k8s.io/release/$KUBECTL_VERSION/bin/linux/$arch/kubectl"; chmod +x "$dir/$arch/kubectl"; }
+  if [[ ! -f "$dir/argo-cd-$ARGO_CHART_VERSION.tgz" ]]; then
+    # Private helm dirs: other checkouts share the default cache.
+    HELM_CACHE_HOME="$dir/helm/cache" HELM_CONFIG_HOME="$dir/helm/config" HELM_DATA_HOME="$dir/helm/data" \
+      helm pull argo-cd --repo https://argoproj.github.io/argo-helm --version "$ARGO_CHART_VERSION" -d "$dir" >&2
+  fi
+  echo "$dir"
+}
+
+phase_argocd() {
+  local sys="$1" vm port tag kc
+  local VM_MEM="$ARGO_VM_MEM" VM_CPUS="$ARGO_VM_CPUS"
+  if [[ "$sys" == k3s ]]; then vm=argok3s port="$PORT_ARGOK3S" kc=/etc/rancher/k3s/k3s.yaml
+  else vm=argolk port="$PORT_ARGOLK" kc=/root/litek8s.kubeconfig; fi
+  tag="argocd-$sys"
+  local tools; tools="$(argo_tools)"
+  local bin=""; [[ "$sys" == litek8s ]] && bin="$(linux_binary)"
+  log "$tag: preparing VM (${VM_MEM} MiB, ${VM_CPUS} vCPU)"
+  vm_prepare "$vm" "$port"
+  local a="${LITEK8S_ARCH:-arm64}"
+  "$VM" scp "$vm" "$tools/$a/helm" /tmp/helm
+  "$VM" scp "$vm" "$tools/$a/kubectl" /tmp/kubectl
+  "$VM" scp "$vm" "$tools/argo-cd-$ARGO_CHART_VERSION.tgz" /tmp/argo-cd.tgz
+  "$VM" scp "$vm" "$HERE/node/argocd.py" /tmp/argocd.py
+  for f in values.yaml guestbook.yaml helm-guestbook.yaml; do "$VM" scp "$vm" "$HERE/argocd/$f" "/tmp/$f"; done
+  rroot "$vm" 'install -m 755 /tmp/helm /tmp/kubectl /tmp/argocd.py /usr/local/bin/
+    mkdir -p /root/argocd && mv /tmp/argo-cd.tgz /tmp/values.yaml /tmp/guestbook.yaml /tmp/helm-guestbook.yaml /root/argocd/'
+  if [[ "$a" == arm64 ]]; then
+    # The example apps' image (gcr.io/google-samples/gb-frontend:v5) is
+    # amd64 only: run it emulated through binfmt, the same on both systems.
+    rroot "$vm" 'export DEBIAN_FRONTEND=noninteractive
+      for i in 1 2 3 4 5; do apt-get update -qq && break; sleep 10; done
+      apt-get install -y -qq qemu-user-static >/dev/null 2>&1'
+  fi
+
+  if [[ "$sys" == k3s ]]; then
+    log "$tag: installing k3s ${K3S_VERSION:-stable} (minimal)"
+    rroot "$vm" "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='$K3S_VERSION' sh -s - --disable=traefik,servicelb,metrics-server,local-storage >/dev/null"
+  else
+    log "$tag: installing crun + litek8s apiserver"
+    rroot "$vm" 'export DEBIAN_FRONTEND=noninteractive
+      for i in 1 2 3 4 5; do apt-get update -qq && break; sleep 10; done
+      apt-get install -y -qq crun iptables >/dev/null'
+    "$VM" scp "$vm" "$bin" /tmp/litek8s
+    rroot "$vm" 'install -m 755 /tmp/litek8s /usr/local/bin/litek8s && rm /tmp/litek8s
+      mkdir -p /var/lib/litek8s
+      systemd-run --unit=litek8s --quiet /usr/local/bin/litek8s apiserver --listen 127.0.0.1:6443 \
+        --data-dir /var/lib/litek8s/apiserver --kubeconfig /root/litek8s.kubeconfig --runtime crun
+      for i in $(seq 1 100); do curl -sf '"$KUBE_URL"'/readyz >/dev/null && break; sleep 0.1; done'
+  fi
+  # Every later command runs as root with this kubeconfig.
+  local K="export KUBECONFIG=$kc; cd /root/argocd;"
+  rroot "$vm" "$K"'for i in $(seq 1 120); do kubectl get nodes 2>/dev/null | grep -q " Ready" && break; sleep 2; done
+    for i in $(seq 1 150); do
+      n=$(kubectl get pods -A --no-headers 2>/dev/null | grep -vc Completed); r=$(kubectl get pods -A --no-headers 2>/dev/null | awk "{split(\$3,a,\"/\"); if (a[1]==a[2] && \$4==\"Running\") c++} END {print c+0}")
+      [ "$n" = "$r" ] && break; sleep 2
+    done; kubectl get pods -A --no-headers' >"$OUT/$tag.system-pods.txt"
+
+  log "$tag: system only: settle ${SETTLE_SECS}s, memory, 60s of API requests"
+  sleep "$SETTLE_SECS"
+  rroot "$vm" "probe.py mem" | save "$tag.idle0.mem.json"
+  rroot "$vm" "$K argocd.py metrics > /tmp/m0.json; sleep 60; argocd.py metrics > /tmp/m1.json; python3 -c 'import json; print(json.dumps({\"before\": json.load(open(\"/tmp/m0.json\")), \"after\": json.load(open(\"/tmp/m1.json\"))}))'" | save "$tag.api-idle0.json"
+
+  log "$tag: helm install (cold: images pulled)"
+  rroot "$vm" "$K argocd.py install argo-cd.tgz values.yaml" | save "$tag.install-cold.json"
+  {
+    echo '['
+    for i in $(seq 1 "$ARGO_RUNS"); do
+      log "$tag: helm uninstall + install, warm images ($i/$ARGO_RUNS)"
+      rroot "$vm" "$K argocd.py uninstall >/dev/null; sleep 10; argocd.py install argo-cd.tgz values.yaml"
+      [[ $i -lt $ARGO_RUNS ]] && echo ','
+    done
+    echo ']'
+  } | save "$tag.install-warm.json"
+
+  log "$tag: Argo CD idle (no app): settle ${SETTLE_SECS}s, memory"
+  sleep "$SETTLE_SECS"
+  rroot "$vm" "probe.py mem" | save "$tag.argo-idle.mem.json"
+
+  log "$tag: GitOps work (memory sampled every 5s)"
+  rroot "$vm" "rm -f /tmp/mem-sync.jsonl; nohup probe.py mem-sample 5 /tmp/mem-sync.jsonl >/dev/null 2>&1 & echo \$! > /tmp/mem-sample.pid"
+  rroot "$vm" "$K argocd.py metrics" | save "$tag.api-sync.before.json"
+  local t0; t0=$(date +%s)
+  for app in guestbook helm-guestbook; do
+    {
+      echo '['
+      for i in $(seq 1 $((ARGO_RUNS + 1))); do
+        # The first run clones the repository and pulls the app's image.
+        [[ $i -gt 1 ]] && rroot "$vm" "$K argocd.py app-delete $app >/dev/null; sleep 5"
+        rroot "$vm" "$K argocd.py app-create $app.yaml $app"
+        [[ $i -le $ARGO_RUNS ]] && echo ','
+      done
+      echo ']'
+    } | save "$tag.app-create.$app.json"
+  done
+  {
+    echo '['
+    for i in $(seq 1 $((2 * ARGO_RUNS))); do
+      rroot "$vm" "$K sleep 5; argocd.py app-scale helm-guestbook $(( i % 2 == 1 ? 2 : 1 ))"
+      [[ $i -lt $((2 * ARGO_RUNS)) ]] && echo ','
+    done
+    echo ']'
+  } | save "$tag.app-scale.json"
+  {
+    echo '['
+    for i in $(seq 1 "$ARGO_RUNS"); do
+      rroot "$vm" "$K sleep 10; argocd.py drift guestbook guestbook guestbook-ui"
+      [[ $i -lt $ARGO_RUNS ]] && echo ','
+    done
+    echo ']'
+  } | save "$tag.drift.json"
+  rroot "$vm" "$K argocd.py app-delete helm-guestbook >/dev/null"
+  echo "{\"seconds\": $(( $(date +%s) - t0 ))}" | save "$tag.sync-window.json"
+  rroot "$vm" "$K argocd.py metrics" | save "$tag.api-sync.after.json"
+  rroot "$vm" 'kill $(cat /tmp/mem-sample.pid); cat /tmp/mem-sync.jsonl' | save "$tag.mem-sync.jsonl"
+
+  log "$tag: one app synced: settle ${SETTLE_SECS}s, memory, ${IDLE_SECS}s CPU + API requests"
+  sleep "$SETTLE_SECS"
+  rroot "$vm" "probe.py mem" | save "$tag.idle-app.mem.json"
+  rroot "$vm" "$K argocd.py metrics" | save "$tag.api-idle.before.json"
+  rroot "$vm" "probe.py cpu $IDLE_SECS" | save "$tag.idle-app.cpu.json"
+  rroot "$vm" "$K argocd.py metrics" | save "$tag.api-idle.after.json"
+  rroot "$vm" "probe.py mem" | save "$tag.idle-app-end.mem.json"
+
+  rroot "$vm" "$K"' python3 - <<'"'PY'"'
+import json, subprocess
+run = lambda *a: subprocess.run(a, capture_output=True, text=True).stdout.strip()
+pods = json.loads(run("kubectl", "get", "pods", "-A", "-o", "json"))["items"]
+print(json.dumps({
+  "server_version": json.loads(run("kubectl", "version", "-o", "json")).get("serverVersion", {}).get("gitVersion"),
+  "k3s_version": run("sh", "-c", "k3s --version 2>/dev/null | head -1"),
+  "crun_version": run("sh", "-c", "crun --version 2>/dev/null | head -1"),
+  "chart": run("sh", "-c", "helm list -n argocd -o json"),
+  "pods": [{"ns": p["metadata"]["namespace"], "name": p["metadata"]["name"],
+            "images": [c["image"] for c in p["spec"]["containers"]],
+            "restarts": sum(c.get("restartCount", 0) for c in p.get("status", {}).get("containerStatuses", []))} for p in pods],
+  "mem_total_kib": int(open("/proc/meminfo").read().split()[1]),
+}, indent=1))
+PY' | save "$tag.info.json"
+  rroot "$vm" "dmesg | grep -iE 'out of memory|oom-kill|killed process' || true" | save "$tag.oom.txt"
+  [[ -n "${KEEP_VMS:-}" ]] || "$VM" down "$vm"
+}
+
 # ------------------------------------------------------------------ main
 
 {
   echo "{\"started\": \"$(date -u +%FT%TZ)\", \"idle_secs\": $IDLE_SECS, \"settle_secs\": $SETTLE_SECS,"
   echo " \"ttr_runs\": $TTR_RUNS, \"rpc_runs\": $RPC_RUNS, \"vm_mem_mib\": $VM_MEM, \"vm_cpus\": $VM_CPUS,"
+  echo " \"argo_vm_mem_mib\": $ARGO_VM_MEM, \"argo_vm_cpus\": $ARGO_VM_CPUS, \"argo_runs\": $ARGO_RUNS,"
+  echo " \"argo_chart_version\": \"$ARGO_CHART_VERSION\", \"helm\": \"$HELM_VERSION\", \"kubectl\": \"$KUBECTL_VERSION\","
   echo " \"host\": \"$(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -m)\","
   echo " \"litek8s_commit\": \"$(git -C "$ROOT" rev-parse --short HEAD)\", \"phases\": \"${PHASES[*]}\"}"
 } >"$OUT/env.json"
@@ -500,9 +665,12 @@ for p in "${PHASES[@]}"; do
     rpc) phase_rpc ;;
     kube) phase_kube docker ;;
     kube-crun) phase_kube crun ;;
+    argocd-k3s) phase_argocd k3s ;;
+    argocd-litek8s) phase_argocd litek8s ;;
     *) echo "unknown phase $p" >&2; exit 2 ;;
   esac
 done
 [[ " ${PHASES[*]} " == *" rpc "* || -n "${KEEP_VMS:-}" ]] || "$VM" down lk >/dev/null 2>&1 || true
 log "done: $OUT"
 python3 "$HERE/report.py" "$OUT" || true
+if ls "$OUT"/argocd-*.install-cold.json >/dev/null 2>&1; then python3 "$HERE/argocd_report.py" "$OUT" || true; fi
