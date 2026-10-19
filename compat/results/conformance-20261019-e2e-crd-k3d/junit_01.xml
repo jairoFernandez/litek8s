@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+  <testsuites tests="6751" disabled="6693" errors="0" failures="0" time="120.428924">
+      <testsuite name="Kubernetes e2e suite" package="/Users/jairo/workspace/personal/litek8s/.claude/worktrees/determined-heisenberg-5980a0/compat/.work/k8s-test-v1.33.13-darwin-arm64/kubernetes/test/bin" tests="6751" disabled="0" skipped="6693" errors="0" failures="0" time="120.428924" timestamp="2026-10-19T00:18:21">
+          <properties>
+              <property name="SuiteSucceeded" value="true"></property>
+              <property name="SuiteHasProgrammaticFocus" value="false"></property>
+              <property name="SpecialSuiteFailureReason" value=""></property>
+              <property name="SuiteLabels" value="[]"></property>
+              <property name="RandomSeed" value="1792387099"></property>
+              <property name="RandomizeAllSpecs" value="true"></property>
+              <property name="LabelFilter" value=""></property>
+              <property name="FocusStrings" value="ServerSideApply|CustomResourceValidationRules|FieldValidation|CustomResourceDefinition resources|CustomResourceDefinition Watch|CustomResourcePublishOpenAPI|CustomResourceConversionWebhook|CustomResourceFieldSelectors|AggregatedDiscovery|AdmissionWebhook.*crd|AdmissionWebhook.*custom resource"></property>
+              <property name="SkipStrings" value="Flaky|HPA|\[Serial\]"></property>
+              <property name="FocusFiles" value=""></property>
+              <property name="SkipFiles" value=""></property>
+              <property name="FailOnPending" value="false"></property>
+              <property name="FailOnEmpty" value="false"></property>
+              <property name="FailFast" value="false"></property>
+              <property name="FlakeAttempts" value="0"></property>
+              <property name="DryRun" value="false"></property>
+              <property name="ParallelTotal" value="4"></property>
+              <property name="OutputInterceptorMode" value="none"></property>
+          </properties>
+          <testcase name="[ReportBeforeSuite]" classname="Kubernetes e2e suite" status="passed" time="0.000218708"></testcase>
+<testcase name="[SynchronizedBeforeSuite]" classname="Kubernetes e2e suite" status="passed" time="0.02714375"></testcase>
+<testcase name="[It] [sig-api-machinery] AggregatedDiscovery should support raw aggregated discovery request for CRDs [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.056564958"></testcase>
+<testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should mutate custom resource [Conformance]" classname="Kubernetes e2e suite" status="passed" time="6.189678541"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourceDefinition resources [Privileged:ClusterAdmin] Simple CustomResourceDefinition listing custom resource definition objects works [Conformance]" classname="Kubernetes e2e suite" status="passed" time="6.309429833"></testcase>
+<testcase name="[It] [sig-api-machinery] ServerSideApply should work for subresources" classname="Kubernetes e2e suite" status="passed" time="0.044590542"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourceValidationRules [Privileged:ClusterAdmin] MUST NOT fail validation for create of a custom resource that satisfies the x-kubernetes-validations rules" classname="Kubernetes e2e suite" status="passed" time="3.060759042"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourceValidationRules [Privileged:ClusterAdmin] MUST fail create of a custom resource that exceeds the runtime cost limit for x-kubernetes-validations rule execution" classname="Kubernetes e2e suite" status="passed" time="3.574941166"></testcase>
+<testcase name="[It] [sig-api-machinery] FieldValidation should detect unknown metadata fields in both the root and embedded object of a CR [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.053549667"></testcase>
+<testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should deny crd creation [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.3267643749999998"></testcase>
+<testcase name="[It] [sig-api-machinery] AggregatedDiscovery should support aggregated discovery interface [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.073716417"></testcase>
+<testcase name="[It] [sig-api-machinery] FieldValidation should detect duplicates in a CR when preserving unknown fields [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.0691965"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] removes definition from spec when one version gets changed to not be served [Conformance]" classname="Kubernetes e2e suite" status="passed" time="25.137026458"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourceDefinition Watch [Privileged:ClusterAdmin] CustomResourceDefinition Watch watch on custom resource definition objects [Conformance]" classname="Kubernetes e2e suite" status="passed" time="63.074464709"></testcase>
+<testcase name="[SynchronizedAfterSuite]" classname="Kubernetes e2e suite" status="passed" time="0.000217875"></testcase>
+<testcase name="[ReportAfterSuite] Kubernetes e2e suite report" classname="Kubernetes e2e suite" status="passed" time="0.017607709"></testcase>
+<testcase name="[SynchronizedBeforeSuite]" classname="Kubernetes e2e suite" status="passed" time="0.007425042"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourceDefinition resources [Privileged:ClusterAdmin] Simple CustomResourceDefinition getting/updating/patching custom resource definition status sub-resource works [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.53425"></testcase>
+<testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should be able to deny custom resource creation, update and deletion [Conformance]" classname="Kubernetes e2e suite" status="passed" time="6.2641237499999995"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourceDefinition resources [Privileged:ClusterAdmin] custom resource defaulting for requests and from storage works [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.17372"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] updates the published spec when one version gets renamed [Conformance]" classname="Kubernetes e2e suite" status="passed" time="34.248582083"></testcase>
+<testcase name="[It] [sig-api-machinery] ServerSideApply should give up ownership of a field if forced applied by a controller" classname="Kubernetes e2e suite" status="passed" time="2.050844583"></testcase>
+<testcase name="[It] [sig-api-machinery] FieldValidation should detect unknown and duplicate fields of a typed object [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.0665775"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] works for CRD without validation schema [Conformance]" classname="Kubernetes e2e suite" status="passed" time="8.419590542"></testcase>
+<testcase name="[It] [sig-api-machinery] AggregatedDiscovery should support aggregated discovery interface for CRDs [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.047986708"></testcase>
+<testcase name="[It] [sig-api-machinery] ServerSideApply should work for CRDs" classname="Kubernetes e2e suite" status="passed" time="6.105598875"></testcase>
+<testcase name="[SynchronizedAfterSuite]" classname="Kubernetes e2e suite" status="passed" time="0.000100166"></testcase>
+<testcase name="[SynchronizedBeforeSuite]" classname="Kubernetes e2e suite" status="passed" time="0.006361334"></testcase>
+<testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should mutate custom resource with different stored version [Conformance]" classname="Kubernetes e2e suite" status="passed" time="6.339529958"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourceValidationRules [Privileged:ClusterAdmin] MUST fail create of a custom resource definition that contains an x-kubernetes-validations rule that contains a syntax error" classname="Kubernetes e2e suite" status="passed" time="0.078856125"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] works for CRD with validation schema [Conformance]" classname="Kubernetes e2e suite" status="passed" time="14.548553625"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] works for CRD preserving unknown fields in an embedded object [Conformance]" classname="Kubernetes e2e suite" status="passed" time="9.887551958"></testcase>
+<testcase name="[It] [sig-api-machinery] FieldValidation should create/apply a CR with unknown fields for CRD with no validation schema [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.059898833"></testcase>
+<testcase name="[It] [sig-api-machinery] FieldValidation should create/apply an invalid CR with extra properties for CRD with validation schema [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.058985625"></testcase>
+<testcase name="[It] [sig-api-machinery] FieldValidation should detect unknown metadata fields of a typed object [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.083536"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourceValidationRules [Privileged:ClusterAdmin] MUST fail create of a custom resource definition that contains an x-kubernetes-validations rule that exceeds the estimated cost limit" classname="Kubernetes e2e suite" status="passed" time="0.079821041"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] works for multiple CRDs of different groups [Conformance]" classname="Kubernetes e2e suite" status="passed" time="19.750188792"></testcase>
+<testcase name="[It] [sig-api-machinery] ServerSideApply should not remove a field if an owner unsets the field but other managers still have ownership of the field" classname="Kubernetes e2e suite" status="passed" time="0.093079375"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourceValidationRules [Privileged:ClusterAdmin] MUST fail create of a custom resource definition that contains a x-kubernetes-validations rule that refers to a property that do not exist" classname="Kubernetes e2e suite" status="passed" time="0.088704208"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourceConversionWebhook [Privileged:ClusterAdmin] should be able to convert from CR v1 to CR v2 [Conformance]" classname="Kubernetes e2e suite" status="passed" time="6.220525083"></testcase>
+<testcase name="[It] [sig-api-machinery] FieldValidation should create/apply a valid CR for CRD with validation schema [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.08663625"></testcase>
+<testcase name="[SynchronizedAfterSuite]" classname="Kubernetes e2e suite" status="passed" time="0.000148042"></testcase>
+<testcase name="[SynchronizedBeforeSuite]" classname="Kubernetes e2e suite" status="passed" time="0.00723675"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourceConversionWebhook [Privileged:ClusterAdmin] should be able to convert a non homogeneous list of CRs [Conformance]" classname="Kubernetes e2e suite" status="passed" time="6.252120083"></testcase>
+<testcase name="[It] [sig-api-machinery] AggregatedDiscovery should support raw aggregated discovery endpoint Accept headers [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.035216458"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourceDefinition resources [Privileged:ClusterAdmin] Simple CustomResourceDefinition creating/deleting custom resource definition objects works [Conformance]" classname="Kubernetes e2e suite" status="passed" time="1.026397083"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourceFieldSelectors [Privileged:ClusterAdmin] CustomResourceFieldSelectors MUST list and watch custom resources matching the field selector [Conformance]" classname="Kubernetes e2e suite" status="passed" time="6.58378575"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] works for multiple CRDs of same group and version but different kinds [Conformance]" classname="Kubernetes e2e suite" status="passed" time="21.999029167"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourceValidationRules [Privileged:ClusterAdmin] MUST fail validation for create of a custom resource that does not satisfy the x-kubernetes-validations rules" classname="Kubernetes e2e suite" status="passed" time="3.039952"></testcase>
+<testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should mutate custom resource with pruning [Conformance]" classname="Kubernetes e2e suite" status="passed" time="6.315005416"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourceValidationRules [Privileged:ClusterAdmin] MUST fail update of a custom resource that does not satisfy a x-kubernetes-validations transition rule" classname="Kubernetes e2e suite" status="passed" time="3.055874917"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] works for CRD preserving unknown fields at the schema root [Conformance]" classname="Kubernetes e2e suite" status="passed" time="6.34054"></testcase>
+<testcase name="[It] [sig-api-machinery] ServerSideApply should create an applied object if it does not already exist" classname="Kubernetes e2e suite" status="passed" time="0.042735542"></testcase>
+<testcase name="[It] [sig-api-machinery] ServerSideApply should remove a field if it is owned but removed in the apply request" classname="Kubernetes e2e suite" status="passed" time="0.099053375"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourceDefinition resources [Privileged:ClusterAdmin] should include custom resource definition resources in discovery documents [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.08620325"></testcase>
+<testcase name="[It] [sig-api-machinery] ServerSideApply should ignore conflict errors if force apply is used" classname="Kubernetes e2e suite" status="passed" time="0.089092584"></testcase>
+<testcase name="[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] works for multiple CRDs of same group but different versions [Conformance]" classname="Kubernetes e2e suite" status="passed" time="30.528494333"></testcase>
+<testcase name="[SynchronizedAfterSuite]" classname="Kubernetes e2e suite" status="passed" time="0.000105917"></testcase>
+      </testsuite>
+  </testsuites>

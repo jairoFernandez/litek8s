@@ -106,6 +106,23 @@ log, `summary.md`) are in `results/conformance-*`.
 Compatibility corpus on this branch, merged with main (79bef74): 101/101
 (`results/20261018-174352-litek8s-conformance-merged/`).
 
+## CRD validation and server-side apply
+
+A focused run of the specs on CRDs and field management (2026-10-19,
+`--focus 'ServerSideApply|CustomResourceValidationRules|FieldValidation|CustomResourceDefinition resources|CustomResourceDefinition Watch|CustomResourcePublishOpenAPI|CustomResourceConversionWebhook|CustomResourceFieldSelectors|AggregatedDiscovery|AdmissionWebhook.*crd|AdmissionWebhook.*custom resource' --skip 'Flaky|HPA'`):
+48 specs, 34 of them `[Conformance]`, the rest the non-conformance
+`ServerSideApply` (7) and `CustomResourceValidationRules` (7) specs, which
+check managedFields ownership, CEL rule compilation, estimated and runtime
+cost limits and transition rules.
+
+| | passed |
+|---|---|
+| k3s v1.33.4 | 48/48 |
+| litek8s | 48/48 |
+
+Results: `results/conformance-20261018-232802-litek8s-crd2/`,
+`results/conformance-20261019-e2e-crd-k3d/`. See docs/crds.md.
+
 ## Setup
 
 - **Runner.** `compat/conformance.sh` downloads `kubernetes-test` for the
