@@ -13,6 +13,7 @@ pub mod defaults;
 pub mod discovery;
 pub mod dns;
 pub mod fields;
+pub mod managed;
 pub mod patch;
 mod pod_streams;
 pub mod protobuf;
