@@ -115,6 +115,17 @@ pub struct ApiState {
     pub(crate) image_loader: std::sync::OnceLock<ImageLoader>,
     /// Request counters served at `/metrics`.
     metrics: super::metrics::RequestMetrics,
+    /// Parsed CRDs by name. Every custom resource read, write and watch
+    /// event needs its CRD and schema, and some are megabytes when parsed
+    /// (Argo CD's Application): share one copy per CRD resourceVersion.
+    crd_cache: std::sync::Mutex<HashMap<String, CachedCrd>>,
+}
+
+struct CachedCrd {
+    rv: u64,
+    crd: Arc<Value>,
+    /// `openAPIV3Schema` by version name.
+    schemas: HashMap<String, Option<Arc<Value>>>,
 }
 
 impl ApiState {
@@ -139,6 +150,7 @@ impl ApiState {
             pod_port: std::sync::atomic::AtomicU16::new(0),
             image_loader: std::sync::OnceLock::new(),
             metrics: Default::default(),
+            crd_cache: Default::default(),
         };
         state.bootstrap()?;
         Ok(state)
@@ -1398,7 +1410,7 @@ impl ApiState {
         if !rt.custom {
             return Ok(objects);
         }
-        let Some(crd) = self.store.get(&ObjectKey::new("apiextensions.k8s.io", "customresourcedefinitions", "", &format!("{}.{}", rt.plural, rt.group))) else {
+        let Some(crd) = self.crd(rt) else {
             return Ok(objects);
         };
         let mut objects = admission::convert_objects(self, &crd, objects, &rt.api_version()).await?;
@@ -1412,8 +1424,8 @@ impl ApiState {
     }
 
     /// The version custom resources are stored as.
-    fn storage_version(&self, rt: &ResourceType) -> Option<(Value, String)> {
-        let crd = self.store.get(&ObjectKey::new("apiextensions.k8s.io", "customresourcedefinitions", "", &format!("{}.{}", rt.plural, rt.group)))?;
+    fn storage_version(&self, rt: &ResourceType) -> Option<(Arc<Value>, String)> {
+        let crd = self.crd(rt)?;
         let v = crd
             .pointer("/spec/versions")?
             .as_array()?
@@ -2319,18 +2331,47 @@ impl ApiState {
     }
 
     /// The structural schema of a custom resource's version.
-    fn crd_schema(&self, rt: &ResourceType) -> Option<Value> {
+    /// A custom resource's CRD, shared from the cache while unchanged.
+    fn crd(&self, rt: &ResourceType) -> Option<Arc<Value>> {
+        self.cached_crd(rt, |c| c.crd.clone())
+    }
+
+    fn crd_schema(&self, rt: &ResourceType) -> Option<Arc<Value>> {
+        self.cached_crd(rt, |c| {
+            let crd = c.crd.clone();
+            c.schemas
+                .entry(rt.version.clone())
+                .or_insert_with(|| {
+                    crd.pointer("/spec/versions")?
+                        .as_array()?
+                        .iter()
+                        .find(|v| v.get("name").and_then(Value::as_str) == Some(rt.version.as_str()))?
+                        .pointer("/schema/openAPIV3Schema")
+                        .filter(|s| s.is_object())
+                        .map(|s| Arc::new(s.clone()))
+                })
+                .clone()
+        })
+        .flatten()
+    }
+
+    fn cached_crd<T>(&self, rt: &ResourceType, f: impl FnOnce(&mut CachedCrd) -> T) -> Option<T> {
         if !rt.custom {
             return None;
         }
-        let crd = self.store.get(&ObjectKey::new("apiextensions.k8s.io", "customresourcedefinitions", "", &format!("{}.{}", rt.plural, rt.group)))?;
-        crd.pointer("/spec/versions")?
-            .as_array()?
-            .iter()
-            .find(|v| v.get("name").and_then(Value::as_str) == Some(rt.version.as_str()))?
-            .pointer("/schema/openAPIV3Schema")
-            .filter(|s| s.is_object())
-            .cloned()
+        let name = format!("{}.{}", rt.plural, rt.group);
+        let key = ObjectKey::new("apiextensions.k8s.io", "customresourcedefinitions", "", &name);
+        let Some(rv) = self.store.resource_version_of(&key) else {
+            self.crd_cache.lock().unwrap().remove(&name);
+            return None;
+        };
+        let mut cache = self.crd_cache.lock().unwrap();
+        if cache.get(&name).is_none_or(|c| c.rv != rv) {
+            let crd = self.store.get(&key)?;
+            let rv = resource_version(&crd).unwrap_or(rv);
+            cache.insert(name.clone(), CachedCrd { rv, crd: Arc::new(crd), schemas: HashMap::new() });
+        }
+        cache.get_mut(&name).map(f)
     }
 
     /// Custom resources: drop fields the schema does not declare, then check
