@@ -1,0 +1,439 @@
+//! State and rendering tests: keys against [`App`], frames drawn on
+//! ratatui's TestBackend at 80x24.
+
+use ratatui::Terminal;
+use ratatui::backend::TestBackend;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+use super::app::*;
+use super::model::*;
+use super::view;
+
+fn key(c: char) -> KeyEvent {
+    KeyEvent::from(KeyCode::Char(c))
+}
+
+fn code(c: KeyCode) -> KeyEvent {
+    KeyEvent::from(c)
+}
+
+fn ctr(name: &str, project: Option<&str>, state: &str) -> Container {
+    Container {
+        id: format!("{name:0<64}"),
+        name: name.into(),
+        image: "nginx:1.27".into(),
+        image_id: "sha256:aa".into(),
+        state: state.into(),
+        status: if state == "running" { "Up 2 minutes".into() } else { "Exited (0) 1 hour ago".into() },
+        project: project.map(str::to_string),
+        service: project.map(|_| name.rsplit('-').nth(1).unwrap_or(name).to_string()),
+        ports: if state == "running" { "8080->80/tcp".into() } else { String::new() },
+        ..Default::default()
+    }
+}
+
+fn sample_app() -> App {
+    let mut app = App::new("unix:///Users/me/.litek8s/docker.sock".into(), "http://127.0.0.1:6443".into(), "litek8s-dev".into());
+    app.now = 1_767_225_600 + 3600;
+    app.apply(Msg::Containers(vec![ctr("scratch", None, "exited"), ctr("shop-web-1", Some("shop"), "running"), ctr("shop-db-1", Some("shop"), "running"), ctr("shop-worker-1", Some("shop"), "exited")]));
+    app.apply(Msg::Images(vec![
+        Image { id: "sha256:aa".into(), tags: vec!["nginx:1.27".into()], size: 190_000_000, created: 1_767_225_600, ..Default::default() },
+        Image { id: "sha256:bb".into(), tags: vec!["redis:7".into()], size: 40_000_000, created: 1_767_225_600, ..Default::default() },
+        Image { id: "sha256:cc".into(), tags: vec![], size: 5_000_000, created: 1_767_225_600, ..Default::default() },
+    ]));
+    app.apply(Msg::Volumes(vec![
+        Volume { name: "shop_data".into(), driver: "local".into(), size: Some(52_000_000), project: Some("shop".into()), ..Default::default() },
+        Volume { name: "old".into(), driver: "local".into(), size: Some(1_000), ..Default::default() },
+    ]));
+    let mut df = DiskUsage { build_cache: 300_000_000, build_cache_records: 12, loaded: true, ..Default::default() };
+    df.container_sizes.insert(format!("{:0<64}", "scratch"), 2_000);
+    app.apply(Msg::Disk(df));
+    app.apply(Msg::Pods(vec![Pod {
+        namespace: "default".into(),
+        name: "web-7d9-abc".into(),
+        status: "Running".into(),
+        ready: "1/1".into(),
+        created: 1_767_225_600,
+        containers: vec!["nginx".into()],
+        images: vec!["redis:7".into()],
+        ports: vec![80],
+        owner: Some("web-7d9".into()),
+        ..Default::default()
+    }]));
+    app.apply(Msg::Deployments(vec![Deployment { namespace: "default".into(), name: "web".into(), desired: 1, ready: 1, updated: 1, available: 1, created: 1_767_225_600, ..Default::default() }]));
+    app.apply(Msg::Namespaces(vec!["default".into(), "kube-system".into()]));
+    app.apply(Msg::DockerInfo { version: "litek8s 0.1.0".into(), cpus: Some(4), memory: Some(4_294_967_296), os: "litek8s dev aarch64".into() });
+    app.apply(Msg::Home(Box::new(HomeSample {
+        status: DevStatus::Up,
+        mode: "vm".into(),
+        uptime_s: 7260,
+        api: "http://127.0.0.1:6443".into(),
+        cpu_pct: Some(12.0),
+        mem_used: Some(1_200_000_000),
+        disk_used: Some(2_300_000_000),
+        disk_free: Some(150_000_000_000),
+        data_dir: "/Users/me/Library/Application Support/dev.civojairo.litek8s/dev".into(),
+        contexts: Contexts { docker_context: "litek8s".into(), docker_context_is_litek8s: true, kube_context: "litek8s-dev".into(), kube_is_litek8s: true, kubeconfig: "/Users/me/.kube/config".into(), ..Default::default() },
+        ..Default::default()
+    })));
+    app
+}
+
+fn render(app: &App, w: u16, h: u16) -> String {
+    let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+    t.draw(|f| view::draw(f, app)).unwrap();
+    let buf = t.backend().buffer().clone();
+    let mut out = String::new();
+    for y in 0..buf.area.height {
+        for x in 0..buf.area.width {
+            out.push_str(buf[(x, y)].symbol());
+        }
+        out.push('\n');
+    }
+    out
+}
+
+#[test]
+fn every_view_fits_80x24() {
+    let mut app = sample_app();
+    for (i, tab) in TABS.iter().enumerate() {
+        app.key(key(char::from(b'1' + i as u8)));
+        assert_eq!(app.tab, *tab);
+        let screen = render(&app, 80, 24);
+        assert_eq!(screen.lines().count(), 24);
+        assert!(screen.lines().all(|l| l.chars().count() == 80));
+        assert!(screen.lines().next().unwrap().contains("7 Settings"), "tab bar cut off:\n{screen}");
+        assert!(screen.lines().last().unwrap().contains("? help"), "{screen}");
+    }
+}
+
+#[test]
+fn home_shows_state_resources_and_contexts() {
+    let app = sample_app();
+    let s = render(&app, 80, 24);
+    assert!(s.contains("● up"), "{s}");
+    assert!(s.contains("macOS VM"), "{s}");
+    assert!(s.contains("up 2h 1m"), "{s}");
+    assert!(s.contains("12% of 4 CPUs"), "{s}");
+    assert!(s.contains("1.2 GB / 4.3 GB"), "{s}");
+    assert!(s.contains("150 GB free"), "{s}");
+    assert!(s.contains("✓ docker context"), "{s}");
+    assert!(s.contains("✓ kubectl context"), "{s}");
+    assert!(s.contains("2/4 running"), "{s}");
+}
+
+#[test]
+fn containers_group_by_compose_project() {
+    let mut app = sample_app();
+    app.key(key('2'));
+    let rows = app.container_rows();
+    assert_eq!(rows[0], CRow::Item(0));
+    assert!(matches!(&rows[1], CRow::Group { name, count: 3, running: 2, collapsed: false } if name == "shop"));
+    assert_eq!(rows.len(), 5);
+    let s = render(&app, 80, 24);
+    assert!(s.contains("▾ shop"), "{s}");
+    assert!(s.contains("2/3 up"), "{s}");
+    assert!(s.contains("8080->80/tcp"), "{s}");
+    // Fold the project.
+    app.key(key('j'));
+    app.key(key(' '));
+    assert_eq!(app.container_rows().len(), 2);
+    assert!(render(&app, 80, 24).contains("▸ shop"));
+}
+
+#[test]
+fn destructive_actions_ask_first() {
+    let mut app = sample_app();
+    app.key(key('2'));
+    // On the project row: stopping asks, and covers all three.
+    app.key(key('j'));
+    assert!(app.key(key('x')).is_empty());
+    match &app.overlay {
+        Overlay::Confirm { title, effect: Effect::Containers(ContainerOp::Stop, ids), .. } => {
+            assert_eq!(title, "Stop project shop?");
+            assert_eq!(ids.len(), 3);
+        }
+        o => panic!("no confirmation: {o:?}"),
+    }
+    assert!(render(&app, 80, 24).contains("y yes"));
+    // n cancels, y runs.
+    assert!(app.key(key('n')).is_empty());
+    assert_eq!(app.overlay, Overlay::None);
+    app.key(key('d'));
+    let effects = app.key(key('y'));
+    assert!(matches!(&effects[..], [Effect::Containers(ContainerOp::Remove, ids)] if ids.len() == 3));
+    // Starting needs no confirmation.
+    let effects = app.key(key('u'));
+    assert!(matches!(&effects[..], [Effect::Containers(ContainerOp::Start, _)]));
+    // Reset on Home asks, and says what it deletes.
+    app.key(key('1'));
+    app.key(key('R'));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("Reset the dev cluster?") && s.contains("cannot be undone"), "{s}");
+    assert_eq!(app.key(code(KeyCode::Esc)), Vec::new());
+    app.key(key('R'));
+    assert_eq!(app.key(code(KeyCode::Enter)), vec![Effect::Dev(DevOp::Reset)]);
+    // Until it finishes, Home says it is stopping, and refuses another run.
+    assert!(render(&app, 80, 24).contains("● stopping"));
+    assert!(app.key(key('u')).is_empty());
+    app.apply(Msg::DevFinished(Ok("litek8s dev reset: done".into())));
+    assert_eq!(app.dev_busy, None);
+}
+
+#[test]
+fn logs_follow_and_scroll() {
+    let mut app = sample_app();
+    app.key(key('2'));
+    let effects = app.key(key('l'));
+    assert!(matches!(&effects[..], [Effect::Logs(LogSource::Container { name, .. })] if name == "scratch"));
+    let id = app.log_id().unwrap();
+    app.apply(Msg::LogLines(id, (0..100).map(|i| format!("line {i}")).collect()));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("line 99") && !s.contains("line 50"), "{s}");
+    assert!(s.contains("[follow]"));
+    app.key(code(KeyCode::PageUp));
+    let s = render(&app, 80, 24);
+    assert!(!s.contains("line 99") && s.contains("line 79"), "{s}");
+    // New lines while scrolled back keep the view where it is.
+    app.apply(Msg::LogLines(id, vec!["line 100".into()]));
+    assert!(render(&app, 80, 24).contains("line 79"));
+    app.key(key('G'));
+    assert!(render(&app, 80, 24).contains("line 100"));
+    // Lines of an older stream are ignored.
+    app.apply(Msg::LogLines(id + 7, vec!["stale".into()]));
+    assert!(!render(&app, 80, 24).contains("stale"));
+    // Scrolling back past the top of a short log shows its first lines.
+    app.key(key('c'));
+    app.apply(Msg::LogLines(id, vec!["only".into(), "two".into()]));
+    app.key(code(KeyCode::PageUp));
+    assert!(render(&app, 80, 24).contains("only"));
+    assert_eq!(app.key(code(KeyCode::Esc)), vec![Effect::StopLogs]);
+    assert!(app.logs.is_none());
+}
+
+#[test]
+fn shell_only_into_running_containers() {
+    let mut app = sample_app();
+    app.key(key('2'));
+    assert!(app.key(key('s')).is_empty());
+    assert!(app.status.as_ref().is_some_and(|(m, err)| *err && m.contains("not running")));
+    app.key(key('j'));
+    app.key(key('j'));
+    assert!(matches!(&app.key(key('s'))[..], [Effect::Exec(id)] if id.starts_with("shop-web-1")));
+}
+
+#[test]
+fn free_space_counts_and_prunes_what_is_selected() {
+    let mut app = sample_app();
+    app.key(key('5'));
+    assert_eq!(app.reclaimable(Reclaim::StoppedContainers), (2_000, 2));
+    assert_eq!(app.reclaimable(Reclaim::DanglingImages), (5_000_000, 1));
+    // nginx is used by containers, redis by a pod: neither is unused.
+    assert_eq!(app.reclaimable(Reclaim::UnusedImages), (0, 0));
+    assert_eq!(app.reclaimable(Reclaim::UnusedVolumes), (52_001_000, 2));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("[x] Stopped containers"), "{s}");
+    assert!(s.contains("[ ] Unused volumes"), "{s}");
+    assert!(s.contains("305 MB"), "selected total:\n{s}");
+    app.key(key('p'));
+    let Overlay::Confirm { effect: Effect::Batch(batch), lines, .. } = app.overlay.clone() else { panic!("no confirmation") };
+    assert_eq!(batch, vec![Effect::PruneContainers, Effect::RemoveImages(vec!["sha256:cc".into()]), Effect::PruneBuildCache]);
+    assert!(lines.iter().any(|l| l.contains("cannot be undone")));
+    app.key(key('n'));
+    // Selecting volumes adds them.
+    app.key(key('G'));
+    app.key(key(' '));
+    app.key(key('p'));
+    let Overlay::Confirm { effect: Effect::Batch(batch), .. } = app.overlay.clone() else { panic!() };
+    assert!(batch.contains(&Effect::RemoveVolumes(vec!["shop_data".into(), "old".into()])));
+}
+
+#[test]
+fn image_removal_says_who_uses_it() {
+    let mut app = sample_app();
+    app.key(key('3'));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("nginx:1.27"), "{s}");
+    assert!(s.contains("pod web-7d9-abc"), "{s}");
+    assert!(s.contains("scratch +3"), "{s}");
+    app.key(code(KeyCode::Delete));
+    let Overlay::Confirm { lines, .. } = &app.overlay else { panic!() };
+    assert!(lines.iter().any(|l| l.contains("Used by containers")), "{lines:?}");
+}
+
+#[test]
+fn filter_narrows_lists() {
+    let mut app = sample_app();
+    app.key(key('2'));
+    app.key(key('/'));
+    for c in "work".chars() {
+        app.key(key(c));
+    }
+    assert_eq!(app.container_rows().len(), 2);
+    app.key(code(KeyCode::Enter));
+    assert_eq!(app.filter(), "work");
+    assert!(render(&app, 80, 24).contains("/work"));
+    app.key(code(KeyCode::Esc));
+    assert_eq!(app.filter(), "");
+}
+
+#[test]
+fn kubernetes_view_scale_forward_and_namespaces() {
+    let mut app = sample_app();
+    app.key(key('6'));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("default/web-7d9-abc") && s.contains("Running"), "{s}");
+    app.key(key('n'));
+    assert_eq!(app.namespace.as_deref(), Some("default"));
+    assert!(render(&app, 80, 24).contains("namespace default"));
+    // Port-forward: suggests local 8080 for container port 80.
+    app.key(key('f'));
+    let Overlay::Input { value, .. } = &app.overlay else { panic!() };
+    assert_eq!(value, "8080:80");
+    assert_eq!(app.key(code(KeyCode::Enter)), vec![Effect::PortForward { namespace: "default".into(), pod: "web-7d9-abc".into(), local: 8080, remote: 80 }]);
+    // Deployments: scale validates its input.
+    app.key(key('v'));
+    app.key(key('s'));
+    app.key(code(KeyCode::Backspace));
+    for c in "x".chars() {
+        app.key(key(c));
+    }
+    assert!(app.key(code(KeyCode::Enter)).is_empty());
+    assert!(matches!(&app.overlay, Overlay::Input { error: Some(_), .. }));
+    app.key(code(KeyCode::Backspace));
+    app.key(key('3'));
+    assert_eq!(app.key(code(KeyCode::Enter)), vec![Effect::Scale { namespace: "default".into(), name: "web".into(), replicas: 3 }]);
+    // Kubernetes down: the view says so instead of an empty table.
+    app.apply(Msg::KubeDown("http://127.0.0.1:6443: connection refused".into()));
+    assert!(render(&app, 80, 24).contains("connection refused"));
+}
+
+#[test]
+fn settings_validate_and_flag_restarts() {
+    let mut app = sample_app();
+    app.key(key('7'));
+    let s = render(&app, 80, 24);
+    assert!(s.contains(if cfg!(target_os = "macos") { "VM CPUs" } else { "CPU limit" }) && s.contains("(default)"), "{s}");
+    // CPUs: 0 is refused with the reason, in the prompt.
+    app.key(code(KeyCode::Enter));
+    app.key(key('0'));
+    assert!(app.key(code(KeyCode::Enter)).is_empty());
+    let Overlay::Input { error: Some(e), .. } = &app.overlay else { panic!("{:?}", app.overlay) };
+    assert!(e.contains("cpus must be between 1"), "{e}");
+    app.key(code(KeyCode::Backspace));
+    app.key(key('1'));
+    let effects = app.key(code(KeyCode::Enter));
+    let [Effect::SaveConfig(c)] = &effects[..] else { panic!("{effects:?}") };
+    assert_eq!(c.cpus, Some(1));
+    // A saved change the running VM did not start with needs a restart.
+    app.apply(Msg::Config(Ok(c.clone())));
+    let mut home = app.home.clone();
+    home.running = Some(crate::dev::DevState {
+        pid: 1,
+        port: 6443,
+        mode: "vm".into(),
+        started_unix_ms: 0,
+        cgroup: None,
+        vm_ip: None,
+        helper_pid: None,
+        cpus: Some(4),
+        memory_mib: Some(4096),
+        shares: Vec::new(),
+        publish: Some("localhost".into()),
+    });
+    app.apply(Msg::Home(Box::new(home)));
+    assert_eq!(app.restart_needed(), vec!["CPUs"]);
+    assert!(render(&app, 80, 24).contains("Restart needed for CPUs"));
+    // Published ports toggle with space.
+    app.key(key('G'));
+    app.key(key('k'));
+    app.key(key('k'));
+    app.key(key('k'));
+    let effects = app.key(key(' '));
+    assert!(matches!(&effects[..], [Effect::SaveConfig(c)] if c.publish == crate::dev::config::Publish::All), "{effects:?}");
+    // Context rows switch to litek8s or back.
+    app.key(key('j'));
+    assert_eq!(app.key(code(KeyCode::Enter)), vec![Effect::DockerContext(false)]);
+}
+
+#[test]
+fn help_overlay_lists_keys_and_k9s() {
+    let mut app = sample_app();
+    app.key(key('?'));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("Keys") && s.contains("k9s --context litek8s-dev") && s.contains("port-forward") && s.contains("Any key closes"), "{s}");
+    // Every line fits inside the box at 80 columns: nothing wraps or is cut.
+    for (section, keys) in view::HELP {
+        let width = 11 + keys.iter().map(|(k, v)| k.chars().count() + v.chars().count() + 3).sum::<usize>();
+        assert!(width <= 76, "{section}: {width} columns");
+    }
+    // Any key closes it without acting.
+    assert!(app.key(key('q')).is_empty());
+    assert_eq!(app.overlay, Overlay::None);
+    assert_eq!(app.key(key('q')), vec![Effect::Quit]);
+    assert_eq!(app.key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)), vec![Effect::Quit]);
+}
+
+#[test]
+fn docker_down_explains_instead_of_empty_lists() {
+    let mut app = sample_app();
+    app.apply(Msg::DockerDown("unix:///x.sock: cannot connect to /x.sock".into()));
+    app.key(key('2'));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("cannot connect") && s.contains("Start the dev cluster"), "{s}");
+    app.apply(Msg::Home(Box::new(HomeSample { status: DevStatus::Down, ..Default::default() })));
+    app.key(key('1'));
+    assert!(render(&app, 80, 24).contains("press u to start"));
+    assert_eq!(app.key(key('u')), vec![Effect::Dev(DevOp::Up)]);
+    // While it starts, a second `u` does nothing.
+    assert!(app.key(key('u')).is_empty());
+    assert_eq!(app.home.status, DevStatus::Starting);
+}
+
+#[test]
+fn wide_terminals_get_more_columns() {
+    let mut app = sample_app();
+    app.key(key('2'));
+    let s = render(&app, 120, 30);
+    assert!(s.contains("STATUS") && s.contains("Up 2 minutes"), "{s}");
+    assert!(render(&app, 120, 30).lines().next().unwrap().contains("Free space"));
+}
+
+#[test]
+fn mouse_selects_tabs_and_rows_also_when_scrolled() {
+    use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+    let click = |column, row| MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column, row, modifiers: KeyModifiers::NONE };
+    let mut app = sample_app();
+    render(&app, 80, 24);
+    // "3 Images" in the tab bar.
+    app.mouse(click(34, 0));
+    assert_eq!(app.tab, Tab::Images);
+    app.key(key('2'));
+    let many: Vec<Container> = (0..40).map(|i| ctr(&format!("c{i:02}"), None, "running")).collect();
+    app.apply(Msg::Containers(many));
+    app.key(key('G'));
+    render(&app, 80, 24);
+    assert!(app.list_offset.get() > 0);
+    // The first row on screen is row `offset`, not 0.
+    let top = app.list_top.get();
+    app.mouse(click(5, top));
+    assert_eq!(app.sel(), app.list_offset.get());
+    // The wheel moves the selection.
+    let before = app.sel();
+    app.mouse(MouseEvent { kind: MouseEventKind::ScrollDown, column: 5, row: 5, modifiers: KeyModifiers::NONE });
+    assert_eq!(app.sel(), before + 3);
+}
+
+#[test]
+fn dev_output_shows_its_last_lines_wrapped() {
+    let mut app = sample_app();
+    app.apply(Msg::DevOutput("$ litek8s dev up".into()));
+    app.apply(Msg::DevOutput(format!("litek8s-dev ready in 0.10s (rootless, http://127.0.0.1:6443, kubectl context {})", "x".repeat(40))));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("$ litek8s dev up") && s.contains("xxxxx"), "{s}");
+    for i in 0..30 {
+        app.apply(Msg::DevOutput(format!("line {i}")));
+    }
+    let s = render(&app, 80, 24);
+    assert!(s.contains("line 29") && !s.contains("line 5 "), "{s}");
+}

@@ -27,7 +27,7 @@ pub mod registry;
 pub mod sa_token;
 pub mod selector;
 pub mod server;
-mod spdy;
+pub(crate) mod spdy;
 pub mod store;
 pub mod table;
 pub mod tls;

@@ -95,6 +95,21 @@ Build the guest once (needs Docker or any Linux box for the musl build):
 dev/vm/build.sh   # static litek8s, then kernel + initramfs from Alpine packages
 ```
 
+## Settings
+
+`dev up` takes its defaults from `~/.litek8s/config.yaml` (`$LITEK8S_CONFIG`),
+which `litek8s ui` edits ([ui.md](ui.md)); flags win over it:
+
+| setting | flag | macOS | Linux |
+|---|---|---|---|
+| `cpus` | `--cpus` | the VM's CPUs (default: half the Mac's, at most 8) | a CPU limit on the sandbox (default: none) |
+| `memory` (MiB) | `--memory` | the VM's ceiling (default 4096) | a memory limit on the sandbox (default: none) |
+| `shares` | `--share` (repeatable) | directories shared at the same path (default `$HOME`) | - (the sandbox sees the host's files) |
+| `port` | `--port` | API server port (default 6443, a free one if taken) | same |
+| `publish` | `--publish` | `localhost` (default) or `all`: where NodePorts, LoadBalancer ports and `docker run -p` ports listen | same |
+
+The file is read at `up`; `dev.json` records what the cluster started with.
+
 ## Images
 
 - `litek8s dev load <image>` exports the image from the local Docker (or

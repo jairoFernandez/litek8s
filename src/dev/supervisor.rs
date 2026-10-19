@@ -126,6 +126,21 @@ fn setup_cgroups(rootless: bool) -> Result<PathBuf> {
     Ok(base)
 }
 
+/// CPU and memory limits for everything the sandbox runs (the settings'
+/// `cpus` and `memory`; none by default).
+fn limit(sandbox: &Path, cpus: Option<usize>, memory_mib: Option<u64>) {
+    if let Some(c) = cpus {
+        if let Err(e) = std::fs::write(sandbox.join("cpu.max"), format!("{} 100000", c * 100_000)) {
+            eprintln!("dev: could not limit CPUs to {c}: {e}");
+        }
+    }
+    if let Some(m) = memory_mib {
+        if let Err(e) = std::fs::write(sandbox.join("memory.max"), (m << 20).to_string()) {
+            eprintln!("dev: could not limit memory to {m} MiB: {e}");
+        }
+    }
+}
+
 /// Remove a cgroup tree (children first); the processes must be gone.
 fn remove_cgroup(dir: &Path) {
     for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
@@ -267,7 +282,7 @@ fn bind_api(port: Option<u16>) -> Result<std::net::TcpListener> {
     }
 }
 
-pub async fn run(port: Option<u16>) -> Result<()> {
+pub async fn run(port: Option<u16>, publish: super::config::Publish, cpus: Option<usize>, memory_mib: Option<u64>) -> Result<()> {
     let home = dev_home()?;
     let data = home.join("cluster");
     std::fs::create_dir_all(&data)?;
@@ -277,6 +292,7 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let port = listener.local_addr()?.port();
     let docker = bind_docker_socket()?;
     let cgroup = setup_cgroups(rootless)?;
+    limit(&cgroup.join("sandbox"), cpus, memory_mib);
 
     let (in_r, in_w) = pipe()?;
     let (out_r, out_w) = pipe()?;
@@ -357,10 +373,14 @@ pub async fn run(port: Option<u16>) -> Result<()> {
             cgroup: Some(cgroup.clone()),
             vm_ip: None,
             helper_pid: None,
+            cpus,
+            memory_mib,
+            shares: Vec::new(),
+            publish: Some(publish.as_str().into()),
         },
     )?;
     eprintln!("dev: sandbox up in {} ms, API on 127.0.0.1:{port}", now_ms() - started);
-    std::thread::spawn(move || super::broker::serve(broker_host, [127, 0, 0, 1].into()));
+    std::thread::spawn(move || super::broker::serve(broker_host, publish.ipv4().into()));
 
     let waiter = tokio::task::spawn_blocking(move || stage1.wait());
     tokio::pin!(waiter);

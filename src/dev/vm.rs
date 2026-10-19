@@ -43,9 +43,13 @@ struct VmConfig {
     port: Option<u16>,
     mac: String,
     /// More Mac directories shared at the same path: (virtiofs tag, path).
-    /// /tmp and /var/folders, as Docker Desktop shares them.
+    /// /tmp and /var/folders, as Docker Desktop shares them, and the
+    /// settings' shares after the first.
     #[serde(default)]
     extra_shares: Vec<(String, PathBuf)>,
+    /// Published ports and NodePorts on every interface, not only localhost.
+    #[serde(default)]
+    publish_all: bool,
 }
 
 const ENTITLEMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -133,7 +137,9 @@ pub fn start(home: &Path, opts: &UpOptions) -> Result<u32> {
         m
     });
     let ncpu = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2);
-    let share = opts.share.clone().or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+    let mut shares = opts.shares.iter().map(|s| s.canonicalize().unwrap_or_else(|_| s.clone()));
+    let share = shares.next().or_else(|| std::env::var_os("HOME").map(PathBuf::from));
+    let user_shares: Vec<(String, PathBuf)> = shares.enumerate().map(|(i, p)| (format!("share{}", i + 1), p)).collect();
     let config = VmConfig {
         home: home.to_path_buf(),
         kernel,
@@ -150,7 +156,9 @@ pub fn start(home: &Path, opts: &UpOptions) -> Result<u32> {
             .iter()
             .filter(|(_, p)| Path::new(p).is_dir())
             .map(|(t, p)| (t.to_string(), PathBuf::from(p)))
+            .chain(user_shares)
             .collect(),
+        publish_all: opts.publish == super::config::Publish::All,
     };
     let config_path = state_dir.join("vm.json");
     std::fs::write(&config_path, serde_json::to_vec_pretty(&config)?)?;
@@ -172,12 +180,35 @@ pub fn start(home: &Path, opts: &UpOptions) -> Result<u32> {
 /// The VM's memory as macOS accounts it: the physical footprint of the
 /// framework's helper process that runs it.
 pub fn footprint(state: &DevState) -> Option<u64> {
+    rusage(state).map(|info| info.ri_phys_footprint)
+}
+
+/// CPU time the VM's helper process has used, in nanoseconds.
+pub fn cpu_time_ns(state: &DevState) -> Option<u64> {
+    let info = rusage(state)?;
+    // rusage times are in Mach absolute time units.
+    #[repr(C)]
+    struct Timebase {
+        numer: u32,
+        denom: u32,
+    }
+    unsafe extern "C" {
+        fn mach_timebase_info(info: *mut Timebase) -> libc::c_int;
+    }
+    let mut tb = Timebase { numer: 0, denom: 0 };
+    // SAFETY: fills the struct we own.
+    let rc = unsafe { mach_timebase_info(&mut tb) };
+    let (numer, denom) = if rc == 0 && tb.denom != 0 { (tb.numer as u128, tb.denom as u128) } else { (1, 1) };
+    Some(((info.ri_user_time + info.ri_system_time) as u128 * numer / denom) as u64)
+}
+
+fn rusage(state: &DevState) -> Option<libc::rusage_info_v2> {
     let pid = state.helper_pid?;
     // SAFETY: proc_pid_rusage fills the struct we own.
     unsafe {
         let mut info: libc::rusage_info_v2 = std::mem::zeroed();
         let rc = libc::proc_pid_rusage(pid as i32, libc::RUSAGE_INFO_V2, (&mut info as *mut libc::rusage_info_v2).cast());
-        (rc == 0).then_some(info.ri_phys_footprint)
+        (rc == 0).then_some(info)
     }
 }
 
@@ -419,6 +450,10 @@ enum GuestEvent {
 }
 
 impl Host {
+    fn publish(&self) -> super::config::Publish {
+        if self.config.publish_all { super::config::Publish::All } else { super::config::Publish::Localhost }
+    }
+
     async fn run(self, listener: std::net::TcpListener, guest_in: OwnedFd, guest_out: OwnedFd) {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         // The console: copy it to the log, pick out the guest's reports.
@@ -458,6 +493,10 @@ impl Host {
             cgroup: None,
             vm_ip: None,
             helper_pid: None,
+            cpus: Some(self.config.cpus),
+            memory_mib: Some(self.config.memory_mib),
+            shares: self.config.share.iter().cloned().chain(self.config.extra_shares.iter().filter(|(t, _)| t.starts_with("share")).map(|(_, p)| p.clone())).collect(),
+            publish: Some(if self.config.publish_all { "all" } else { "localhost" }.into()),
         };
         loop {
             tokio::select! {
@@ -469,9 +508,9 @@ impl Host {
                         }
                         eprintln!("dev-vm: guest up after {} ms; API on 127.0.0.1:{port}", now_ms() - self.started);
                         forwarders.push(tokio::spawn(forward_accepts(listener_take(&listener), self.vm, super::guest::GUEST_API_PORT)));
-                        forwarders.push(tokio::spawn(expose_services(self.vm, port)));
+                        forwarders.push(tokio::spawn(expose_services(self.vm, port, self.publish())));
                         forwarders.push(tokio::spawn(serve_docker_socket(self.vm)));
-                        forwarders.push(tokio::spawn(expose_docker_ports(self.vm)));
+                        forwarders.push(tokio::spawn(expose_docker_ports(self.vm, self.publish())));
                         forwarders.push(tokio::spawn(forward_fs_events(self.vm)));
                     }
                     Some(GuestEvent::Vsock) => {}
@@ -572,7 +611,7 @@ async fn serve_docker_socket(vm: VmHandle) {
 
 /// Keep a localhost listener (IPv4 and IPv6) for every port Docker
 /// containers publish, following the engine's port list.
-async fn expose_docker_ports(vm: VmHandle) {
+async fn expose_docker_ports(vm: VmHandle, publish: super::config::Publish) {
     use http_body_util::BodyExt;
     let listeners: Arc<Mutex<HashMap<u16, Vec<tokio::task::JoinHandle<()>>>>> = Arc::default();
     loop {
@@ -607,7 +646,7 @@ async fn expose_docker_ports(vm: VmHandle) {
                             continue;
                         }
                         let mut tasks = Vec::new();
-                        for addr in [std::net::SocketAddr::from(([127, 0, 0, 1], port)), std::net::SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, port))] {
+                        for addr in [std::net::SocketAddr::from((publish.ipv4(), port)), std::net::SocketAddr::from((publish.ipv6(), port))] {
                             match std::net::TcpListener::bind(addr) {
                                 Ok(l) => {
                                     l.set_nonblocking(true).ok();
@@ -734,7 +773,7 @@ fn wanted_ports(services: &Value) -> Vec<(u16, u16)> {
 
 /// Keep a localhost listener for every NodePort / LoadBalancer port,
 /// following the Services through a watch.
-async fn expose_services(vm: VmHandle, api_port: u16) {
+async fn expose_services(vm: VmHandle, api_port: u16, publish: super::config::Publish) {
     let api = format!("127.0.0.1:{api_port}");
     let listeners: Arc<Mutex<HashMap<u16, tokio::task::JoinHandle<()>>>> = Arc::default();
     loop {
@@ -753,7 +792,7 @@ async fn expose_services(vm: VmHandle, api_port: u16) {
                 if current.contains_key(&host) {
                     continue;
                 }
-                match std::net::TcpListener::bind(("127.0.0.1", host)) {
+                match std::net::TcpListener::bind((publish.ipv4(), host)) {
                     Ok(l) => {
                         l.set_nonblocking(true).ok();
                         current.insert(host, tokio::spawn(forward_accepts(l, vm, node)));
@@ -826,10 +865,11 @@ mod tests {
             cpus: 2,
             port: None,
             mac: random_mac(),
-            extra_shares: vec![("tmp".into(), "/private/tmp".into())],
+            extra_shares: vec![("tmp".into(), "/private/tmp".into()), ("share1".into(), "/Volumes/src".into())],
+            publish_all: false,
         };
         let line = kernel_cmdline(&c, true);
-        assert!(line.contains(" litek8s.share=/Users/me litek8s.mounts=tmp:/private/tmp litek8s.rosetta=1 litek8s.seed="), "{line}");
+        assert!(line.contains(" litek8s.share=/Users/me litek8s.mounts=tmp:/private/tmp,share1:/Volumes/src litek8s.rosetta=1 litek8s.seed="), "{line}");
         assert_eq!(c.mac.len(), 17);
     }
 }

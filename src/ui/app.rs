@@ -1,0 +1,1211 @@
+//! The UI's state and what keys do to it. Nothing here does I/O: a key
+//! changes the state and returns [`Effect`]s the runtime carries out, and
+//! what the backends learn arrives as [`Msg`]s. That keeps all of it
+//! testable without a terminal, Docker or a cluster.
+
+use std::collections::{BTreeSet, VecDeque};
+
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+
+use super::model::{self, Container, Deployment, DiskUsage, Image, Pod, Volume};
+use crate::dev::config::{DevConfig, Publish};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tab {
+    Home,
+    Containers,
+    Images,
+    Volumes,
+    Space,
+    Kube,
+    Settings,
+}
+
+pub const TABS: [Tab; 7] = [Tab::Home, Tab::Containers, Tab::Images, Tab::Volumes, Tab::Space, Tab::Kube, Tab::Settings];
+
+impl Tab {
+    pub fn title(self) -> &'static str {
+        match self {
+            Tab::Home => "Home",
+            Tab::Containers => "Containers",
+            Tab::Images => "Images",
+            Tab::Volumes => "Volumes",
+            Tab::Space => "Free space",
+            Tab::Kube => "Kubernetes",
+            Tab::Settings => "Settings",
+        }
+    }
+
+    fn index(self) -> usize {
+        TABS.iter().position(|t| *t == self).unwrap_or(0)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContainerOp {
+    Start,
+    Stop,
+    Restart,
+    Remove,
+}
+
+impl ContainerOp {
+    pub fn verb(&self) -> &'static str {
+        match self {
+            ContainerOp::Start => "start",
+            ContainerOp::Stop => "stop",
+            ContainerOp::Restart => "restart",
+            ContainerOp::Remove => "remove",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum DevOp {
+    Up,
+    Down,
+    Reset,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LogSource {
+    Container { id: String, name: String },
+    Pod { namespace: String, name: String, container: Option<String> },
+}
+
+/// What the runtime is asked to do.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Effect {
+    Containers(ContainerOp, Vec<String>),
+    RemoveImages(Vec<String>),
+    RemoveVolumes(Vec<String>),
+    PruneContainers,
+    PruneBuildCache,
+    Logs(LogSource),
+    StopLogs,
+    Exec(String),
+    Dev(DevOp),
+    Scale { namespace: String, name: String, replicas: i64 },
+    RestartDeployment { namespace: String, name: String },
+    DeletePod { namespace: String, name: String },
+    PortForward { namespace: String, pod: String, local: u16, remote: u16 },
+    StopForwards,
+    SaveConfig(DevConfig),
+    EditConfig,
+    DockerContext(bool),
+    KubeContext(bool),
+    Refresh,
+    Quit,
+    /// One after the other.
+    Batch(Vec<Effect>),
+}
+
+/// What the backends report.
+#[derive(Debug, Clone)]
+pub enum Msg {
+    Containers(Vec<Container>),
+    Images(Vec<Image>),
+    Volumes(Vec<Volume>),
+    Disk(DiskUsage),
+    DockerInfo { version: String, cpus: Option<u64>, memory: Option<u64>, os: String },
+    DockerDown(String),
+    Pods(Vec<Pod>),
+    Deployments(Vec<Deployment>),
+    Namespaces(Vec<String>),
+    KubeDown(String),
+    Home(Box<HomeSample>),
+    LogLines(u64, Vec<String>),
+    LogEnd(u64, Option<String>),
+    /// A finished action: `Ok(message)` or `Err(error)`.
+    Done(Result<String, String>),
+    /// A line of output of a running `dev up/down/reset`.
+    DevOutput(String),
+    DevFinished(Result<String, String>),
+    Forwards(Vec<Forward>),
+    Config(Result<DevConfig, String>),
+}
+
+/// A running port-forward.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Forward {
+    pub local: u16,
+    pub namespace: String,
+    pub pod: String,
+    pub remote: u16,
+}
+
+/// The dev cluster as the supervisor's state file and API tell it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DevStatus {
+    #[default]
+    Unknown,
+    Down,
+    Starting,
+    Up,
+    Stopping,
+    /// No local dev cluster; the endpoints point elsewhere.
+    Remote,
+}
+
+impl DevStatus {
+    pub fn label(self) -> &'static str {
+        match self {
+            DevStatus::Unknown => "checking",
+            DevStatus::Down => "down",
+            DevStatus::Starting => "starting",
+            DevStatus::Up => "up",
+            DevStatus::Stopping => "stopping",
+            DevStatus::Remote => "remote",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Contexts {
+    pub docker_host_env: Option<String>,
+    pub docker_host_is_litek8s: bool,
+    pub docker_context: String,
+    pub docker_context_is_litek8s: bool,
+    pub kube_context: String,
+    pub kube_is_litek8s: bool,
+    pub kubeconfig: String,
+}
+
+/// One sample of the dev cluster's state and use.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HomeSample {
+    pub status: DevStatus,
+    pub mode: String,
+    pub uptime_s: u64,
+    pub api: String,
+    pub vm_ip: Option<String>,
+    pub cpu_pct: Option<f64>,
+    pub mem_used: Option<u64>,
+    pub disk_used: Option<u64>,
+    pub disk_free: Option<u64>,
+    pub data_dir: String,
+    /// What the running cluster was started with.
+    pub running: Option<crate::dev::DevState>,
+    pub contexts: Contexts,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum InputKind {
+    Filter,
+    Scale { namespace: String, name: String },
+    PortForward { namespace: String, pod: String },
+    Setting(Field),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Field {
+    Cpus,
+    Memory,
+    Shares,
+    Port,
+    Publish,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Overlay {
+    None,
+    Help,
+    Confirm { title: String, lines: Vec<String>, effect: Effect },
+    Input { prompt: String, value: String, kind: InputKind, error: Option<String> },
+}
+
+pub struct LogView {
+    pub id: u64,
+    pub title: String,
+    pub lines: VecDeque<String>,
+    pub follow: bool,
+    /// Lines up from the bottom when not following.
+    pub offset: usize,
+    pub ended: Option<String>,
+    pub wrap: bool,
+}
+
+pub const LOG_LINES: usize = 5000;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CRow {
+    Group { name: String, count: usize, running: usize, collapsed: bool },
+    Item(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KubeView {
+    Pods,
+    Deployments,
+}
+
+/// A reclaimable category of the free-space view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Reclaim {
+    StoppedContainers,
+    DanglingImages,
+    UnusedImages,
+    BuildCache,
+    UnusedVolumes,
+}
+
+pub const RECLAIMS: [Reclaim; 5] = [Reclaim::StoppedContainers, Reclaim::DanglingImages, Reclaim::BuildCache, Reclaim::UnusedImages, Reclaim::UnusedVolumes];
+
+impl Reclaim {
+    pub fn title(self) -> &'static str {
+        match self {
+            Reclaim::StoppedContainers => "Stopped containers",
+            Reclaim::DanglingImages => "Dangling images (untagged, unused)",
+            Reclaim::UnusedImages => "Unused images (no container or pod)",
+            Reclaim::BuildCache => "Build cache",
+            Reclaim::UnusedVolumes => "Unused volumes (data is lost)",
+        }
+    }
+}
+
+pub struct App {
+    pub tab: Tab,
+    pub overlay: Overlay,
+    pub logs: Option<LogView>,
+    next_log: u64,
+    pub status: Option<(String, bool)>,
+    pub now: i64,
+    pub docker_endpoint: String,
+    pub kube_endpoint: String,
+    pub kube_context: String,
+
+    pub docker_error: Option<String>,
+    pub docker_version: String,
+    pub docker_os: String,
+    pub vm_cpus: Option<u64>,
+    pub vm_memory: Option<u64>,
+    pub containers: Vec<Container>,
+    pub images: Vec<Image>,
+    pub volumes: Vec<Volume>,
+    pub disk: DiskUsage,
+    pub collapsed: BTreeSet<String>,
+
+    pub kube_error: Option<String>,
+    pub pods: Vec<Pod>,
+    pub deployments: Vec<Deployment>,
+    pub namespaces: Vec<String>,
+    /// `None`: all namespaces.
+    pub namespace: Option<String>,
+    pub kube_view: KubeView,
+    pub forwards: Vec<Forward>,
+
+    pub home: HomeSample,
+    pub dev_busy: Option<DevOp>,
+    pub dev_output: VecDeque<String>,
+
+    pub config: DevConfig,
+    pub config_error: Option<String>,
+    pub config_path: String,
+
+    pub selected: [usize; 7],
+    pub filters: [String; 7],
+    pub space_checked: BTreeSet<Reclaim>,
+    pub mouse: bool,
+    /// Screen rows of the current list's first row and tab titles' spans
+    /// (for mouse clicks), set while drawing.
+    pub list_top: std::cell::Cell<u16>,
+    /// The first list row on screen (the table scrolls with the selection).
+    pub list_offset: std::cell::Cell<usize>,
+    pub tab_spans: std::cell::RefCell<Vec<(u16, u16)>>,
+}
+
+impl App {
+    pub fn new(docker_endpoint: String, kube_endpoint: String, kube_context: String) -> Self {
+        App {
+            tab: Tab::Home,
+            overlay: Overlay::None,
+            logs: None,
+            next_log: 1,
+            status: None,
+            now: chrono::Utc::now().timestamp(),
+            docker_endpoint,
+            kube_endpoint,
+            kube_context,
+            docker_error: None,
+            docker_version: String::new(),
+            docker_os: String::new(),
+            vm_cpus: None,
+            vm_memory: None,
+            containers: Vec::new(),
+            images: Vec::new(),
+            volumes: Vec::new(),
+            disk: DiskUsage::default(),
+            collapsed: BTreeSet::new(),
+            kube_error: None,
+            pods: Vec::new(),
+            deployments: Vec::new(),
+            namespaces: Vec::new(),
+            namespace: None,
+            kube_view: KubeView::Pods,
+            forwards: Vec::new(),
+            home: HomeSample::default(),
+            dev_busy: None,
+            dev_output: VecDeque::new(),
+            config: DevConfig::default(),
+            config_error: None,
+            config_path: crate::dev::config::path().display().to_string(),
+            selected: [0; 7],
+            filters: Default::default(),
+            space_checked: [Reclaim::StoppedContainers, Reclaim::DanglingImages, Reclaim::BuildCache].into_iter().collect(),
+            mouse: false,
+            list_top: std::cell::Cell::new(0),
+            list_offset: std::cell::Cell::new(0),
+            tab_spans: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    pub fn filter(&self) -> &str {
+        &self.filters[self.tab.index()]
+    }
+
+    fn matches(&self, text: &[&str]) -> bool {
+        let f = self.filter().to_lowercase();
+        f.is_empty() || text.iter().any(|t| t.to_lowercase().contains(&f))
+    }
+
+    pub fn sel(&self) -> usize {
+        self.selected[self.tab.index()]
+    }
+
+    // ---- what each list shows ----
+
+    pub fn container_rows(&self) -> Vec<CRow> {
+        let visible: Vec<usize> = (0..self.containers.len())
+            .filter(|&i| {
+                let c = &self.containers[i];
+                self.matches(&[&c.name, &c.image, c.project.as_deref().unwrap_or(""), &c.state])
+            })
+            .collect();
+        let mut rows: Vec<CRow> = visible.iter().filter(|&&i| self.containers[i].project.is_none()).map(|&i| CRow::Item(i)).collect();
+        let mut projects: Vec<&str> = visible.iter().filter_map(|&i| self.containers[i].project.as_deref()).collect();
+        projects.dedup();
+        for p in projects {
+            let members: Vec<usize> = visible.iter().copied().filter(|&i| self.containers[i].project.as_deref() == Some(p)).collect();
+            let collapsed = self.collapsed.contains(p);
+            rows.push(CRow::Group { name: p.to_string(), count: members.len(), running: members.iter().filter(|&&i| self.containers[i].running()).count(), collapsed });
+            if !collapsed {
+                rows.extend(members.into_iter().map(CRow::Item));
+            }
+        }
+        rows
+    }
+
+    pub fn visible_images(&self) -> Vec<usize> {
+        (0..self.images.len()).filter(|&i| self.matches(&[&self.images[i].name(), self.images[i].short_id()])).collect()
+    }
+
+    pub fn visible_volumes(&self) -> Vec<usize> {
+        (0..self.volumes.len()).filter(|&i| self.matches(&[&self.volumes[i].name, self.volumes[i].project.as_deref().unwrap_or("")])).collect()
+    }
+
+    pub fn visible_pods(&self) -> Vec<usize> {
+        (0..self.pods.len())
+            .filter(|&i| {
+                let p = &self.pods[i];
+                self.namespace.as_ref().is_none_or(|n| *n == p.namespace) && self.matches(&[&p.name, &p.status])
+            })
+            .collect()
+    }
+
+    pub fn visible_deployments(&self) -> Vec<usize> {
+        (0..self.deployments.len())
+            .filter(|&i| {
+                let d = &self.deployments[i];
+                self.namespace.as_ref().is_none_or(|n| *n == d.namespace) && self.matches(&[&d.name])
+            })
+            .collect()
+    }
+
+    /// Bytes and items each free-space category would reclaim.
+    pub fn reclaimable(&self, r: Reclaim) -> (u64, usize) {
+        match r {
+            Reclaim::StoppedContainers => {
+                let stopped: Vec<&Container> = self.containers.iter().filter(|c| !c.running()).collect();
+                (stopped.iter().map(|c| self.disk.container_sizes.get(&c.id).copied().or(c.size_rw).unwrap_or(0)).sum(), stopped.len())
+            }
+            Reclaim::DanglingImages => {
+                let imgs: Vec<&Image> = self.images.iter().filter(|i| i.dangling() && i.unused()).collect();
+                (imgs.iter().map(|i| i.size).sum(), imgs.len())
+            }
+            Reclaim::UnusedImages => {
+                let imgs: Vec<&Image> = self.images.iter().filter(|i| !i.dangling() && i.unused()).collect();
+                (imgs.iter().map(|i| i.size).sum(), imgs.len())
+            }
+            Reclaim::BuildCache => (self.disk.build_cache, self.disk.build_cache_records),
+            Reclaim::UnusedVolumes => {
+                let vols: Vec<&Volume> = self.volumes.iter().filter(|v| v.users.is_empty()).collect();
+                (vols.iter().map(|v| v.size.unwrap_or(0)).sum(), vols.len())
+            }
+        }
+    }
+
+    fn prune_effects(&self) -> Vec<Effect> {
+        let mut out = Vec::new();
+        for r in &self.space_checked {
+            if self.reclaimable(*r).1 == 0 {
+                continue;
+            }
+            out.push(match r {
+                Reclaim::StoppedContainers => Effect::PruneContainers,
+                Reclaim::DanglingImages => Effect::RemoveImages(self.images.iter().filter(|i| i.dangling() && i.unused()).map(|i| i.id.clone()).collect()),
+                Reclaim::UnusedImages => Effect::RemoveImages(self.images.iter().filter(|i| !i.dangling() && i.unused()).map(|i| i.id.clone()).collect()),
+                Reclaim::BuildCache => Effect::PruneBuildCache,
+                Reclaim::UnusedVolumes => Effect::RemoveVolumes(self.volumes.iter().filter(|v| v.users.is_empty()).map(|v| v.name.clone()).collect()),
+            });
+        }
+        out
+    }
+
+    pub fn list_len(&self) -> usize {
+        match self.tab {
+            Tab::Home => 0,
+            Tab::Containers => self.container_rows().len(),
+            Tab::Images => self.visible_images().len(),
+            Tab::Volumes => self.visible_volumes().len(),
+            Tab::Space => RECLAIMS.len(),
+            Tab::Kube => match self.kube_view {
+                KubeView::Pods => self.visible_pods().len(),
+                KubeView::Deployments => self.visible_deployments().len(),
+            },
+            Tab::Settings => SETTINGS.len(),
+        }
+    }
+
+    fn clamp(&mut self) {
+        let len = self.list_len();
+        let i = self.tab.index();
+        if self.selected[i] >= len {
+            self.selected[i] = len.saturating_sub(1);
+        }
+    }
+
+    fn move_sel(&mut self, delta: isize) {
+        let len = self.list_len();
+        if len == 0 {
+            return;
+        }
+        let i = self.tab.index();
+        self.selected[i] = (self.selected[i] as isize + delta).clamp(0, len as isize - 1) as usize;
+    }
+
+    pub fn selected_container(&self) -> Option<&Container> {
+        match self.container_rows().get(self.sel())? {
+            CRow::Item(i) => self.containers.get(*i),
+            CRow::Group { .. } => None,
+        }
+    }
+
+    /// The containers the selection stands for: one, or a whole project.
+    fn selected_containers(&self) -> (String, Vec<&Container>) {
+        match self.container_rows().get(self.sel()) {
+            Some(CRow::Item(i)) => {
+                let c = &self.containers[*i];
+                (c.name.clone(), vec![c])
+            }
+            Some(CRow::Group { name, .. }) => (format!("project {name}"), self.containers.iter().filter(|c| c.project.as_deref() == Some(name)).collect()),
+            None => (String::new(), Vec::new()),
+        }
+    }
+
+    pub fn selected_image(&self) -> Option<&Image> {
+        self.visible_images().get(self.sel()).map(|&i| &self.images[i])
+    }
+
+    pub fn selected_volume(&self) -> Option<&Volume> {
+        self.visible_volumes().get(self.sel()).map(|&i| &self.volumes[i])
+    }
+
+    pub fn selected_pod(&self) -> Option<&Pod> {
+        self.visible_pods().get(self.sel()).map(|&i| &self.pods[i])
+    }
+
+    pub fn selected_deployment(&self) -> Option<&Deployment> {
+        self.visible_deployments().get(self.sel()).map(|&i| &self.deployments[i])
+    }
+
+    /// Settings that differ from what the running cluster started with.
+    pub fn restart_needed(&self) -> Vec<&'static str> {
+        let Some(state) = &self.home.running else { return Vec::new() };
+        let mut out = Vec::new();
+        if self.config.port.is_some_and(|p| p != state.port) {
+            out.push("port");
+        }
+        if state.publish.as_deref().unwrap_or("localhost") != self.config.publish.as_str() {
+            out.push("published ports");
+        }
+        if state.mode != "vm" {
+            // Linux: limits on the sandbox, none unless set.
+            if state.cpus != self.config.cpus {
+                out.push("CPUs");
+            }
+            if state.memory_mib != self.config.memory {
+                out.push("memory");
+            }
+        } else {
+            if state.cpus.is_some_and(|c| c != self.config.cpus.unwrap_or_else(crate::dev::config::default_cpus)) {
+                out.push("CPUs");
+            }
+            if state.memory_mib.is_some_and(|m| m != self.config.memory.unwrap_or(crate::dev::config::DEFAULT_MEMORY_MIB)) {
+                out.push("memory");
+            }
+            let canon = |p: &std::path::PathBuf| p.canonicalize().unwrap_or_else(|_| p.clone());
+            let want: Vec<_> = self.config.effective_shares().iter().map(canon).collect();
+            let have: Vec<_> = state.shares.iter().map(canon).collect();
+            if !have.is_empty() && want != have {
+                out.push("shared directories");
+            }
+        }
+        out
+    }
+
+    pub fn setting_value(&self, f: Field) -> String {
+        match f {
+            Field::Cpus => self.config.cpus.map(|c| c.to_string()).unwrap_or_default(),
+            Field::Memory => self.config.memory.map(|c| c.to_string()).unwrap_or_default(),
+            Field::Shares => self.config.shares.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "),
+            Field::Port => self.config.port.map(|c| c.to_string()).unwrap_or_default(),
+            Field::Publish => self.config.publish.as_str().to_string(),
+        }
+    }
+
+    /// The settings with `f` set from `value`, validated.
+    pub fn with_setting(&self, f: Field, value: &str) -> Result<DevConfig, String> {
+        let mut c = self.config.clone();
+        let v = value.trim();
+        let num = |what: &str| -> Result<Option<u64>, String> { if v.is_empty() { Ok(None) } else { v.parse::<u64>().map(Some).map_err(|_| format!("{what} must be a number")) } };
+        match f {
+            Field::Cpus => c.cpus = num("CPUs")?.map(|n| n as usize),
+            Field::Memory => c.memory = num("memory")?,
+            Field::Port => c.port = num("port")?.map(|n| u16::try_from(n).map_err(|_| "port must be at most 65535".to_string())).transpose()?,
+            Field::Shares => {
+                c.shares = v
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| {
+                        let home = || std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+                        match s.strip_prefix("~/") {
+                            Some(rest) => home().join(rest),
+                            None if s == "~" => home(),
+                            None => std::path::PathBuf::from(s),
+                        }
+                    })
+                    .collect()
+            }
+            Field::Publish => c.publish = Publish::parse(v).map_err(|e| e.to_string())?,
+        }
+        let problems = c.problems();
+        if problems.is_empty() { Ok(c) } else { Err(problems.join("; ")) }
+    }
+
+    pub fn flash(&mut self, text: impl Into<String>, error: bool) {
+        self.status = Some((text.into(), error));
+    }
+
+    // ---- messages ----
+
+    pub fn apply(&mut self, msg: Msg) {
+        match msg {
+            Msg::Containers(c) => {
+                self.docker_error = None;
+                self.containers = c;
+                self.relink();
+            }
+            Msg::Images(i) => {
+                self.images = i;
+                self.relink();
+            }
+            Msg::Volumes(v) => {
+                self.volumes = v;
+                self.relink();
+            }
+            Msg::Disk(d) => {
+                self.disk = d;
+                self.relink();
+            }
+            Msg::DockerInfo { version, cpus, memory, os } => {
+                self.docker_version = version;
+                self.vm_cpus = cpus;
+                self.vm_memory = memory;
+                self.docker_os = os;
+            }
+            Msg::DockerDown(e) => {
+                self.docker_error = Some(e);
+                self.vm_cpus = None;
+                self.vm_memory = None;
+                self.docker_version.clear();
+                self.containers.clear();
+                self.images.clear();
+                self.volumes.clear();
+                self.disk = DiskUsage::default();
+            }
+            Msg::Pods(p) => {
+                self.kube_error = None;
+                self.pods = p;
+                self.relink();
+            }
+            Msg::Deployments(d) => self.deployments = d,
+            Msg::Namespaces(n) => {
+                self.namespaces = n;
+                if self.namespace.as_ref().is_some_and(|ns| !self.namespaces.contains(ns)) {
+                    self.namespace = None;
+                }
+            }
+            Msg::KubeDown(e) => {
+                self.kube_error = Some(e);
+                self.pods.clear();
+                self.deployments.clear();
+                self.relink();
+            }
+            Msg::Home(sample) => {
+                let mut sample = *sample;
+                if let Some(op) = self.dev_busy {
+                    sample.status = match op {
+                        DevOp::Up => DevStatus::Starting,
+                        DevOp::Down | DevOp::Reset => DevStatus::Stopping,
+                    };
+                }
+                self.home = sample;
+            }
+            Msg::LogLines(id, lines) => {
+                if let Some(v) = self.logs.as_mut().filter(|v| v.id == id) {
+                    let added = lines.len();
+                    v.lines.extend(lines);
+                    while v.lines.len() > LOG_LINES {
+                        v.lines.pop_front();
+                    }
+                    if !v.follow {
+                        v.offset = (v.offset + added).min(v.lines.len());
+                    }
+                }
+            }
+            Msg::LogEnd(id, err) => {
+                if let Some(v) = self.logs.as_mut().filter(|v| v.id == id) {
+                    v.ended = Some(err.unwrap_or_else(|| "stream ended".into()));
+                }
+            }
+            Msg::Done(Ok(m)) => self.flash(m, false),
+            Msg::Done(Err(e)) => self.flash(e, true),
+            Msg::DevOutput(line) => {
+                self.dev_output.push_back(line);
+                while self.dev_output.len() > 50 {
+                    self.dev_output.pop_front();
+                }
+            }
+            Msg::DevFinished(r) => {
+                self.dev_busy = None;
+                match r {
+                    Ok(m) => self.flash(m, false),
+                    Err(e) => self.flash(e, true),
+                }
+            }
+            Msg::Forwards(f) => self.forwards = f,
+            Msg::Config(Ok(c)) => {
+                self.config = c;
+                self.config_error = None;
+            }
+            Msg::Config(Err(e)) => self.config_error = Some(e),
+        }
+        self.clamp();
+    }
+
+    fn relink(&mut self) {
+        model::link_images(&mut self.images, &self.containers, &self.pods);
+        model::link_volumes(&mut self.volumes, &self.disk, &self.containers);
+    }
+
+    fn open_logs(&mut self, source: LogSource) -> Vec<Effect> {
+        let title = match &source {
+            LogSource::Container { name, .. } => format!("logs: {name}"),
+            LogSource::Pod { namespace, name, container } => match container {
+                Some(c) => format!("logs: {namespace}/{name} [{c}]"),
+                None => format!("logs: {namespace}/{name}"),
+            },
+        };
+        let id = self.next_log;
+        self.next_log += 1;
+        self.logs = Some(LogView { id, title, lines: VecDeque::new(), follow: true, offset: 0, ended: None, wrap: false });
+        vec![Effect::Logs(source)]
+    }
+
+    /// The id of the log view's stream (the runtime tags lines with it).
+    pub fn log_id(&self) -> Option<u64> {
+        self.logs.as_ref().map(|l| l.id)
+    }
+
+    fn confirm(&mut self, title: impl Into<String>, lines: Vec<String>, effect: Effect) {
+        self.overlay = Overlay::Confirm { title: title.into(), lines, effect };
+    }
+
+    fn input(&mut self, prompt: impl Into<String>, value: String, kind: InputKind) {
+        self.overlay = Overlay::Input { prompt: prompt.into(), value, kind, error: None };
+    }
+
+    // ---- keys ----
+
+    pub fn key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+            return vec![Effect::Quit];
+        }
+        match std::mem::replace(&mut self.overlay, Overlay::None) {
+            Overlay::None => {}
+            Overlay::Help => {
+                // Any key closes the help.
+                return Vec::new();
+            }
+            Overlay::Confirm { title, lines, effect } => {
+                return match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                        if let Effect::Dev(op) = effect {
+                            self.dev_busy = Some(op);
+                            self.dev_output.clear();
+                            self.home.status = DevStatus::Stopping;
+                        }
+                        vec![effect]
+                    }
+                    KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') => Vec::new(),
+                    _ => {
+                        self.overlay = Overlay::Confirm { title, lines, effect };
+                        Vec::new()
+                    }
+                };
+            }
+            Overlay::Input { prompt, mut value, kind, error } => {
+                match key.code {
+                    KeyCode::Esc => {
+                        if kind == InputKind::Filter {
+                            self.filters[self.tab.index()].clear();
+                        }
+                        return Vec::new();
+                    }
+                    KeyCode::Enter => return self.submit(prompt, value, kind),
+                    KeyCode::Backspace => {
+                        value.pop();
+                    }
+                    KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => value.clear(),
+                    KeyCode::Char(c) => value.push(c),
+                    _ => {}
+                }
+                if kind == InputKind::Filter {
+                    self.filters[self.tab.index()] = value.clone();
+                    self.clamp();
+                }
+                self.overlay = Overlay::Input { prompt, value, kind, error: if key.code == KeyCode::Enter { error } else { None } };
+                return Vec::new();
+            }
+        }
+        if self.logs.is_some() {
+            return self.log_key(key);
+        }
+        match key.code {
+            KeyCode::Char('q') => return vec![Effect::Quit],
+            KeyCode::Char('?') | KeyCode::F(1) => self.overlay = Overlay::Help,
+            KeyCode::Char(c @ '1'..='7') => self.tab = TABS[c as usize - '1' as usize],
+            KeyCode::Tab => self.tab = TABS[(self.tab.index() + 1) % TABS.len()],
+            KeyCode::BackTab => self.tab = TABS[(self.tab.index() + TABS.len() - 1) % TABS.len()],
+            KeyCode::Down | KeyCode::Char('j') => self.move_sel(1),
+            KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1),
+            KeyCode::PageDown => self.move_sel(10),
+            KeyCode::PageUp => self.move_sel(-10),
+            KeyCode::Home | KeyCode::Char('g') => self.move_sel(-(self.list_len() as isize)),
+            KeyCode::End | KeyCode::Char('G') => self.move_sel(self.list_len() as isize),
+            KeyCode::Char('/') if self.tab != Tab::Home && self.tab != Tab::Settings && self.tab != Tab::Space => {
+                let current = self.filter().to_string();
+                self.input("filter", current, InputKind::Filter);
+            }
+            KeyCode::Esc if !self.filter().is_empty() => {
+                self.filters[self.tab.index()].clear();
+                self.clamp();
+            }
+            KeyCode::Char('r') if key.modifiers.contains(KeyModifiers::CONTROL) => return vec![Effect::Refresh],
+            _ => return self.tab_key(key),
+        }
+        Vec::new()
+    }
+
+    fn log_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        let Some(v) = self.logs.as_mut() else { return Vec::new() };
+        let len = v.lines.len();
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.logs = None;
+                return vec![Effect::StopLogs];
+            }
+            KeyCode::Char('f') => {
+                v.follow = !v.follow;
+                v.offset = 0;
+            }
+            KeyCode::Char('w') => v.wrap = !v.wrap,
+            KeyCode::Up | KeyCode::Char('k') => {
+                v.follow = false;
+                v.offset = (v.offset + 1).min(len);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                v.offset = v.offset.saturating_sub(1);
+                v.follow = v.offset == 0;
+            }
+            KeyCode::PageUp => {
+                v.follow = false;
+                v.offset = (v.offset + 20).min(len);
+            }
+            KeyCode::PageDown => {
+                v.offset = v.offset.saturating_sub(20);
+                v.follow = v.offset == 0;
+            }
+            KeyCode::Char('g') | KeyCode::Home => {
+                v.follow = false;
+                v.offset = len;
+            }
+            KeyCode::Char('G') | KeyCode::End => {
+                v.follow = true;
+                v.offset = 0;
+            }
+            KeyCode::Char('c') => v.lines.clear(),
+            KeyCode::Char('?') => self.overlay = Overlay::Help,
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn tab_key(&mut self, key: KeyEvent) -> Vec<Effect> {
+        let code = key.code;
+        match self.tab {
+            Tab::Home => match code {
+                KeyCode::Char('u') if self.dev_busy.is_none() => {
+                    self.dev_busy = Some(DevOp::Up);
+                    self.dev_output.clear();
+                    self.home.status = DevStatus::Starting;
+                    return vec![Effect::Dev(DevOp::Up)];
+                }
+                KeyCode::Char('d') if self.dev_busy.is_none() => {
+                    let n = self.containers.iter().filter(|c| c.running()).count();
+                    let mut lines = vec!["Stops the cluster, its pods and Docker containers.".to_string(), "Objects, images and volumes are kept for the next `up`.".to_string()];
+                    if n > 0 {
+                        lines.push(format!("{n} running container(s) will stop."));
+                    }
+                    self.confirm("Stop the dev cluster?", lines, Effect::Dev(DevOp::Down));
+                }
+                KeyCode::Char('R') if self.dev_busy.is_none() => self.confirm(
+                    "Reset the dev cluster?",
+                    vec![
+                        "Stops the cluster and DELETES all its data:".into(),
+                        "Kubernetes objects, pods, Docker containers, images, volumes".into(),
+                        format!("and the build cache, in {}.", if self.home.data_dir.is_empty() { "the dev data directory" } else { &self.home.data_dir }),
+                        "The kubectl context litek8s-dev is removed. This cannot be undone.".into(),
+                    ],
+                    Effect::Dev(DevOp::Reset),
+                ),
+                _ => {}
+            },
+            Tab::Containers => return self.containers_key(code),
+            Tab::Images => {
+                if matches!(code, KeyCode::Char('d') | KeyCode::Delete) {
+                    if let Some(img) = self.selected_image() {
+                        let mut lines = vec![format!("{} ({}, {})", img.name(), img.short_id(), model::bytes(img.size))];
+                        if !img.containers.is_empty() {
+                            lines.push(format!("Used by containers: {}", img.containers.join(", ")));
+                            lines.push("Remove those containers first.".into());
+                        }
+                        if !img.pods.is_empty() {
+                            lines.push(format!("Used by pods: {} (they will pull it again)", img.pods.join(", ")));
+                        }
+                        let id = img.id.clone();
+                        self.confirm("Remove image?", lines, Effect::RemoveImages(vec![id]));
+                    }
+                }
+            }
+            Tab::Volumes => {
+                if matches!(code, KeyCode::Char('d') | KeyCode::Delete) {
+                    if let Some(v) = self.selected_volume() {
+                        let mut lines = vec![format!("{} ({})", v.name, v.size.map(model::bytes).unwrap_or_else(|| "size unknown".into())), "Its data is deleted.".into()];
+                        if !v.users.is_empty() {
+                            lines.push(format!("In use by: {} (remove them first)", v.users.join(", ")));
+                        }
+                        let name = v.name.clone();
+                        self.confirm("Remove volume?", lines, Effect::RemoveVolumes(vec![name]));
+                    }
+                }
+            }
+            Tab::Space => match code {
+                KeyCode::Char(' ') | KeyCode::Char('x') => {
+                    let r = RECLAIMS[self.sel().min(RECLAIMS.len() - 1)];
+                    if !self.space_checked.remove(&r) {
+                        self.space_checked.insert(r);
+                    }
+                }
+                KeyCode::Char('p') | KeyCode::Enter => {
+                    let effects = self.prune_effects();
+                    if effects.is_empty() {
+                        self.flash("nothing to reclaim in the selected categories", false);
+                    } else {
+                        let mut lines: Vec<String> = Vec::new();
+                        let mut total = 0;
+                        for r in &self.space_checked {
+                            let (b, n) = self.reclaimable(*r);
+                            if n > 0 {
+                                total += b;
+                                lines.push(format!("{}: {n} ({})", r.title(), model::bytes(b)));
+                            }
+                        }
+                        lines.push(format!("About {} freed. This cannot be undone.", model::bytes(total)));
+                        self.confirm("Free space?", lines, Effect::Batch(effects));
+                    }
+                }
+                _ => {}
+            },
+            Tab::Kube => return self.kube_key(code),
+            Tab::Settings => return self.settings_key(code),
+        }
+        Vec::new()
+    }
+
+    fn containers_key(&mut self, code: KeyCode) -> Vec<Effect> {
+        let (what, list) = self.selected_containers();
+        if list.is_empty() {
+            return Vec::new();
+        }
+        let ids: Vec<String> = list.iter().map(|c| c.id.clone()).collect();
+        let single = self.selected_container().cloned();
+        match code {
+            KeyCode::Enter | KeyCode::Char(' ') if single.is_none() => {
+                if let Some(CRow::Group { name, .. }) = self.container_rows().get(self.sel()) {
+                    let name = name.clone();
+                    if !self.collapsed.remove(&name) {
+                        self.collapsed.insert(name);
+                    }
+                }
+            }
+            KeyCode::Enter | KeyCode::Char('l') => {
+                if let Some(c) = single {
+                    return self.open_logs(LogSource::Container { id: c.id, name: c.name });
+                }
+            }
+            KeyCode::Char('s') | KeyCode::Char('e') => match single {
+                Some(c) if c.state == "running" => return vec![Effect::Exec(c.id)],
+                Some(c) => self.flash(format!("{} is not running", c.name), true),
+                None => {}
+            },
+            KeyCode::Char('u') => return vec![Effect::Containers(ContainerOp::Start, ids)],
+            KeyCode::Char('x') => self.confirm(format!("Stop {what}?"), list_lines(&list), Effect::Containers(ContainerOp::Stop, ids)),
+            KeyCode::Char('r') => self.confirm(format!("Restart {what}?"), list_lines(&list), Effect::Containers(ContainerOp::Restart, ids)),
+            KeyCode::Char('d') | KeyCode::Delete => {
+                let mut lines = list_lines(&list);
+                if list.iter().any(|c| c.running()) {
+                    lines.push("Running containers are stopped first.".into());
+                }
+                lines.push("Their files outside volumes are deleted.".into());
+                self.confirm(format!("Remove {what}?"), lines, Effect::Containers(ContainerOp::Remove, ids));
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn kube_key(&mut self, code: KeyCode) -> Vec<Effect> {
+        match code {
+            KeyCode::Char('p') => self.kube_view = KubeView::Pods,
+            KeyCode::Char('D') => self.kube_view = KubeView::Deployments,
+            KeyCode::Left | KeyCode::Right | KeyCode::Char('v') => {
+                self.kube_view = if self.kube_view == KubeView::Pods { KubeView::Deployments } else { KubeView::Pods };
+                self.clamp();
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                // Cycle: all → each namespace → all.
+                let mut all: Vec<Option<String>> = vec![None];
+                all.extend(self.namespaces.iter().cloned().map(Some));
+                let pos = all.iter().position(|n| *n == self.namespace).unwrap_or(0);
+                let next = if code == KeyCode::Char('n') { (pos + 1) % all.len() } else { (pos + all.len() - 1) % all.len() };
+                self.namespace = all[next].clone();
+                self.clamp();
+            }
+            KeyCode::Char('a') => {
+                self.namespace = None;
+                self.clamp();
+            }
+            KeyCode::Char('X') if !self.forwards.is_empty() => return vec![Effect::StopForwards],
+            _ => {}
+        }
+        match self.kube_view {
+            KubeView::Pods => {
+                let Some(p) = self.selected_pod().cloned() else { return Vec::new() };
+                match code {
+                    KeyCode::Enter | KeyCode::Char('l') => {
+                        let container = (p.containers.len() > 1).then(|| p.containers[0].clone());
+                        return self.open_logs(LogSource::Pod { namespace: p.namespace, name: p.name, container });
+                    }
+                    KeyCode::Char('f') => {
+                        let port = p.ports.first().copied().unwrap_or(8080);
+                        let local = if port < 1024 { port as u32 + 8000 } else { port as u32 };
+                        self.input(format!("port-forward {}/{} (local:pod)", p.namespace, p.name), format!("{local}:{port}"), InputKind::PortForward { namespace: p.namespace, pod: p.name });
+                    }
+                    KeyCode::Char('d') | KeyCode::Delete => {
+                        let mut lines = vec![format!("{}/{} ({})", p.namespace, p.name, p.status)];
+                        if let Some(o) = &p.owner {
+                            lines.push(format!("Owned by {o}: a new pod replaces it."));
+                        }
+                        self.confirm("Delete pod?", lines, Effect::DeletePod { namespace: p.namespace, name: p.name });
+                    }
+                    _ => {}
+                }
+            }
+            KubeView::Deployments => {
+                let Some(d) = self.selected_deployment().cloned() else { return Vec::new() };
+                match code {
+                    KeyCode::Char('s') | KeyCode::Char('S') => self.input(format!("scale {}/{} to", d.namespace, d.name), d.desired.to_string(), InputKind::Scale { namespace: d.namespace, name: d.name }),
+                    KeyCode::Char('r') => self.confirm(
+                        format!("Restart {}/{}?", d.namespace, d.name),
+                        vec!["A rollout replaces its pods one by one.".into()],
+                        Effect::RestartDeployment { namespace: d.namespace, name: d.name },
+                    ),
+                    KeyCode::Enter | KeyCode::Char('l') => {
+                        // The logs of its first pod.
+                        let pod = self.pods.iter().find(|p| p.namespace == d.namespace && !d.selector.is_empty() && p.owner.as_ref().is_some_and(|o| o.starts_with(&format!("{}-", d.name))));
+                        if let Some(p) = pod.cloned() {
+                            return self.open_logs(LogSource::Pod { namespace: p.namespace, name: p.name, container: None });
+                        }
+                        self.flash(format!("{} has no pods", d.name), true);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    fn settings_key(&mut self, code: KeyCode) -> Vec<Effect> {
+        let row = SETTINGS[self.sel().min(SETTINGS.len() - 1)];
+        match (code, row) {
+            (KeyCode::Enter | KeyCode::Char('e'), Setting::Field(Field::Publish)) | (KeyCode::Char(' '), Setting::Field(Field::Publish)) => {
+                let mut c = self.config.clone();
+                c.publish = if c.publish == Publish::All { Publish::Localhost } else { Publish::All };
+                return vec![Effect::SaveConfig(c)];
+            }
+            (KeyCode::Enter | KeyCode::Char('e'), Setting::Field(f)) => {
+                let value = self.setting_value(f);
+                self.input(field_prompt(f), value, InputKind::Setting(f));
+            }
+            (KeyCode::Backspace | KeyCode::Delete, Setting::Field(f)) => {
+                // Back to the default.
+                if let Ok(c) = self.with_setting(f, if f == Field::Publish { "localhost" } else { "" }) {
+                    return vec![Effect::SaveConfig(c)];
+                }
+            }
+            (KeyCode::Enter | KeyCode::Char(' '), Setting::DockerContext) => return vec![Effect::DockerContext(!self.home.contexts.docker_context_is_litek8s)],
+            (KeyCode::Enter | KeyCode::Char(' '), Setting::KubeContext) => return vec![Effect::KubeContext(!self.home.contexts.kube_is_litek8s)],
+            (KeyCode::Enter | KeyCode::Char('e'), Setting::EditFile) => return vec![Effect::EditConfig],
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn submit(&mut self, prompt: String, value: String, kind: InputKind) -> Vec<Effect> {
+        let fail = |app: &mut App, e: String| {
+            app.overlay = Overlay::Input { prompt: prompt.clone(), value: value.clone(), kind: kind.clone(), error: Some(e) };
+            Vec::new()
+        };
+        match &kind {
+            InputKind::Filter => Vec::new(),
+            InputKind::Scale { namespace, name } => match value.trim().parse::<i64>() {
+                Ok(n) if (0..=1000).contains(&n) => vec![Effect::Scale { namespace: namespace.clone(), name: name.clone(), replicas: n }],
+                _ => fail(self, "replicas: a number from 0 to 1000".into()),
+            },
+            InputKind::PortForward { namespace, pod } => {
+                let parsed = match value.trim().split_once(':') {
+                    Some((l, r)) => l.trim().parse::<u16>().ok().zip(r.trim().parse::<u16>().ok()),
+                    None => value.trim().parse::<u16>().ok().map(|p| (p, p)),
+                };
+                match parsed {
+                    Some((local, remote)) if local > 0 && remote > 0 => vec![Effect::PortForward { namespace: namespace.clone(), pod: pod.clone(), local, remote }],
+                    _ => fail(self, "local:pod, e.g. 8080:80".into()),
+                }
+            }
+            InputKind::Setting(f) => match self.with_setting(*f, &value) {
+                Ok(c) => vec![Effect::SaveConfig(c)],
+                Err(e) => fail(self, e),
+            },
+        }
+    }
+
+    // ---- mouse ----
+
+    pub fn mouse(&mut self, ev: MouseEvent) -> Vec<Effect> {
+        if self.overlay != Overlay::None {
+            return Vec::new();
+        }
+        match ev.kind {
+            MouseEventKind::ScrollDown => {
+                if self.logs.is_some() {
+                    return self.log_key(KeyEvent::from(KeyCode::Down));
+                }
+                self.move_sel(3);
+            }
+            MouseEventKind::ScrollUp => {
+                if self.logs.is_some() {
+                    return self.log_key(KeyEvent::from(KeyCode::Up));
+                }
+                self.move_sel(-3);
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                if ev.row == 0 {
+                    let spans = self.tab_spans.borrow().clone();
+                    if let Some(i) = spans.iter().position(|(a, b)| ev.column >= *a && ev.column < *b) {
+                        self.tab = TABS[i];
+                    }
+                    return Vec::new();
+                }
+                let top = self.list_top.get();
+                if self.logs.is_none() && top > 0 && ev.row >= top {
+                    let i = (ev.row - top) as usize + self.list_offset.get();
+                    if i < self.list_len() {
+                        let idx = self.tab.index();
+                        self.selected[idx] = i;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+}
+
+fn list_lines(list: &[&Container]) -> Vec<String> {
+    let mut lines: Vec<String> = list.iter().take(6).map(|c| format!("{} ({}, {})", c.name, c.image, c.state)).collect();
+    if list.len() > 6 {
+        lines.push(format!("and {} more", list.len() - 6));
+    }
+    lines
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Setting {
+    Field(Field),
+    DockerContext,
+    KubeContext,
+    EditFile,
+}
+
+pub const SETTINGS: [Setting; 8] = [
+    Setting::Field(Field::Cpus),
+    Setting::Field(Field::Memory),
+    Setting::Field(Field::Shares),
+    Setting::Field(Field::Port),
+    Setting::Field(Field::Publish),
+    Setting::DockerContext,
+    Setting::KubeContext,
+    Setting::EditFile,
+];
+
+pub fn field_prompt(f: Field) -> &'static str {
+    match f {
+        Field::Cpus => if cfg!(target_os = "macos") { "VM CPUs (empty: half the Mac's)" } else { "CPU limit (empty: none)" },
+        Field::Memory => if cfg!(target_os = "macos") { "VM memory in MiB (empty: 4096)" } else { "memory limit in MiB (empty: none)" },
+        Field::Shares => "shared directories, comma-separated (empty: $HOME)",
+        Field::Port => "API server port (empty: 6443)",
+        Field::Publish => "published ports: localhost or all",
+    }
+}

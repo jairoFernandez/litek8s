@@ -14,6 +14,11 @@ The same cluster serves the Docker Engine API on `~/.litek8s/docker.sock`:
 (`export DOCKER_HOST=unix://$HOME/.litek8s/docker.sock`), next to (not
 instead of) an installed Docker or OrbStack. See [docs/docker.md](docs/docker.md).
 
+`litek8s ui` is a terminal UI for all of it, what OrbStack's window is to
+OrbStack: the cluster's state and resources, containers by compose project
+with logs and shells, images, volumes, freeing space, settings and a light
+Kubernetes view; keyboard-driven, 80x24, works over SSH. See [docs/ui.md](docs/ui.md).
+
 ## Commands
 
 ```bash

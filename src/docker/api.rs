@@ -533,7 +533,7 @@ fn system_df(engine: &Engine) -> Value {
             i
         })
         .collect();
-    json!({"LayersSize": layers, "Images": imgs, "Containers": ctrs, "Volumes": vols, "BuildCache": []})
+    json!({"LayersSize": layers, "Images": imgs, "Containers": ctrs, "Volumes": vols, "BuildCache": super::build::usage(engine)})
 }
 
 fn events(engine: &Arc<Engine>, q: &HashMap<String, String>) -> Response<Body> {

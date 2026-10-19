@@ -150,16 +150,45 @@ fn remove_build_dir(dir: &Path) {
 
 pub fn prune(engine: &Engine) -> Value {
     let mut deleted = Vec::new();
-    let mut space = 0u64;
-    for (key, entry) in engine.images.entries() {
+    // What goes: the layers no image shares (as `system df` reports them).
+    let space: u64 = usage(engine).iter().filter_map(|c| c["Size"].as_u64()).sum();
+    for (key, _) in engine.images.entries() {
         if key.starts_with(CACHE_PREFIX) {
-            space += entry.layers.iter().map(|l| engine.images.layer_size(l)).sum::<u64>();
             let _ = engine.images.set_key(&key, None);
             deleted.push(key.trim_start_matches(CACHE_PREFIX).to_string());
         }
     }
     let _ = std::fs::remove_dir_all(engine.root.join("build-cache-mounts"));
     json!({"CachesDeleted": deleted, "SpaceReclaimed": space})
+}
+
+/// The build cache as `GET /system/df` reports it: one record per cached
+/// step, sized by the layers no image shares (what a prune frees).
+pub fn usage(engine: &Engine) -> Vec<Value> {
+    let entries = engine.images.entries();
+    let shared: HashSet<&String> =
+        entries.iter().filter(|(k, _)| !k.starts_with(CACHE_PREFIX)).flat_map(|(_, e)| e.layers.iter()).collect();
+    let mut counted = HashSet::new();
+    entries
+        .iter()
+        .filter(|(k, _)| k.starts_with(CACHE_PREFIX))
+        .map(|(key, entry)| {
+            let own: Vec<&String> = entry.layers.iter().filter(|l| !shared.contains(l) && counted.insert(*l)).collect();
+            let size: u64 = own.iter().map(|l| engine.images.layer_size(l)).sum();
+            let used = chrono::DateTime::from_timestamp(entry.last_used, 0).map(|t| t.to_rfc3339()).unwrap_or_default();
+            json!({
+                "ID": key.trim_start_matches(CACHE_PREFIX),
+                "Type": "regular",
+                "Description": "litek8s build step",
+                "InUse": false,
+                "Shared": own.len() < entry.layers.len(),
+                "Size": size,
+                "CreatedAt": used,
+                "LastUsedAt": used,
+                "UsageCount": 1,
+            })
+        })
+        .collect()
 }
 
 /// The image being built in one stage.

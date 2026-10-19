@@ -13,6 +13,7 @@
 //! `dev load` puts local images into the cluster (like `kind load`).
 
 pub mod broker;
+pub mod config;
 pub mod hostinfo;
 pub mod kubeconfig;
 #[cfg(target_os = "linux")]
@@ -45,12 +46,14 @@ pub enum DevCommand {
         no_kubeconfig: bool,
         #[arg(long, default_value_t = 120, help = "Seconds to wait for the node to be Ready")]
         timeout: u64,
-        #[arg(long, help = "macOS: VM memory in MiB (default 4096; only what the guest touches is used)")]
+        #[arg(long, help = "Memory in MiB: the macOS VM's (default 4096; only what the guest touches is used), a limit on Linux (default none)")]
         memory: Option<u64>,
-        #[arg(long, help = "macOS: VM CPUs (default: half of the Mac's)")]
+        #[arg(long, help = "CPUs: the macOS VM's (default: half of the Mac's), a limit on Linux (default none)")]
         cpus: Option<usize>,
-        #[arg(long, help = "macOS: directory shared with the VM at the same path (default: $HOME)")]
-        share: Option<PathBuf>,
+        #[arg(long, help = "macOS: directory shared with the VM at the same path (default: $HOME; repeat for more)")]
+        share: Vec<PathBuf>,
+        #[arg(long, help = "Where published ports and NodePorts listen: localhost (default) or all")]
+        publish: Option<String>,
     },
     /// Stop the dev cluster (objects and images are kept for the next `up`)
     Down,
@@ -69,6 +72,12 @@ pub enum DevCommand {
     Supervise {
         #[arg(long)]
         port: Option<u16>,
+        #[arg(long, default_value = "localhost")]
+        publish: String,
+        #[arg(long)]
+        cpus: Option<usize>,
+        #[arg(long)]
+        memory: Option<u64>,
     },
     #[command(hide = true, name = "__apiserver")]
     InnerApiserver {
@@ -78,7 +87,7 @@ pub enum DevCommand {
 }
 
 /// What a running dev cluster recorded about itself.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DevState {
     /// The supervisor (Linux) or VM process (macOS).
     pub pid: u32,
@@ -95,6 +104,17 @@ pub struct DevState {
     /// Virtualization.framework's process running the VM (macOS).
     #[serde(default)]
     pub helper_pid: Option<u32>,
+    /// What the cluster was started with (to tell whether changed settings
+    /// need a restart): the VM's CPUs, memory (MiB) and shared directories.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mib: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shares: Vec<PathBuf>,
+    /// `localhost` or `all`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish: Option<String>,
 }
 
 pub fn dev_home() -> Result<PathBuf> {
@@ -135,6 +155,46 @@ fn running(home: &Path) -> Option<DevState> {
     read_state(home).filter(|s| pid_alive(s.pid))
 }
 
+/// The local dev cluster's state if it runs (what `dev status` reads).
+pub fn running_state() -> Option<DevState> {
+    running(&dev_home().ok()?)
+}
+
+/// Whether the API server of a running cluster answers and its node is
+/// Ready.
+pub async fn ready(state: &DevState) -> bool {
+    node_ready(state.port).await
+}
+
+/// CPU time (ns) everything the cluster runs has used: the cgroup on
+/// Linux, the VM process on macOS.
+pub fn cpu_time_ns(state: &DevState) -> Option<u64> {
+    if let Some(cg) = &state.cgroup {
+        let stat = std::fs::read_to_string(cg.join("cpu.stat")).ok()?;
+        return stat.lines().find_map(|l| l.strip_prefix("usage_usec ")?.trim().parse::<u64>().ok()).map(|us| us * 1000);
+    }
+    #[cfg(target_os = "macos")]
+    if state.mode == "vm" {
+        return vm::cpu_time_ns(state);
+    }
+    None
+}
+
+/// Memory everything the cluster runs uses, in bytes.
+pub fn memory_used(state: &DevState) -> Option<u64> {
+    memory_bytes(state)
+}
+
+/// Bytes the dev data directory takes on disk (walks it: not cheap).
+pub fn data_size(home: &Path) -> u64 {
+    dir_size(home)
+}
+
+/// The tail of the cluster's log.
+pub fn log_lines(lines: usize) -> String {
+    dev_home().map(|h| log_tail(&h, lines)).unwrap_or_default()
+}
+
 pub(crate) fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
@@ -156,15 +216,31 @@ fn log_tail(home: &Path, lines: usize) -> String {
 
 pub async fn run(command: DevCommand) -> Result<()> {
     match command {
-        DevCommand::Up { port, no_kubeconfig, timeout, memory, cpus, share } => {
-            up(UpOptions { port, kubeconfig: !no_kubeconfig, timeout: Duration::from_secs(timeout), memory, cpus, share }).await
+        DevCommand::Up { port, no_kubeconfig, timeout, memory, cpus, share, publish } => {
+            // Flags win over ~/.litek8s/config.yaml.
+            let config = config::DevConfig::load()?;
+            let publish = match publish {
+                Some(p) => config::Publish::parse(&p)?,
+                None => config.publish,
+            };
+            let shares = if share.is_empty() { config.shares.clone() } else { share };
+            up(UpOptions {
+                port: port.or(config.port),
+                kubeconfig: !no_kubeconfig,
+                timeout: Duration::from_secs(timeout),
+                memory: memory.or(config.memory),
+                cpus: cpus.or(config.cpus),
+                shares,
+                publish,
+            })
+            .await
         }
         DevCommand::Down => down().await,
         DevCommand::Status => status().await,
         DevCommand::Reset => reset().await,
         DevCommand::Load { images } => load(images).await,
         DevCommand::Setup => setup(),
-        DevCommand::Supervise { port } => supervise(port).await,
+        DevCommand::Supervise { port, publish, cpus, memory } => supervise(port, config::Publish::parse(&publish)?, cpus, memory).await,
         DevCommand::InnerApiserver { data_dir } => inner_apiserver(data_dir).await,
     }
 }
@@ -175,7 +251,9 @@ pub struct UpOptions {
     pub timeout: Duration,
     pub memory: Option<u64>,
     pub cpus: Option<usize>,
-    pub share: Option<PathBuf>,
+    /// Shared directories (macOS; empty: $HOME).
+    pub shares: Vec<PathBuf>,
+    pub publish: config::Publish,
 }
 
 async fn up(opts: UpOptions) -> Result<()> {
@@ -230,9 +308,15 @@ fn start(home: &Path, opts: &UpOptions) -> Result<u32> {
     } else {
         std::process::Command::new(&exe)
     };
-    cmd.args(["dev", "supervise"]);
+    cmd.args(["dev", "supervise", "--publish", opts.publish.as_str()]);
     if let Some(p) = opts.port {
         cmd.arg("--port").arg(p.to_string());
+    }
+    if let Some(c) = opts.cpus {
+        cmd.arg("--cpus").arg(c.to_string());
+    }
+    if let Some(m) = opts.memory {
+        cmd.arg("--memory").arg(m.to_string());
     }
     cmd.stdin(std::process::Stdio::null()).stdout(log.try_clone()?).stderr(log);
     // SAFETY: setsid only.
@@ -578,12 +662,12 @@ fn setup() -> Result<()> {
 mod supervisor;
 
 #[cfg(target_os = "linux")]
-async fn supervise(port: Option<u16>) -> Result<()> {
-    supervisor::run(port).await
+async fn supervise(port: Option<u16>, publish: config::Publish, cpus: Option<usize>, memory: Option<u64>) -> Result<()> {
+    supervisor::run(port, publish, cpus, memory).await
 }
 
 #[cfg(not(target_os = "linux"))]
-async fn supervise(_: Option<u16>) -> Result<()> {
+async fn supervise(_: Option<u16>, _: config::Publish, _: Option<usize>, _: Option<u64>) -> Result<()> {
     bail!("the dev supervisor runs on Linux")
 }
 

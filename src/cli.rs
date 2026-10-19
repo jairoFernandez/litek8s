@@ -67,6 +67,15 @@ Linux: rootless by default, in namespaces of its own (no host iptables, interfac
 macOS: a small Linux VM on Virtualization.framework; NodePorts and LoadBalancers appear
 on localhost and $HOME is shared at the same path for hostPath volumes.";
 
+const UI_AFTER_HELP: &str = "\
+Examples:
+  litek8s ui                     # the local dev cluster: Home, Containers, Images, Volumes, Free space, Kubernetes, Settings
+  ssh -t box litek8s ui          # the same over SSH
+  litek8s ui --docker-host tcp://10.0.0.5:2375 --context remote   # another litek8s
+  litek8s ui --mouse             # clicks and the wheel too
+
+Keyboard only by default; ? lists the keys. Fits 80x24. See docs/ui.md.";
+
 const NODE_AGENT_AFTER_HELP: &str = "\
 Examples:
   litek8s agent --join https://192.168.1.10:6443 --token K10<hash>::<secret>
@@ -334,6 +343,12 @@ enum Command {
         #[command(subcommand)]
         command: crate::dev::DevCommand,
     },
+    #[command(
+        about = "A terminal UI for the dev environment: cluster, containers, images, volumes, settings, pods",
+        help_template = HELP_TEMPLATE,
+        after_help = UI_AFTER_HELP
+    )]
+    Ui(crate::ui::UiArgs),
     #[command(
         about = "Run a node agent that joins a remote litek8s API server",
         help_template = HELP_TEMPLATE,
@@ -1199,6 +1214,7 @@ pub async fn run() -> Result<()> {
             .await
         }
         Command::Dev { command } => crate::dev::run(command).await,
+        Command::Ui(args) => crate::ui::run(args).await,
         Command::Agent { join: Some(join), token, node_name, node_ip, node_dir, runtime, wireguard_port, no_wireguard, node_grace_period, .. } => {
             let token = token.context("--token is required with --join")?;
             let node_name = node_name.unwrap_or_else(crate::kube::agent::default_node_name);

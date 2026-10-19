@@ -104,6 +104,38 @@ pub fn install(path: &Path, server: &str) -> Result<()> {
     write_private(path, &merge(&doc, server, true)?)
 }
 
+/// `doc` with `context` (which must exist) as the current context.
+pub fn with_current(doc: &str, context: &str) -> Result<String> {
+    let Value::Mapping(mut root) = serde_yaml::from_str::<Value>(doc).context("the kubeconfig is not valid YAML")? else {
+        anyhow::bail!("the kubeconfig is not a YAML mapping");
+    };
+    let exists = root.get("contexts").and_then(Value::as_sequence).is_some_and(|l| l.iter().any(|c| c.get("name").and_then(Value::as_str) == Some(context)));
+    if !exists {
+        anyhow::bail!("there is no context {context:?} in the kubeconfig");
+    }
+    root.insert("current-context".into(), context.into());
+    Ok(serde_yaml::to_string(&Value::Mapping(root))?)
+}
+
+/// Make `context` the current context of the kubeconfig at `path`.
+pub fn set_current(path: &Path, context: &str) -> Result<()> {
+    let doc = std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    write_private(path, &with_current(&doc, context)?)
+}
+
+/// The current context of the kubeconfig at `path` and its server.
+pub fn current(path: &Path) -> Option<(String, Option<String>)> {
+    let root: Value = serde_yaml::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    let name = root.get("current-context")?.as_str()?.to_string();
+    let cluster = root.get("contexts")?.as_sequence()?.iter().find(|c| c.get("name").and_then(Value::as_str) == Some(&name))?.get("context")?.get("cluster")?.as_str()?.to_string();
+    let server = root
+        .get("clusters")
+        .and_then(Value::as_sequence)
+        .and_then(|l| l.iter().find(|c| c.get("name").and_then(Value::as_str) == Some(&cluster)))
+        .and_then(|c| c.get("cluster")?.get("server")?.as_str().map(str::to_string));
+    Some((name, server))
+}
+
 /// Drop the dev context from the kubeconfig at `path`.
 pub fn uninstall(path: &Path) -> Result<()> {
     let Ok(doc) = std::fs::read_to_string(path) else { return Ok(()) };
@@ -137,6 +169,21 @@ mod tests {
         let removed: Value = serde_yaml::from_str(&remove(&again).unwrap()).unwrap();
         assert_eq!(removed["clusters"].as_sequence().unwrap().len(), 1);
         assert_eq!(removed["current-context"], "");
+    }
+
+    #[test]
+    fn switches_the_current_context() {
+        let merged = merge(KIND, "http://127.0.0.1:6443", false).unwrap();
+        let v: Value = serde_yaml::from_str(&with_current(&merged, CONTEXT).unwrap()).unwrap();
+        assert_eq!(v["current-context"], "litek8s-dev");
+        assert_eq!(v["users"][0]["user"]["client-key-data"], "BBBB");
+        assert!(with_current(KIND, "nope").is_err());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config");
+        std::fs::write(&path, &merged).unwrap();
+        assert_eq!(current(&path), Some(("kind-kind".to_string(), Some("https://127.0.0.1:41234".to_string()))));
+        set_current(&path, CONTEXT).unwrap();
+        assert_eq!(current(&path), Some((CONTEXT.to_string(), Some("http://127.0.0.1:6443".to_string()))));
     }
 
     #[test]

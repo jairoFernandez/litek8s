@@ -337,6 +337,81 @@ where
     result
 }
 
+/// The client side, for one forwarded connection: `conn`'s bytes go to the
+/// pod's `port` over the SPDY session on `io` (an upgraded
+/// `POST .../pods/<name>/portforward`) and back. Errors the server reports
+/// on the error stream are returned.
+pub async fn forward_one<S, C>(io: S, port: u16, conn: C) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+    C: AsyncRead + AsyncWrite + Send + 'static,
+{
+    const ERROR_SID: u32 = 1;
+    const DATA_SID: u32 = 3;
+    let (mut reader, mut writer) = tokio::io::split(io);
+    let (mut local_r, mut local_w) = tokio::io::split(conn);
+    let mut headers = HeaderWriter { started: false };
+    let port_s = port.to_string();
+    for (sid, kind) in [(ERROR_SID, "error"), (DATA_SID, "data")] {
+        let mut body = sid.to_be_bytes().to_vec();
+        body.extend_from_slice(&0u32.to_be_bytes());
+        body.extend_from_slice(&[0, 0]);
+        body.extend_from_slice(&headers.block(&[("streamtype", kind), ("port", &port_s), ("requestid", "0")]));
+        writer.write_all(&control(TYPE_SYN_STREAM, 0, &body)).await?;
+    }
+    writer.flush().await?;
+    let upload = async move {
+        let mut buf = vec![0u8; 32 * 1024];
+        loop {
+            let n = local_r.read(&mut buf).await?;
+            writer.write_all(&data(DATA_SID, if n == 0 { FLAG_FIN } else { 0 }, &buf[..n])).await?;
+            writer.flush().await?;
+            if n == 0 {
+                // Keep the session (and the download) open until the pod side ends.
+                return std::future::pending::<Result<()>>().await;
+            }
+        }
+    };
+    let download = async move {
+        let mut error = Vec::new();
+        loop {
+            let mut head = [0u8; 8];
+            if reader.read_exact(&mut head).await.is_err() {
+                break;
+            }
+            let flags = head[4];
+            let len = u32::from_be_bytes([0, head[5], head[6], head[7]]) as usize;
+            let mut payload = vec![0u8; len];
+            reader.read_exact(&mut payload).await?;
+            if head[0] & 0x80 != 0 {
+                let frame_type = u16::from_be_bytes([head[2], head[3]]);
+                if frame_type == TYPE_RST_STREAM || frame_type == TYPE_GOAWAY {
+                    break;
+                }
+                continue;
+            }
+            let sid = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) & 0x7fff_ffff;
+            if sid == ERROR_SID {
+                error.extend_from_slice(&payload);
+            } else if sid == DATA_SID {
+                local_w.write_all(&payload).await?;
+                if flags & FLAG_FIN != 0 {
+                    break;
+                }
+            }
+        }
+        let _ = local_w.shutdown().await;
+        if !error.is_empty() {
+            bail!("{}", String::from_utf8_lossy(&error).trim());
+        }
+        Ok(())
+    };
+    tokio::select! {
+        r = upload => r,
+        r = download => r,
+    }
+}
+
 /// One forwarded connection: client bytes → pod, pod bytes → client.
 async fn relay(
     open: Opener,
@@ -409,6 +484,28 @@ mod tests {
             b = (b + a) % 65521;
         }
         assert_eq!((b << 16) | a, 0xe3c6a7c2);
+    }
+
+    #[tokio::test]
+    async fn client_and_server_forward_bytes() {
+        use crate::kube::agent::hub::StreamHandle;
+        let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+        // The "pod" echoes what it gets, upper-cased.
+        let open: Opener = Arc::new(|port: u16| {
+            Box::pin(async move {
+                assert_eq!(port, 8080);
+                Ok(StreamHandle::echo_upper_for_tests())
+            })
+        });
+        tokio::spawn(serve(server_io, open));
+        let (mut user, local) = tokio::io::duplex(1024);
+        let fwd = tokio::spawn(forward_one(client_io, 8080, local));
+        user.write_all(b"hello").await.unwrap();
+        let mut buf = [0u8; 5];
+        user.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"HELLO");
+        drop(user);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), fwd).await;
     }
 
     #[test]

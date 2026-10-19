@@ -73,6 +73,28 @@ impl StreamHandle {
     pub fn input(&self) -> StreamInput {
         StreamInput { id: self.id, tx: self.tx.clone() }
     }
+
+    /// A stream that answers every chunk of input upper-cased (tests of
+    /// what relays streams).
+    #[cfg(test)]
+    pub fn echo_upper_for_tests() -> StreamHandle {
+        let (tx, mut frames) = mpsc::channel::<Frame>(16);
+        let (events_tx, events) = mpsc::channel(16);
+        tokio::spawn(async move {
+            while let Some(frame) = frames.recv().await {
+                match frame {
+                    Frame::Data { bytes, .. } => {
+                        let _ = events_tx.send(StreamEvent::Data { channel: 1, bytes: Bytes::from(bytes.to_ascii_uppercase()) }).await;
+                    }
+                    Frame::CloseInput { .. } => {
+                        let _ = events_tx.send(StreamEvent::Done { exit_code: None, error: None }).await;
+                    }
+                    Frame::Control(_) => break,
+                }
+            }
+        });
+        StreamHandle { id: 1, tx, events, streams: Arc::default() }
+    }
 }
 
 #[derive(Clone)]
