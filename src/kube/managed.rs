@@ -747,10 +747,8 @@ impl Entry {
             s = format!("{s} with subresource {:?}", self.subresource);
         }
         if self.operation == "Update" {
-            s = match &self.time {
-                Some(t) => format!("{s} using {} at {t}", self.api_version),
-                None => format!("{s} using {}", self.api_version),
-            };
+            // Manager identities carry no time, so conflicts never show one.
+            s = format!("{s} using {}", self.api_version);
         }
         s
     }

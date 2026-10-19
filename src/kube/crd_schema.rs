@@ -861,9 +861,20 @@ fn with_field_path(path: &str, fp: &str) -> String {
     out
 }
 
-fn run_rules(v: &Value, old: Option<&Value>, s: &Value, path: &str, resource_root: bool, out: &mut Vec<String>) {
+/// The runtime CEL budget: per rule evaluation, and per request.
+const PER_CALL_RUNTIME_LIMIT: u64 = 1_000_000;
+const RUNTIME_BUDGET: u64 = 10_000_000;
+
+/// Rule evaluation state across one object: the remaining budget, and
+/// whether evaluation stopped.
+struct Budget {
+    remaining: u64,
+    stopped: bool,
+}
+
+fn run_rules(v: &Value, old: Option<&Value>, s: &Value, path: &str, resource_root: bool, budget: &mut Budget, out: &mut Vec<String>) {
     let rules = rules_of(s);
-    if rules.is_empty() || v.is_null() {
+    if rules.is_empty() || v.is_null() || budget.stopped {
         return;
     }
     let ty = if flag(s, "x-kubernetes-int-or-string") { "" } else { str_of(s, "type") };
@@ -881,7 +892,7 @@ fn run_rules(v: &Value, old: Option<&Value>, s: &Value, path: &str, resource_roo
             // Ratcheting: an unchanged value is not re-validated.
             continue;
         }
-        let mut env = cel::Env::default();
+        let mut env = cel::Env { cost_limit: PER_CALL_RUNTIME_LIMIT.min(budget.remaining), ..Default::default() };
         env.vars.insert("self".into(), self_val.clone());
         let old_binding = match (&old_val, optional_old) {
             (Some(o), true) => Val::Optional(Some(Box::new(o.clone()))),
@@ -893,7 +904,23 @@ fn run_rules(v: &Value, old: Option<&Value>, s: &Value, path: &str, resource_roo
         let message = str_of(r, "message").trim();
         let rule_str = if message.is_empty() { src.trim() } else { message };
         let at = err_path(path);
-        match program.eval(&env) {
+        let result = program.eval(&env);
+        let spent = env.cost.get();
+        if result.as_ref().err().map(String::as_str) == Some(cel::eval::COST_EXCEEDED) {
+            budget.stopped = true;
+            if budget.remaining <= PER_CALL_RUNTIME_LIMIT {
+                out.push(format!("{at}: Invalid value: {}: validation failed due to running out of cost budget, no further validation rules will be run", go_quote(ty)));
+            } else {
+                out.push(format!(
+                    "{at}: Invalid value: {}: '{}': no further validation rules will be run due to call cost exceeds limit for rule: {rule_str}",
+                    go_quote(ty),
+                    cel::eval::COST_EXCEEDED
+                ));
+            }
+            return;
+        }
+        budget.remaining = budget.remaining.saturating_sub(spent);
+        match result {
             Ok(Val::Bool(true)) => {}
             Ok(Val::Bool(false)) => {
                 let mut msg = if message.is_empty() { format!("failed rule: {}", src.trim()) } else { message.to_string() };
@@ -923,8 +950,8 @@ fn run_rules(v: &Value, old: Option<&Value>, s: &Value, path: &str, resource_roo
     }
 }
 
-fn walk_rules(v: &Value, old: Option<&Value>, s: &Value, path: &str, resource_root: bool, out: &mut Vec<String>) {
-    run_rules(v, old, s, path, resource_root, out);
+fn walk_rules(v: &Value, old: Option<&Value>, s: &Value, path: &str, resource_root: bool, budget: &mut Budget, out: &mut Vec<String>) {
+    run_rules(v, old, s, path, resource_root, budget, out);
     match v {
         Value::Object(map) => {
             let props = s.get("properties").and_then(Value::as_object);
@@ -936,14 +963,14 @@ fn walk_rules(v: &Value, old: Option<&Value>, s: &Value, path: &str, resource_ro
                 let Some(cs) = props.and_then(|ps| ps.get(k)).or(add) else { continue };
                 let child_old = old.and_then(|o| o.get(k));
                 let child_path = if props.and_then(|ps| ps.get(k)).is_some() { join(path, k) } else { format!("{path}[{k}]") };
-                walk_rules(child, child_old, cs, &child_path, flag(cs, "x-kubernetes-embedded-resource"), out);
+                walk_rules(child, child_old, cs, &child_path, flag(cs, "x-kubernetes-embedded-resource"), budget, out);
             }
         }
         Value::Array(items) => {
             if let Some(is) = s.get("items") {
                 let olds = correlate_items(items, old, s);
                 for (i, item) in items.iter().enumerate() {
-                    walk_rules(item, olds[i], is, &format!("{path}[{i}]"), flag(is, "x-kubernetes-embedded-resource"), out);
+                    walk_rules(item, olds[i], is, &format!("{path}[{i}]"), flag(is, "x-kubernetes-embedded-resource"), budget, out);
                 }
             }
         }
@@ -975,7 +1002,8 @@ pub fn validate(obj: &Value, old: Option<&Value>, schema: &Value) -> Vec<String>
         if blocking {
             errs.push("<nil>: Invalid value: \"null\": some validation rules were not checked because the object was invalid; correct the existing errors to complete validation".into());
         } else {
-            walk_rules(obj, old, schema, "", true, &mut errs);
+            let mut budget = Budget { remaining: RUNTIME_BUDGET, stopped: false };
+            walk_rules(obj, old, schema, "", true, &mut budget, &mut errs);
         }
     }
     errs
@@ -1113,4 +1141,21 @@ fn cost_probe() {
         out.push(cost);
     }
     std::fs::write(std::env::var("COST_OUT").unwrap(), serde_json::to_string(&out).unwrap()).unwrap();
+}
+
+#[cfg(test)]
+mod runtime_cost_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn runtime_cost_limit() {
+        let schema = json!({"type": "object", "properties": {"spec": {"type": "object", "x-kubernetes-validations": [
+            {"rule": "self.l.all(x, self.l.all(y, y == x))"}, {"rule": "self.n > 0"}],
+            "properties": {"n": {"type": "integer"}, "l": {"type": "array", "maxItems": 5000, "items": {"type": "string", "maxLength": 20}}}}}});
+        let l: Vec<String> = vec!["a".repeat(20); 725];
+        let errs = validate(&json!({"spec": {"n": 0, "l": l}}), None, &schema);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("no further validation rules will be run due to call cost exceeds limit for rule: self.l.all"), "{errs:?}");
+    }
 }

@@ -767,3 +767,19 @@ t_crd_validation_cleanup() {
     k delete crd celrules.compat.litek8s.dev formats.compat.litek8s.dev bounds.compat.litek8s.dev ratchets.compat.litek8s.dev \
         taglists.compat.litek8s.dev versioneds.compat.litek8s.dev ssalists.compat.litek8s.dev --ignore-not-found --wait=false >/dev/null
 }
+
+case_def ssa_from_client_side L1 30 "kubectl apply --server-side after kubectl apply takes over the client-side fields"
+t_ssa_from_client_side() {
+    use_ns
+    local f
+    f=$(mktemp)
+    printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: m, namespace: %s}\ndata: {a: "1", b: "1"}\n' "$NS" >"$f"
+    k apply -f "$f" >/dev/null
+    printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: m, namespace: %s}\ndata: {a: "2"}\n' "$NS" >"$f"
+    k apply --server-side -f "$f" >/dev/null
+    expect_eq "$(k -n "$NS" get configmap m -o jsonpath='{.data}')" '{"a":"2"}'
+    k -n "$NS" patch configmap m --type merge -p '{"data":{"c":"x"}}' >/dev/null
+    printf 'apiVersion: v1\nkind: ConfigMap\nmetadata: {name: m, namespace: %s}\ndata: {a: "2", c: "y"}\n' "$NS" >"$f"
+    expect_fail 'Apply failed with 1 conflict: conflict with "kubectl-patch" using v1: .data.c' k apply --server-side -f "$f"
+    rm -f "$f"
+}

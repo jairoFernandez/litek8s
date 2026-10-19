@@ -2428,7 +2428,26 @@ impl ApiState {
             m.remove("managedFields");
         }
         let force = req.q("force") == Some("true");
-        super::managed::apply(live.as_ref(), config, base, &request, force, ty).map_err(|e| match e {
+        let mut result = super::managed::apply(live.as_ref(), config, base.clone(), &request, force, ty);
+        // Moving from client-side to server-side apply: conflicts only with
+        // kubectl-client-side-apply over fields its last-applied
+        // configuration set are not conflicts (the API server's
+        // lastAppliedManager).
+        if let Err(super::managed::ApplyError::Conflicts(c)) = &result {
+            let last_applied = live
+                .as_ref()
+                .and_then(|l| l.pointer("/metadata/annotations/kubectl.kubernetes.io~1last-applied-configuration"))
+                .and_then(Value::as_str)
+                .and_then(|s| serde_json::from_str::<Value>(s).ok());
+            if let Some(last) = last_applied.and_then(|l| super::managed::to_set(&l, ty).ok()) {
+                let owned = last.paths().into_iter().map(|p| super::managed::path_string(&p)).collect::<Vec<_>>();
+                let only_csa = c.0.iter().all(|(m, p)| m.starts_with("\"kubectl-client-side-apply\" using") && owned.contains(p));
+                if only_csa {
+                    result = super::managed::apply(live.as_ref(), config, base, &request, true, ty);
+                }
+            }
+        }
+        result.map_err(|e| match e {
             super::managed::ApplyError::Invalid(msg) => ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "Invalid", msg),
             super::managed::ApplyError::Conflicts(c) => {
                 let mut err = ApiError::new(StatusCode::CONFLICT, "Conflict", c.message());

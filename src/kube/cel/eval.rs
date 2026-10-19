@@ -11,10 +11,38 @@ use super::lib::{self, Quantity};
 use super::parse::{Comp, Expr, Kind, Program};
 use super::Val;
 
-/// Variables visible to an expression.
+/// Variables visible to an expression, and the runtime cost budget.
 #[derive(Default)]
 pub struct Env {
     pub vars: BTreeMap<String, Val>,
+    /// Cost units spent so far (roughly cel-go's runtime cost: one per
+    /// variable, field selection, operator and call, plus string traversal).
+    pub cost: std::cell::Cell<u64>,
+    /// Stop with [`COST_EXCEEDED`] past this cost (0: unlimited).
+    pub cost_limit: u64,
+}
+
+/// The error of an evaluation that ran out of its cost limit.
+pub const COST_EXCEEDED: &str = "operation cancelled: actual cost limit exceeded";
+
+impl Env {
+    fn charge(&self, units: u64) -> Result<(), String> {
+        let c = self.cost.get().saturating_add(units);
+        self.cost.set(c);
+        if self.cost_limit > 0 && c > self.cost_limit {
+            return Err(COST_EXCEEDED.into());
+        }
+        Ok(())
+    }
+}
+
+/// Traversal cost of a string or bytes value (0.1 per byte, rounded up).
+fn traversal(v: &Val) -> u64 {
+    match v {
+        Val::Str(s) => (s.len() as u64).div_ceil(10),
+        Val::Bytes(b) => (b.len() as u64).div_ceil(10),
+        _ => 0,
+    }
 }
 
 impl Program {
@@ -84,7 +112,10 @@ fn map_key(k: &Val) -> String {
 pub(super) fn eval(e: &Expr, env: &Env, scope: &mut Scope) -> Result<Val, String> {
     match &e.kind {
         Kind::Lit(v) => Ok(v.clone()),
-        Kind::Ident(name) => lookup(env, scope, name),
+        Kind::Ident(name) => {
+            env.charge(1)?;
+            lookup(env, scope, name)
+        }
         Kind::Select { operand, field, test: true, .. } => Ok(Val::Bool(match eval(operand, env, scope)? {
             Val::Map(m) => m.contains_key(field),
             Val::Null => false,
@@ -100,7 +131,10 @@ pub(super) fn eval(e: &Expr, env: &Env, scope: &mut Scope) -> Result<Val, String
             Val::Null => Ok(Val::Optional(None)),
             other => Err(format!("type '{}' does not support field selection", other.type_name())),
         },
-        Kind::Select { operand, field, .. } => match eval(operand, env, scope)? {
+        Kind::Select { operand, field, .. } => match {
+            env.charge(1)?;
+            eval(operand, env, scope)?
+        } {
             Val::Optional(None) => Ok(Val::Optional(None)),
             Val::Optional(Some(inner)) => Ok(opt(Some(select(*inner, field)?))),
             base => select(base, field),
@@ -168,8 +202,16 @@ pub(super) fn eval(e: &Expr, env: &Env, scope: &mut Scope) -> Result<Val, String
             let right = eval(b, env, scope).and_then(truth);
             logical_or(left, right).map(Val::Bool)
         }
-        Kind::Binary(op, a, b) => binary(op, eval(a, env, scope)?, eval(b, env, scope)?),
-        Kind::Call { target, func, args } => call(target.as_deref(), func, args, env, scope),
+        Kind::Binary(op, a, b) => {
+            let (a, b) = (eval(a, env, scope)?, eval(b, env, scope)?);
+            let strings = matches!(*op, "==" | "!=" | "<" | "<=" | ">" | ">=") && traversal(&a).min(traversal(&b)) > 0;
+            env.charge(1 + if strings { traversal(&a).min(traversal(&b)) } else if *op == "+" { traversal(&a) + traversal(&b) } else { 0 })?;
+            binary(op, a, b)
+        }
+        Kind::Call { target, func, args } => {
+            env.charge(1)?;
+            call(target.as_deref(), func, args, env, scope)
+        }
         Kind::Comp(c) => comprehension(c, env, scope),
     }
 }
@@ -225,6 +267,8 @@ fn comprehension(c: &Comp, env: &Env, scope: &mut Scope) -> Result<Val, String> 
         if c.name == "all" && acc_bool == Ok(false) || c.name == "exists" && acc_bool == Ok(true) {
             break;
         }
+        // The loop condition and step of the macro expansion.
+        env.charge(2)?;
         let pushed = if two {
             scope.push((c.v1.clone(), k.clone()));
             scope.push((c.v2.clone().unwrap(), v.clone()));
@@ -779,6 +823,14 @@ fn quantity_arg(v: Option<&Val>, name: &str) -> Result<Quantity, String> {
 fn call(target: Option<&Expr>, name: &str, args: &[Expr], env: &Env, scope: &mut Scope) -> Result<Val, String> {
     let recv = target.map(|t| eval(t, env, scope)).transpose()?;
     let args: Vec<Val> = args.iter().map(|a| eval(a, env, scope)).collect::<Result<_, _>>()?;
+    if let Some(r) = &recv {
+        let t = traversal(r);
+        match name {
+            "matches" | "find" | "findAll" => env.charge(t.max(1) * traversal(args.first().unwrap_or(&Val::Null)).max(1) * 5 / 2)?,
+            "contains" | "lowerAscii" | "upperAscii" | "trim" | "replace" | "split" | "substring" | "indexOf" | "lastIndexOf" => env.charge(t)?,
+            _ => {}
+        }
+    }
     call_values(recv, name, &args)
 }
 
