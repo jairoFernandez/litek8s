@@ -1553,6 +1553,7 @@ impl ApiState {
         let mut obj = parse_body(req)?;
         self.strict_fields(rt, req, &obj, false)?;
         let generated = meta(&obj).get("name").and_then(Value::as_str).unwrap_or_default().is_empty();
+        let incoming = obj.pointer("/metadata/managedFields").cloned();
         self.prepare_create(rt, ns, &mut obj, true)?;
         let name = name_of(&obj);
         let attrs = admission::Attributes {
@@ -1573,6 +1574,7 @@ impl ApiState {
                 }
             }
         }
+        self.track_fields(rt, None, &mut obj, incoming, req, None);
         if req.dry_run() {
             return Ok(json_response(StatusCode::CREATED, &obj));
         }
@@ -1618,6 +1620,7 @@ impl ApiState {
             .filter(|s| !s.is_empty())
             .map(|s| s.parse::<u64>().map_err(|_| ApiError::bad_request("invalid resourceVersion")))
             .transpose()?;
+        let incoming = obj.pointer("/metadata/managedFields").cloned();
         let new = self.prepare_update(rt, &old, obj, sub, name)?;
         let attrs = admission::Attributes {
             rt,
@@ -1628,7 +1631,8 @@ impl ApiState {
             old: Some(&old),
             dry_run: req.dry_run(),
         };
-        let new = admission::admit(self, &attrs, new).await?;
+        let mut new = admission::admit(self, &attrs, new).await?;
+        self.track_fields(rt, Some(&old), &mut new, incoming, req, sub);
         if req.dry_run() {
             return Ok(json_response(StatusCode::OK, &new));
         }
@@ -1668,7 +1672,7 @@ impl ApiState {
             let Some(old) = self.store.get(&key) else {
                 if is_apply && sub.is_none() {
                     // Server-side apply creates missing objects.
-                    let mut obj = body.clone();
+                    let (mut obj, entries) = self.apply_config(rt, None, &body, req, sub)?;
                     if name_of(&obj).is_empty() {
                         obj["metadata"]["name"] = json!(name);
                     }
@@ -1682,7 +1686,8 @@ impl ApiState {
                         old: None,
                         dry_run: req.dry_run(),
                     };
-                    let obj = admission::admit(self, &attrs, obj).await?;
+                    let mut obj = admission::admit(self, &attrs, obj).await?;
+                    set_managed_fields(&mut obj, entries);
                     if req.dry_run() {
                         return Ok(json_response(StatusCode::CREATED, &obj));
                     }
@@ -1700,6 +1705,7 @@ impl ApiState {
             let stored_rv = resource_version(&old);
             let old = self.served_as(rt, vec![old]).await?.remove(0);
             let mut target = old.clone();
+            let mut applied: Option<Vec<super::managed::Entry>> = None;
             match ct {
                 "application/json-patch+json" => patch::json_patch(&mut target, &body)
                     .map_err(|e| ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "Invalid", e.to_string()))?,
@@ -1714,7 +1720,11 @@ impl ApiState {
                     }
                     patch::strategic_merge_patch(&mut target, &body)
                 }
-                _ if is_apply => patch::apply_merge(&mut target, &body),
+                _ if is_apply => {
+                    let (merged, entries) = self.apply_config(rt, Some(&old), &body, req, sub)?;
+                    target = merged;
+                    applied = Some(entries);
+                }
                 other => {
                     return Err(ApiError::new(
                         StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -1723,6 +1733,7 @@ impl ApiState {
                     ));
                 }
             }
+            let incoming = target.pointer("/metadata/managedFields").cloned().filter(|m| Some(m) != old.pointer("/metadata/managedFields"));
             let new = self.prepare_update(rt, &old, target, sub, name)?;
             let attrs = admission::Attributes {
                 rt,
@@ -1733,7 +1744,11 @@ impl ApiState {
                 old: Some(&old),
                 dry_run: req.dry_run(),
             };
-            let new = admission::admit(self, &attrs, new).await?;
+            let mut new = admission::admit(self, &attrs, new).await?;
+            match applied {
+                Some(entries) => set_managed_fields(&mut new, entries),
+                None => self.track_fields(rt, Some(&old), &mut new, incoming, req, sub),
+            }
             if req.dry_run() {
                 return Ok(json_response(StatusCode::OK, &new));
             }
@@ -2027,7 +2042,8 @@ impl ApiState {
                 .ok_or_else(|| ApiError::bad_request("scale needs spec.replicas"))?;
             let mut updated = old.clone();
             updated["spec"]["replicas"] = json!(replicas);
-            let new = self.prepare_update(rt, &old, updated, None, name)?;
+            let mut new = self.prepare_update(rt, &old, updated, None, name)?;
+            self.track_fields(rt, Some(&old), &mut new, None, req, Some("scale"));
             if req.dry_run() {
                 return Ok(json_response(StatusCode::OK, &scale_of(&new)));
             }
@@ -2130,7 +2146,7 @@ impl ApiState {
             map.remove("status");
         }
         self.default_by_kind(rt, obj, None)?;
-        self.enforce_crd_schema(rt, obj)?;
+        self.enforce_crd_schema(rt, obj, None)?;
         let errs = super::validation::validate(&rt.group, &rt.kind, obj, None);
         if !errs.is_empty() {
             return Err(ApiError::invalid_fields(rt, &name_of(obj), &errs));
@@ -2197,6 +2213,7 @@ impl ApiState {
                     }
                 }
             }
+            self.enforce_crd_schema(rt, &mut result, Some(old))?;
             return Ok(result);
         }
         new["kind"] = json!(rt.kind);
@@ -2239,7 +2256,7 @@ impl ApiState {
             new["metadata"]["generation"] = json!(bumped);
         }
         self.default_by_kind(rt, &mut new, Some(old))?;
-        self.enforce_crd_schema(rt, &mut new)?;
+        self.enforce_crd_schema(rt, &mut new, Some(old))?;
         let errs = super::validation::validate(&rt.group, &rt.kind, &new, Some(old));
         if !errs.is_empty() {
             return Err(ApiError::invalid_fields(rt, url_name, &errs));
@@ -2425,13 +2442,136 @@ impl ApiState {
             .cloned()
     }
 
-    /// Custom resources: drop fields the schema does not declare, then check
-    /// the values against it.
-    fn enforce_crd_schema(&self, rt: &ResourceType, obj: &mut Value) -> Result<(), ApiError> {
+    /// The manager of a non-apply write: `?fieldManager=`, else the client's
+    /// user agent up to the first '/'.
+    fn manager_of(req: &Req) -> String {
+        if let Some(m) = req.q("fieldManager") {
+            return m.to_string();
+        }
+        let ua = req.headers.get(hyper::header::USER_AGENT).and_then(|v| v.to_str().ok()).unwrap_or_default();
+        let name = ua.split('/').next().unwrap_or_default();
+        name.chars().take(128).collect()
+    }
+
+    /// Record the fields a write (create, update, non-apply patch) changes
+    /// in `new`'s managedFields. `incoming` is the managedFields the request
+    /// itself carried: `[{}]` clears them, other non-empty values replace
+    /// the stored ones as the starting point.
+    fn track_fields(&self, rt: &ResourceType, old: Option<&Value>, new: &mut Value, incoming: Option<Value>, req: &Req, sub: Option<&str>) {
+        self.track_fields_as(rt, old, new, incoming, &Self::manager_of(req), sub);
+    }
+
+    /// [`Self::track_fields`] for a named manager (the in-process
+    /// controllers write as `kube-controller-manager`).
+    fn track_fields_as(&self, rt: &ResourceType, old: Option<&Value>, new: &mut Value, incoming: Option<Value>, manager: &str, sub: Option<&str>) {
+        let base = match incoming.as_ref().and_then(Value::as_array) {
+            Some(list) if list.len() == 1 && list[0].as_object().is_some_and(|m| m.is_empty()) => {
+                if let Some(m) = new.get_mut("metadata").and_then(Value::as_object_mut) {
+                    m.remove("managedFields");
+                }
+                return;
+            }
+            Some(list) if !list.is_empty() => super::managed::decode(&json!({"metadata": {"managedFields": list}})),
+            _ => old.map(super::managed::decode).unwrap_or_default(),
+        };
+        let schema = self.crd_schema(rt);
+        let ty = match &schema {
+            Some(s) => super::managed::Ty::CrdRoot(s),
+            None if rt.custom => super::managed::Ty::Deduced,
+            None => super::managed::Ty::BuiltinRoot,
+        };
+        let now = now_rfc3339();
+        let api_version = rt.api_version();
+        let request = super::managed::Request {
+            manager,
+            api_version: &api_version,
+            scope: super::managed::Scope { subresource: sub.unwrap_or_default(), has_status: rt.has_status },
+            now: &now,
+        };
+        let empty = json!({});
+        let mut stripped_old = old.cloned().unwrap_or_else(|| empty.clone());
+        let mut stripped_new = new.clone();
+        for v in [&mut stripped_old, &mut stripped_new] {
+            if let Some(m) = v.get_mut("metadata").and_then(Value::as_object_mut) {
+                m.remove("managedFields");
+            }
+        }
+        let entries = super::managed::update(&stripped_old, &stripped_new, base, &request, ty);
+        set_managed_fields(new, entries);
+    }
+
+    /// Server-side apply: merge `config` into `live` (`None` creates) with
+    /// field ownership; 409 on conflicts unless `?force=true`.
+    fn apply_config(&self, rt: &ResourceType, live: Option<&Value>, config: &Value, req: &Req, sub: Option<&str>) -> Result<(Value, Vec<super::managed::Entry>), ApiError> {
+        let Some(manager) = req.q("fieldManager") else {
+            return Err(ApiError::new(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "Invalid",
+                "PatchOptions.meta.k8s.io \"\" is invalid: fieldManager: Required value: is required for apply patch",
+            ));
+        };
+        if config.pointer("/metadata/managedFields").is_some_and(|m| !m.is_null()) {
+            return Err(ApiError::bad_request("metadata.managedFields must be nil"));
+        }
+        let schema = self.crd_schema(rt);
+        let ty = match &schema {
+            Some(s) => super::managed::Ty::CrdRoot(s),
+            None if rt.custom => super::managed::Ty::Deduced,
+            None => super::managed::Ty::BuiltinRoot,
+        };
+        let now = now_rfc3339();
+        let api_version = rt.api_version();
+        let request = super::managed::Request {
+            manager,
+            api_version: &api_version,
+            scope: super::managed::Scope { subresource: sub.unwrap_or_default(), has_status: rt.has_status },
+            now: &now,
+        };
+        let base = live.map(super::managed::decode).unwrap_or_default();
+        let mut live = live.cloned();
+        if let Some(m) = live.as_mut().and_then(|l| l.get_mut("metadata")).and_then(Value::as_object_mut) {
+            m.remove("managedFields");
+        }
+        let force = req.q("force") == Some("true");
+        let mut result = super::managed::apply(live.as_ref(), config, base.clone(), &request, force, ty);
+        // Moving from client-side to server-side apply: conflicts only with
+        // kubectl-client-side-apply over fields its last-applied
+        // configuration set are not conflicts (the API server's
+        // lastAppliedManager).
+        if let Err(super::managed::ApplyError::Conflicts(c)) = &result {
+            let last_applied = live
+                .as_ref()
+                .and_then(|l| l.pointer("/metadata/annotations/kubectl.kubernetes.io~1last-applied-configuration"))
+                .and_then(Value::as_str)
+                .and_then(|s| serde_json::from_str::<Value>(s).ok());
+            if let Some(last) = last_applied.and_then(|l| super::managed::to_set(&l, ty).ok()) {
+                let owned = last.paths().into_iter().map(|p| super::managed::path_string(&p)).collect::<Vec<_>>();
+                let only_csa = c.0.iter().all(|(m, p)| m.starts_with("\"kubectl-client-side-apply\" using") && owned.contains(p));
+                if only_csa {
+                    result = super::managed::apply(live.as_ref(), config, base, &request, true, ty);
+                }
+            }
+        }
+        result.map_err(|e| match e {
+            super::managed::ApplyError::Invalid(msg) => ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "Invalid", msg),
+            super::managed::ApplyError::Conflicts(c) => {
+                let mut err = ApiError::new(StatusCode::CONFLICT, "Conflict", c.message());
+                err.details = Some(json!({"causes": c.causes()}));
+                err
+            }
+        })
+    }
+
+    /// Custom resources: drop fields the schema does not declare, fill in
+    /// defaults, drop nulls the schema does not allow, then validate the
+    /// values and the `x-kubernetes-validations` rules (transition rules
+    /// and ratcheting against `old` on updates).
+    fn enforce_crd_schema(&self, rt: &ResourceType, obj: &mut Value, old: Option<&Value>) -> Result<(), ApiError> {
         let Some(schema) = self.crd_schema(rt) else { return Ok(()) };
         super::fields::prune(obj, &schema);
         super::fields::apply_defaults(obj, &schema);
-        let errs = super::fields::schema_errors(obj, &schema);
+        super::crd_schema::prune_nulls(obj, &schema);
+        let errs = super::crd_schema::validate(obj, old, &schema);
         if !errs.is_empty() {
             return Err(ApiError::invalid_fields(rt, &name_of(obj), &errs));
         }
@@ -2690,24 +2830,60 @@ impl ApiState {
                         format!("metadata.name: Invalid value: must be spec.names.plural+\".\"+spec.group ({expected})"),
                     ));
                 }
-                let storage: Vec<Value> = obj
-                    .pointer("/spec/versions")
+                let errs = super::crd_schema::validate_crd(obj, old);
+                if !errs.is_empty() {
+                    return Err(ApiError::invalid_fields(rt, &name, &errs));
+                }
+                let versions: Vec<Value> = obj.pointer("/spec/versions").and_then(Value::as_array).cloned().unwrap_or_default();
+                let storage: Vec<&str> = versions
+                    .iter()
+                    .filter(|v| v.get("storage").and_then(Value::as_bool) == Some(true))
+                    .filter_map(|v| v.get("name").and_then(Value::as_str))
+                    .collect();
+                if storage.len() != 1 {
+                    return Err(ApiError::invalid_fields(
+                        rt,
+                        &name,
+                        &[format!("spec.versions: Invalid value: {}: must have exactly one version marked as storage version", serde_json::to_string(&versions).unwrap_or_default())],
+                    ));
+                }
+                // storedVersions lists every version objects may still be
+                // stored in: it only grows here, and shrinks only through
+                // status updates (after a storage migration).
+                let mut stored: Vec<Value> = old
+                    .and_then(|o| o.pointer("/status/storedVersions"))
                     .and_then(Value::as_array)
-                    .map(|vs| {
-                        vs.iter()
-                            .filter(|v| v.get("storage").and_then(Value::as_bool) == Some(true))
-                            .filter_map(|v| v.get("name").cloned())
-                            .collect()
-                    })
+                    .cloned()
                     .unwrap_or_default();
+                if !stored.iter().any(|v| v == storage[0]) {
+                    stored.push(json!(storage[0]));
+                }
+                let names: Vec<&str> = versions.iter().filter_map(|v| v.get("name").and_then(Value::as_str)).collect();
+                let missing: Vec<String> = stored
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter(|v| !names.contains(v))
+                    .map(|v| {
+                        format!(
+                            "status.storedVersions[{}]: Invalid value: \"{v}\": missing from spec.versions; {v} was previously a storage version, and must remain in spec.versions until a storage migration ensures no data remains persisted in {v} and removes {v} from status.storedVersions",
+                            stored.iter().position(|s| s == v).unwrap_or(0)
+                        )
+                    })
+                    .collect();
+                if !missing.is_empty() {
+                    return Err(ApiError::invalid_fields(rt, &name, &missing));
+                }
                 let now = now_rfc3339();
-                obj["status"] = json!({
-                    "acceptedNames": obj["spec"]["names"].clone(),
-                    "storedVersions": storage,
-                    "conditions": [
+                let conditions = old.and_then(|o| o.pointer("/status/conditions")).cloned().unwrap_or_else(|| {
+                    json!([
                         {"type": "NamesAccepted", "status": "True", "reason": "NoConflicts", "message": "no conflicts found", "lastTransitionTime": now},
                         {"type": "Established", "status": "True", "reason": "InitialNamesAccepted", "message": "the initial names have been accepted", "lastTransitionTime": now},
-                    ],
+                    ])
+                });
+                obj["status"] = json!({
+                    "acceptedNames": obj["spec"]["names"].clone(),
+                    "storedVersions": stored,
+                    "conditions": conditions,
                 });
             }
             _ => {}
@@ -3198,6 +3374,7 @@ impl ApiState {
         let rt = self.internal_rt(group, plural)?;
         let generated = name_of(&obj).is_empty();
         self.prepare_create(&rt, ns, &mut obj, true)?;
+        self.track_fields_as(&rt, None, &mut obj, None, CONTROLLER_MANAGER, None);
         for _ in 0..5 {
             let name = name_of(&obj);
             match self.store.create(key_for(&rt, ns, &name), obj.clone()) {
@@ -3236,7 +3413,8 @@ impl ApiState {
             .get(&key)
             .ok_or_else(|| ApiError::from_store(StoreError::NotFound, &rt, &name))?;
         let expected = resource_version(&obj);
-        let new = self.prepare_update(&rt, &old, obj, sub, &name)?;
+        let mut new = self.prepare_update(&rt, &old, obj, sub, &name)?;
+        self.track_fields_as(&rt, Some(&old), &mut new, None, CONTROLLER_MANAGER, sub);
         self.commit_update(&rt, key, new, expected)
             .map_err(|e| ApiError::from_store(e, &rt, &name))
     }
@@ -3314,6 +3492,19 @@ impl ApiError {
 }
 
 /// Equal apart from the resourceVersion.
+/// The field manager of writes the in-process controllers make.
+const CONTROLLER_MANAGER: &str = "kube-controller-manager";
+
+/// Store managedFields on an object (none if empty).
+fn set_managed_fields(obj: &mut Value, entries: Vec<super::managed::Entry>) {
+    let Some(m) = obj.get_mut("metadata").and_then(Value::as_object_mut) else { return };
+    if entries.is_empty() {
+        m.remove("managedFields");
+    } else {
+        m.insert("managedFields".into(), super::managed::encode(entries));
+    }
+}
+
 fn same_content(a: &Value, b: &Value) -> bool {
     let strip = |v: &Value| {
         let mut v = v.clone();

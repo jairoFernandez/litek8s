@@ -1,6 +1,6 @@
 //! PATCH bodies: JSON merge patch (RFC 7386), JSON patch (RFC 6902), the
-//! strategic merge patch kubectl sends by default, and the field-merge used for
-//! server-side apply.
+//! strategic merge patch kubectl sends by default (server-side apply is in
+//! `managed`).
 
 use anyhow::{Result, anyhow, bail};
 use serde_json::{Map, Value};
@@ -266,15 +266,6 @@ fn strip_directives(value: &mut Value) {
         Value::Array(items) => items.iter_mut().for_each(strip_directives),
         _ => {}
     }
-}
-
-/// Server-side apply without field ownership: the applied configuration is
-/// merged into the live object (maps recursively, keyed lists by merge key,
-/// other lists replaced). Fields dropped from the applied config are NOT
-/// removed, because that needs `managedFields` tracking, which this server
-/// does not do yet.
-pub fn apply_merge(target: &mut Value, applied: &Value) {
-    strategic_merge_patch(target, applied);
 }
 
 #[cfg(test)]
