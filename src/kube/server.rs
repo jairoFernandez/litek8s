@@ -1587,6 +1587,7 @@ fn agent_connect(state: &Arc<ApiState>, req: &Req) -> Result<Response<Body>, Api
         api_host = "host-gateway".into();
         api_port = pod_port;
     }
+    let servers = join::server_list(state);
     let state = state.clone();
     tokio::spawn(async move {
         let Ok(upgraded) = on_upgrade.await else { return };
@@ -1598,6 +1599,11 @@ fn agent_connect(state: &Arc<ApiState>, req: &Req) -> Result<Response<Body>, Api
     *resp.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
     resp.headers_mut().insert(hyper::header::UPGRADE, HeaderValue::from_static(super::agent::protocol::PROTOCOL_VERSION));
     resp.headers_mut().insert(hyper::header::CONNECTION, HeaderValue::from_static("Upgrade"));
+    if let Ok(v) = HeaderValue::from_str(&servers.join(",")) {
+        if !servers.is_empty() {
+            resp.headers_mut().insert(join::SERVERS_HEADER, v);
+        }
+    }
     Ok(resp)
 }
 
@@ -3805,7 +3811,7 @@ impl ApiState {
     }
 
     /// The server a node's agent is connected to (HA), from its Lease.
-    fn node_server_addr(&self, node: &str) -> Option<String> {
+    pub(crate) fn node_server_addr(&self, node: &str) -> Option<String> {
         let cluster = self.ha()?;
         let lease = self.get_object("coordination.k8s.io", "leases", "kube-node-lease", node)?;
         let server = lease.pointer("/metadata/annotations").and_then(|a| a.get(NODE_SERVER_ANNOTATION)).and_then(Value::as_str)?;

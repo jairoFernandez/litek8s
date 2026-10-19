@@ -563,7 +563,7 @@ static UNREACHABLE: std::sync::Mutex<Option<std::collections::HashSet<String>>> 
 
 async fn dial(api: &ApiState, backend: &Backend) -> Result<Box<dyn Io>> {
     let addr = &backend.addr;
-    let tunnel = !backend.pod_uid.is_empty() && api.hub.is_connected(&backend.node);
+    let tunnel = !backend.pod_uid.is_empty() && (api.hub.is_connected(&backend.node) || api.node_server_addr(&backend.node).is_some());
     if !tunnel || !UNREACHABLE.lock().unwrap().as_ref().is_some_and(|s| s.contains(addr)) {
         match tokio::time::timeout(Duration::from_secs(1), tokio::net::TcpStream::connect(addr.as_str())).await {
             Ok(Ok(tcp)) => return Ok(Box::new(tcp)),
@@ -576,8 +576,19 @@ async fn dial(api: &ApiState, backend: &Backend) -> Result<Box<dyn Io>> {
             }
         }
     }
-    let (pod_uid, port) = (backend.pod_uid.clone(), backend.port);
-    let mut handle = api.hub.open_stream(&backend.node, |stream| Message::PortForward { stream, pod_uid, port }).await?;
+    pod_stream(api, &backend.node, &backend.pod_uid, backend.port).await
+}
+
+/// A byte stream to `port` of a pod, through its node's agent connection:
+/// on this server, or (HA) through the server the node is connected to.
+pub(crate) async fn pod_stream(api: &ApiState, node: &str, pod_uid: &str, port: u16) -> Result<Box<dyn Io>> {
+    if !api.hub.is_connected(node) {
+        if let (Some(cluster), Some(addr)) = (api.ha(), api.node_server_addr(node)) {
+            return Ok(Box::new(super::ha::tunnel(&cluster, &addr, node, pod_uid, port).await?));
+        }
+    }
+    let pod_uid = pod_uid.to_string();
+    let mut handle = api.hub.open_stream(node, |stream| Message::PortForward { stream, pod_uid, port }).await?;
     let (ours, theirs) = tokio::io::duplex(64 * 1024);
     let (mut from_us, mut to_us) = tokio::io::split(theirs);
     let input = handle.input();

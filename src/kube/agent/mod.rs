@@ -947,6 +947,7 @@ pub async fn node_agent_with(
         pod_cidr: network.pod_cidr.clone(),
         cluster_cidr: network.cluster_cidr.clone(),
         service_cidr: crate::kube::join::SERVICE_CIDR.into(),
+        servers: Vec::new(),
     };
     let _ = std::fs::write(root_dir.join("join.json"), serde_json::to_vec(&saved)?);
     eprintln!("node-agent: running pods with {}", node.pointer("/status/nodeInfo/containerRuntimeVersion").and_then(Value::as_str).unwrap_or("?"));
@@ -968,21 +969,52 @@ pub async fn run_local<R: PodRuntime>(api: Arc<crate::kube::ApiState>, agent: Ar
     }
 }
 
-/// Run an agent against a remote API server, reconnecting as needed.
+/// Run an agent against a remote API server, reconnecting as needed. With
+/// several servers (HA) it moves to another one when the one in use is
+/// unreachable or reports it lost the cluster.
 pub async fn run_remote<R: PodRuntime>(agent: Arc<Agent<R>>, mut client: crate::kube::join::Client) -> Result<()> {
     let mut backoff = Duration::from_millis(500);
+    let mut failures = 0usize;
     loop {
         match client.connect().await {
             Ok(io) => {
                 backoff = Duration::from_millis(500);
+                failures = 0;
                 eprintln!("node-agent: connected to {}", client.server_host());
-                if let Err(e) = agent.session(io).await {
-                    eprintln!("node-agent: session ended: {e:#}");
+                let session = agent.session(io);
+                tokio::pin!(session);
+                let mut probe = tokio::time::interval(Duration::from_secs(2));
+                let mut unready = 0;
+                loop {
+                    tokio::select! {
+                        r = &mut session => {
+                            if let Err(e) = r {
+                                eprintln!("node-agent: session ended: {e:#}");
+                            }
+                            break;
+                        }
+                        _ = probe.tick(), if client.server_count() > 1 => {
+                            unready = if client.ready().await { 0 } else { unready + 1 };
+                            if unready >= 3 {
+                                eprintln!("node-agent: {} is not ready (cut off from the other servers?); switching", client.server_host());
+                                client.next_server();
+                                break;
+                            }
+                        }
+                    }
                 }
+                continue;
             }
-            Err(e) => eprintln!("node-agent: failed to connect to {}: {e:#}", client.server_host()),
+            Err(e) => {
+                eprintln!("node-agent: failed to connect to {}: {e:#}", client.server_host());
+                failures += 1;
+                client.next_server();
+            }
         }
-        tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(Duration::from_secs(15));
+        // Back off once every known server has been tried.
+        if failures % client.server_count().max(1) == 0 {
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(15));
+        }
     }
 }

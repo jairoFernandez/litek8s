@@ -280,6 +280,18 @@ pub struct JoinResponse {
     pub pod_cidr: String,
     pub cluster_cidr: String,
     pub service_cidr: String,
+    /// Every API server (`host:port`) of an HA control plane: the agent
+    /// fails over between them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub servers: Vec<String>,
+}
+
+/// Header of the agent connection's answer listing the API servers.
+pub const SERVERS_HEADER: &str = "x-litek8s-servers";
+
+/// The API servers agents may use (HA), as `host:port`.
+pub(crate) fn server_list(api: &ApiState) -> Vec<String> {
+    api.ha().map(|c| c.status().servers.into_iter().filter(|s| s.voter).map(|s| s.addr).collect()).unwrap_or_default()
 }
 
 #[derive(Debug, Deserialize)]
@@ -300,6 +312,7 @@ pub(crate) fn handle_join(api: &ApiState, authorization: &str, password: &str, b
         pod_cidr,
         cluster_cidr: api.cluster_network().cluster_cidr.clone(),
         service_cidr: SERVICE_CIDR.into(),
+        servers: server_list(api),
     };
     Ok(serde_json::to_value(response).unwrap_or_default())
 }
@@ -310,8 +323,10 @@ pub(crate) fn handle_join(api: &ApiState, authorization: &str, password: &str, b
 /// How an agent reaches and authenticates to the API server.
 pub struct Client {
     https: bool,
-    /// host:port
+    /// host:port of the server in use.
     authority: String,
+    /// Every server known (HA): the one given, then those servers listed.
+    servers: Vec<String>,
     token: Token,
     pub node: String,
     password: String,
@@ -453,15 +468,62 @@ impl Client {
         };
         let authority = if authority.contains(':') { authority.to_string() } else { format!("{authority}:6443") };
         std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
+        let mut servers = vec![authority.clone()];
+        let saved: Vec<String> = std::fs::read(dir.join("servers.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
+        for s in saved {
+            if !servers.contains(&s) {
+                servers.push(s);
+            }
+        }
         Ok(Self {
             https,
             authority,
+            servers,
             token: Token::parse(token)?,
             node: node.to_string(),
             password: load_or_create(&dir.join("node-password"), 24)?,
             tls: None,
             dir: dir.to_path_buf(),
         })
+    }
+
+    /// Learn the cluster's servers (kept for restarts).
+    pub fn set_servers(&mut self, list: &[String]) {
+        let mut changed = false;
+        for s in list {
+            if !s.is_empty() && !self.servers.contains(s) {
+                self.servers.push(s.clone());
+                changed = true;
+            }
+        }
+        if changed {
+            let _ = std::fs::write(self.dir.join("servers.json"), serde_json::to_vec(&self.servers[1..]).unwrap_or_default());
+        }
+    }
+
+    /// Move on to the next known server.
+    pub fn next_server(&mut self) {
+        if self.servers.len() > 1 {
+            let i = self.servers.iter().position(|s| *s == self.authority).map_or(0, |i| (i + 1) % self.servers.len());
+            self.authority = self.servers[i].clone();
+            eprintln!("node-agent: trying API server {}", self.authority);
+        }
+    }
+
+    pub fn server_count(&self) -> usize {
+        self.servers.len()
+    }
+
+    /// Whether the server in use answers `/readyz` (an HA server cut off
+    /// from the others does not).
+    pub async fn ready(&mut self) -> bool {
+        let probe = async {
+            self.ensure_tls().await?;
+            let io = self.dial(self.tls.as_ref()).await?;
+            let (status, _) = request(io, &self.authority, "GET", "/readyz", &[], Vec::new()).await?;
+            Ok::<bool, anyhow::Error>(status == 200)
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), probe).await.ok().and_then(|r| r.ok()).unwrap_or(false)
     }
 
     pub fn server_host(&self) -> &str {
@@ -547,6 +609,7 @@ impl Client {
         match attempt.await {
             Ok(response) => {
                 std::fs::write(&saved_path, serde_json::to_vec(&response)?)?;
+                self.set_servers(&response.servers);
                 Ok(response)
             }
             Err(e) => match saved {
@@ -584,6 +647,13 @@ impl Client {
             let body = resp.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
             bail!("server answered {status}: {}", String::from_utf8_lossy(&body).trim());
         }
+        let servers: Vec<String> = resp
+            .headers()
+            .get(SERVERS_HEADER)
+            .and_then(|v| v.to_str().ok())
+            .map(|v| v.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect())
+            .unwrap_or_default();
+        self.set_servers(&servers);
         let upgraded = hyper::upgrade::on(resp).await?;
         Ok(hyper_util::rt::TokioIo::new(upgraded))
     }

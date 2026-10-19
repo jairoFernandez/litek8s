@@ -26,6 +26,7 @@
 //! Servers talk HTTPS on the API port, pinned to the cluster CA and
 //! authenticated with the join secret (`net.rs`).
 
+pub mod lb;
 pub mod lincheck;
 pub mod log;
 pub mod net;
@@ -97,6 +98,9 @@ pub struct Cluster {
     leader: watch::Receiver<bool>,
     /// One membership change at a time.
     membership_lock: tokio::sync::Mutex<()>,
+    /// When the leader last reached this server (ms since `started`).
+    leader_contact: AtomicU64,
+    started: std::time::Instant,
 }
 
 /// What a joining server needs to be one of the cluster's servers.
@@ -275,6 +279,8 @@ impl Cluster {
             reads: ReadBatcher::default(),
             leader: leader_rx,
             membership_lock: Default::default(),
+            leader_contact: AtomicU64::new(0),
+            started: std::time::Instant::now(),
         });
         if migrated {
             // Members that join later must get the moved objects: they only
@@ -386,7 +392,9 @@ impl Cluster {
             // A leader that has not heard from a quorum lately is likely
             // cut off: let load balancers send clients elsewhere.
             Some(l) if l == self.id => m.millis_since_quorum_ack.is_some_and(|ms| ms < 3_000) || m.membership_config.membership().voter_ids().count() == 1,
-            Some(_) => true,
+            // A follower the leader has not reached lately: an election, or
+            // this server is cut off.
+            Some(_) => self.started.elapsed().as_millis() as u64 - self.leader_contact.load(Ordering::Relaxed) < 3_000,
             None => false,
         }
     }
@@ -664,8 +672,25 @@ fn parse<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Response<Bod
     serde_json::from_slice(bytes).map_err(|e| error(StatusCode::BAD_REQUEST, format!("invalid request: {e}")))
 }
 
+/// A byte stream to a pod's port through `addr`, the server its node's
+/// agent is connected to.
+pub async fn tunnel(cluster: &Cluster, addr: &str, node: &str, pod_uid: &str, port: u16) -> Result<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>> {
+    let path = format!("{PREFIX}/tunnel?node={node}&pod={pod_uid}&port={port}");
+    let req = cluster.peers.request(addr, Method::POST, &path, &[("connection", "Upgrade".into()), ("upgrade", TUNNEL_PROTOCOL.into())], net::body(Vec::new()))?;
+    let mut resp = cluster.peers.open(addr, req).await?;
+    if resp.status() != StatusCode::SWITCHING_PROTOCOLS {
+        let status = resp.status();
+        let body = resp.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+        bail!("{addr} refused the tunnel ({status}): {}", String::from_utf8_lossy(&body));
+    }
+    Ok(hyper_util::rt::TokioIo::new(hyper::upgrade::on(&mut resp).await?))
+}
+
+const TUNNEL_PROTOCOL: &str = "litek8s-tunnel";
+
 /// Serve a `server.litek8s.dev` request.
-pub async fn serve(state: &Arc<ApiState>, req: Request<Incoming>) -> Response<Body> {
+pub async fn serve(state: &Arc<ApiState>, mut req: Request<Incoming>) -> Response<Body> {
+    let upgrade = req.headers().contains_key(hyper::header::UPGRADE).then(|| hyper::upgrade::on(&mut req));
     let (parts, body) = req.into_parts();
     let path = parts.uri.path().strip_prefix(PREFIX).unwrap_or_default().to_string();
     let method = parts.method.clone();
@@ -691,7 +716,11 @@ pub async fn serve(state: &Arc<ApiState>, req: Request<Incoming>) -> Response<Bo
                 Ok(r) => r,
                 Err(r) => return r,
             };
-            json_reply(StatusCode::OK, &cluster.raft.append_entries(rpc).await)
+            let result = cluster.raft.append_entries(rpc).await;
+            if result.as_ref().is_ok_and(|r| r.is_success()) {
+                cluster.leader_contact.store(cluster.started.elapsed().as_millis() as u64, Ordering::Relaxed);
+            }
+            json_reply(StatusCode::OK, &result)
         }
         (Method::POST, "/raft/vote") => {
             let bytes = match read_body(body, 1 << 20).await {
@@ -782,6 +811,37 @@ pub async fn serve(state: &Arc<ApiState>, req: Request<Incoming>) -> Response<Bo
             json_reply(StatusCode::OK, &cluster.status())
         }
         (Method::POST, "/status") => json_reply(StatusCode::OK, &cluster.status()),
+        (Method::POST, "/tunnel") => {
+            let query: std::collections::HashMap<String, String> = parts
+                .uri
+                .query()
+                .unwrap_or_default()
+                .split('&')
+                .filter_map(|kv| kv.split_once('='))
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            let (node, pod, port) = (query.get("node").cloned().unwrap_or_default(), query.get("pod").cloned().unwrap_or_default(), query.get("port").and_then(|p| p.parse::<u16>().ok()).unwrap_or(0));
+            if !state.hub.is_connected(&node) {
+                return error(StatusCode::SERVICE_UNAVAILABLE, format!("node {node} is not connected to this server"));
+            }
+            let Some(upgrade) = upgrade else { return error(StatusCode::BAD_REQUEST, "a tunnel needs an upgrade") };
+            let stream = match crate::kube::admission::pod_stream(state, &node, &pod, port).await {
+                Ok(s) => s,
+                Err(e) => return error(StatusCode::SERVICE_UNAVAILABLE, format!("{e:#}")),
+            };
+            tokio::spawn(async move {
+                if let Ok(up) = upgrade.await {
+                    let mut up = hyper_util::rt::TokioIo::new(up);
+                    let mut stream = stream;
+                    let _ = tokio::io::copy_bidirectional(&mut up, &mut stream).await;
+                }
+            });
+            let mut resp = Response::new(full(Vec::new()));
+            *resp.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+            resp.headers_mut().insert(hyper::header::UPGRADE, hyper::header::HeaderValue::from_static(TUNNEL_PROTOCOL));
+            resp.headers_mut().insert(hyper::header::CONNECTION, hyper::header::HeaderValue::from_static("Upgrade"));
+            resp
+        }
         // Fault injection for tests (LITEK8S_HA_FAULTS=1): cut or restore
         // this server's links to the servers at `addrs`.
         (Method::POST, "/debug/partition") if std::env::var_os("LITEK8S_HA_FAULTS").is_some() => {

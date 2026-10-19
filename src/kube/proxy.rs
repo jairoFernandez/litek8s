@@ -12,10 +12,7 @@ use hyper::header::{CONNECTION, HOST, TRANSFER_ENCODING, UPGRADE};
 use hyper::{Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use serde_json::Value;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::agent::hub::StreamEvent;
-use super::agent::protocol::Message;
 use super::controllers::util;
 use super::server::{ApiError, ApiState, Body, Req, full};
 
@@ -123,47 +120,12 @@ pub(crate) async fn service(state: &Arc<ApiState>, ns: &str, name_port: &str, pa
 
 async fn relay(state: &Arc<ApiState>, pod: &Value, port: u16, path: &str, req: &Req, prefix: &str, tls: bool) -> Result<Response<Body>, ApiError> {
     let node = util::s(pod, "/spec/nodeName").to_string();
-    if node.is_empty() || !state.hub.is_connected(&node) {
+    if node.is_empty() || !(state.hub.is_connected(&node) || state.node_server_addr(&node).is_some()) {
         return Err(unavailable(format!("pod {} is not running on a connected node", util::name(pod))));
     }
-    let uid = util::uid(pod);
-    let mut handle = state
-        .hub
-        .open_stream(&node, |stream| Message::PortForward { stream, pod_uid: uid, port })
+    let client_side = super::admission::pod_stream(state, &node, &util::uid(pod), port)
         .await
         .map_err(|e| unavailable(format!("{e:#}")))?;
-    // Bridge the agent stream to an in-memory socket for the HTTP client.
-    let (client_side, relay_side) = tokio::io::duplex(256 * 1024);
-    let (mut from_client, mut to_client) = tokio::io::split(relay_side);
-    let input = handle.input();
-    let upstream = tokio::spawn(async move {
-        let mut buf = vec![0u8; 64 * 1024];
-        loop {
-            match from_client.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if !input.send(0, Bytes::copy_from_slice(&buf[..n])).await {
-                        break;
-                    }
-                }
-            }
-        }
-        input.close().await;
-    });
-    let downstream = tokio::spawn(async move {
-        while let Some(event) = handle.events.recv().await {
-            match event {
-                StreamEvent::Data { channel: 2, .. } => {}
-                StreamEvent::Data { bytes, .. } => {
-                    if to_client.write_all(&bytes).await.is_err() {
-                        break;
-                    }
-                }
-                StreamEvent::Done { .. } => break,
-            }
-        }
-        let _ = to_client.shutdown().await;
-    });
     let result = async {
         let io: Box<dyn Io> = if tls {
             let host = util::s(pod, "/status/podIP").to_string();
@@ -193,8 +155,6 @@ async fn relay(state: &Arc<ApiState>, pod: &Value, port: u16, path: &str, req: &
         anyhow::Ok((parts, bytes))
     }
     .await;
-    upstream.abort();
-    downstream.abort();
     let (parts, bytes) = result.map_err(|e| unavailable(format!("error trying to reach pod: {e:#}")))?;
     // Like the API server's proxy, point absolute links in HTML back
     // through the proxy.

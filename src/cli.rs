@@ -55,6 +55,21 @@ heartbeats stop is marked Unknown after --node-monitor-grace-period and its
 pods are evicted after their tolerationSeconds (default 300 s, see
 --default-unreachable-toleration-seconds).";
 
+const SERVER_AFTER_HELP: &str = "\
+Examples:
+  litek8s server list --server http://192.168.1.10:6443
+  litek8s server remove pi-3 --server https://192.168.1.10:6443 --token K10...::...
+
+Servers join with `litek8s apiserver --server https://<existing>:6443 --token <token>`
+(the first one starts with --cluster-init). Remove a server before reinstalling it.";
+
+const LB_AFTER_HELP: &str = "\
+Examples:
+  litek8s lb --listen 127.0.0.1:6443 --server http://192.168.1.10:6443
+  kubectl --server http://127.0.0.1:6443 get nodes
+
+Connections go whole (HTTP or TLS) to a server whose /readyz answers 200.";
+
 const DEV_AFTER_HELP: &str = "\
 Examples:
   litek8s dev up                 # API server, controllers, DNS, proxy and a node; kubectl context litek8s-dev
@@ -545,6 +560,43 @@ enum Command {
         command: ControlPlaneCommand,
     },
     #[command(
+        about = "List or remove the API servers of a highly available control plane",
+        help_template = HELP_TEMPLATE,
+        after_help = SERVER_AFTER_HELP
+    )]
+    Server {
+        #[command(subcommand)]
+        command: ServerCommand,
+    },
+    #[command(
+        about = "A TCP load balancer in front of the API servers of an HA control plane (one address for kubectl)",
+        help_template = HELP_TEMPLATE,
+        after_help = LB_AFTER_HELP
+    )]
+    Lb {
+        #[arg(long, default_value = "127.0.0.1:6443", help = "Address to listen on")]
+        listen: std::net::SocketAddr,
+        #[arg(long = "server", required = true, value_name = "URL", help = "An API server (repeat for more; the others are learned from it)")]
+        servers: Vec<String>,
+        #[arg(long, help = "Consider a server ready when it accepts TCP connections (for servers whose /readyz needs credentials)")]
+        tcp_check: bool,
+    },
+    #[command(hide = true, about = "Linearizability check of an HA control plane: a CRUD register workload, recorded and checked")]
+    HaCheck {
+        #[arg(long = "server", required = true, value_name = "HOST:PORT")]
+        servers: Vec<String>,
+        #[arg(long, default_value = "60s", value_parser = parse_duration)]
+        duration: Duration,
+        #[arg(long, default_value_t = 8)]
+        clients: u32,
+        #[arg(long, default_value_t = 6)]
+        keys: u32,
+        #[arg(long, default_value = "default")]
+        namespace: String,
+        #[arg(long, help = "Write the history (JSON) here")]
+        out: Option<PathBuf>,
+    },
+    #[command(
         about = "Create and manage local multi-node clusters using Docker",
         help_template = HELP_TEMPLATE,
         after_help = CLUSTER_AFTER_HELP
@@ -998,6 +1050,24 @@ enum InfraCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum ServerCommand {
+    #[command(about = "List the API servers, the leader and how far behind each is")]
+    List {
+        #[arg(long, default_value = "http://127.0.0.1:6443", value_name = "URL", help = "Any API server of the cluster")]
+        server: String,
+    },
+    #[command(about = "Remove an API server from the cluster (then stop it)")]
+    Remove {
+        #[arg(help = "Its name, as `litek8s server list` shows it")]
+        name: String,
+        #[arg(long, default_value = "https://127.0.0.1:6443", value_name = "URL", help = "Any API server of the cluster")]
+        server: String,
+        #[arg(long, env = "LITEK8S_TOKEN", hide_env_values = true, help = "The cluster's join token")]
+        token: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum ControlPlaneCommand {
     #[command(about = "Install litek8s on a remote host and join it to the HA cluster")]
     Join {
@@ -1222,6 +1292,35 @@ pub async fn run() -> Result<()> {
             .await
         }
         Command::Dev { command } => crate::dev::run(command).await,
+        Command::Server { command } => match command {
+            ServerCommand::List { server } => crate::kube::ha::lb::list(&server).await,
+            ServerCommand::Remove { name, server, token } => crate::kube::ha::lb::remove(&server, &token, &name).await,
+        },
+        Command::Lb { listen, servers, tcp_check } => crate::kube::ha::lb::run(listen, servers, tcp_check).await,
+        Command::HaCheck { servers, duration, clients, keys, namespace, out } => {
+            let history = crate::kube::ha::lincheck::run(crate::kube::ha::lincheck::Workload {
+                servers,
+                clients,
+                keys,
+                duration,
+                timeout: Duration::from_secs(5),
+                namespace,
+            })
+            .await;
+            if let Some(path) = &out {
+                std::fs::write(path, serde_json::to_vec(&history)?)?;
+            }
+            let summary = crate::kube::ha::lincheck::summarize(&history);
+            println!("{}", serde_json::to_string(&summary)?);
+            let started = std::time::Instant::now();
+            match crate::kube::ha::lincheck::check(&history) {
+                Ok(()) => {
+                    println!("linearizable ({} operations, checked in {:?})", history.len(), started.elapsed());
+                    Ok(())
+                }
+                Err(e) => anyhow::bail!("NOT linearizable: {e}"),
+            }
+        }
         Command::Ui(args) => crate::ui::run(args).await,
         Command::Agent { join: Some(join), token, node_name, node_ip, node_dir, runtime, wireguard_port, no_wireguard, node_grace_period, .. } => {
             let token = token.context("--token is required with --join")?;
