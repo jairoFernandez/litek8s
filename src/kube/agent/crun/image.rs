@@ -243,6 +243,18 @@ pub(crate) struct ImageStore {
     /// One unpack per layer at a time (images share layers).
     layer_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     owners: bool,
+    /// Pulls, imports and builds in progress: their blobs and layers are not
+    /// indexed yet, so sweeping waits.
+    busy: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+/// Holds off [`ImageStore::sweep`] while alive.
+pub(crate) struct Busy(Arc<std::sync::atomic::AtomicUsize>);
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -260,7 +272,13 @@ impl ImageStore {
                 let _ = std::fs::remove_dir_all(e.path()).or_else(|_| std::fs::remove_file(e.path()));
             }
         }
-        Ok(Self { root: root.to_path_buf(), index: Mutex::new(()), layer_locks: Mutex::new(HashMap::new()), owners: is_root() })
+        Ok(Self { root: root.to_path_buf(), index: Mutex::new(()), layer_locks: Mutex::new(HashMap::new()), owners: is_root(), busy: Arc::default() })
+    }
+
+    /// Mark work that adds blobs or layers before indexing them.
+    pub fn busy(&self) -> Busy {
+        self.busy.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Busy(self.busy.clone())
     }
 
     pub fn layer_dir(&self, diff_id: &str) -> PathBuf {
@@ -455,6 +473,7 @@ impl ImageStore {
     }
 
     pub async fn pull_with(&self, image: &str, opts: &PullOptions) -> Result<Image> {
+        let _busy = self.busy();
         let reference = Reference::parse(image)?;
         let key = reference.canonical();
         let always = opts.always;
@@ -611,6 +630,7 @@ impl ImageStore {
     /// `docker.io/library/myapp:dev`, which is what a pod's `myapp:dev`
     /// means) and are never pulled over afterwards.
     pub fn import_archive(&self, archive: &Path) -> Result<Vec<String>> {
+        let _busy = self.busy();
         let dir = self.staging_dir().join(format!("import-{}", random_hex(8)));
         let result = (|| {
             extract_archive(archive, &dir)?;
@@ -735,6 +755,15 @@ impl ImageStore {
 
     /// Remove layers and blobs that no indexed image refers to.
     pub fn sweep(&self) -> Result<()> {
+        if self.busy.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            return Ok(());
+        }
+        // Anything changed (written, or renamed into place) in the last ten
+        // minutes may belong to work another process has not indexed yet.
+        let recent = |p: &Path| {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::symlink_metadata(p).is_ok_and(|m| chrono::Utc::now().timestamp() - m.ctime() < 600)
+        };
         let index = self.load_index();
         let mut layers = HashSet::new();
         let mut blobs = HashSet::new();
@@ -753,15 +782,12 @@ impl ImageStore {
                 }
                 continue;
             }
-            // Layers of a pull or build still in progress are not indexed
-            // yet.
-            let recent = entry.metadata().and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|a| a < Duration::from_secs(600)));
-            if !layers.contains(&path) && !recent {
+            if !layers.contains(&path) && !recent(&path) {
                 let _ = std::fs::remove_dir_all(&path);
             }
         }
         for entry in std::fs::read_dir(self.root.join("blobs/sha256"))?.flatten() {
-            if !blobs.contains(&entry.path()) {
+            if !blobs.contains(&entry.path()) && !recent(&entry.path()) {
                 let _ = std::fs::remove_file(entry.path());
             }
         }

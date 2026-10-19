@@ -242,6 +242,7 @@ struct Builder {
 }
 
 async fn run(engine: Arc<Engine>, dir: &Path, opts: Options, tx: mpsc::UnboundedSender<Value>) -> Result<String> {
+    let _busy = engine.images.busy();
     let context = dir.join("context");
     let tar = dir.join("context.tar");
     let ctx = context.clone();

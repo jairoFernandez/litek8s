@@ -338,6 +338,11 @@ async fn dispatch(engine: &Arc<Engine>, method: Method, s: &[&str], req: Request
         (Method::POST, ["images", "prune"]) => Ok(json_resp(200, &prune_images(engine, &q))),
         (Method::POST, ["images", "load"]) => load_images(engine, &q, req).await,
         (Method::GET, ["images", "search"]) => Ok(json_resp(200, &json!([]))),
+        (Method::GET, ["images", "get"]) => {
+            let names: Vec<String> = req.uri().query().unwrap_or_default().split('&').filter_map(|p| p.strip_prefix("names=")).map(decode).collect();
+            save_images(engine, names)
+        }
+        (Method::GET, ["images", rest @ .., "get"]) if !rest.is_empty() => save_images(engine, vec![rest.join("/")]),
         (Method::GET, ["images", rest @ .., "json"]) if !rest.is_empty() => {
             let name = rest.join("/");
             let info = images::resolve(&engine.images, &name).ok_or_else(|| ApiError::not_found(format!("No such image: {name}")))?;
@@ -1318,6 +1323,88 @@ fn prune_images(engine: &Engine, q: &HashMap<String, String>) -> Value {
         deleted.push(json!({"Deleted": info.id}));
     }
     json!({"ImagesDeleted": deleted, "SpaceReclaimed": space})
+}
+
+/// `docker save`: a docker-archive tar (manifest.json, configs, one
+/// layer.tar per layer), written on a thread and streamed.
+fn save_images(engine: &Arc<Engine>, names: Vec<String>) -> ApiResult<Response<Body>> {
+    let mut found = Vec::new();
+    for n in &names {
+        let info = images::resolve(&engine.images, n).ok_or_else(|| ApiError::not_found(format!("No such image: {n}")))?;
+        let tag = images::key_for(n).filter(|k| info.keys.contains(k)).and_then(|k| images::short_name(&k));
+        found.push((info, tag));
+    }
+    let store = engine.images.clone();
+    let (tx, rx) = tokio::sync::mpsc::channel::<Bytes>(16);
+    struct ChanWriter(tokio::sync::mpsc::Sender<Bytes>);
+    impl std::io::Write for ChanWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.blocking_send(Bytes::copy_from_slice(buf)).map_err(|_| std::io::Error::other("client went away"))?;
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        let mut b = tar::Builder::new(std::io::BufWriter::with_capacity(1 << 20, ChanWriter(tx)));
+        let mut manifest = Vec::new();
+        let mut written = std::collections::HashSet::new();
+        let append = |b: &mut tar::Builder<_>, name: &str, data: &mut dyn std::io::Read, size: u64| -> std::io::Result<()> {
+            let mut h = tar::Header::new_ustar();
+            h.set_size(size);
+            h.set_mode(0o644);
+            h.set_mtime(0);
+            h.set_entry_type(tar::EntryType::Regular);
+            b.append_data(&mut h, name, data)
+        };
+        for (info, tag) in found {
+            let mut config = store.config_blob(&info.entry.config).unwrap_or(Value::Null);
+            // Layers are kept unpacked: their tars are regenerated, and the
+            // config names those tars' digests (a pulled image's ID changes
+            // on the way through docker save/load; content does not).
+            let mut layers = Vec::new();
+            let mut diff_ids = Vec::new();
+            for diff in &info.entry.layers {
+                let tmp = store.staging_dir().join(format!("save-{}.tar", cimage::random_hex(6)));
+                let result = (|| -> anyhow::Result<()> {
+                    cimage::write_layer_tar(&store.layer_dir(diff), std::io::BufWriter::new(std::fs::File::create(&tmp)?))?;
+                    let digest = {
+                        use sha2::Digest;
+                        let mut h = sha2::Sha256::new();
+                        std::io::copy(&mut std::fs::File::open(&tmp)?, &mut h)?;
+                        format!("sha256:{}", hex::encode(h.finalize()))
+                    };
+                    let name = format!("{}/layer.tar", digest.trim_start_matches("sha256:"));
+                    if written.insert(name.clone()) {
+                        let size = std::fs::metadata(&tmp)?.len();
+                        append(&mut b, &name, &mut std::fs::File::open(&tmp)?, size)?;
+                    }
+                    layers.push(name);
+                    diff_ids.push(digest);
+                    Ok(())
+                })();
+                let _ = std::fs::remove_file(&tmp);
+                result?;
+            }
+            config["rootfs"] = json!({"type": "layers", "diff_ids": diff_ids});
+            let config_bytes = serde_json::to_vec(&config)?;
+            let config_name = {
+                use sha2::Digest;
+                format!("{}.json", hex::encode(sha2::Sha256::digest(&config_bytes)))
+            };
+            if written.insert(config_name.clone()) {
+                append(&mut b, &config_name, &mut &config_bytes[..], config_bytes.len() as u64)?;
+            }
+            manifest.push(json!({"Config": config_name, "RepoTags": tag.into_iter().collect::<Vec<_>>(), "Layers": layers}));
+        }
+        let m = serde_json::to_vec(&manifest)?;
+        append(&mut b, "manifest.json", &mut &m[..], m.len() as u64)?;
+        b.into_inner()?.into_inner().map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok(())
+    });
+    let s = futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|b| (b, rx)) });
+    Ok(stream_resp("application/x-tar", s))
 }
 
 async fn load_images(engine: &Arc<Engine>, q: &HashMap<String, String>, req: Request<Incoming>) -> ApiResult<Response<Body>> {
