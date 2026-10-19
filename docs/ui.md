@@ -306,10 +306,28 @@ threads:
 | Settings | 0.02 % | 1.0/s | 16.6 MiB | 2 |
 | a log following 1 line/s | 0.03 % | 2.4/s | 19.1 MiB (peak) | 2 |
 
-Startup: the first frame is drawn 0.7 ms after the UI starts and the first
-one with the engine's containers 2.7 ms after (`LITEK8S_UI_STATS=1 litek8s
-ui` prints these, and the number of frames drawn, when it exits: 156 frames
-in 315 s for the run above, nearly all of them Home samples and log lines).
+On macOS (M-series MacBook, `litek8s dev up --cpus 4 --memory 4096`, the
+same workload, 80x24 in `tmux`), idle 60 s in each view; CPU from `ps`
+CPU time, idle wake-ups and footprint (what Activity Monitor calls Memory)
+from `top`:
+
+| view | CPU | idle wake-ups | footprint | RSS | threads |
+|---|---|---|---|---|---|
+| Home (samples every 2 s) | 0.12 % | 0.02/s | 6.5 MiB | 20.2 MiB | 3 |
+| Containers | 0.00 % | 0.02/s | 6.5 MiB | 20.2 MiB | 2 |
+| Kubernetes | 0.02 % | 0.02/s | 6.5 MiB | 20.2 MiB | 2 |
+| Settings | 0.02 % | 0.02/s | 6.5 MiB | 20.2 MiB | 2 |
+| a log following 1 line/s | 0.07 % | 0.03/s | 6.6 MiB | 20.2 MiB | 2 |
+
+(RSS counts the shared pages of the 39 MB binary; the footprint is the UI's
+own memory.)
+
+Startup: on Linux the first frame is drawn 0.7 ms after the UI starts and
+the first one with the engine's containers 2.7 ms after; on the Mac 1.6-2.8
+ms and 7-13 ms (the Docker socket is relayed into the VM over vsock).
+`LITEK8S_UI_STATS=1 litek8s ui` prints these, and the number of frames
+drawn, when it exits: 156 frames in 315 s for the Linux run above, nearly
+all of them Home samples and log lines.
 
 Size: the UI (ratatui and crossterm, no other new dependency) adds to the
 release binary:

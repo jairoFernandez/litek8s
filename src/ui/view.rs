@@ -38,6 +38,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         }
     }
     hints(f, app, bottom);
+    long_error(f, app, area);
     match &app.overlay {
         Overlay::None => {}
         Overlay::Help => help(f, app, area),
@@ -70,7 +71,8 @@ fn tabs(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn hints(f: &mut Frame, app: &App, area: Rect) {
-    let line = if let Some((text, error)) = &app.status {
+    let boxed = is_long_error(app, area.width);
+    let line = if let Some((text, error)) = app.status.as_ref().filter(|_| !boxed) {
         Line::from(Span::styled(format!(" {text}"), if *error { BAD } else { OK }))
     } else {
         let keys: &[(&str, &str)] = if app.logs.is_some() {
@@ -98,6 +100,24 @@ fn hints(f: &mut Frame, app: &App, area: Rect) {
     let [left, right] = Layout::horizontal([Constraint::Min(1), Constraint::Length(9)]).areas(area);
     f.render_widget(Paragraph::new(line), left);
     f.render_widget(Paragraph::new(Line::from(vec![Span::styled("?", Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)), Span::raw(" help ")])).right_aligned(), right);
+}
+
+/// An error too long for the hint line, wrapped in a box just above it
+/// (it goes with the status line: after 8 s or a key).
+fn is_long_error(app: &App, width: u16) -> bool {
+    matches!(&app.status, Some((text, true)) if text.chars().count() + 1 > width.saturating_sub(10) as usize)
+}
+
+fn long_error(f: &mut Frame, app: &App, area: Rect) {
+    let Some((text, true)) = &app.status else { return };
+    let inner = area.width.saturating_sub(2).max(1) as usize;
+    if !is_long_error(app, area.width) {
+        return;
+    }
+    let rows = (text.chars().count().div_ceil(inner) as u16).clamp(1, 5);
+    let r = Rect { x: area.x, y: area.y + area.height.saturating_sub(rows + 3), width: area.width, height: rows + 2 };
+    f.render_widget(Clear, r);
+    f.render_widget(Paragraph::new(Span::styled(text.clone(), BAD)).wrap(Wrap { trim: false }).block(Block::bordered().border_style(BAD).title(Span::styled(" error ", BOLD))), r);
 }
 
 fn block(title: &str) -> Block<'static> {

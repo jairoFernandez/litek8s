@@ -437,3 +437,15 @@ fn dev_output_shows_its_last_lines_wrapped() {
     let s = render(&app, 80, 24);
     assert!(s.contains("line 29") && !s.contains("line 5 "), "{s}");
 }
+
+#[test]
+fn long_errors_wrap_above_the_hints() {
+    let mut app = sample_app();
+    let msg = "1 of 1 image(s) not removed: conflict: unable to remove repository reference \"busybox\" (must force) - container shop-worker-1 is using its referenced image";
+    app.apply(Msg::Done(Err(msg.into())));
+    let s = render(&app, 80, 24);
+    assert!(s.contains(" error ") && s.contains("is using its referenced image"), "{s}");
+    // Short errors stay in the hint line, without a box.
+    app.apply(Msg::Done(Err("nope".into())));
+    assert!(!render(&app, 80, 24).contains(" error "));
+}
