@@ -2077,6 +2077,9 @@ impl ApiState {
         obj: &mut Value,
         check_namespace: bool,
     ) -> Result<(), ApiError> {
+        if !rt.custom {
+            super::fields::drop_nulls(obj);
+        }
         let Some(map) = obj.as_object_mut() else {
             return Err(ApiError::bad_request("the request body must be a JSON object"));
         };
@@ -2177,6 +2180,9 @@ impl ApiState {
     ) -> Result<Value, ApiError> {
         if !new.is_object() {
             return Err(ApiError::bad_request("the request body must be a JSON object"));
+        }
+        if !rt.custom {
+            super::fields::drop_nulls(&mut new);
         }
         let body_name = name_of(&new);
         if !body_name.is_empty() && body_name != url_name {

@@ -238,6 +238,21 @@ fn prune_at(v: &mut Value, schema: &Value, resource: bool) {
     }
 }
 
+/// Drop every `null` object field, as decoding into Kubernetes' Go types
+/// does for built-in resources: a manifest's `replicas:` with no value is an
+/// unset field (defaulted to 1), not a null that clients then dereference
+/// (Helm's readiness check panicked on the kyverno chart's Deployments).
+pub fn drop_nulls(v: &mut Value) {
+    match v {
+        Value::Object(map) => {
+            map.retain(|_, child| !child.is_null());
+            map.values_mut().for_each(drop_nulls);
+        }
+        Value::Array(items) => items.iter_mut().for_each(drop_nulls),
+        _ => {}
+    }
+}
+
 /// Fill in `default`s the schema declares for missing fields (also inside
 /// array items and additionalProperties), like the API server does on
 /// requests and on reads from storage. As there, a `null` in a field that is
@@ -445,6 +460,13 @@ mod tests {
         prune(&mut pruned, &schema);
         assert!(pruned.get("unknownField").is_none() && pruned["spec"].get("foo").is_none());
         assert_eq!(pruned["metadata"]["unknownMeta"], 1);
+    }
+
+    #[test]
+    fn nulls_are_dropped_like_typed_decoding() {
+        let mut d = json!({"spec": {"replicas": null, "template": {"spec": {"containers": [{"name": "c", "args": null}]}}}});
+        drop_nulls(&mut d);
+        assert_eq!(d, json!({"spec": {"template": {"spec": {"containers": [{"name": "c"}]}}}}));
     }
 
     #[test]
