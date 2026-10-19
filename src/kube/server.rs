@@ -3804,6 +3804,8 @@ impl ApiState {
                     .peers
                     .call_json(&addr, Method::POST, "/podcidr", &json!({"node": node, "requested": previous}), Duration::from_secs(30))
                     .await?;
+                // The Node the leader just wrote, here too (it gets labeled next).
+                let _ = cluster.read_barrier().await;
                 return v["cidr"].as_str().map(str::to_string).context("the leader allocated no pod CIDR");
             }
         }

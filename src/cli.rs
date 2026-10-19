@@ -112,10 +112,11 @@ fn parse_duration(raw: &str) -> Result<Duration, String> {
     let (number, unit) = raw.split_at(raw.find(|c: char| !c.is_ascii_digit()).unwrap_or(raw.len()));
     let n: u64 = number.parse().map_err(|_| format!("invalid duration {raw:?} (use e.g. 40s, 5m, 1h)"))?;
     let secs = match unit {
+        "ms" => return Ok(Duration::from_millis(n)),
         "" | "s" => n,
         "m" => n * 60,
         "h" => n * 3600,
-        _ => return Err(format!("invalid duration unit in {raw:?} (s, m or h)")),
+        _ => return Err(format!("invalid duration unit in {raw:?} (ms, s, m or h)")),
     };
     Ok(Duration::from_secs(secs))
 }
@@ -594,6 +595,19 @@ enum Command {
         #[arg(long, default_value = "default")]
         namespace: String,
         #[arg(long, help = "Write the history (JSON) here")]
+        out: Option<PathBuf>,
+    },
+    #[command(hide = true, about = "Write one ConfigMap repeatedly: write latency and unavailability windows (HA failover)")]
+    HaProbe {
+        #[arg(long, default_value = "127.0.0.1:6443", value_name = "HOST:PORT")]
+        server: String,
+        #[arg(long, default_value = "100ms", value_parser = parse_duration)]
+        interval: Duration,
+        #[arg(long, default_value = "60s", value_parser = parse_duration)]
+        duration: Duration,
+        #[arg(long, default_value = "default")]
+        namespace: String,
+        #[arg(long, help = "Write every sample (JSON) here")]
         out: Option<PathBuf>,
     },
     #[command(
@@ -1297,6 +1311,14 @@ pub async fn run() -> Result<()> {
             ServerCommand::Remove { name, server, token } => crate::kube::ha::lb::remove(&server, &token, &name).await,
         },
         Command::Lb { listen, servers, tcp_check } => crate::kube::ha::lb::run(listen, servers, tcp_check).await,
+        Command::HaProbe { server, interval, duration, namespace, out } => {
+            let samples = crate::kube::ha::lincheck::probe(&server, &namespace, interval, duration, Duration::from_secs(15)).await;
+            if let Some(path) = &out {
+                std::fs::write(path, serde_json::to_vec(&samples)?)?;
+            }
+            println!("{}", serde_json::to_string_pretty(&crate::kube::ha::lincheck::probe_report(&samples, 500.0))?);
+            Ok(())
+        }
         Command::HaCheck { servers, duration, clients, keys, namespace, out } => {
             let history = crate::kube::ha::lincheck::run(crate::kube::ha::lincheck::Workload {
                 servers,

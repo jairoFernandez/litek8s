@@ -333,6 +333,69 @@ pub async fn run(w: Workload) -> Vec<Op> {
     all
 }
 
+/// One timed write of [`probe`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Sample {
+    /// Milliseconds since the start of the run.
+    pub at_ms: f64,
+    pub latency_ms: f64,
+    pub ok: bool,
+}
+
+/// Write one ConfigMap again and again (sequentially, `interval` apart,
+/// as fast as possible with zero) for `duration`: write latency and the
+/// windows in which writes fail.
+pub async fn probe(server: &str, namespace: &str, interval: Duration, duration: Duration, timeout: Duration) -> Vec<Sample> {
+    let start = Instant::now();
+    let path = format!("/api/v1/namespaces/{namespace}/configmaps");
+    let name = format!("ha-probe-{}", std::process::id());
+    let _ = http(server, "POST", &path, Some(&cm(&name, 0)), timeout).await;
+    let mut samples = Vec::new();
+    let mut n = 0i64;
+    while start.elapsed() < duration {
+        n += 1;
+        let t0 = Instant::now();
+        let at_ms = start.elapsed().as_secs_f64() * 1e3;
+        let ok = matches!(http(server, "PUT", &format!("{path}/{name}"), Some(&cm(&name, n)), timeout).await, Ok((200, _)));
+        samples.push(Sample { at_ms, latency_ms: t0.elapsed().as_secs_f64() * 1e3, ok });
+        let next = t0 + interval;
+        if Instant::now() < next {
+            tokio::time::sleep_until(next.into()).await;
+        } else if !ok {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+    samples
+}
+
+/// Latency percentiles of successful writes, and every window longer than
+/// `gap_ms` without one (from the last success before to the first after).
+pub fn probe_report(samples: &[Sample], gap_ms: f64) -> Value {
+    let mut ok: Vec<f64> = samples.iter().filter(|s| s.ok).map(|s| s.latency_ms).collect();
+    ok.sort_by(f64::total_cmp);
+    let pct = |p: f64| ok.get(((ok.len() as f64 - 1.0) * p).round() as usize).copied().unwrap_or(f64::NAN);
+    let mut windows = Vec::new();
+    let mut last_ok_end: Option<f64> = None;
+    for s in samples {
+        if s.ok {
+            let end = s.at_ms + s.latency_ms;
+            if let Some(prev) = last_ok_end {
+                if end - prev > gap_ms {
+                    windows.push(json!({"from_ms": prev, "to_ms": end, "ms": end - prev}));
+                }
+            }
+            last_ok_end = Some(end);
+        }
+    }
+    json!({
+        "writes": samples.len(),
+        "ok": ok.len(),
+        "failed": samples.len() - ok.len(),
+        "p50_ms": pct(0.5), "p90_ms": pct(0.9), "p99_ms": pct(0.99), "max_ms": ok.last().copied().unwrap_or(f64::NAN),
+        "unavailable": windows,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
