@@ -113,6 +113,8 @@ pub struct ApiState {
     pod_port: std::sync::atomic::AtomicU16,
     /// Imports image archives into the local node, when there is one.
     pub(crate) image_loader: std::sync::OnceLock<ImageLoader>,
+    /// Request counters served at `/metrics`.
+    metrics: super::metrics::RequestMetrics,
 }
 
 impl ApiState {
@@ -136,6 +138,7 @@ impl ApiState {
             signer: super::sa_token::TokenSigner::load_or_create(data_dir)?,
             pod_port: std::sync::atomic::AtomicU16::new(0),
             image_loader: std::sync::OnceLock::new(),
+            metrics: Default::default(),
         };
         state.bootstrap()?;
         Ok(state)
@@ -812,17 +815,21 @@ async fn handle(state: Arc<ApiState>, mut req: Request<Incoming>) -> Response<Bo
         Ok(resp) => resp,
         Err(error) => error.into_response(),
     };
+    let code = resp.status().as_u16();
     if state.log_requests {
         eprintln!(
-            "apiserver: {} {}{} -> {} ({} µs)",
+            "apiserver: {} {}{} -> {} ({} µs) {}",
             parts.method,
             path,
             parts.uri.query().map(|q| format!("?{q}")).unwrap_or_default(),
-            resp.status().as_u16(),
-            started.elapsed().as_micros()
+            code,
+            started.elapsed().as_micros(),
+            header(hyper::header::USER_AGENT),
         );
     }
-    resp
+    let info = super::metrics::request_info(&req.method, &path, &req.query, &req.content_type, parts.headers.contains_key(hyper::header::UPGRADE));
+    let (resp_parts, body) = resp.into_parts();
+    Response::from_parts(resp_parts, state.metrics.observe(info, code, body))
 }
 
 /// litek8s's own endpoint for loading image archives into the local node
@@ -869,6 +876,12 @@ async fn route(state: &Arc<ApiState>, path: &str, req: &Req) -> Result<Response<
     const AGGREGATED_TYPE: &str = "application/json;g=apidiscovery.k8s.io;v=v2;as=APIGroupDiscoveryList";
     match segs.as_slice() {
         ["version"] if get => Ok(json_response(StatusCode::OK, &discovery::version())),
+        ["metrics"] if get => {
+            let mut resp = Response::new(full(state.metrics.render()));
+            resp.headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"));
+            Ok(resp)
+        }
         [probe, ..] if get && matches!(*probe, "healthz" | "livez" | "readyz") => Ok(text_response("ok")),
         ["api"] if get && aggregated => Ok(json_response_typed(
             StatusCode::OK,
