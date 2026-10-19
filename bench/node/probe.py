@@ -206,7 +206,8 @@ def mem():
         comm = comm_of(pid)
         cg = cgroup_of(pid)
         b = bucket(cg, comm) or "os/other"
-        if b in ("argocd", "workload", "k8s addon pods", "pod sandbox (pause)"):
+        # Per pod: its own processes (the pause sandbox stays with the runtime).
+        if b in ("argocd", "workload", "k8s addon pods"):
             p = pods.setdefault(anchor_of(cg), {"kind": b, "pss_kib": 0, "comms": []})
             p["pss_kib"] += pss
             p["comms"] = sorted(set(p["comms"]) | {comm})
