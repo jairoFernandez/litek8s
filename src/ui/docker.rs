@@ -245,7 +245,9 @@ impl Demux {
 /// A log line as text the terminal can show: no escape sequences or control
 /// characters (they would move the cursor over the UI), tabs expanded.
 pub fn printable(line: &[u8]) -> String {
-    let s = String::from_utf8_lossy(line);
+    // A log line longer than this is cut (the view keeps 5000 lines).
+    const MAX: usize = 4096;
+    let s = String::from_utf8_lossy(&line[..line.len().min(MAX * 4)]);
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
@@ -284,6 +286,10 @@ pub fn printable(line: &[u8]) -> String {
             c if c.is_control() => {}
             c => out.push(c),
         }
+        if out.len() >= MAX {
+            out.push('…');
+            break;
+        }
     }
     out
 }
@@ -315,5 +321,6 @@ mod tests {
         assert_eq!(printable(b"\x1b]0;title\x07text"), "text");
         assert_eq!(printable(b"10%\r50%\r100%\n"), "100%");
         assert_eq!(printable(b"line\r\n"), "line");
+        assert!(printable(&vec![b'x'; 100_000]).chars().count() <= 4097);
     }
 }

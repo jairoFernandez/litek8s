@@ -25,8 +25,12 @@ fn main() -> anyhow::Result<()> {
     if std::env::var_os("MALLOC_ARENA_MAX").is_none() {
         unsafe { libc::mallopt(libc::M_ARENA_MAX, 2) };
     }
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?
-        .block_on(litek8s::cli::run())
+    // The terminal UI waits on a few sockets: one thread is plenty (the
+    // servers want one per core).
+    let runtime = if args.get(1).map(String::as_str) == Some("ui") {
+        tokio::runtime::Builder::new_current_thread().enable_all().build()?
+    } else {
+        tokio::runtime::Builder::new_multi_thread().enable_all().build()?
+    };
+    runtime.block_on(litek8s::cli::run())
 }

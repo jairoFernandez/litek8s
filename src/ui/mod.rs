@@ -17,8 +17,8 @@ mod kube;
 pub mod model;
 pub mod view;
 
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -52,6 +52,7 @@ type Term = ratatui::Terminal<CrosstermBackend<std::io::Stdout>>;
 
 pub async fn run(args: UiArgs) -> Result<()> {
     use std::io::IsTerminal;
+    let started = Instant::now();
     if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
         bail!("litek8s ui needs a terminal");
     }
@@ -84,11 +85,11 @@ pub async fn run(args: UiArgs) -> Result<()> {
     app.apply(Msg::Config(crate::dev::config::DevConfig::load().map_err(|e| format!("{e:#}"))));
 
     let refresh = Arc::new(Notify::new());
-    let fast = Arc::new(AtomicBool::new(true));
+    let pace = Arc::new(AtomicU64::new(home::VISIBLE));
     let wake_home = Arc::new(Notify::new());
     let tasks = vec![
         docker::spawn(docker_ep.clone(), tx.clone(), refresh.clone()),
-        home::spawn(tx.clone(), local, fast.clone(), wake_home.clone()),
+        home::spawn(tx.clone(), local, pace.clone(), wake_home.clone()),
     ];
     let kube_watches = if fixed.is_some() { kube::spawn_watches(kube_ep.clone(), tx.clone()) } else { Vec::new() };
     if fixed.is_none() {
@@ -96,7 +97,7 @@ pub async fn run(args: UiArgs) -> Result<()> {
     }
 
     let mut terminal = setup(args.mouse)?;
-    let input = Input::spawn();
+    let input = Input::new();
     let mut rt = Runtime {
         docker: docker_ep,
         kube: kube_ep,
@@ -109,8 +110,9 @@ pub async fn run(args: UiArgs) -> Result<()> {
         forwards: kube::Forwards::default(),
         log_task: None,
         input,
+        stats: Stats { started, first_frame: None, data_frame: None, containers_seen: false, frames: 0 },
     };
-    let result = rt.event_loop(&mut terminal, &mut app, rx, &fast).await;
+    let result = rt.event_loop(&mut terminal, &mut app, rx, &pace).await;
     rt.forwards.stop_all();
     if let Some(t) = rt.log_task.take() {
         t.abort();
@@ -119,7 +121,31 @@ pub async fn run(args: UiArgs) -> Result<()> {
         t.abort();
     }
     restore(args.mouse);
+    if std::env::var_os("LITEK8S_UI_STATS").is_some() {
+        let s = &rt.stats;
+        let ms = |d: Option<Duration>| d.map(|d| format!("{:.1} ms", d.as_secs_f64() * 1000.0)).unwrap_or_else(|| "-".into());
+        eprintln!(
+            "litek8s ui: first frame {}, first frame with containers {}, {} frames in {:.1} s",
+            ms(s.first_frame),
+            ms(s.data_frame),
+            s.frames,
+            s.started.elapsed().as_secs_f64()
+        );
+    }
     result
+}
+
+/// How often ages ("5m") are redrawn when nothing else changes.
+const AGES_EVERY: Duration = Duration::from_secs(30);
+
+/// `LITEK8S_UI_STATS=1`: what the UI did, printed when it exits.
+struct Stats {
+    started: Instant,
+    first_frame: Option<Duration>,
+    /// The first frame showing the engine's containers.
+    data_frame: Option<Duration>,
+    containers_seen: bool,
+    frames: u64,
 }
 
 const DEV_DOWN: &str = "the dev cluster is not running (Home: u starts it)";
@@ -153,69 +179,38 @@ fn restore(mouse: bool) {
     let _ = terminal::disable_raw_mode();
 }
 
-/// Terminal events from a thread that can be paused while a shell or an
-/// editor owns the terminal (so it does not steal their keystrokes).
+/// Terminal events, from crossterm's event stream: it waits in the
+/// terminal reader (no timer), and dropping it stops reading, so a shell or
+/// an editor gets every keystroke while the UI is suspended.
 struct Input {
-    rx: UnboundedReceiver<Event>,
-    ctl: Arc<(Mutex<InputState>, Condvar)>,
-}
-
-#[derive(PartialEq)]
-enum InputState {
-    Running,
-    PauseRequested,
-    Paused,
+    stream: Option<event::EventStream>,
 }
 
 impl Input {
-    fn spawn() -> Input {
-        let (tx, rx) = unbounded_channel();
-        let ctl = Arc::new((Mutex::new(InputState::Running), Condvar::new()));
-        let c = ctl.clone();
-        std::thread::spawn(move || {
-            let (lock, cvar) = &*c;
-            loop {
-                {
-                    let mut st = lock.lock().unwrap();
-                    if *st == InputState::PauseRequested {
-                        *st = InputState::Paused;
-                        cvar.notify_all();
-                    }
-                    while *st == InputState::Paused {
-                        st = cvar.wait(st).unwrap();
-                    }
-                }
-                match event::poll(Duration::from_millis(100)) {
-                    Ok(true) => match event::read() {
-                        Ok(ev) => {
-                            if tx.send(ev).is_err() {
-                                return;
-                            }
-                        }
-                        Err(_) => return,
-                    },
-                    Ok(false) => {}
-                    Err(_) => return,
-                }
-            }
-        });
-        Input { rx, ctl }
+    fn new() -> Input {
+        Input { stream: Some(event::EventStream::new()) }
     }
 
-    fn pause(&self) {
-        let (lock, cvar) = &*self.ctl;
-        let mut st = lock.lock().unwrap();
-        *st = InputState::PauseRequested;
-        while *st != InputState::Paused {
-            st = cvar.wait(st).unwrap();
+    /// The next event; never ready while paused; `None` when the terminal
+    /// is gone.
+    async fn next(&mut self) -> Option<Event> {
+        use futures_util::StreamExt;
+        match &mut self.stream {
+            Some(s) => s.next().await.and_then(Result::ok),
+            None => std::future::pending().await,
         }
     }
 
+    fn pause(&mut self) {
+        self.stream = None;
+    }
+
     fn resume(&mut self) {
-        while self.rx.try_recv().is_ok() {}
-        let (lock, cvar) = &*self.ctl;
-        *lock.lock().unwrap() = InputState::Running;
-        cvar.notify_all();
+        // Whatever was typed for the shell is not for the UI.
+        while event::poll(Duration::ZERO).unwrap_or(false) {
+            let _ = event::read();
+        }
+        self.stream = Some(event::EventStream::new());
     }
 }
 
@@ -232,64 +227,111 @@ struct Runtime {
     forwards: kube::Forwards,
     log_task: Option<tokio::task::JoinHandle<()>>,
     input: Input,
+    stats: Stats,
 }
 
 impl Runtime {
-    async fn event_loop(&mut self, terminal: &mut Term, app: &mut App, mut rx: UnboundedReceiver<Msg>, fast: &AtomicBool) -> Result<()> {
+    async fn event_loop(&mut self, terminal: &mut Term, app: &mut App, mut rx: UnboundedReceiver<Msg>, pace: &AtomicU64) -> Result<()> {
+        // Drawn only when a key, a resize or new data changes something;
+        // timers only for a status line to fade and for ages to move on.
         let mut dirty = true;
-        let mut status_at: Option<Instant> = None;
-        let mut tick = tokio::time::interval(Duration::from_secs(5));
+        let mut status_until: Option<tokio::time::Instant> = None;
+        let mut last_status: Option<(String, bool)> = None;
+        let mut ages_at = tokio::time::Instant::now() + AGES_EVERY;
         loop {
             if dirty {
                 app.now = chrono::Utc::now().timestamp();
                 terminal.draw(|f| view::draw(f, app))?;
+                self.stats.frames += 1;
+                if self.stats.first_frame.is_none() {
+                    self.stats.first_frame = Some(self.stats.started.elapsed());
+                }
+                if self.stats.containers_seen && self.stats.data_frame.is_none() {
+                    self.stats.data_frame = Some(self.stats.started.elapsed());
+                }
                 dirty = false;
+                ages_at = tokio::time::Instant::now() + AGES_EVERY;
             }
+            let shows_ages = matches!(app.tab, Tab::Images | Tab::Kube) && app.logs.is_none();
             let effects = tokio::select! {
-                ev = self.input.rx.recv() => match ev {
+                ev = self.input.next() => match ev {
                     Some(Event::Key(k)) if k.kind != KeyEventKind::Release => {
                         if app.status.is_some() && app.overlay == app::Overlay::None {
                             app.status = None;
                         }
+                        dirty = true;
                         app.key(k)
                     }
-                    Some(Event::Mouse(m)) => app.mouse(m),
-                    Some(Event::Resize(..)) => Vec::new(),
+                    Some(Event::Mouse(m)) => {
+                        dirty = true;
+                        app.mouse(m)
+                    }
+                    // draw() picks up the new size.
+                    Some(Event::Resize(..)) => {
+                        dirty = true;
+                        Vec::new()
+                    }
                     Some(_) => continue,
                     None => return Ok(()),
                 },
                 msg = rx.recv() => {
                     let Some(msg) = msg else { return Ok(()) };
-                    let was_status = app.status.clone();
+                    dirty |= self.visible(app, &msg);
                     app.apply(msg);
                     // Take what else is queued before drawing (log bursts).
                     while let Ok(m) = rx.try_recv() {
+                        dirty |= self.visible(app, &m);
                         app.apply(m);
-                    }
-                    if app.status != was_status && app.status.is_some() {
-                        status_at = Some(Instant::now());
                     }
                     self.follow_dev_cluster(app);
                     Vec::new()
                 }
-                _ = tick.tick() => {
-                    if status_at.is_some_and(|t| t.elapsed() > Duration::from_secs(8)) {
-                        app.status = None;
-                        status_at = None;
-                    }
+                _ = tokio::time::sleep_until(status_until.unwrap_or_else(tokio::time::Instant::now)), if status_until.is_some() => {
+                    app.status = None;
+                    last_status = None;
+                    status_until = None;
+                    dirty = true;
+                    Vec::new()
+                }
+                _ = tokio::time::sleep_until(ages_at), if shows_ages => {
+                    dirty = true;
                     Vec::new()
                 }
             };
-            dirty = true;
-            fast.store(matches!(app.tab, Tab::Home | Tab::Space), Ordering::Relaxed);
+            let every = match app.tab {
+                _ if app.logs.is_some() => home::HIDDEN,
+                Tab::Home | Tab::Space => home::VISIBLE,
+                Tab::Settings => home::SETTINGS,
+                _ => home::HIDDEN,
+            };
+            if pace.swap(every, Ordering::Relaxed) > every {
+                // Back on Home: a fresh sample now, not at the slow pace's end.
+                self.wake_home.notify_one();
+            }
             for e in effects {
                 if self.effect(e, terminal, app).await? {
                     return Ok(());
                 }
             }
-            if app.status.is_some() && status_at.is_none() {
-                status_at = Some(Instant::now());
+            // A new status line shows for 8 s.
+            if app.status != last_status {
+                last_status = app.status.clone();
+                status_until = last_status.as_ref().map(|_| tokio::time::Instant::now() + Duration::from_secs(8));
             }
+        }
+    }
+
+    /// Whether a message can change what is on screen (Home samples arrive
+    /// in the background for other views too).
+    fn visible(&mut self, app: &App, msg: &Msg) -> bool {
+        match msg {
+            Msg::Containers(_) => {
+                self.stats.containers_seen = true;
+                true
+            }
+            Msg::Home(_) => matches!(app.tab, Tab::Home | Tab::Space | Tab::Settings) && app.logs.is_none(),
+            Msg::LogLines(..) | Msg::LogEnd(..) => app.logs.is_some(),
+            _ => true,
         }
     }
 
@@ -503,7 +545,11 @@ impl Runtime {
             let _ = execute!(std::io::stdout(), event::EnableMouseCapture);
         }
         terminal.hide_cursor()?;
-        terminal.clear()?;
+        // Clear and redraw everything. Not terminal.clear(): it asks the
+        // terminal for the cursor position, and that read fails while the
+        // dropped event stream's wake-up is still pending.
+        let size = terminal.size()?;
+        terminal.resize(ratatui::layout::Rect::new(0, 0, size.width, size.height))?;
         self.input.resume();
         Ok(())
     }

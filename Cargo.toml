@@ -42,8 +42,11 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 webpki-roots = "1"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 ruzstd = "0.9.1"
-# `litek8s ui`: the terminal UI (crossterm is re-exported as ratatui::crossterm).
+# `litek8s ui`: the terminal UI. crossterm is ratatui's (re-exported as
+# ratatui::crossterm); `event-stream` lets the UI wait for keys without a
+# thread of its own polling.
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
 
 # The macOS dev VM (`litek8s dev up` on a Mac) uses Apple's
 # Virtualization.framework.

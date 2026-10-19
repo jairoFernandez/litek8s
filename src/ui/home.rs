@@ -1,10 +1,11 @@
 //! The Home view's numbers: the dev cluster's state (its supervisor's state
 //! file and API), CPU and memory of everything it runs, its disk use, and
 //! where the user's tools point. Sampled every 2 s while Home or Free space
-//! is on screen, every 10 s otherwise.
+//! is on screen, every 10 s on Settings (its restart note), every 60 s
+//! otherwise (to notice the cluster's API port moving).
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
@@ -12,7 +13,12 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use super::app::{DevStatus, HomeSample, Msg};
 
-pub fn spawn(tx: UnboundedSender<Msg>, local: bool, fast: Arc<AtomicBool>, wake: Arc<Notify>) -> tokio::task::JoinHandle<()> {
+/// Seconds between samples, by what is on screen.
+pub const VISIBLE: u64 = 2;
+pub const SETTINGS: u64 = 10;
+pub const HIDDEN: u64 = 60;
+
+pub fn spawn(tx: UnboundedSender<Msg>, local: bool, pace: Arc<AtomicU64>, wake: Arc<Notify>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut cpu_prev: Option<(u64, Instant)> = None;
         let mut disk: Option<(u64, Instant)> = None;
@@ -42,8 +48,10 @@ pub fn spawn(tx: UnboundedSender<Msg>, local: bool, fast: Arc<AtomicBool>, wake:
             if state.is_none() {
                 cpu_prev = None;
             }
-            // Walking the data directory is not free: every 30 s.
-            if disk.is_none_or(|(_, at)| at.elapsed() > Duration::from_secs(30)) && home.is_dir() {
+            let every = pace.load(Ordering::Relaxed);
+            // Walking the data directory is not free: every 30 s, and only
+            // while its number is on screen.
+            if every == VISIBLE && disk.is_none_or(|(_, at)| at.elapsed() > Duration::from_secs(30)) && home.is_dir() {
                 let h = home.clone();
                 if let Ok(n) = tokio::task::spawn_blocking(move || crate::dev::data_size(&h)).await {
                     disk = Some((n, Instant::now()));
@@ -56,9 +64,8 @@ pub fn spawn(tx: UnboundedSender<Msg>, local: bool, fast: Arc<AtomicBool>, wake:
             if tx.send(Msg::Home(Box::new(s))).is_err() {
                 return;
             }
-            let every = if fast.load(Ordering::Relaxed) { Duration::from_secs(2) } else { Duration::from_secs(10) };
             tokio::select! {
-                _ = tokio::time::sleep(every) => {}
+                _ = tokio::time::sleep(Duration::from_secs(every)) => {}
                 _ = wake.notified() => {}
             }
         }

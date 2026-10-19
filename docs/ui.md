@@ -268,18 +268,61 @@ on 6443.
 
 ## Light on the machine
 
+The UI draws only when a key, a window resize or new data changes what is
+on screen, and waits on sockets otherwise:
+
 - **No polling for lists.** Containers, images and volumes are re-listed
   only after Docker events (`GET /events`), coalesced over 150 ms; sizes
   (`/system/df`, which walks directories) only after events that change
   them and at most every 2 s. Pods, deployments and namespaces come from
   Kubernetes watches, coalesced over 100 ms.
-- **Home** samples the cluster's CPU and memory every 2 s while Home or
-  Free space is on screen, every 10 s otherwise; the data directory's size
-  (a directory walk) at most every 30 s.
-- The screen redraws when something changes (and every 5 s for ages).
-- Size: the UI adds about 1.4 MiB to the stripped release binary
-  (macOS arm64 30.9 → 32.4 MB, Linux x86_64 36.0 → 37.5 MB): ratatui and
-  crossterm, no other new dependency.
+- **Home** samples the cluster's state, CPU and memory every 2 s while Home
+  or Free space is on screen, every 10 s on Settings (for its restart
+  note), every 60 s otherwise (to notice the API port moving); the data
+  directory's size (a directory walk) at most every 30 s and only while it
+  is shown. When the engine is down it is retried with backoff up to 10 s.
+- **Input** comes from crossterm's event stream, which waits in the
+  terminal reader (no timer); while a shell or an editor has the terminal
+  the stream is dropped, so nothing else reads keystrokes. The only timers
+  are a status message fading after 8 s and, on the views that show ages,
+  a redraw every 30 s.
+- **Two threads**: `litek8s ui` runs on a single-threaded async runtime
+  (the servers in the same binary use one thread per core) plus
+  crossterm's terminal reader; a blocking-pool thread comes and goes for
+  the data directory walk. The log view keeps the last 5000 lines, each
+  cut at 4096 characters.
+
+Measured on Linux x86_64 (omarchy, release build, rootless dev cluster with
+a 3-container compose project and a 3-replica deployment, 80x24 in `tmux`,
+after two window resizes), idle 60 s in each view; CPU from
+`/proc/<pid>/stat`, wake-ups are voluntary context switches of all its
+threads:
+
+| view | CPU | wake-ups | RSS | threads |
+|---|---|---|---|---|
+| Home (samples every 2 s) | 0.07 % | 3.6/s | 16.5 MiB | 3 (the size walk's blocking thread) |
+| Containers | 0.00 % | 0.3/s | 16.5 MiB | 2 |
+| Kubernetes | 0.02 % | 0.4/s | 16.5 MiB | 2 |
+| Settings | 0.02 % | 1.0/s | 16.6 MiB | 2 |
+| a log following 1 line/s | 0.03 % | 2.4/s | 19.1 MiB (peak) | 2 |
+
+Startup: the first frame is drawn 0.7 ms after the UI starts and the first
+one with the engine's containers 2.7 ms after (`LITEK8S_UI_STATS=1 litek8s
+ui` prints these, and the number of frames drawn, when it exits: 156 frames
+in 315 s for the run above, nearly all of them Home samples and log lines).
+
+Size: the UI (ratatui and crossterm, no other new dependency) adds to the
+release binary:
+
+| | main (c47079e) | with the UI | delta |
+|---|---|---|---|
+| macOS arm64, stripped | 30.86 MB | 32.43 MB | +1.49 MiB |
+| macOS arm64, as built | 37.39 MB | 39.28 MB | +1.80 MiB |
+| Linux x86_64, stripped | 35.95 MB | 37.63 MB | +1.61 MiB |
+| Linux x86_64, as built (with symbols) | 45.49 MB | 47.65 MB | +2.06 MiB |
+
+Most of it is the UI's own code (about 650 KiB of symbols); ratatui and
+crossterm are about 200 KiB.
 
 ## Keys
 
