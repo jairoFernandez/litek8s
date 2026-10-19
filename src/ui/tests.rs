@@ -102,7 +102,7 @@ fn every_view_fits_80x24() {
         let screen = render(&app, 80, 24);
         assert_eq!(screen.lines().count(), 24);
         assert!(screen.lines().all(|l| l.chars().count() == 80));
-        assert!(screen.lines().next().unwrap().contains("7 Settings"), "tab bar cut off:\n{screen}");
+        assert!(screen.lines().next().unwrap().contains("8 Settings"), "tab bar cut off:\n{screen}");
         assert!(screen.lines().last().unwrap().contains("? help"), "{screen}");
     }
 }
@@ -125,7 +125,7 @@ fn home_shows_state_resources_and_contexts() {
 #[test]
 fn containers_group_by_compose_project() {
     let mut app = sample_app();
-    app.key(key('2'));
+    app.key(key('3'));
     let rows = app.container_rows();
     assert_eq!(rows[0], CRow::Item(0));
     assert!(matches!(&rows[1], CRow::Group { name, count: 3, running: 2, collapsed: false } if name == "shop"));
@@ -144,7 +144,7 @@ fn containers_group_by_compose_project() {
 #[test]
 fn destructive_actions_ask_first() {
     let mut app = sample_app();
-    app.key(key('2'));
+    app.key(key('3'));
     // On the project row: stopping asks, and covers all three.
     app.key(key('j'));
     assert!(app.key(key('x')).is_empty());
@@ -169,21 +169,21 @@ fn destructive_actions_ask_first() {
     app.key(key('1'));
     app.key(key('R'));
     let s = render(&app, 80, 24);
-    assert!(s.contains("Reset the dev cluster?") && s.contains("cannot be undone"), "{s}");
+    assert!(s.contains("Delete cluster dev?") && s.contains("cannot be undone") && s.contains("litek8s-dev is removed"), "{s}");
     assert_eq!(app.key(code(KeyCode::Esc)), Vec::new());
     app.key(key('R'));
-    assert_eq!(app.key(code(KeyCode::Enter)), vec![Effect::Dev(DevOp::Reset)]);
+    assert_eq!(app.key(code(KeyCode::Enter)), vec![Effect::Dev(DevOp::Delete("dev".into()))]);
     // Until it finishes, Home says it is stopping, and refuses another run.
     assert!(render(&app, 80, 24).contains("● stopping"));
     assert!(app.key(key('u')).is_empty());
-    app.apply(Msg::DevFinished(Ok("litek8s dev reset: done".into())));
+    app.apply(Msg::DevFinished(Ok("litek8s dev delete --name dev: done".into())));
     assert_eq!(app.dev_busy, None);
 }
 
 #[test]
 fn logs_follow_and_scroll() {
     let mut app = sample_app();
-    app.key(key('2'));
+    app.key(key('3'));
     let effects = app.key(key('l'));
     assert!(matches!(&effects[..], [Effect::Logs(LogSource::Container { name, .. })] if name == "scratch"));
     let id = app.log_id().unwrap();
@@ -214,7 +214,7 @@ fn logs_follow_and_scroll() {
 #[test]
 fn shell_only_into_running_containers() {
     let mut app = sample_app();
-    app.key(key('2'));
+    app.key(key('3'));
     assert!(app.key(key('s')).is_empty());
     assert!(app.status.as_ref().is_some_and(|(m, err)| *err && m.contains("not running")));
     app.key(key('j'));
@@ -225,7 +225,7 @@ fn shell_only_into_running_containers() {
 #[test]
 fn free_space_counts_and_prunes_what_is_selected() {
     let mut app = sample_app();
-    app.key(key('5'));
+    app.key(key('6'));
     assert_eq!(app.reclaimable(Reclaim::StoppedContainers), (2_000, 2));
     assert_eq!(app.reclaimable(Reclaim::DanglingImages), (5_000_000, 1));
     // nginx is used by containers, redis by a pod: neither is unused.
@@ -251,7 +251,7 @@ fn free_space_counts_and_prunes_what_is_selected() {
 #[test]
 fn image_removal_says_who_uses_it() {
     let mut app = sample_app();
-    app.key(key('3'));
+    app.key(key('4'));
     let s = render(&app, 80, 24);
     assert!(s.contains("nginx:1.27"), "{s}");
     assert!(s.contains("pod web-7d9-abc"), "{s}");
@@ -264,7 +264,7 @@ fn image_removal_says_who_uses_it() {
 #[test]
 fn filter_narrows_lists() {
     let mut app = sample_app();
-    app.key(key('2'));
+    app.key(key('3'));
     app.key(key('/'));
     for c in "work".chars() {
         app.key(key(c));
@@ -280,7 +280,7 @@ fn filter_narrows_lists() {
 #[test]
 fn kubernetes_view_scale_forward_and_namespaces() {
     let mut app = sample_app();
-    app.key(key('6'));
+    app.key(key('7'));
     let s = render(&app, 80, 24);
     assert!(s.contains("default/web-7d9-abc") && s.contains("Running"), "{s}");
     app.key(key('n'));
@@ -311,7 +311,7 @@ fn kubernetes_view_scale_forward_and_namespaces() {
 #[test]
 fn settings_validate_and_flag_restarts() {
     let mut app = sample_app();
-    app.key(key('7'));
+    app.key(key('8'));
     let s = render(&app, 80, 24);
     assert!(s.contains(if cfg!(target_os = "macos") { "VM CPUs" } else { "CPU limit" }) && s.contains("(default)"), "{s}");
     // CPUs: 0 is refused with the reason, in the prompt.
@@ -340,6 +340,9 @@ fn settings_validate_and_flag_restarts() {
         memory_mib: Some(4096),
         shares: Vec::new(),
         publish: Some("localhost".into()),
+        name: Some("dev".into()),
+        nodes: Some(1),
+        docker_socket: None,
     });
     app.apply(Msg::Home(Box::new(home)));
     assert_eq!(app.restart_needed(), vec!["CPUs"]);
@@ -378,13 +381,13 @@ fn help_overlay_lists_keys_and_k9s() {
 fn docker_down_explains_instead_of_empty_lists() {
     let mut app = sample_app();
     app.apply(Msg::DockerDown("unix:///x.sock: cannot connect to /x.sock".into()));
-    app.key(key('2'));
+    app.key(key('3'));
     let s = render(&app, 80, 24);
-    assert!(s.contains("cannot connect") && s.contains("Start the dev cluster"), "{s}");
+    assert!(s.contains("cannot connect") && s.contains("Start the cluster"), "{s}");
     app.apply(Msg::Home(Box::new(HomeSample { status: DevStatus::Down, ..Default::default() })));
     app.key(key('1'));
     assert!(render(&app, 80, 24).contains("press u to start"));
-    assert_eq!(app.key(key('u')), vec![Effect::Dev(DevOp::Up)]);
+    assert_eq!(app.key(key('u')), vec![Effect::Dev(DevOp::Up { cluster: "dev".into(), switch: true })]);
     // While it starts, a second `u` does nothing.
     assert!(app.key(key('u')).is_empty());
     assert_eq!(app.home.status, DevStatus::Starting);
@@ -393,7 +396,7 @@ fn docker_down_explains_instead_of_empty_lists() {
 #[test]
 fn wide_terminals_get_more_columns() {
     let mut app = sample_app();
-    app.key(key('2'));
+    app.key(key('3'));
     let s = render(&app, 120, 30);
     assert!(s.contains("STATUS") && s.contains("Up 2 minutes"), "{s}");
     assert!(render(&app, 120, 30).lines().next().unwrap().contains("Free space"));
@@ -405,10 +408,10 @@ fn mouse_selects_tabs_and_rows_also_when_scrolled() {
     let click = |column, row| MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column, row, modifiers: KeyModifiers::NONE };
     let mut app = sample_app();
     render(&app, 80, 24);
-    // "3 Images" in the tab bar.
-    app.mouse(click(34, 0));
+    // "4 Images" in the tab bar.
+    app.mouse(click(38, 0));
     assert_eq!(app.tab, Tab::Images);
-    app.key(key('2'));
+    app.key(key('3'));
     let many: Vec<Container> = (0..40).map(|i| ctr(&format!("c{i:02}"), None, "running")).collect();
     app.apply(Msg::Containers(many));
     app.key(key('G'));
@@ -448,4 +451,108 @@ fn long_errors_wrap_above_the_hints() {
     // Short errors stay in the hint line, without a box.
     app.apply(Msg::Done(Err("nope".into())));
     assert!(!render(&app, 80, 24).contains(" error "));
+}
+
+fn clusters_sample() -> ClustersSample {
+    let row = |name: &str, status, port: Option<u16>, nodes, ready, memory| ClusterRow {
+        name: name.into(),
+        context: format!("litek8s-{name}"),
+        status,
+        port,
+        nodes,
+        ready_nodes: ready,
+        memory,
+        age: Some("2h".into()),
+    };
+    ClustersSample {
+        local: vec![
+            row("dev", DevStatus::Up, Some(6443), 1, Some(1), Some(38_000_000)),
+            row("ci", DevStatus::Starting, Some(50213), 3, Some(2), Some(96_000_000)),
+            row("old", DevStatus::Down, None, 1, None, None),
+        ],
+        others: vec![("home".into(), Some("https://192.168.1.10:6443".into())), ("orbstack".into(), Some("https://127.0.0.1:26443".into()))],
+        env_mode: Some("vm".into()),
+        env_memory: Some(412_000_000),
+        env_cpus: Some(4),
+        env_memory_mib: Some(4096),
+    }
+}
+
+#[test]
+fn clusters_view_lists_local_clusters_and_other_contexts() {
+    let mut app = sample_app();
+    app.apply(Msg::Clusters(Box::new(clusters_sample())));
+    app.key(key('2'));
+    assert_eq!(app.tab, Tab::Clusters);
+    let s = render(&app, 80, 24);
+    assert!(s.contains("Local clusters") && s.contains("4 CPUs") && s.contains("412 MB used"), "{s}");
+    assert!(s.contains("● dev") && s.contains("127.0.0.1:50213") && s.contains("2/3") && s.contains("96.0 MB"), "{s}");
+    assert!(s.contains("Other kubeconfig contexts") && s.contains("https://192.168.1.10:6443"), "{s}");
+    assert!(s.lines().last().unwrap().contains("n new"), "{s}");
+    // Start a stopped one: no question; stop and delete ask.
+    app.key(key('G'));
+    app.key(key('k'));
+    app.key(key('k'));
+    assert_eq!(app.selected_cluster().unwrap().unwrap().name, "old");
+    assert_eq!(app.key(key('u')), vec![Effect::Dev(DevOp::Up { cluster: "old".into(), switch: false })]);
+    assert_eq!(DevOp::Up { cluster: "old".into(), switch: false }.args(), ["dev", "up", "--name", "old", "--no-switch"]);
+    app.apply(Msg::DevFinished(Ok("done".into())));
+    app.key(key('k'));
+    app.key(key('D'));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("Delete cluster ci?") && s.contains("litek8s-ci is removed") && s.contains("cannot be undone"), "{s}");
+    assert_eq!(app.key(key('y')), vec![Effect::Dev(DevOp::Delete("ci".into()))]);
+    assert!(render(&app, 80, 24).contains("stopping"));
+    app.apply(Msg::DevFinished(Ok("done".into())));
+    // enter on a local cluster shows it everywhere and offers to switch the tools.
+    let effects = app.key(code(KeyCode::Enter));
+    assert_eq!(effects, vec![Effect::UseCluster("ci".into())]);
+    assert_eq!(app.cluster, "ci");
+    assert!(render(&app, 80, 24).contains("Point kubectl and docker at ci?"));
+    assert_eq!(app.key(key('y')), vec![Effect::SwitchTools("ci".into())]);
+    // Another context: read-only, the Kubernetes view only.
+    app.key(key('G'));
+    assert!(app.key(key('d')).is_empty());
+    assert_eq!(app.key(code(KeyCode::Enter)), vec![Effect::UseContext("orbstack".into())]);
+}
+
+#[test]
+fn new_cluster_form_validates_and_creates() {
+    let mut app = sample_app();
+    app.apply(Msg::Clusters(Box::new(clusters_sample())));
+    app.key(key('2'));
+    app.key(key('n'));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("New cluster") && s.contains("dev2") && s.contains("shared VM") || s.contains("shared rootless sandbox"), "{s}");
+    // A name that exists, then a bad node count.
+    for _ in 0..4 {
+        app.key(code(KeyCode::Backspace));
+    }
+    for c in "ci".chars() {
+        app.key(key(c));
+    }
+    assert!(app.key(code(KeyCode::Enter)).is_empty());
+    assert!(render(&app, 80, 24).contains("ci exists already"));
+    app.key(key('2'));
+    app.key(code(KeyCode::Tab));
+    app.key(code(KeyCode::Backspace));
+    app.key(key('0'));
+    assert!(app.key(code(KeyCode::Enter)).is_empty());
+    assert!(render(&app, 80, 24).contains("nodes: 1 to 10"));
+    app.key(code(KeyCode::Backspace));
+    app.key(key('3'));
+    assert_eq!(app.key(code(KeyCode::Enter)), vec![Effect::Dev(DevOp::Create { cluster: "ci2".into(), nodes: 3 })]);
+    assert_eq!(DevOp::Create { cluster: "ci2".into(), nodes: 3 }.args(), ["dev", "up", "--name", "ci2", "--nodes", "3", "--no-switch"]);
+    assert_eq!(app.overlay, Overlay::None);
+}
+
+#[test]
+fn home_says_dash_while_the_engine_is_down() {
+    let mut app = sample_app();
+    app.apply(Msg::DockerDown("cannot connect".into()));
+    app.apply(Msg::KubeDown("down".into()));
+    app.apply(Msg::Home(Box::new(HomeSample { status: DevStatus::Down, ..Default::default() })));
+    let s = render(&app, 80, 24);
+    assert!(!s.contains("0/0") && !s.contains("0 (0 B)") && !s.contains("0  (0 B)"), "{s}");
+    assert!(s.contains("engine not running"), "{s}");
 }

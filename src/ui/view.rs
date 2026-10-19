@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Cell, Clear, Gauge, Paragraph, Row, Table, TableState, Wrap};
 
-use super::app::{App, CRow, DevStatus, Field, InputKind, KubeView, Overlay, RECLAIMS, SETTINGS, Setting, TABS, Tab};
+use super::app::{App, CRow, DevStatus, Field, InputKind, KubeView, NewCluster, Overlay, RECLAIMS, SETTINGS, Setting, TABS, Tab};
 use super::model::{age, bytes};
 
 const ACCENT: Color = Color::Cyan;
@@ -29,6 +29,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     } else {
         match app.tab {
             Tab::Home => home(f, app, body),
+            Tab::Clusters => clusters(f, app, body),
             Tab::Containers => containers(f, app, body),
             Tab::Images => images(f, app, body),
             Tab::Volumes => volumes(f, app, body),
@@ -44,16 +45,21 @@ pub fn draw(f: &mut Frame, app: &App) {
         Overlay::Help => help(f, app, area),
         Overlay::Confirm { title, lines, .. } => confirm(f, title, lines, area),
         Overlay::Input { prompt, value, error, kind } => input(f, prompt, value, error.as_deref(), kind, area),
+        Overlay::NewCluster(form) => new_cluster(f, app, form, area),
     }
 }
 
 fn tabs(f: &mut Frame, app: &App, area: Rect) {
-    let narrow = area.width < 100;
+    // Eight views fit 80 columns with short names and single spaces.
+    let narrow = area.width < 110;
+    let gap = if narrow { 1 } else { 2 };
     let mut spans = vec![Span::styled(" litek8s ", Style::new().fg(Color::Black).bg(ACCENT).add_modifier(Modifier::BOLD)), Span::raw(" ")];
     let mut x = 10u16;
     let mut hit = Vec::new();
     for (i, t) in TABS.iter().enumerate() {
         let title = match (*t, narrow) {
+            (Tab::Containers, true) => "Ctrs",
+            (Tab::Volumes, true) => "Vols",
             (Tab::Space, true) => "Space",
             (Tab::Kube, true) => "Kube",
             (t, _) => t.title(),
@@ -61,10 +67,10 @@ fn tabs(f: &mut Frame, app: &App, area: Rect) {
         let label = format!("{} {title}", i + 1);
         let w = label.chars().count() as u16;
         hit.push((x, x + w));
-        x += w + 2;
+        x += w + gap;
         let style = if *t == app.tab { Style::new().fg(ACCENT).add_modifier(Modifier::BOLD | Modifier::UNDERLINED) } else { Style::new() };
         spans.push(Span::styled(label, style));
-        spans.push(Span::raw("  "));
+        spans.push(Span::raw(" ".repeat(gap as usize)));
     }
     *app.tab_spans.borrow_mut() = hit;
     f.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -79,9 +85,10 @@ fn hints(f: &mut Frame, app: &App, area: Rect) {
             &[("esc", "back"), ("f", "follow"), ("w", "wrap"), ("↑↓", "scroll"), ("g/G", "top/end")]
         } else {
             match app.tab {
-                Tab::Home => &[("u", "up"), ("d", "down"), ("R", "reset"), ("7", "settings")],
+                Tab::Home => &[("u", "up"), ("d", "down"), ("R", "delete"), ("2", "clusters"), ("8", "settings")],
+                Tab::Clusters => &[("n", "new"), ("u", "up"), ("d", "down"), ("D", "delete"), ("enter", "use")],
                 Tab::Containers => &[("l", "logs"), ("s", "shell"), ("u", "start"), ("x", "stop"), ("r", "restart"), ("d", "remove"), ("/", "filter")],
-                Tab::Images | Tab::Volumes => &[("d", "remove"), ("/", "filter"), ("5", "free space")],
+                Tab::Images | Tab::Volumes => &[("d", "remove"), ("/", "filter"), ("6", "free space")],
                 Tab::Space => &[("space", "select"), ("p", "free selected")],
                 Tab::Kube => match app.kube_view {
                     KubeView::Pods => &[("l", "logs"), ("f", "forward"), ("d", "delete"), ("n", "namespace"), ("v", "deployments")],
@@ -209,7 +216,7 @@ fn home(f: &mut Frame, app: &App, area: Rect) {
     if let Some(ip) = &h.vm_ip {
         lines.push(kv("VM IP", ip.clone(), DIM));
     }
-    f.render_widget(Paragraph::new(lines).block(block("Dev cluster")), left);
+    f.render_widget(Paragraph::new(lines).block(block(&format!("Cluster {}", app.cluster))), left);
 
     // Resources.
     let inner = block("Resources").inner(right);
@@ -255,21 +262,29 @@ fn home(f: &mut Frame, app: &App, area: Rect) {
     };
     let disk_ratio = h.disk_used.zip(h.disk_free).map(|(u, free)| u as f64 / (u + free).max(1) as f64);
     gauge(f, rows[2], "Disk", disk_ratio, disk_text);
+    // While the engine or the API is not there, there is nothing to count:
+    // "–", not "0".
+    let engine_down = down || app.docker_error.is_some();
+    let kube_down = down || app.kube_error.is_some();
     let running = app.containers.iter().filter(|c| c.running()).count();
     let pods_running = app.pods.iter().filter(|p| p.status == "Running").count();
+    let ctrs = if engine_down { "–          ".to_string() } else { format!("{running}/{} running   ", app.containers.len()) };
+    let pods = if kube_down { "–".to_string() } else { format!("{pods_running}/{}", app.pods.len()) };
     f.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(format!("{:<label_w$}", "Ctrs", label_w = label_w as usize), DIM),
-            Span::raw(format!("{running}/{} running   ", app.containers.len())),
+            Span::styled(ctrs, if engine_down { DIM } else { Style::new() }),
             Span::styled("Pods ", DIM),
-            Span::raw(format!("{pods_running}/{}", app.pods.len())),
+            Span::styled(pods, if kube_down { DIM } else { Style::new() }),
         ])),
         rows[3],
     );
-    f.render_widget(
-        Paragraph::new(Line::from(vec![Span::styled(format!("{:<label_w$}", "Images", label_w = label_w as usize), DIM), Span::raw(format!("{}  ({})", app.images.len(), bytes(app.images.iter().map(|i| i.size).sum())))])),
-        rows[4],
-    );
+    let images = if engine_down {
+        Span::styled(if down { "– (engine not running)" } else { "–" }, DIM)
+    } else {
+        Span::raw(format!("{}  ({})", app.images.len(), bytes(app.images.iter().map(|i| i.size).sum())))
+    };
+    f.render_widget(Paragraph::new(Line::from(vec![Span::styled(format!("{:<label_w$}", "Images", label_w = label_w as usize), DIM), images])), rows[4]);
 
     // Contexts.
     let c = &h.contexts;
@@ -291,31 +306,173 @@ fn home(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines).block(block("Your tools point at")), ctx);
 
     if !app.dev_output.is_empty() {
-        let title = match app.dev_busy {
-            Some(op) => format!("litek8s dev {} …", format!("{op:?}").to_lowercase()),
-            None => "Output".into(),
-        };
-        // The last lines that fit, wrapped.
-        let mut rows = out.height.saturating_sub(2) as usize;
-        let mut first = app.dev_output.len();
-        while first > 0 {
-            let need = app.dev_output[first - 1].chars().count().max(1).div_ceil(inner_w);
-            if need > rows {
-                break;
-            }
-            rows -= need;
-            first -= 1;
-        }
-        let lines: Vec<Line> = app.dev_output.iter().skip(first).map(|l| Line::raw(l.clone())).collect();
-        f.render_widget(Paragraph::new(lines).block(block(&title)).wrap(Wrap { trim: false }), out);
+        dev_output(f, app, out);
     } else {
         let tip = match h.status {
-            DevStatus::Down => "The dev cluster is down: press u to start it.",
-            DevStatus::Remote => "Connected to a litek8s that is not this machine's dev cluster.",
-            _ => "Switch docker/kubectl to litek8s in Settings (7). Help: ?",
+            DevStatus::Down => format!("{} is down: press u to start it (2: all clusters).", app.cluster),
+            DevStatus::Remote => "Connected to a litek8s that is not this machine's dev cluster.".into(),
+            _ => "Switch docker/kubectl to litek8s in Settings (8). Help: ?".into(),
         };
         f.render_widget(Paragraph::new(Span::styled(format!(" {tip}"), DIM)), out);
     }
+}
+
+/// Rows the output of a running `litek8s dev` needs (wrapped) in `width`.
+fn output_rows(app: &App, width: u16) -> u16 {
+    let inner_w = width.saturating_sub(2).max(1) as usize;
+    let wrapped: usize = app.dev_output.iter().map(|l| l.chars().count().max(1).div_ceil(inner_w)).sum();
+    if app.dev_output.is_empty() { 0 } else { (wrapped as u16 + 2).clamp(3, 12) }
+}
+
+/// The last lines of a `litek8s dev` run that fit, wrapped.
+fn dev_output(f: &mut Frame, app: &App, out: Rect) {
+    let inner_w = out.width.saturating_sub(2).max(1) as usize;
+    let title = match &app.dev_busy {
+        Some(op) => format!("litek8s {} …", op.args().join(" ")),
+        None => "Output".into(),
+    };
+    let mut rows = out.height.saturating_sub(2) as usize;
+    let mut first = app.dev_output.len();
+    while first > 0 {
+        let need = app.dev_output[first - 1].chars().count().max(1).div_ceil(inner_w);
+        if need > rows {
+            break;
+        }
+        rows -= need;
+        first -= 1;
+    }
+    let lines: Vec<Line> = app.dev_output.iter().skip(first).map(|l| Line::raw(l.clone())).collect();
+    f.render_widget(Paragraph::new(lines).block(block(&title)).wrap(Wrap { trim: false }), out);
+}
+
+fn clusters(f: &mut Frame, app: &App, area: Rect) {
+    let c = &app.clusters;
+    let out_h = output_rows(app, area.width);
+    let others_h = if c.others.is_empty() { 0 } else { (c.others.len() as u16 + 2).min(8) };
+    let local_h = (c.local.len().max(1) as u16 + 3).min(area.height.saturating_sub(others_h + out_h).max(4));
+    let [local, others, out, rest] = Layout::vertical([Constraint::Length(local_h), Constraint::Length(others_h), Constraint::Length(out_h), Constraint::Fill(1)]).areas(area);
+
+    let what = if cfg!(target_os = "macos") { "VM" } else { "sandbox" };
+    let shared = match &c.env_mode {
+        Some(_) => {
+            let mut parts = Vec::new();
+            if let Some(n) = c.env_cpus {
+                parts.push(format!("{n} CPUs"));
+            }
+            if let Some(m) = c.env_memory_mib {
+                parts.push(format!("{} max", bytes(m << 20)));
+            }
+            if let Some(u) = c.env_memory {
+                parts.push(format!("{} used", bytes(u)));
+            }
+            format!("shared {what}: {}", if parts.is_empty() { "running".into() } else { parts.join(", ") })
+        }
+        None => format!("{what} not running"),
+    };
+    let title = format!("Local clusters · {shared}");
+    let sel = app.sel();
+    let rows: Vec<Row> = c
+        .local
+        .iter()
+        .map(|r| {
+            let mark = if r.name == app.cluster && app.context_override.is_none() { "● " } else { "  " };
+            let nodes = match r.ready_nodes {
+                Some(n) if (n as u32) < r.nodes => format!("{n}/{}", r.nodes),
+                _ => r.nodes.to_string(),
+            };
+            Row::new(vec![
+                Cell::from(Span::styled(format!("{mark}{}", r.name), if r.name == app.cluster { BOLD } else { Style::new() })),
+                Cell::from(Span::styled(r.status.label(), status_style(r.status))),
+                Cell::from(r.port.map(|p| format!("127.0.0.1:{p}")).unwrap_or_else(|| "-".into())),
+                Cell::from(nodes),
+                Cell::from(r.memory.map(bytes).unwrap_or_else(|| "-".into())),
+                Cell::from(Span::styled(r.age.clone().unwrap_or_else(|| "-".into()), DIM)),
+                Cell::from(Span::styled(r.context.clone(), DIM)),
+            ])
+        })
+        .collect();
+    let b = block(&trunc(&title, local.width.saturating_sub(4) as usize));
+    let inner = b.inner(local);
+    app.list_top.set(inner.y + 1);
+    let header = ["NAME", "STATE", "API", "NODES", "MEMORY", "AGE", "CONTEXT"];
+    let widths = [Constraint::Length(14), Constraint::Length(9), Constraint::Length(16), Constraint::Length(5), Constraint::Length(9), Constraint::Length(4), Constraint::Fill(1)];
+    if rows.is_empty() {
+        f.render_widget(b, local);
+        f.render_widget(Paragraph::new(Span::styled(" No local clusters: n creates one (or `litek8s dev up`).", DIM)), Rect { y: inner.y + 1, height: 1, ..inner });
+    } else {
+        let mut state = TableState::default().with_selected((sel < c.local.len()).then_some(sel));
+        let table = Table::new(rows, widths)
+            .header(Row::new(header.into_iter().map(|h| Cell::from(Span::styled(h, DIM)))))
+            .block(b)
+            .column_spacing(1)
+            .row_highlight_style(SELECTED);
+        f.render_stateful_widget(table, local, &mut state);
+        app.list_offset.set(state.offset());
+    }
+
+    if !c.others.is_empty() {
+        let rows: Vec<Row> = c
+            .others
+            .iter()
+            .map(|(name, server)| {
+                let mark = if app.context_override.as_deref() == Some(name) { "● " } else { "  " };
+                Row::new(vec![Cell::from(format!("{mark}{name}")), Cell::from(Span::styled(server.clone().unwrap_or_else(|| "-".into()), DIM))])
+            })
+            .collect();
+        let mut state = TableState::default().with_selected(sel.checked_sub(c.local.len()));
+        let table = Table::new(rows, [Constraint::Percentage(40), Constraint::Fill(1)])
+            .block(block("Other kubeconfig contexts (read-only; enter: Kubernetes view)"))
+            .column_spacing(1)
+            .row_highlight_style(SELECTED);
+        f.render_stateful_widget(table, others, &mut state);
+    }
+    if out_h > 0 {
+        dev_output(f, app, out);
+    } else if rest.height > 0 {
+        let tip = if cfg!(target_os = "macos") {
+            "All clusters share one VM (its CPUs and memory: Settings)."
+        } else {
+            "All clusters share one sandbox (its limits: Settings)."
+        };
+        f.render_widget(Paragraph::new(Span::styled(format!(" {tip}"), DIM)).wrap(Wrap { trim: false }), rest);
+    }
+}
+
+fn new_cluster(f: &mut Frame, app: &App, form: &NewCluster, area: Rect) {
+    let field = |label: &str, value: &str, active: bool| {
+        let mut spans = vec![Span::styled(format!("{label:<7}"), if active { Style::new().fg(ACCENT).add_modifier(Modifier::BOLD) } else { DIM }), Span::raw(value.to_string())];
+        if active {
+            spans.push(Span::styled("█", Style::new().fg(ACCENT)));
+        }
+        Line::from(spans)
+    };
+    let name = if form.name.is_empty() { "<name>".to_string() } else { form.name.clone() };
+    let cluster = crate::dev::cluster::Cluster { name: name.clone() };
+    let size = if cfg!(target_os = "macos") {
+        let cpus = app.clusters.env_cpus.or(app.config.cpus).unwrap_or_else(crate::dev::config::default_cpus);
+        let mem = app.clusters.env_memory_mib.or(app.config.memory).unwrap_or(crate::dev::config::DEFAULT_MEMORY_MIB);
+        format!("Runs in the shared VM: {cpus} CPUs, {mem} MiB for all clusters.")
+    } else {
+        "Runs in the shared rootless sandbox (limits for all: Settings).".to_string()
+    };
+    let mut lines = vec![
+        field("Name", &form.name, form.field == 0),
+        field("Nodes", &form.nodes, form.field == 1),
+        Line::raw(""),
+        Line::styled(size, DIM),
+        Line::styled(format!("Context {}, socket {}", cluster.context(), home_dir_short(&cluster.docker_socket().display().to_string())), DIM),
+        Line::styled("Nodes after the first are workers joined like real nodes.", DIM),
+    ];
+    if let Some(e) = &form.error {
+        lines.push(Line::styled(e.clone(), BAD));
+    }
+    lines.push(Line::styled("tab next field   enter create   esc cancel", DIM));
+    let width = 66u16;
+    let inner = width.min(area.width.saturating_sub(2)).saturating_sub(2).max(1) as usize;
+    let rows: usize = lines.iter().map(|l| l.width().max(1).div_ceil(inner)).sum();
+    let r = centered(area, width, rows as u16 + 2);
+    f.render_widget(Clear, r);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(Block::bordered().border_style(Style::new().fg(ACCENT)).title(Span::styled(" New cluster ", BOLD))), r);
 }
 
 fn table_area(app: &App, area: Rect, title: &str) -> (Block<'static>, Rect) {
@@ -359,7 +516,7 @@ fn state_style(state: &str) -> Style {
 
 fn containers(f: &mut Frame, app: &App, area: Rect) {
     if let Some(e) = &app.docker_error {
-        return unavailable(f, area, "Containers", e, "Start the dev cluster (1, then u) or pass --docker-host.");
+        return unavailable(f, area, "Containers", e, "Start the cluster (1, then u; 2 for the others) or pass --docker-host.");
     }
     let wide = area.width >= 100;
     let rows: Vec<Row> = app
@@ -496,7 +653,11 @@ fn space(f: &mut Frame, app: &App, area: Rect) {
 
 fn kube(f: &mut Frame, app: &App, area: Rect) {
     if let Some(e) = &app.kube_error {
-        return unavailable(f, area, "Kubernetes", e, "Start the dev cluster, or pass --context for another cluster.");
+        let hint = match &app.context_override {
+            Some(c) => format!("Context {c} from the kubeconfig (2: enter on a local cluster to go back)."),
+            None => "Start the cluster (1, then u), or pick another one in 2 Clusters.".to_string(),
+        };
+        return unavailable(f, area, "Kubernetes", e, &hint);
     }
     let [head, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
     let ns = app.namespace.clone().unwrap_or_else(|| "all".into());
@@ -585,7 +746,7 @@ fn settings(f: &mut Frame, app: &App, area: Rect) {
                 Setting::Field(Field::Memory) => ("Memory limit (MiB)", default(app.setting_value(Field::Memory), "none".into())),
                 Setting::Field(Field::Shares) if mac => ("Shared directories", default(app.setting_value(Field::Shares), "$HOME".into())),
                 Setting::Field(Field::Shares) => ("Shared directories", Span::styled("macOS VM only (Linux uses the host's files)", DIM)),
-                Setting::Field(Field::Port) => ("API server port", default(app.setting_value(Field::Port), crate::dev::DEFAULT_PORT.to_string())),
+                Setting::Field(Field::Port) => ("API port (dev)", default(app.setting_value(Field::Port), crate::dev::DEFAULT_PORT.to_string())),
                 Setting::Field(Field::Publish) => (
                     "Published ports on",
                     Span::raw(match app.config.publish {
@@ -657,7 +818,9 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
 
 fn confirm(f: &mut Frame, title: &str, lines: &[String], area: Rect) {
     let width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(20).max(title.len()).clamp(30, 74) as u16 + 4;
-    let r = centered(area, width, lines.len() as u16 + 4);
+    let inner = (width.min(area.width.saturating_sub(2)).saturating_sub(2)).max(1) as usize;
+    let rows: usize = lines.iter().map(|l| l.chars().count().max(1).div_ceil(inner)).sum();
+    let r = centered(area, width, rows as u16 + 4);
     f.render_widget(Clear, r);
     let mut text: Vec<Line> = lines.iter().map(|l| Line::raw(l.clone())).collect();
     text.push(Line::raw(""));
@@ -686,8 +849,9 @@ fn input(f: &mut Frame, prompt: &str, value: &str, error: Option<&str>, kind: &I
 
 /// The help screen: per view, its keys (each line fits 76 columns).
 pub const HELP: &[(&str, &[(&str, &str)])] = &[
-    ("Everywhere", &[("1-7 tab", "views"), ("↑↓ jk", "move"), ("/", "filter"), ("ctrl-r", "refresh"), ("q", "quit")]),
-    ("Home", &[("u", "start"), ("d", "stop (asks)"), ("R", "reset: delete all data (asks)")]),
+    ("Everywhere", &[("1-8 tab", "views"), ("↑↓ jk", "move"), ("/", "filter"), ("ctrl-r", "refresh"), ("q", "quit")]),
+    ("Home", &[("u", "start"), ("d", "stop (asks)"), ("R", "delete it and its data (asks)")]),
+    ("Clusters", &[("n", "new"), ("u", "start"), ("d", "stop"), ("D", "delete (asks)"), ("enter", "show / use it")]),
     ("Containers", &[("l", "logs"), ("s", "shell"), ("u x r", "start stop restart"), ("d", "remove"), ("space", "fold")]),
     ("Images", &[("d", "remove (asks)")]),
     ("Volumes", &[("d", "remove (asks)")]),

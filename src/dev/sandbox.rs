@@ -237,7 +237,10 @@ fn sandbox_resolv_conf() -> String {
 }
 
 fn pid1(mut input: std::io::BufReader<std::fs::File>, mut output: std::fs::File, args: &[String]) -> ! {
-    let resolv = sandbox_resolv_conf();
+    // A cell in the macOS VM keeps the VM's resolv.conf, which DHCP may
+    // still be about to write.
+    let keep_resolv = std::env::var("LITEK8S_DEV_KEEP_RESOLV").is_ok_and(|v| v == "1");
+    let resolv = if keep_resolv { String::new() } else { sandbox_resolv_conf() };
     let report = |output: &mut std::fs::File, what: &str, e: std::io::Error| {
         let _ = writeln!(output, "E {what}: {e}");
         std::process::exit(111);
@@ -258,13 +261,15 @@ fn pid1(mut input: std::io::BufReader<std::fs::File>, mut output: std::fs::File,
     if let Err(e) = mount("tmpfs", "/run", Some("tmpfs"), libc::MS_NOSUID | libc::MS_NODEV, Some("mode=755")) {
         report(&mut output, "mounting /run", e);
     }
-    let _ = std::fs::create_dir_all("/run/systemd/resolve");
-    let _ = std::fs::write("/run/systemd/resolve/resolv.conf", &resolv);
-    let _ = std::fs::write("/run/systemd/resolve/stub-resolv.conf", &resolv);
-    // /etc/resolv.conf itself, when it is not a link into /run.
-    if std::fs::read_link("/etc/resolv.conf").is_err() {
-        let _ = std::fs::write("/run/resolv.conf", &resolv);
-        let _ = mount("/run/resolv.conf", "/etc/resolv.conf", None, libc::MS_BIND, None);
+    if !keep_resolv {
+        let _ = std::fs::create_dir_all("/run/systemd/resolve");
+        let _ = std::fs::write("/run/systemd/resolve/resolv.conf", &resolv);
+        let _ = std::fs::write("/run/systemd/resolve/stub-resolv.conf", &resolv);
+        // /etc/resolv.conf itself, when it is not a link into /run.
+        if std::fs::read_link("/etc/resolv.conf").is_err() {
+            let _ = std::fs::write("/run/resolv.conf", &resolv);
+            let _ = mount("/run/resolv.conf", "/etc/resolv.conf", None, libc::MS_BIND, None);
+        }
     }
     if let Err(e) = mount("shm", "/dev/shm", Some("tmpfs"), nosuid, Some("mode=1777,size=65536k")) {
         let _ = writeln!(output, "W /dev/shm: {e}");
@@ -281,8 +286,10 @@ fn pid1(mut input: std::io::BufReader<std::fs::File>, mut output: std::fs::File,
     if let Err(e) = std::fs::write(cg.join("cgroup.subtree_control"), enable.join(" ")) {
         let _ = writeln!(output, "W enabling cgroup controllers {}: {e}", enable.join(" "));
     }
+    // A cluster's cell is named after its node.
+    let hostname = std::env::var("LITEK8S_DEV_HOSTNAME").unwrap_or_else(|_| HOSTNAME.to_string());
     // SAFETY: plain call with a valid buffer.
-    unsafe { libc::sethostname(HOSTNAME.as_ptr().cast(), HOSTNAME.len()) };
+    unsafe { libc::sethostname(hostname.as_ptr().cast(), hostname.len()) };
     loopback_up();
     let _ = writeln!(output, "S");
 
@@ -294,9 +301,12 @@ fn pid1(mut input: std::io::BufReader<std::fs::File>, mut output: std::fs::File,
     }
     drop(input);
     drop(output);
-    if let Some(gw) = default_gateway() {
-        // SAFETY: still single-threaded.
-        unsafe { std::env::set_var("LITEK8S_HOST_LOOPBACK", gw) };
+    // A cell's gateway is the cell bridge: the manager passes the host's.
+    if std::env::var_os("LITEK8S_HOST_LOOPBACK").is_none() {
+        if let Some(gw) = default_gateway() {
+            // SAFETY: still single-threaded.
+            unsafe { std::env::set_var("LITEK8S_HOST_LOOPBACK", gw) };
+        }
     }
 
     let program = cstr("/proc/self/exe");
@@ -374,12 +384,47 @@ fn loopback_up() {
 
 /// The default IPv4 gateway (pasta and slirp4netns map it to the host's
 /// loopback).
-fn default_gateway() -> Option<String> {
+pub(crate) fn default_gateway() -> Option<String> {
     super::hostinfo::parse_default_gateway(&std::fs::read_to_string("/proc/net/route").ok()?)
 }
 
 // ---------------------------------------------------------------------------
-// Host side helpers (used by the supervisor)
+// Host side helpers (used by the supervisor and the cell manager)
+
+pub(crate) fn pipe() -> std::io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+    let mut fds = [0; 2];
+    // SAFETY: pipe2 fills both descriptors.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: just created, owned here.
+    Ok(unsafe { (std::os::fd::OwnedFd::from_raw_fd(fds[0]), std::os::fd::OwnedFd::from_raw_fd(fds[1])) })
+}
+
+/// Make `sources[i]` descriptor `targets[i]` in the child (no CLOEXEC),
+/// going through high numbers first so sources and targets may overlap.
+pub(crate) fn remap_fds(cmd: &mut std::process::Command, sources: Vec<RawFd>, targets: Vec<RawFd>) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: only async-signal-safe calls (fcntl, dup2) after fork.
+    unsafe {
+        cmd.pre_exec(move || {
+            let mut tmp = Vec::with_capacity(sources.len());
+            for &s in &sources {
+                let t = libc::fcntl(s, libc::F_DUPFD_CLOEXEC, 100);
+                if t < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                tmp.push(t);
+            }
+            for (&t, &target) in tmp.iter().zip(&targets) {
+                if libc::dup2(t, target) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+            }
+            Ok(())
+        });
+    }
+}
 
 /// The user's subordinate id range from /etc/subuid or /etc/subgid.
 pub fn subordinate_range(file: &str, user: &str, uid: u32) -> Option<(u32, u32)> {

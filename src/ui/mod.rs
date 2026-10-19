@@ -9,6 +9,7 @@
 
 pub mod app;
 mod client;
+mod clusters;
 mod ctx;
 mod docker;
 mod exec;
@@ -17,8 +18,8 @@ mod kube;
 pub mod model;
 pub mod view;
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -34,12 +35,15 @@ use client::Endpoint;
 
 #[derive(Debug, Args)]
 pub struct UiArgs {
-    /// Docker API to show (default: litek8s's socket, ~/.litek8s/docker.sock)
+    /// Docker API to show (default: the local cluster's socket, ~/.litek8s/docker.sock for `dev`)
     #[arg(long, value_name = "URL")]
     pub docker_host: Option<String>,
     /// kubeconfig context to show (default: the local dev cluster)
     #[arg(long)]
     pub context: Option<String>,
+    /// The local cluster to show (default: the one shown last, else `dev`)
+    #[arg(long)]
+    pub cluster: Option<String>,
     /// Start in this namespace of the Kubernetes view
     #[arg(long, short)]
     pub namespace: Option<String>,
@@ -56,7 +60,17 @@ pub async fn run(args: UiArgs) -> Result<()> {
     if !std::io::stdout().is_terminal() || !std::io::stdin().is_terminal() {
         bail!("litek8s ui needs a terminal");
     }
-    let socket = crate::docker::host_socket_path();
+    let cluster = match &args.cluster {
+        Some(c) => crate::dev::cluster::Cluster::new(c)?,
+        None => {
+            let home = crate::dev::dev_home().unwrap_or_default();
+            ctx::active_cluster()
+                .and_then(|c| crate::dev::cluster::Cluster::new(&c).ok())
+                .filter(|c| c.exists(&home))
+                .unwrap_or_else(crate::dev::cluster::Cluster::default_cluster)
+        }
+    };
+    let socket = cluster.docker_socket();
     let docker_ep = match &args.docker_host {
         Some(h) => Endpoint::parse_docker_host(h)?,
         None => Endpoint::unix(socket.clone()),
@@ -75,21 +89,26 @@ pub async fn run(args: UiArgs) -> Result<()> {
     };
     let (kube_ep, kube_context) = match &fixed {
         Some((ep, name)) => (ep.clone(), name.clone()),
-        None => (dev_endpoint(crate::dev::DEFAULT_PORT), crate::dev::kubeconfig::CONTEXT.to_string()),
+        None => (dev_endpoint(crate::dev::DEFAULT_PORT), cluster.context()),
     };
 
     let (tx, rx) = unbounded_channel();
     let mut app = App::new(docker_ep.display.clone(), kube_ep.display.clone(), kube_context);
     app.mouse = args.mouse;
     app.namespace = args.namespace.clone();
+    app.cluster = cluster.name.clone();
     app.apply(Msg::Config(crate::dev::config::DevConfig::load().map_err(|e| format!("{e:#}"))));
 
     let refresh = Arc::new(Notify::new());
     let pace = Arc::new(AtomicU64::new(home::VISIBLE));
     let wake_home = Arc::new(Notify::new());
+    let active = Arc::new(Mutex::new(cluster.name.clone()));
+    let clusters_visible = Arc::new(AtomicBool::new(false));
+    let wake_clusters = Arc::new(Notify::new());
+    let docker_task = docker::spawn(docker_ep.clone(), tx.clone(), refresh.clone());
     let tasks = vec![
-        docker::spawn(docker_ep.clone(), tx.clone(), refresh.clone()),
-        home::spawn(tx.clone(), local, pace.clone(), wake_home.clone()),
+        home::spawn(tx.clone(), local, pace.clone(), wake_home.clone(), active.clone()),
+        clusters::spawn(tx.clone(), clusters_visible.clone(), wake_clusters.clone()),
     ];
     let kube_watches = if fixed.is_some() { kube::spawn_watches(kube_ep.clone(), tx.clone()) } else { Vec::new() };
     if fixed.is_none() {
@@ -100,6 +119,11 @@ pub async fn run(args: UiArgs) -> Result<()> {
     let input = Input::new();
     let mut rt = Runtime {
         docker: docker_ep,
+        docker_task,
+        local,
+        active,
+        clusters_visible,
+        wake_clusters,
         kube: kube_ep,
         follow_dev: fixed.is_none(),
         kube_port: None,
@@ -117,6 +141,7 @@ pub async fn run(args: UiArgs) -> Result<()> {
     if let Some(t) = rt.log_task.take() {
         t.abort();
     }
+    rt.docker_task.abort();
     for t in tasks.into_iter().chain(rt.kube_watches.drain(..)) {
         t.abort();
     }
@@ -148,7 +173,7 @@ struct Stats {
     frames: u64,
 }
 
-const DEV_DOWN: &str = "the dev cluster is not running (Home: u starts it)";
+const DEV_DOWN: &str = "the cluster is not running (Home: u starts it)";
 
 fn dev_endpoint(port: u16) -> Endpoint {
     Endpoint::parse_http(&format!("http://127.0.0.1:{port}"), None).expect("static URL")
@@ -221,6 +246,13 @@ impl Input {
 
 struct Runtime {
     docker: Endpoint,
+    docker_task: tokio::task::JoinHandle<()>,
+    /// The views show a local cluster (not a --docker-host / --context).
+    local: bool,
+    /// The local cluster shown (Home samples it).
+    active: Arc<Mutex<String>>,
+    clusters_visible: Arc<AtomicBool>,
+    wake_clusters: Arc<Notify>,
     kube: Endpoint,
     /// The Kubernetes API is the local dev cluster's, wherever it runs.
     follow_dev: bool,
@@ -289,6 +321,11 @@ impl Runtime {
                         app.apply(m);
                     }
                     self.follow_dev_cluster(app);
+                    // The shown cluster was deleted: the UI went back to `dev`.
+                    if self.local && *self.active.lock().unwrap() != app.cluster {
+                        let name = app.cluster.clone();
+                        self.use_cluster(app, &name);
+                    }
                     Vec::new()
                 }
                 _ = tokio::time::sleep_until(status_until.unwrap_or_else(tokio::time::Instant::now)), if status_until.is_some() => {
@@ -313,6 +350,10 @@ impl Runtime {
                 // Back on Home: a fresh sample now, not at the slow pace's end.
                 self.wake_home.notify_one();
             }
+            let on_clusters = app.tab == Tab::Clusters && app.logs.is_none();
+            if self.clusters_visible.swap(on_clusters, Ordering::Relaxed) != on_clusters && on_clusters {
+                self.wake_clusters.notify_one();
+            }
             for e in effects {
                 if self.effect(e, terminal, app).await? {
                     return Ok(());
@@ -335,6 +376,7 @@ impl Runtime {
                 true
             }
             Msg::Home(_) => matches!(app.tab, Tab::Home | Tab::Space | Tab::Settings) && app.logs.is_none(),
+            Msg::Clusters(_) => app.tab == Tab::Clusters && app.logs.is_none(),
             Msg::LogLines(..) | Msg::LogEnd(..) => app.logs.is_some(),
             _ => true,
         }
@@ -354,6 +396,30 @@ impl Runtime {
             Effect::Refresh => {
                 self.refresh.notify_one();
                 self.wake_home.notify_one();
+                self.wake_clusters.notify_one();
+            }
+            Effect::UseCluster(name) => self.use_cluster(app, &name),
+            Effect::UseContext(name) => match kube::resolve(Some(&name)) {
+                Ok((ep, ctx)) => {
+                    self.follow_dev = false;
+                    self.kube_port = None;
+                    for t in self.kube_watches.drain(..) {
+                        t.abort();
+                    }
+                    app.apply(Msg::KubeDown(format!("connecting to {ctx}…")));
+                    self.kube = ep;
+                    app.kube_endpoint = self.kube.display.clone();
+                    app.kube_context = ctx;
+                    self.kube_watches = kube::spawn_watches(self.kube.clone(), self.tx.clone());
+                }
+                Err(e) => app.flash(format!("{e:#}"), true),
+            },
+            Effect::SwitchTools(name) => {
+                let cluster = crate::dev::cluster::Cluster { name };
+                let port = crate::dev::cluster_state(&cluster.name).map(|s| s.port);
+                let r = ctx::switch_kube(true, &cluster, port).and_then(|k| ctx::switch_docker(true, &cluster).map(|d| format!("{k}; {d}")));
+                self.wake_home.notify_one();
+                done(r);
             }
             Effect::Batch(list) => {
                 // One after the other, in a task: a prune can take a while.
@@ -473,12 +539,12 @@ impl Runtime {
                 }
             }
             Effect::DockerContext(on) => {
-                let r = ctx::switch_docker(on);
+                let r = ctx::switch_docker(on, &crate::dev::cluster::Cluster { name: app.cluster.clone() });
                 self.wake_home.notify_one();
                 done(r);
             }
             Effect::KubeContext(on) => {
-                let r = ctx::switch_kube(on, app.home.running.as_ref().map(|s| s.port));
+                let r = ctx::switch_kube(on, &crate::dev::cluster::Cluster { name: app.cluster.clone() }, app.home.running.as_ref().map(|s| s.port));
                 self.wake_home.notify_one();
                 done(r);
             }
@@ -508,6 +574,34 @@ impl Runtime {
             }
         }
         Ok(false)
+    }
+
+    /// Show another local cluster: its Docker socket, its API (followed
+    /// through Home's samples).
+    fn use_cluster(&mut self, app: &mut App, name: &str) {
+        let cluster = crate::dev::cluster::Cluster { name: name.to_string() };
+        app.cluster = cluster.name.clone();
+        ctx::set_active_cluster(name);
+        *self.active.lock().unwrap() = cluster.name.clone();
+        if !self.local {
+            app.flash("this UI shows a fixed --docker-host / --context; restart it without them to switch clusters", true);
+            return;
+        }
+        let socket = cluster.docker_socket();
+        if self.docker.display != client::Endpoint::unix(socket.clone()).display {
+            self.docker_task.abort();
+            self.docker = client::Endpoint::unix(socket);
+            app.docker_endpoint = self.docker.display.clone();
+            app.apply(Msg::DockerDown(format!("connecting to {name}…")));
+            self.docker_task = docker::spawn(self.docker.clone(), self.tx.clone(), self.refresh.clone());
+        }
+        // The Kubernetes side follows the new cluster's port.
+        self.follow_dev = true;
+        self.kube_port = Some(0);
+        app.kube_context = cluster.context();
+        app.home.running = None;
+        self.follow_dev_cluster(app);
+        self.wake_home.notify_one();
     }
 
     /// Point the Kubernetes side at the dev cluster's current port.
@@ -559,21 +653,20 @@ impl Runtime {
         Ok(())
     }
 
-    /// `litek8s dev up|down|reset` as a child process, its output on Home.
+    /// `litek8s dev up|down|delete` as a child process, its output on Home
+    /// and Clusters.
     fn dev(&mut self, op: DevOp) {
         let tx = self.tx.clone();
         let wake = self.wake_home.clone();
+        let wake_clusters = self.wake_clusters.clone();
         let refresh = self.refresh.clone();
         tokio::spawn(async move {
             use tokio::io::AsyncBufReadExt;
-            let verb = match op {
-                DevOp::Up => "up",
-                DevOp::Down => "down",
-                DevOp::Reset => "reset",
-            };
+            let args = op.args();
+            let verb = args[1..].join(" ");
             let exe = std::env::current_exe().unwrap_or_else(|_| "litek8s".into());
             let child = tokio::process::Command::new(exe)
-                .args(["dev", verb])
+                .args(&args)
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -600,11 +693,12 @@ impl Runtime {
             let _ = tokio::join!(a, b);
             let r = match status {
                 Ok(s) if s.success() => Ok(format!("litek8s dev {verb}: done")),
-                Ok(s) => Err(format!("litek8s dev {verb} failed ({s}); see the output on Home")),
+                Ok(s) => Err(format!("litek8s dev {verb} failed ({s}); see the output on Home or Clusters")),
                 Err(e) => Err(format!("litek8s dev {verb}: {e}")),
             };
             let _ = tx.send(Msg::DevFinished(r));
             wake.notify_one();
+            wake_clusters.notify_one();
             refresh.notify_one();
         });
     }

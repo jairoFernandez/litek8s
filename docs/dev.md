@@ -1,7 +1,9 @@
 # `litek8s dev`: a local Kubernetes cluster for development
 
-`litek8s dev` is a single-node Kubernetes cluster for your laptop, in the
-role kind, k3d, minikube or Docker Desktop's Kubernetes play, without Docker.
+`litek8s dev` is a local Kubernetes cluster for your laptop, in the role
+kind, k3d, minikube or Docker Desktop's Kubernetes play, without Docker; as
+many as you like, each with as many nodes as you like, all in one small VM
+(macOS) or one rootless sandbox (Linux).
 It is the same `litek8s apiserver` (API server, controllers, scheduler,
 cluster DNS, service proxy) with a node agent on crun, packaged so that:
 
@@ -13,7 +15,9 @@ curl localhost:$(kubectl get svc web -o jsonpath='{.spec.ports[0].nodePort}')
 litek8s dev load myapp:dev       # an image of your local Docker/Podman, or a `docker save` archive
 litek8s dev status               # mode, server, pods, memory, disk
 litek8s dev down                 # stop; objects and images are kept
-litek8s dev reset                # stop and delete everything, and the kube context
+litek8s dev delete               # stop and delete everything, and the kube context (`reset` does the same)
+litek8s dev up --name ci --nodes 3   # another cluster: context litek8s-ci, 3 nodes
+litek8s dev list                 # every local cluster: state, API port, nodes, memory, age
 ```
 
 Numbers against kind and k3d are in [bench/RESULTS.md](../bench/RESULTS.md#local-dev-cluster-litek8s-dev-vs-kind-and-k3d);
@@ -107,10 +111,13 @@ which `litek8s ui` edits ([ui.md](ui.md)); flags win over it:
 | `cpus` | `--cpus` | the VM's CPUs (default: half the Mac's, at most 8) | a CPU limit on the sandbox (default: none) |
 | `memory` (MiB) | `--memory` | the VM's ceiling (default 4096) | a memory limit on the sandbox (default: none) |
 | `shares` | `--share` (repeatable) | directories shared at the same path (default `$HOME`) | - (the sandbox sees the host's files) |
-| `port` | `--port` | API server port (default 6443, a free one if taken) | same |
+| `port` | `--port` | API server port of the default cluster (default 6443, a free one if taken; other clusters keep the one they got) | same |
 | `publish` | `--publish` | `localhost` (default) or `all`: where NodePorts, LoadBalancer ports and `docker run -p` ports listen | same |
 
-The file is read at `up`; `dev.json` records what the cluster started with.
+The file is read at `up`; `env.json` records what the VM or sandbox started
+with, each cluster's `dev.json` its own port and nodes. `cpus`, `memory`,
+`shares` and `publish` belong to the VM or sandbox all clusters share: they
+apply when the first cluster starts it.
 
 ## Images
 
@@ -127,11 +134,154 @@ The file is read at `up`; `dev.json` records what the cluster started with.
   `docker run -p 5000:5000 registry:2` does).
   Other plain-HTTP registries: `LITEK8S_INSECURE_REGISTRIES=host:port`.
 
+## Several clusters
+
+kind and k3d give every cluster its own node container (a whole systemd or
+k3s with its own containerd, ~400-600 MB each); `litek8s dev` gives it a
+few processes in the VM or sandbox that is already running:
+
+```bash
+litek8s dev up --name ci                 # context litek8s-ci, its own API port, data and Docker socket
+litek8s dev up --name multi --nodes 3    # 3 nodes: litek8s-multi, -worker, -worker2
+litek8s dev list
+NAME         STATE    API               NODES  MEMORY     AGE   CONTEXT
+dev          running  127.0.0.1:6443    1      4.2 MiB    7m    litek8s-dev
+ci           running  127.0.0.1:36097   1      3.9 MiB    1m    litek8s-ci
+multi        running  127.0.0.1:41011   3      17.7 MiB   0s    litek8s-multi
+
+shared sandbox (rootless, 62.3 MiB in use)
+litek8s dev down --name ci               # stop one; the VM/sandbox stops with the last one
+litek8s dev delete --name ci             # and delete its data and context
+litek8s dev down --all
+```
+
+`dev up|down|status|delete|reset|load` take `--name` (default `dev`, which
+keeps the paths, port, context and socket litek8s always used, so an
+existing cluster is not migrated). What each cluster gets:
+
+| | default (`dev`) | `--name <n>` |
+|---|---|---|
+| kubectl context | `litek8s-dev` | `litek8s-<n>` (`--no-switch` adds it without making it current) |
+| API port | 6443, a free one if taken | the one it had last, else a free one |
+| Docker socket | `~/.litek8s/docker.sock` | `~/.litek8s/<n>/docker.sock` (docker context `litek8s-<n>`) |
+| data (Linux) | `~/.local/share/litek8s/dev/cluster` | `~/.local/share/litek8s/dev/clusters/<n>/data` |
+| data (macOS) | `/var/lib/litek8s/dev` in the VM's disk | `/var/lib/litek8s/<n>` in the VM's disk |
+| log | `dev.log` in the dev data directory | `clusters/<n>/dev.log` there (the VM's or sandbox's own: `env.log`) |
+| node names | `litek8s-dev` | `litek8s-<n>`, `litek8s-<n>-worker`, `-worker2`, ... |
+| NodePorts from | 30000 | 30100-32700, by name (so two clusters rarely want the same `localhost` port) |
+
+**How.** The first `dev up` starts the VM (macOS) or the sandbox (Linux);
+each cluster is then a *cell* in it, made by the same code that makes the
+Linux sandbox: its own network namespace (its `litek8s0` pod bridge,
+iptables rules, DNS, kubelet and NodePort ports: every cluster uses the
+usual 10.42.0.0/16 pods and 10.43.0.0/16 Services without conflict), mount
+namespace (`/run`, crun state), PID namespace (stopping it stops all of its
+processes), cgroup namespace (`/cells/<cluster>/<node>`: a cluster's memory
+is that directory's), and UTS and IPC namespaces. Cells reach each other and
+the outside through a bridge in the VM or sandbox (`lkcells0`,
+10.231.0.0/24, masqueraded). A small manager inside (`litek8s dev __cells`)
+starts and stops cells; the VM process or supervisor outside binds each
+cluster's API port and Docker socket on the host (Linux: handed to the cell
+as descriptors, so connections are not copied; macOS: relayed over vsock into
+the cell's network namespace) and forwards its NodePorts. When the last
+cluster stops, the VM or sandbox goes too.
+
+**Several nodes.** `--nodes N` (1-10, remembered) runs N-1 workers, each in
+a cell of its own, joined with the real join flow (`litek8s agent --join
+https://<control plane>:6443 --token ...`, see
+[multi-node](../compat/cases/M1-multinode.sh)) and connected by the same
+WireGuard pod overlay real nodes use: test pod spreading, affinity,
+DaemonSets, draining, or a node failing on your laptop:
+
+```bash
+litek8s dev down --name multi --node litek8s-multi-worker2   # its pods die; NotReady after the grace period (40 s)
+litek8s dev up --name multi --node litek8s-multi-worker2     # back, Ready once it reconnects
+```
+
+ On Linux the overlay needs
+the `wireguard` kernel module loaded (`lsmod | grep wireguard`; a rootless
+sandbox cannot load it; most distributions load it on first use by root,
+e.g. `sudo modprobe wireguard` once).
+
+**Isolation, honestly.** Cells isolate names, networks, files under `/run`,
+processes and cgroups, as containers do; they do not isolate the kernel. All
+clusters share:
+
+- the VM's CPUs and memory (macOS) or the sandbox's limits (Linux,
+  `cpus`/`memory` in the settings): set for all of them, and one busy
+  cluster slows the others (no per-cluster limits yet);
+- the VM's disk: deleting a cluster deletes its files but the sparse disk
+  image never shrinks (`dev delete` of the last cluster removes it);
+- on Linux, one user namespace: the same subordinate ids map to the same
+  host ids in every cluster;
+- the host's ports: NodePorts, LoadBalancer ports and `docker run -p` ports
+  of every cluster listen on the same `localhost`; when two clusters want
+  one port, the first gets it and the other's log says "not exposed";
+- the image store is per cluster: an image pulled or `dev load`ed in one
+  is not in the others (`dev load --name <n>`).
+
+A cluster deleted while the VM is down has its data deleted at the VM's next
+boot.
+
+### Memory: 1, 3 and 5 clusters
+
+Each cluster one node, idle 60 s after `dev up` (or `kind create cluster`,
+`k3d cluster create`), then with a 3-replica `nginx:alpine` deployment in each
+(60 s after the rollout). A cluster's memory is counted the way `docker
+stats` counts a container: its cgroup's usage less the page cache the
+kernel would drop first. Measured 2026-10-19 with the release build.
+
+**macOS** (M-series MacBook, 14 cores, 36 GB; litek8s VM at `--cpus 4
+--memory 4096`; kind v0.33.0 and k3d v5.8.3 with their default images on
+OrbStack, as installed):
+
+| clusters | litek8s: whole VM¹ | litek8s: the clusters² | kind: node containers³ | k3d: server + LB containers³ |
+|---|---|---|---|---|
+| 1, idle | 375 MiB | 2.4 MiB | 564 MiB | 614 MiB |
+| 3, idle | 378 MiB | 6.1 MiB | 1574 MiB | 1707 MiB |
+| 5, idle | 386 MiB | 9.2 MiB | 2857 MiB | 2818 MiB |
+| 1, 3 pods each | 452 MiB | 28 MiB | 671 MiB | 649 MiB |
+| 3, 3 pods each | 697 MiB | 82 MiB | 2033 MiB | 1925 MiB |
+| 5, 3 pods each | 898 MiB | 135 MiB | 3080 MiB | 3208 MiB |
+
+¹ The VM's physical footprint as macOS counts it (what Activity Monitor
+shows for it): the guest kernel, the initramfs (the litek8s binary, crun,
+iptables) held in RAM, page cache, and every cluster. ² The sum of the
+clusters' cells. ³ `docker stats`, without OrbStack's own VM, which the
+kind and k3d columns do not include (it runs anyway for Docker). Creating
+the clusters took 9/32/54 s with kind, 17/50/83 s with k3d, and 0.1-0.2 s
+each with litek8s once the VM was up (its boot: about 1.5-2.5 s, once).
+
+**Linux** (omarchy: x86_64, 16 threads, 32 GB, kernel 7.2, rootless; kind
+and k3d are not installed there, so litek8s only):
+
+| clusters | litek8s: whole sandbox⁴ | litek8s: the clusters² |
+|---|---|---|
+| 1, idle | 38 MiB | 4 MiB |
+| 3, idle | 52 MiB | 13 MiB |
+| 5, idle | 63 MiB | 20 MiB |
+| 1, 3 pods each | 91 MiB | 57 MiB |
+| 3, 3 pods each | 205 MiB | 166 MiB |
+| 5, 3 pods each | 317 MiB | 273 MiB |
+
+⁴ The sandbox's cgroup: the supervisor, pasta, the cell manager and every
+cluster (and, on Linux, the page cache of the binary, charged to whoever
+touched it first).
+
+What it means: an idle cluster costs 2-4 MiB beyond the first and a kind
+or k3d cluster about 550 MiB, so five idle litek8s clusters fit in the
+memory of one kind node with room to spare. With pods the pods dominate:
+nginx starts a worker per CPU the cell sees (4 in the VM, 16 on the Linux
+machine). The VM's footprint grows faster than its clusters' sum with
+workloads: each cluster pulls and unpacks its own images (the image store is
+per cluster), and the guest's page cache stays in the footprint until macOS
+asks for it back.
+
 ## Limits
 
-- One node. No authentication on the API (it listens on 127.0.0.1 only on
-  Linux; on macOS also on the VM's address on the framework's private NAT
-  network).
+- No authentication on the API (it listens on 127.0.0.1 only; inside the
+  VM or sandbox, on the cluster's cell, and for multi-node clusters also on
+  its cell address, which only the other cells reach).
 - hostPorts are not exposed on the host's localhost (NodePorts are); rootless
   cannot bind host ports below 1024.
 - macOS: the first boot formats the data disk (~5 s); DHCP from the

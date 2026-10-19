@@ -60,12 +60,15 @@ Examples:
   litek8s dev up                 # API server, controllers, DNS, proxy and a node; kubectl context litek8s-dev
   kubectl create deployment web --image=nginx && kubectl expose deployment web --type=NodePort --port 80
   litek8s dev load myapp:dev     # from the local Docker/Podman, or a `docker save` archive
-  litek8s dev status | down | reset
+  litek8s dev status | down | delete
+  litek8s dev up --name ci --nodes 3   # another cluster (context litek8s-ci), 3 nodes, same VM/sandbox
+  litek8s dev list               # every local cluster: state, API port, nodes, memory
 
 Linux: rootless by default, in namespaces of its own (no host iptables, interfaces or
 /run changes); needs crun, uidmap, pasta or slirp4netns (`litek8s dev setup` checks).
 macOS: a small Linux VM on Virtualization.framework; NodePorts and LoadBalancers appear
-on localhost and $HOME is shared at the same path for hostPath volumes.";
+on localhost and $HOME is shared at the same path for hostPath volumes. Every cluster
+runs in that one VM or sandbox, in namespaces of its own.";
 
 const UI_AFTER_HELP: &str = "\
 Examples:
@@ -1209,6 +1212,8 @@ pub async fn run() -> Result<()> {
                 },
                 wireguard_port: (!no_wireguard).then_some(wireguard_port),
                 listener: None,
+                extra_listen: None,
+                node_port_offset: 0,
                 docker,
             })
             .await

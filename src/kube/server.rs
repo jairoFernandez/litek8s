@@ -56,6 +56,8 @@ const CONTINUE_TTL_SECS: i64 = 300;
 const DEFAULT_WATCH_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const SERVICE_CIDR_PREFIX: &str = "10.43";
 const KUBERNETES_SERVICE_IP: &str = "10.43.0.1";
+/// 30000-32767.
+const NODE_PORTS: i64 = 2768;
 
 pub struct ApiServerConfig {
     pub listen: SocketAddr,
@@ -96,6 +98,11 @@ pub struct ApiServerConfig {
     /// (the dev sandbox binds it on the host before entering its network
     /// namespace).
     pub listener: Option<std::net::TcpListener>,
+    /// Serve the API on this address too (a dev cluster's cell address,
+    /// where its other nodes join).
+    pub extra_listen: Option<SocketAddr>,
+    /// NodePorts are allocated from 30000 + this offset on (wrapping).
+    pub node_port_offset: u16,
     /// Serve the Docker API with the local node's crun runtime.
     pub docker: Option<crate::docker::Settings>,
 }
@@ -128,6 +135,9 @@ pub struct ApiState {
     /// Serializes pod CIDR allocation.
     join_lock: std::sync::Mutex<()>,
     pub(crate) network: join::ClusterNetwork,
+    /// Where NodePort allocation starts in 30000-32767 (several local dev
+    /// clusters share the host's ports: each starts somewhere else).
+    pub(crate) node_port_offset: u16,
     pub(crate) lifecycle: super::controllers::NodeLifecycle,
     pub(crate) metrics: Metrics,
     /// Where pods on other nodes reach this server over the pod overlay
@@ -175,6 +185,7 @@ impl ApiState {
             join_secret: join::server_secret(data_dir, None)?,
             join_lock: std::sync::Mutex::default(),
             network: join::ClusterNetwork::default(),
+            node_port_offset: 0,
             lifecycle: super::controllers::NodeLifecycle::default(),
             metrics: Metrics::default(),
             overlay_endpoint: std::sync::OnceLock::new(),
@@ -357,6 +368,7 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
         state.join_secret = join::server_secret(config.data_dir.as_deref(), config.token.as_deref())?;
     }
     state.network = config.network.clone();
+    state.node_port_offset = config.node_port_offset;
     state.lifecycle = config.lifecycle.clone();
     let state = Arc::new(state);
     let token = state.join_token();
@@ -372,6 +384,10 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
     }
     eprintln!("apiserver: listening on http://{addr} (and https for in-cluster clients; no authentication)");
     tokio::spawn(super::controllers::run(state.clone()));
+    if let Some(extra) = config.extra_listen {
+        let l = TcpListener::bind(extra).await.with_context(|| format!("failed to bind apiserver on {extra}"))?;
+        tokio::spawn(serve_listener(state.clone(), l));
+    }
     super::metrics::spawn_memory_trim();
     tokio::spawn(super::aggregator::run(state.clone()));
     tokio::spawn(expire_events(state.clone()));
@@ -3023,7 +3039,8 @@ impl ApiState {
                         .and_then(|p| p.get("nodePort"))
                         .and_then(Value::as_i64);
                     let np = reuse.unwrap_or_else(|| {
-                        let np = (30000..=32767).find(|p| !used.contains(p)).unwrap_or(30000);
+                        let start = self.node_port_offset as i64 % NODE_PORTS;
+                        let np = (0..NODE_PORTS).map(|i| 30000 + (start + i) % NODE_PORTS).find(|p| !used.contains(p)).unwrap_or(30000);
                         used.push(np);
                         allocated.push((format!("port:{np}"), std::time::Instant::now()));
                         np

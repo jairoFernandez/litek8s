@@ -92,10 +92,24 @@ fn bind_reusable(addr: std::net::SocketAddr) -> std::io::Result<std::net::TcpLis
 }
 
 fn send_with_fd(stream: &UnixStream, byte: u8, fd: RawFd) -> std::io::Result<()> {
-    let mut data = [byte];
-    let mut iov = libc::iovec { iov_base: data.as_mut_ptr().cast(), iov_len: 1 };
+    send_msg(stream.as_raw_fd(), &[byte], &[fd])
+}
+
+fn recv_with_fd(stream: &UnixStream) -> std::io::Result<(u8, Option<OwnedFd>)> {
+    let mut data = [0u8; 1];
+    let (n, mut fds) = recv_msg(stream.as_raw_fd(), &mut data)?;
+    if n == 0 {
+        return Err(std::io::ErrorKind::UnexpectedEof.into());
+    }
+    Ok((data[0], if fds.is_empty() { None } else { Some(fds.remove(0)) }))
+}
+
+/// Send `data` with `fds` attached (SCM_RIGHTS) on the Unix socket `sock`.
+pub(crate) fn send_msg(sock: RawFd, data: &[u8], fds: &[RawFd]) -> std::io::Result<()> {
+    let mut iov = libc::iovec { iov_base: data.as_ptr() as *mut libc::c_void, iov_len: data.len() };
+    let payload = std::mem::size_of_val(fds) as u32;
     // SAFETY: CMSG_SPACE is a pure computation.
-    let space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) } as usize;
+    let space = if fds.is_empty() { 0 } else { (unsafe { libc::CMSG_SPACE(payload) }) as usize };
     let mut cmsg = vec![0u8; space];
     // SAFETY: msghdr points at buffers that outlive the call; the control
     // message is filled in through the CMSG macros.
@@ -103,24 +117,26 @@ fn send_with_fd(stream: &UnixStream, byte: u8, fd: RawFd) -> std::io::Result<()>
         let mut msg: libc::msghdr = std::mem::zeroed();
         msg.msg_iov = &mut iov;
         msg.msg_iovlen = 1;
-        msg.msg_control = cmsg.as_mut_ptr().cast();
-        msg.msg_controllen = space as _;
-        let c = libc::CMSG_FIRSTHDR(&msg);
-        (*c).cmsg_level = libc::SOL_SOCKET;
-        (*c).cmsg_type = libc::SCM_RIGHTS;
-        (*c).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as _;
-        std::ptr::write_unaligned(libc::CMSG_DATA(c) as *mut RawFd, fd);
-        if libc::sendmsg(stream.as_raw_fd(), &msg, 0) < 0 {
+        if !fds.is_empty() {
+            msg.msg_control = cmsg.as_mut_ptr().cast();
+            msg.msg_controllen = space as _;
+            let c = libc::CMSG_FIRSTHDR(&msg);
+            (*c).cmsg_level = libc::SOL_SOCKET;
+            (*c).cmsg_type = libc::SCM_RIGHTS;
+            (*c).cmsg_len = libc::CMSG_LEN(payload) as _;
+            std::ptr::copy_nonoverlapping(fds.as_ptr(), libc::CMSG_DATA(c) as *mut RawFd, fds.len());
+        }
+        if libc::sendmsg(sock, &msg, 0) < 0 {
             return Err(std::io::Error::last_os_error());
         }
     }
     Ok(())
 }
 
-fn recv_with_fd(stream: &UnixStream) -> std::io::Result<(u8, Option<OwnedFd>)> {
-    let mut data = [0u8; 1];
-    let mut iov = libc::iovec { iov_base: data.as_mut_ptr().cast(), iov_len: 1 };
-    let mut cmsg = [0u8; 64];
+/// Receive one message into `buf` and the descriptors that came with it.
+pub(crate) fn recv_msg(sock: RawFd, buf: &mut [u8]) -> std::io::Result<(usize, Vec<OwnedFd>)> {
+    let mut iov = libc::iovec { iov_base: buf.as_mut_ptr().cast(), iov_len: buf.len() };
+    let mut cmsg = [0u8; 256];
     // SAFETY: msghdr points at buffers that outlive the call; we walk the
     // control messages the kernel filled in.
     unsafe {
@@ -129,14 +145,26 @@ fn recv_with_fd(stream: &UnixStream) -> std::io::Result<(u8, Option<OwnedFd>)> {
         msg.msg_iovlen = 1;
         msg.msg_control = cmsg.as_mut_ptr().cast();
         msg.msg_controllen = cmsg.len() as _;
-        let n = libc::recvmsg(stream.as_raw_fd(), &mut msg, 0);
-        if n <= 0 {
-            return Err(if n == 0 { std::io::ErrorKind::UnexpectedEof.into() } else { std::io::Error::last_os_error() });
+        let n = libc::recvmsg(sock, &mut msg, 0);
+        if n < 0 {
+            return Err(std::io::Error::last_os_error());
         }
-        let c = libc::CMSG_FIRSTHDR(&msg);
-        let fd = (!c.is_null() && (*c).cmsg_level == libc::SOL_SOCKET && (*c).cmsg_type == libc::SCM_RIGHTS)
-            .then(|| OwnedFd::from_raw_fd(std::ptr::read_unaligned(libc::CMSG_DATA(c) as *const RawFd)));
-        Ok((data[0], fd))
+        let mut fds = Vec::new();
+        let mut c = libc::CMSG_FIRSTHDR(&msg);
+        while !c.is_null() {
+            if (*c).cmsg_level == libc::SOL_SOCKET && (*c).cmsg_type == libc::SCM_RIGHTS {
+                let count = ((*c).cmsg_len as usize - libc::CMSG_LEN(0) as usize) / std::mem::size_of::<RawFd>();
+                let data = libc::CMSG_DATA(c) as *const RawFd;
+                for i in 0..count {
+                    let fd = std::ptr::read_unaligned(data.add(i));
+                    // Not for the processes the receiver starts.
+                    libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+                    fds.push(OwnedFd::from_raw_fd(fd));
+                }
+            }
+            c = libc::CMSG_NXTHDR(&msg, c);
+        }
+        Ok((n as usize, fds))
     }
 }
 
@@ -161,5 +189,18 @@ mod tests {
         writeln!(client, "tcp nope").unwrap();
         let (byte, fd) = recv_with_fd(&client).unwrap();
         assert!(byte == b'1' && fd.is_none());
+    }
+
+    #[test]
+    fn passes_several_descriptors() {
+        let (a, b) = UnixStream::pair().unwrap();
+        let files: Vec<std::fs::File> = (0..4).map(|_| tempfile::tempfile().unwrap()).collect();
+        let raw: Vec<RawFd> = files.iter().map(|f| f.as_raw_fd()).collect();
+        send_msg(a.as_raw_fd(), b"hello", &raw).unwrap();
+        let mut buf = [0u8; 16];
+        let (n, fds) = recv_msg(b.as_raw_fd(), &mut buf).unwrap();
+        assert_eq!((&buf[..n], fds.len()), (&b"hello"[..], 4));
+        send_msg(a.as_raw_fd(), b"x", &[]).unwrap();
+        assert_eq!(recv_msg(b.as_raw_fd(), &mut buf).unwrap().1.len(), 0);
     }
 }

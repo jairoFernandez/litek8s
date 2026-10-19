@@ -15,12 +15,12 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use super::app::Contexts;
+use crate::dev::cluster::Cluster;
 use crate::dev::kubeconfig;
 
-pub const DOCKER_CONTEXT: &str = "litek8s";
-
-pub fn litek8s_docker_host() -> String {
-    format!("unix://{}", crate::docker::host_socket_path().display())
+/// The docker host of a local cluster.
+pub fn litek8s_docker_host(cluster: &Cluster) -> String {
+    format!("unix://{}", cluster.docker_socket().display())
 }
 
 fn docker_config_dir() -> PathBuf {
@@ -64,8 +64,8 @@ fn same_host(a: &str, b: &str) -> bool {
     a == b || norm(a) == norm(b)
 }
 
-pub fn detect(dev_port: Option<u16>) -> Contexts {
-    let ours = litek8s_docker_host();
+pub fn detect(cluster: &Cluster, dev_port: Option<u16>) -> Contexts {
+    let ours = litek8s_docker_host(cluster);
     let docker_host_env = std::env::var("DOCKER_HOST").ok().filter(|s| !s.is_empty());
     let docker_context = docker_context();
     let ctx_host = docker_context_host(&docker_context).unwrap_or_default();
@@ -77,10 +77,19 @@ pub fn detect(dev_port: Option<u16>) -> Contexts {
         docker_host_env,
         docker_context_is_litek8s: same_host(&ctx_host, &ours),
         docker_context,
-        kube_is_litek8s: kube_context == kubeconfig::CONTEXT || (server.is_some() && server == dev_server),
+        kube_is_litek8s: kube_context == cluster.context() || (server.is_some() && server == dev_server),
         kube_context,
         kubeconfig: path.display().to_string(),
     }
+}
+
+/// The local cluster the UI showed last.
+pub fn active_cluster() -> Option<String> {
+    remembered("cluster").filter(|c| crate::dev::cluster::validate(c).is_ok())
+}
+
+pub fn set_active_cluster(name: &str) {
+    remember("cluster", name);
 }
 
 fn state_path() -> PathBuf {
@@ -113,18 +122,24 @@ fn docker_cli(args: &[&str]) -> Option<Result<String>> {
     })
 }
 
-/// Point the docker CLI at litek8s (`on`) or back at what it used before.
-pub fn switch_docker(on: bool) -> Result<String> {
+fn is_ours(context: &str) -> bool {
+    context == "litek8s" || context.starts_with("litek8s-")
+}
+
+/// Point the docker CLI at a local cluster (`on`) or back at what it used
+/// before litek8s.
+pub fn switch_docker(on: bool, cluster: &Cluster) -> Result<String> {
     let current = docker_context();
-    let ours = litek8s_docker_host();
+    let ours = litek8s_docker_host(cluster);
+    let name = cluster.docker_context();
     let target = if on {
-        if current != DOCKER_CONTEXT {
+        if !is_ours(&current) {
             remember("docker_context_before", &current);
         }
-        ensure_docker_context(&ours)?;
-        DOCKER_CONTEXT.to_string()
+        ensure_docker_context(&name, &ours, cluster)?;
+        name
     } else {
-        remembered("docker_context_before").filter(|c| c != DOCKER_CONTEXT && (c == "default" || docker_context_host(c).is_some())).unwrap_or_else(|| "default".into())
+        remembered("docker_context_before").filter(|c| !is_ours(c) && (c == "default" || docker_context_host(c).is_some())).unwrap_or_else(|| "default".into())
     };
     match docker_cli(&["context", "use", &target]) {
         Some(r) => {
@@ -139,20 +154,21 @@ pub fn switch_docker(on: bool) -> Result<String> {
     Ok(msg)
 }
 
-fn ensure_docker_context(host: &str) -> Result<()> {
-    let existing = docker_context_host(DOCKER_CONTEXT);
+fn ensure_docker_context(name: &str, host: &str, cluster: &Cluster) -> Result<()> {
+    let existing = docker_context_host(name);
     if existing.as_deref() == Some(host) {
         return Ok(());
     }
     let docker_arg = format!("host={host}");
     let verb = if existing.is_some() { "update" } else { "create" };
-    if let Some(r) = docker_cli(&["context", verb, DOCKER_CONTEXT, "--description", "litek8s dev", "--docker", &docker_arg]) {
+    let description = format!("litek8s {}", cluster.name);
+    if let Some(r) = docker_cli(&["context", verb, name, "--description", &description, "--docker", &docker_arg]) {
         return r.map(|_| ());
     }
     // No CLI: write the context the way `docker context create` does.
-    let dir = meta_dir(DOCKER_CONTEXT);
+    let dir = meta_dir(name);
     std::fs::create_dir_all(&dir)?;
-    let meta = json!({"Name": DOCKER_CONTEXT, "Metadata": {"Description": "litek8s dev"}, "Endpoints": {"docker": {"Host": host, "SkipTLSVerify": false}}});
+    let meta = json!({"Name": name, "Metadata": {"Description": description}, "Endpoints": {"docker": {"Host": host, "SkipTLSVerify": false}}});
     std::fs::write(dir.join("meta.json"), serde_json::to_vec(&meta)?).context("failed to write the docker context")?;
     Ok(())
 }
@@ -175,21 +191,23 @@ fn set_current_docker_context(name: &str) -> Result<()> {
     std::fs::write(&path, serde_json::to_vec_pretty(&config)?).with_context(|| format!("failed to write {}", path.display()))
 }
 
-/// Make litek8s-dev kubectl's current context (`on`), or the one before.
-pub fn switch_kube(on: bool, dev_port: Option<u16>) -> Result<String> {
+/// Make a local cluster's context kubectl's current one (`on`), or the one
+/// before litek8s.
+pub fn switch_kube(on: bool, cluster: &Cluster, dev_port: Option<u16>) -> Result<String> {
     let path = kubeconfig::default_path();
     let current = kubeconfig::current(&path).map(|(c, _)| c).unwrap_or_default();
+    let context = cluster.context();
     if on {
-        if current != kubeconfig::CONTEXT && !current.is_empty() {
+        if !is_ours(&current) && !current.is_empty() {
             remember("kube_context_before", &current);
         }
         match dev_port {
-            Some(port) => kubeconfig::install(&path, &format!("http://127.0.0.1:{port}"))?,
-            None => kubeconfig::set_current(&path, kubeconfig::CONTEXT).context("start the dev cluster first (it adds the litek8s-dev context)")?,
+            Some(port) => kubeconfig::install(&path, &context, &format!("http://127.0.0.1:{port}"), true)?,
+            None => kubeconfig::set_current(&path, &context).with_context(|| format!("start {} first (it adds the {context} context)", cluster.name))?,
         }
-        return Ok(format!("kubectl context: {}", kubeconfig::CONTEXT));
+        return Ok(format!("kubectl context: {context}"));
     }
-    let Some(before) = remembered("kube_context_before").filter(|c| c != kubeconfig::CONTEXT) else {
+    let Some(before) = remembered("kube_context_before").filter(|c| !is_ours(c)) else {
         bail!("no earlier kubectl context recorded; use `kubectl config use-context <name>`");
     };
     kubeconfig::set_current(&path, &before)?;

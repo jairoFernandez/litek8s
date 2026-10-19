@@ -6,25 +6,28 @@ commands. It is part of the same binary, keyboard-driven, fits an 80x24
 terminal, and works the same locally and over SSH:
 
 ```bash
-litek8s ui                  # this machine's dev cluster
+litek8s ui                  # this machine's dev clusters
+litek8s ui --cluster ci     # starting on the local cluster `ci`
 ssh -t box litek8s ui       # another machine's, in your terminal
 ```
 
-Seven views, `1`-`7` (or `tab`) to switch, `?` for the keys of each:
+Eight views, `1`-`8` (or `tab`) to switch, `?` for the keys of each:
 
 | view | what it gives you |
 |---|---|
-| **1 Home** | the dev cluster's state (up, down, starting, stopping), mode, uptime; CPU, memory and disk of the VM or rootless sandbox; the Docker socket and API server; whether `docker` and `kubectl` point at litek8s. `u` up, `d` down, `R` reset (asks first) |
-| **2 Containers** | `docker ps -a`, grouped by compose project: `l` logs (follow), `s` a shell in the container, `u`/`x`/`r` start/stop/restart, `d` remove; on a project row they act on the whole project, `space` folds it |
-| **3 Images** | sizes, age, which containers and pods use each; `d` remove |
-| **4 Volumes** | sizes, which containers mount each, compose project; `d` remove |
-| **5 Free space** | what can be reclaimed: stopped containers, dangling images, build cache, unused images, unused volumes; select with `space`, `p` frees it |
-| **6 Kubernetes** | namespaces → pods and deployments with status; logs, port-forward, scale, restart, delete pod. For more, [k9s](https://k9scli.io) works with litek8s (`k9s --context litek8s-dev`) |
-| **7 Settings** | CPUs, memory, shared directories, API port, where published ports listen; switch the docker and kubectl contexts to litek8s and back; edit the settings file in `$EDITOR` |
+| **1 Home** | the shown cluster's state (up, down, starting, stopping), mode, uptime; CPU, memory and disk of the VM or rootless sandbox; the Docker socket and API server; whether `docker` and `kubectl` point at it. `u` up, `d` down, `R` delete (asks first) |
+| **2 Clusters** | the local clusters (state, API port, nodes, memory, age) and your kubeconfig's other contexts; `n` new (name, nodes), `u`/`d` up/down, `D` delete, `enter` shows it in every view (and offers to point `kubectl` and `docker` at it); see [Clusters](#clusters) |
+| **3 Containers** | `docker ps -a`, grouped by compose project: `l` logs (follow), `s` a shell in the container, `u`/`x`/`r` start/stop/restart, `d` remove; on a project row they act on the whole project, `space` folds it |
+| **4 Images** | sizes, age, which containers and pods use each; `d` remove |
+| **5 Volumes** | sizes, which containers mount each, compose project; `d` remove |
+| **6 Free space** | what can be reclaimed: stopped containers, dangling images, build cache, unused images, unused volumes; select with `space`, `p` frees it |
+| **7 Kubernetes** | namespaces → pods and deployments with status; logs, port-forward, scale, restart, delete pod. For more, [k9s](https://k9scli.io) works with litek8s (`k9s --context litek8s-dev`) |
+| **8 Settings** | CPUs, memory, shared directories, API port, where published ports listen; switch the docker and kubectl contexts to litek8s and back; edit the settings file in `$EDITOR` |
 
 Everything that deletes or stops asks first, and says what goes: removing a
-compose project lists its containers, a reset says it deletes every object,
-image and volume, freeing space adds up what it frees.
+compose project lists its containers, deleting a cluster says it deletes
+every object, image and volume and where they are, freeing space adds up
+what it frees.
 
 ## Screens
 
@@ -36,8 +39,8 @@ shown here as a default install has them (`~/.litek8s`, `~/.kube/config`,
 Home:
 
 ```
- litek8s  1 Home  2 Containers  3 Images  4 Volumes  5 Space  6 Kube  7 Settings
-┌ Dev cluster ─────────────────────────┐┌ Resources ───────────────────────────┐
+ litek8s  1 Home 2 Clusters 3 Ctrs 4 Images 5 Vols 6 Space 7 Kube 8 Settings
+┌ Cluster dev ─────────────────────────┐┌ Resources ───────────────────────────┐
 │● up  macOS VM, up 22m 50s            ││CPU             1% of 4 CPUs          │
 │API      http://127.0.0.1:6443        ││Memory ████    466 MB / 4.1 GB        │
 │Docker   ~/.litek8s/docker.sock       ││Disk      269 MB used, 131 GB free    │
@@ -49,9 +52,9 @@ Home:
 │  DOCKER_HOST      unset                                                      │
 │✓ kubectl context  litek8s-dev  (~/.kube/config)                              │
 └──────────────────────────────────────────────────────────────────────────────┘
- Switch docker/kubectl to litek8s in Settings (7). Help: ?
+ Switch docker/kubectl to litek8s in Settings (8). Help: ?
 
- u up  d down  R reset  7 settings                                       ? help
+ u up  d down  R delete  2 clusters  8 settings                          ? help
 ```
 
 After `u` on a stopped cluster, the output of `litek8s dev up` shows under
@@ -69,7 +72,7 @@ On Linux the mode is `rootless sandbox`; with a CPU or memory limit set
 2-CPU limit):
 
 ```
-┌ Dev cluster ─────────────────────────┐┌ Resources ───────────────────────────┐
+┌ Cluster dev ─────────────────────────┐┌ Resources ───────────────────────────┐
 │● up  rootless sandbox, up 20s        ││CPU    ████████200% of 2 CPUs ████████│
 │API      http://127.0.0.1:6443        ││Memory █      54.8 MB / 2.1 GB        │
 ```
@@ -77,7 +80,7 @@ On Linux the mode is `rootless sandbox`; with a CPU or memory limit set
 Containers, with a compose project and a confirmation:
 
 ```
- litek8s  1 Home  2 Containers  3 Images  4 Volumes  5 Space  6 Kube  7 Settings
+ litek8s  1 Home 2 Clusters 3 Ctrs 4 Images 5 Vols 6 Space 7 Kube 8 Settings
 ┌ Containers (3/3 running) ────────────────────────────────────────────────────┐
 │NAME                      STATE     IMAGE                   PORTS             │
 │▾ shop                    3/3 up    compose project                           │
@@ -161,7 +164,7 @@ containers and unused images on the Mac:
 Kubernetes (`n` cycles namespaces, `v` switches to deployments):
 
 ```
- litek8s  1 Home  2 Containers  3 Images  4 Volumes  5 Space  6 Kube  7 Settings
+ litek8s  1 Home 2 Clusters 3 Ctrs 4 Images 5 Vols 6 Space 7 Kube 8 Settings
  namespace all   [Pods] Deployments
 ┌ Pods — litek8s-dev ──────────────────────────────────────────────────────────┐
 │NAME                                  READY  STATUS             RESTARTS AGE  │
@@ -189,7 +192,7 @@ runs:
 │VM CPUs              4                                                        │
 │VM memory (MiB)      4096                                                     │
 │Shared directories   /Users/me, /Users/Shared                                 │
-│API server port      6443 (default)                                           │
+│API port (dev)       6443 (default)                                           │
 │Published ports on   all interfaces (LAN)                                     │
 │docker context       default  (enter: use litek8s)                            │
 │kubectl context      other  (enter: use litek8s-dev)                          │
@@ -199,6 +202,77 @@ runs:
  CPUs, memory and shares size the macOS VM.
  Settings apply on the next `litek8s dev up` (its flags win).
 ```
+
+## Clusters
+
+`litek8s dev` runs as many clusters as you like in one VM or sandbox
+([dev.md](dev.md#several-clusters)); view 2 lists them, with the VM's or
+sandbox's size and what it uses, and the other contexts of your kubeconfig
+(a home cluster, a cloud one) read-only. On the Mac, with a 3-node cluster
+and a stopped one:
+
+```
+ litek8s  1 Home 2 Clusters 3 Ctrs 4 Images 5 Vols 6 Space 7 Kube 8 Settings
+┌ Local clusters · shared VM: 4 CPUs, 4.3 GB max, 412 MB used ─────────────────┐
+│NAME           STATE     API              NODES MEMORY    AGE  CONTEXT        │
+│● dev          up        127.0.0.1:6443   1     27.2 MB   8m   litek8s-dev    │
+│  ci           up        127.0.0.1:61325  3     5.6 MB    2m   litek8s-ci     │
+│  old          down      -                1     -         3d   litek8s-old    │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ Other kubeconfig contexts (read-only; enter: Kubernetes view) ───────────────┐
+│  home                          https://192.168.1.10:6443                     │
+└──────────────────────────────────────────────────────────────────────────────┘
+ All clusters share one VM (its CPUs and memory: Settings).
+
+ n new  u up  d down  D delete  enter use                                ? help
+```
+
+`●` marks the cluster the other views show. MEMORY is the cluster's own:
+its nodes' processes and pods, counted the way `docker stats` counts a
+container (the binary and the VM's kernel are shared and not in it); the
+title's figure is the whole VM (or sandbox). NODES shows `2/3` while a node
+is not Ready.
+
+`n` asks for a name and a node count, and says what the cluster shares:
+
+```
+         ┌ New cluster ───────────────────────────────────────────────┐
+         │Name   ci2█                                                 │
+         │Nodes  3                                                    │
+         │                                                            │
+         │Runs in the shared VM: 4 CPUs, 4096 MiB for all clusters.   │
+         │Context litek8s-ci2, socket ~/.litek8s/ci2/docker.sock      │
+         │Nodes after the first are workers joined like real nodes.   │
+         │tab next field   enter create   esc cancel                  │
+         └────────────────────────────────────────────────────────────┘
+```
+
+and runs `litek8s dev up --name ci2 --nodes 3 --no-switch` (kubectl's
+current context stays as it is), its output under the list. `D` says what
+goes before it goes (here on Linux):
+
+```
+ ┌ Delete cluster t1? ────────────────────────────────────────────────────────┐
+ │Stops it and DELETES all of its data:                                       │
+ │Kubernetes objects, pods, Docker containers, images, volumes                │
+ │and the build cache, in ~/.local/share/litek8s/dev/clusters/t1/data.        │
+ │The kubectl context litek8s-t1 is removed. This cannot be undone.           │
+ │                                                                            │
+ │y yes   n/esc no                                                            │
+ └────────────────────────────────────────────────────────────────────────────┘
+```
+
+`enter` on a local cluster shows it everywhere (Home, Containers, Images,
+Volumes, Free space and Kubernetes follow its Docker socket and API) and
+then asks whether `kubectl` and `docker` should point at it too
+(`current-context` and the docker context `litek8s-<name>`); the UI
+remembers it for next time. `enter` on another context shows that context
+in the Kubernetes view only (nothing to start or stop there); `enter` on a
+local cluster comes back.
+
+While a cluster or its engine is down, Home says so instead of counting
+nothing: `Ctrs –`, `Pods –`, `Images – (engine not running)`, not `0/0` and
+`0 (0 B)`.
 
 ## Settings: `~/.litek8s/config.yaml`
 
@@ -230,14 +304,15 @@ changes still need `d` and `u` on Home. "Config file" opens it in
 Home shows, and Settings switches:
 
 - **docker context.** "use litek8s" creates (or updates) a `litek8s`
-  context for `unix://~/.litek8s/docker.sock` and makes it current, with
+  context for `unix://~/.litek8s/docker.sock` (for another cluster,
+  `litek8s-<name>` for `~/.litek8s/<name>/docker.sock`) and makes it current, with
   `docker context` when the CLI is installed and by writing the CLI's
   context store (`$DOCKER_CONFIG/contexts`, `config.json`) when it is not.
   "switch back" returns to the context that was current before
   (`default` if none was recorded). `DOCKER_HOST`, when set in your shell,
   wins over any context; Home says so.
-- **kubectl context.** "use litek8s-dev" makes the dev cluster's context
-  current (adding it if the cluster runs); "switch back" restores the
+- **kubectl context.** "use litek8s-dev" makes the shown cluster's context
+  (`litek8s-<name>`) current (adding it if the cluster runs); "switch back" restores the
   previous current context. Nothing else in the kubeconfig changes.
 
 What was current before is kept in `~/.litek8s/ui-state.json`.
@@ -253,7 +328,8 @@ same:
 | pods, deployments, namespaces, logs, scale, restart, delete | the Kubernetes API (list + watch, `PATCH`, `.../log?follow=true`) |
 | port-forward | `POST .../pods/{name}/portforward` upgraded to SPDY/3.1 (`portforward.k8s.io`), one session per local connection, listening on 127.0.0.1 |
 | state, CPU, memory, disk of the dev cluster | the dev supervisor's state file (`dev.json`: mode, port, pid, cgroup or VM process, what it started with), its cgroup or the VM process |
-| up, down, reset | `litek8s dev up/down/reset`, run as a child process (its output shows on Home) |
+| up, down, delete, new cluster | `litek8s dev up/down/delete --name <cluster>`, run as a child process (its output shows on Home and Clusters) |
+| the local clusters, their memory | the clusters' files in the dev data directory (`cluster.json`, `dev.json`), one request to the VM or sandbox (`env.sock`) for every cluster's memory, `GET /api/v1/nodes` of each running one for its Ready nodes |
 
 ```bash
 litek8s ui --docker-host tcp://10.0.0.5:2375 --context remote   # another litek8s
@@ -276,7 +352,11 @@ on screen, and waits on sockets otherwise:
   (`/system/df`, which walks directories) only after events that change
   them and at most every 2 s. Pods, deployments and namespaces come from
   Kubernetes watches, coalesced over 100 ms.
-- **Home** samples the cluster's state, CPU and memory every 2 s while Home
+- **Clusters** lists the clusters every 2 s while the view is on screen
+  (their files, one memory request to the VM or sandbox, a node list from
+  each running cluster) and not at all otherwise: a cluster nobody looks
+  at is not polled.
+- **Home** samples the shown cluster's state, CPU and memory every 2 s while Home
   or Free space is on screen, every 10 s on Settings (for its restart
   note), every 60 s otherwise (to notice the API port moving); the data
   directory's size (a directory walk) at most every 30 s and only while it
@@ -301,10 +381,15 @@ threads:
 | view | CPU | wake-ups | RSS | threads |
 |---|---|---|---|---|
 | Home (samples every 2 s) | 0.07 % | 3.6/s | 16.5 MiB | 3 (the size walk's blocking thread) |
+| Clusters (2 clusters, one with 3 nodes; every 2 s) | 0.08 % | 2.3/s | 17.3 MiB | 2 |
 | Containers | 0.00 % | 0.3/s | 16.5 MiB | 2 |
 | Kubernetes | 0.02 % | 0.4/s | 16.5 MiB | 2 |
 | Settings | 0.02 % | 1.0/s | 16.6 MiB | 2 |
 | a log following 1 line/s | 0.03 % | 2.4/s | 19.1 MiB (peak) | 2 |
+
+(The Clusters row is from a later round with named clusters, same machine and
+method; in that round Home measured 0.03 % and 1.8/s, Containers 0.00 % and
+0.1/s: with Clusters off screen, nothing samples the clusters.)
 
 On macOS (M-series MacBook, `litek8s dev up --cpus 4 --memory 4096`, the
 same workload, 80x24 in `tmux`), idle 60 s in each view; CPU from `ps`
@@ -346,8 +431,9 @@ crossterm are about 200 KiB.
 
 | where | keys |
 |---|---|
-| everywhere | `1`-`7`/`tab`/`shift-tab` views, `↑↓`/`jk`/`PgUp`/`PgDn`/`g`/`G` move, `/` filter the list (`esc` clears), `ctrl-r` refresh, `?` help, `q` or `ctrl-c` quit |
-| Home | `u` up, `d` down (asks), `R` reset (asks) |
+| everywhere | `1`-`8`/`tab`/`shift-tab` views, `↑↓`/`jk`/`PgUp`/`PgDn`/`g`/`G` move, `/` filter the list (`esc` clears), `ctrl-r` refresh, `?` help, `q` or `ctrl-c` quit |
+| Home | `u` up, `d` down (asks), `R` delete the cluster (asks) |
+| Clusters | `n` new (`tab` between name and nodes), `u` up, `d` down (asks), `D`/`del` delete (asks), `enter` show it (a local cluster: every view, then asks about `kubectl`/`docker`; another context: the Kubernetes view) |
 | Containers | `l`/`enter` logs, `s` shell, `u` start, `x` stop (asks), `r` restart (asks), `d`/`del` remove (asks), `space` fold a project |
 | Images, Volumes | `d`/`del` remove (asks) |
 | Free space | `space` select a category, `p`/`enter` free the selected (asks) |

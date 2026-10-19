@@ -4,14 +4,15 @@
 //! busybox around this binary) and a data disk. Init mounts the usual
 //! filesystems, loads the kernel modules the cluster needs, formats the data
 //! disk on first boot, mounts the Mac's shared directory (virtiofs) at the
-//! same path as on the Mac, gets an address by DHCP and runs the API server
-//! with a crun node as a child, reaping orphans and restarting it if it
-//! dies. It talks to the host over the console (hvc0): it reports
+//! same path as on the Mac, gets an address by DHCP and runs the cell
+//! manager ([`super::cells`]) as a child, which runs each cluster in cells
+//! of its own; init reaps orphans and restarts the manager if it dies. It
+//! talks to the host over the console (hvc0): it reports
 //! `LITEK8S_GUEST ip=...` once the network is up and powers off on a
-//! `poweroff` line from the host.
+//! `poweroff` line from the host; cells' output comes through it too, as
+//! `LITEK8S_LOG <cluster> <line>`.
 
-/// The dev cluster's node name (the sandbox's hostname on Linux, the VM's
-/// on macOS).
+/// The default dev cluster's node name (the VM's hostname too).
 pub const NODE_NAME: &str = "litek8s-dev";
 
 /// The API server port inside the VM.
@@ -21,14 +22,15 @@ pub const GUEST_API_PORT: u16 = 6443;
 pub const DATA_DIR: &str = "/var/lib/litek8s";
 
 /// The vsock port the guest forwards from: the host connects, sends
-/// `tcp <port>\n` and is spliced to 127.0.0.1:<port> in the VM (the API
-/// server, NodePorts). The API then needs neither the VM's address nor its
-/// network, and listens on the VM's loopback only.
+/// `tcp <port> [<cell>]\n` and is spliced to 127.0.0.1:<port> in the VM or
+/// in a cluster's cell (the API server, NodePorts, the Docker API). The API
+/// then needs neither the VM's address nor its network, and listens on
+/// loopback only. `stats\n` gets every cluster's memory and CPU time.
 pub const VSOCK_PORT: u32 = 1024;
 
 /// Written by init once DHCP has found the Mac's address on the VM network
-/// (see `LITEK8S_HOST_LOOPBACK`).
-pub const HOST_ADDRESS_FILE: &str = "/run/litek8s-host-address";
+/// (see `LITEK8S_HOST_LOOPBACK`); outside /run, which every cell has its own of.
+pub const HOST_ADDRESS_FILE: &str = "/etc/litek8s-host-address";
 
 /// Kernel command line options init understands.
 #[derive(Debug, Default, PartialEq)]
@@ -45,6 +47,8 @@ pub struct BootOptions {
     /// The Mac shares Rosetta (tag `rosetta`): run linux/amd64 binaries
     /// with it.
     pub rosetta: bool,
+    /// Clusters deleted while the VM was down: their data goes at boot.
+    pub purge: Vec<String>,
 }
 
 pub fn parse_cmdline(cmdline: &str) -> BootOptions {
@@ -60,6 +64,8 @@ pub fn parse_cmdline(cmdline: &str) -> BootOptions {
             o.mounts = v.split(',').filter_map(|m| m.split_once(':')).map(|(t, p)| (t.to_string(), p.to_string())).collect();
         } else if word == "litek8s.rosetta=1" {
             o.rosetta = true;
+        } else if let Some(v) = word.strip_prefix("litek8s.purge=") {
+            o.purge = v.split(',').filter(|n| super::cluster::validate(n).is_ok()).map(str::to_string).collect();
         }
     }
     o
@@ -202,8 +208,26 @@ mod init {
                 _ => return,
             }
         }
-        let text = String::from_utf8_lossy(&line);
-        let Some(port) = text.strip_prefix("tcp ").and_then(|p| p.trim().parse::<u16>().ok()) else { return };
+        let text = String::from_utf8_lossy(&line).to_string();
+        if text.trim() == "stats" {
+            let stats = super::super::env::cell_stats(std::path::Path::new("/sys/fs/cgroup"));
+            let _ = (&conn).write_all(&serde_json::to_vec(&stats).unwrap_or_default());
+            return;
+        }
+        let mut words = text.strip_prefix("tcp ").unwrap_or_default().split_whitespace();
+        let Some(port) = words.next().and_then(|p| p.parse::<u16>().ok()) else { return };
+        // In a cell: connect from its network namespace (this thread's only).
+        if let Some(cell) = words.next() {
+            if !cell.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.') {
+                return;
+            }
+            let Ok(ns) = std::fs::File::open(format!("{}/{cell}.net", super::super::cells::NETNS_DIR)) else { return };
+            use std::os::fd::AsRawFd;
+            // SAFETY: setns on this thread with a namespace file we hold open.
+            if unsafe { libc::setns(ns.as_raw_fd(), libc::CLONE_NEWNET) } != 0 {
+                return;
+            }
+        }
         let Ok(tcp) = std::net::TcpStream::connect(("127.0.0.1", port)) else { return };
         let _ = tcp.set_nodelay(true);
         let (Ok(mut conn_r), Ok(mut tcp_w)) = (conn.try_clone(), tcp.try_clone()) else { return };
@@ -357,17 +381,17 @@ mod init {
         Some((ip, gw))
     }
 
-    fn spawn_apiserver() -> Option<libc::pid_t> {
+    /// The cell manager: the clusters the Mac asks for, each in cells of
+    /// its own.
+    fn spawn_manager() -> Option<libc::pid_t> {
         let mut cmd = std::process::Command::new("/init");
-        cmd.args(["dev", "__apiserver", "--data-dir", &format!("{DATA_DIR}/dev")]);
+        cmd.args(["dev", "__cells", "--guest"]);
         cmd.env("LITEK8S_DEV_GUEST", "1").env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin").env("HOME", "/root");
-        // The node's address is the pod bridge's: the VM's own comes by
-        // DHCP, which the API server does not wait for.
-        cmd.env("LITEK8S_NODE_IP", "10.42.0.1").env("LITEK8S_HOST_LOOPBACK", HOST_ADDRESS_FILE);
+        cmd.env("LITEK8S_HOST_LOOPBACK", HOST_ADDRESS_FILE);
         match cmd.spawn() {
             Ok(child) => Some(child.id() as libc::pid_t),
             Err(e) => {
-                say(&format!("failed to start the API server: {e}"));
+                say(&format!("failed to start the cell manager: {e}"));
                 None
             }
         }
@@ -466,11 +490,19 @@ mod init {
         if opts.rosetta {
             setup_rosetta();
         }
+        for name in &opts.purge {
+            let dir = format!("{DATA_DIR}/{name}");
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => say(&format!("deleted {dir} (cluster {name} was deleted)")),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => say(&format!("cannot delete {dir}: {e}")),
+            }
+        }
         let t_disk = started.elapsed().as_millis() - t_disk_start;
         if let Err(e) = serve_vsock() {
             say(&format!("no vsock ({e}); the host cannot reach the cluster"));
         }
-        let mut main = spawn_apiserver();
+        let mut main = spawn_manager();
         say(&format!("booted in {} ms (mounts {t_mounts}, modules {}, disk+share {t_disk})", started.elapsed().as_millis(), t_modules - t_mounts));
         println!("LITEK8S_GUEST vsock={VSOCK_PORT}");
         let _ = std::io::stdout().flush();
@@ -525,9 +557,9 @@ mod init {
                 }
                 if Some(r) == main {
                     restarts += 1;
-                    say(&format!("API server exited ({status}); restarting ({restarts})"));
+                    say(&format!("cell manager exited ({status}); restarting ({restarts})"));
                     std::thread::sleep(Duration::from_secs(1));
-                    main = spawn_apiserver();
+                    main = spawn_manager();
                 }
             }
         }
@@ -542,7 +574,8 @@ mod tests {
     fn parses_boot_options() {
         let o = parse_cmdline("console=hvc0 quiet litek8s.share=/Users/me litek8s.disk=/dev/vdb litek8s.seed=00ff");
         assert_eq!(o, BootOptions { share: Some("/Users/me".into()), disk: "/dev/vdb".into(), seed: Some(vec![0, 255]), ..Default::default() });
-        let o = parse_cmdline("litek8s.mounts=tmp:/private/tmp,folders:/private/var/folders litek8s.rosetta=1");
+        let o = parse_cmdline("litek8s.mounts=tmp:/private/tmp,folders:/private/var/folders litek8s.rosetta=1 litek8s.purge=ci,../x,b");
+        assert_eq!(o.purge, vec!["ci".to_string(), "b".to_string()]);
         assert_eq!(o.mounts, vec![("tmp".to_string(), "/private/tmp".to_string()), ("folders".to_string(), "/private/var/folders".to_string())]);
         assert!(o.rosetta);
         assert_eq!(parse_cmdline("console=hvc0").disk, "/dev/vda");
