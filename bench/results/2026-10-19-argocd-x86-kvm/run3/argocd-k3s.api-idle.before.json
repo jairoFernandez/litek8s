@@ -1,0 +1,3674 @@
+{
+ "apiserver_request_total": [
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "",
+   "resource": "",
+   "subresource": "/healthz",
+   "scope": "",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "",
+   "resource": "",
+   "subresource": "/readyz",
+   "scope": "",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "",
+   "resource": "",
+   "subresource": "openapi/v3",
+   "scope": "",
+   "code": "200",
+   "value": 175.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "",
+   "resource": "",
+   "subresource": "openapi/v3/",
+   "scope": "",
+   "code": "200",
+   "value": 9.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "",
+   "resource": "",
+   "subresource": "api",
+   "scope": "",
+   "code": "200",
+   "value": 75.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "",
+   "resource": "",
+   "subresource": "apis",
+   "scope": "",
+   "code": "200",
+   "value": 76.0
+  },
+  {
+   "verb": "LIST",
+   "group": "",
+   "version": "v1",
+   "resource": "configmaps",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "configmaps",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "LIST",
+   "group": "",
+   "version": "v1",
+   "resource": "configmaps",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 36.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "configmaps",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 77.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "",
+   "version": "v1",
+   "resource": "configmaps",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 24.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "v1",
+   "resource": "configmaps",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 11.0
+  },
+  {
+   "verb": "PUT",
+   "group": "",
+   "version": "v1",
+   "resource": "configmaps",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "endpoints",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "",
+   "version": "v1",
+   "resource": "endpoints",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "v1",
+   "resource": "endpoints",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 70.0
+  },
+  {
+   "verb": "PUT",
+   "group": "",
+   "version": "v1",
+   "resource": "endpoints",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 63.0
+  },
+  {
+   "verb": "PATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "events",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 10.0
+  },
+  {
+   "verb": "LIST",
+   "group": "",
+   "version": "v1",
+   "resource": "limitranges",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "limitranges",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "LIST",
+   "group": "",
+   "version": "v1",
+   "resource": "limitranges",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 11.0
+  },
+  {
+   "verb": "LIST",
+   "group": "",
+   "version": "v1",
+   "resource": "namespaces",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "namespaces",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 5.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "v1",
+   "resource": "namespaces",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 276.0
+  },
+  {
+   "verb": "LIST",
+   "group": "",
+   "version": "v1",
+   "resource": "nodes",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 4.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "nodes",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 11.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "v1",
+   "resource": "nodes",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 15.0
+  },
+  {
+   "verb": "PATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "nodes",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 7.0
+  },
+  {
+   "verb": "PUT",
+   "group": "",
+   "version": "v1",
+   "resource": "nodes",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "PATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "nodes",
+   "subresource": "status",
+   "scope": "resource",
+   "code": "200",
+   "value": 20.0
+  },
+  {
+   "verb": "LIST",
+   "group": "",
+   "version": "v1",
+   "resource": "persistentvolumeclaims",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "persistentvolumeclaims",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "LIST",
+   "group": "",
+   "version": "v1",
+   "resource": "persistentvolumes",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "persistentvolumes",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "LIST",
+   "group": "",
+   "version": "v1",
+   "resource": "pods",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 4.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "pods",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 5.0
+  },
+  {
+   "verb": "LIST",
+   "group": "",
+   "version": "v1",
+   "resource": "pods",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 635.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "",
+   "version": "v1",
+   "resource": "pods",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 73.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "v1",
+   "resource": "pods",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 345.0
+  },
+  {
+   "verb": "PATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "pods",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 4.0
+  },
+  {
+   "verb": "PATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "pods",
+   "subresource": "status",
+   "scope": "resource",
+   "code": "200",
+   "value": 255.0
+  },
+  {
+   "verb": "LIST",
+   "group": "",
+   "version": "v1",
+   "resource": "podtemplates",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "podtemplates",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "LIST",
+   "group": "",
+   "version": "v1",
+   "resource": "replicationcontrollers",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "replicationcontrollers",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "LIST",
+   "group": "",
+   "version": "v1",
+   "resource": "resourcequotas",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "resourcequotas",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "LIST",
+   "group": "",
+   "version": "v1",
+   "resource": "secrets",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "secrets",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "LIST",
+   "group": "",
+   "version": "v1",
+   "resource": "secrets",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 80.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "secrets",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 69.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "",
+   "version": "v1",
+   "resource": "secrets",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 9.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "v1",
+   "resource": "secrets",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 11.0
+  },
+  {
+   "verb": "PUT",
+   "group": "",
+   "version": "v1",
+   "resource": "secrets",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 35.0
+  },
+  {
+   "verb": "LIST",
+   "group": "",
+   "version": "v1",
+   "resource": "serviceaccounts",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "serviceaccounts",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "",
+   "version": "v1",
+   "resource": "serviceaccounts",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 21.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "v1",
+   "resource": "serviceaccounts",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 27.0
+  },
+  {
+   "verb": "LIST",
+   "group": "",
+   "version": "v1",
+   "resource": "services",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 6.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "services",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 6.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "",
+   "version": "v1",
+   "resource": "services",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 22.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "v1",
+   "resource": "services",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 42.0
+  },
+  {
+   "verb": "PATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "services",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 7.0
+  },
+  {
+   "verb": "LIST",
+   "group": "admissionregistration.k8s.io",
+   "version": "v1",
+   "resource": "mutatingadmissionpolicies",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "admissionregistration.k8s.io",
+   "version": "v1",
+   "resource": "mutatingadmissionpolicies",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "LIST",
+   "group": "admissionregistration.k8s.io",
+   "version": "v1",
+   "resource": "mutatingadmissionpolicybindings",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "admissionregistration.k8s.io",
+   "version": "v1",
+   "resource": "mutatingadmissionpolicybindings",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "LIST",
+   "group": "admissionregistration.k8s.io",
+   "version": "v1",
+   "resource": "mutatingwebhookconfigurations",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "admissionregistration.k8s.io",
+   "version": "v1",
+   "resource": "mutatingwebhookconfigurations",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "LIST",
+   "group": "admissionregistration.k8s.io",
+   "version": "v1",
+   "resource": "validatingadmissionpolicies",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "admissionregistration.k8s.io",
+   "version": "v1",
+   "resource": "validatingadmissionpolicies",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "LIST",
+   "group": "admissionregistration.k8s.io",
+   "version": "v1",
+   "resource": "validatingadmissionpolicybindings",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "admissionregistration.k8s.io",
+   "version": "v1",
+   "resource": "validatingadmissionpolicybindings",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "LIST",
+   "group": "admissionregistration.k8s.io",
+   "version": "v1",
+   "resource": "validatingwebhookconfigurations",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "admissionregistration.k8s.io",
+   "version": "v1",
+   "resource": "validatingwebhookconfigurations",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "LIST",
+   "group": "apiextensions.k8s.io",
+   "version": "v1",
+   "resource": "customresourcedefinitions",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "apiextensions.k8s.io",
+   "version": "v1",
+   "resource": "customresourcedefinitions",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "GET",
+   "group": "apiextensions.k8s.io",
+   "version": "v1",
+   "resource": "customresourcedefinitions",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 40.0
+  },
+  {
+   "verb": "PUT",
+   "group": "apiextensions.k8s.io",
+   "version": "v1",
+   "resource": "customresourcedefinitions",
+   "subresource": "status",
+   "scope": "resource",
+   "code": "200",
+   "value": 14.0
+  },
+  {
+   "verb": "LIST",
+   "group": "apiregistration.k8s.io",
+   "version": "v1",
+   "resource": "apiservices",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "apiregistration.k8s.io",
+   "version": "v1",
+   "resource": "apiservices",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "LIST",
+   "group": "apps",
+   "version": "v1",
+   "resource": "controllerrevisions",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "apps",
+   "version": "v1",
+   "resource": "controllerrevisions",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "apps",
+   "version": "v1",
+   "resource": "controllerrevisions",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "GET",
+   "group": "apps",
+   "version": "v1",
+   "resource": "controllerrevisions",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "LIST",
+   "group": "apps",
+   "version": "v1",
+   "resource": "daemonsets",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "apps",
+   "version": "v1",
+   "resource": "daemonsets",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "apps",
+   "version": "v1",
+   "resource": "daemonsets",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "LIST",
+   "group": "apps",
+   "version": "v1",
+   "resource": "deployments",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "apps",
+   "version": "v1",
+   "resource": "deployments",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "LIST",
+   "group": "apps",
+   "version": "v1",
+   "resource": "deployments",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 207.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "apps",
+   "version": "v1",
+   "resource": "deployments",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 28.0
+  },
+  {
+   "verb": "GET",
+   "group": "apps",
+   "version": "v1",
+   "resource": "deployments",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 92.0
+  },
+  {
+   "verb": "PATCH",
+   "group": "apps",
+   "version": "v1",
+   "resource": "deployments",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 13.0
+  },
+  {
+   "verb": "PUT",
+   "group": "apps",
+   "version": "v1",
+   "resource": "deployments",
+   "subresource": "status",
+   "scope": "resource",
+   "code": "200",
+   "value": 190.0
+  },
+  {
+   "verb": "LIST",
+   "group": "apps",
+   "version": "v1",
+   "resource": "replicasets",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "apps",
+   "version": "v1",
+   "resource": "replicasets",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "apps",
+   "version": "v1",
+   "resource": "replicasets",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 28.0
+  },
+  {
+   "verb": "GET",
+   "group": "apps",
+   "version": "v1",
+   "resource": "replicasets",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 58.0
+  },
+  {
+   "verb": "PATCH",
+   "group": "apps",
+   "version": "v1",
+   "resource": "replicasets",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 7.0
+  },
+  {
+   "verb": "PUT",
+   "group": "apps",
+   "version": "v1",
+   "resource": "replicasets",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 6.0
+  },
+  {
+   "verb": "PUT",
+   "group": "apps",
+   "version": "v1",
+   "resource": "replicasets",
+   "subresource": "status",
+   "scope": "resource",
+   "code": "200",
+   "value": 147.0
+  },
+  {
+   "verb": "LIST",
+   "group": "apps",
+   "version": "v1",
+   "resource": "statefulsets",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "apps",
+   "version": "v1",
+   "resource": "statefulsets",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "LIST",
+   "group": "apps",
+   "version": "v1",
+   "resource": "statefulsets",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 200.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "apps",
+   "version": "v1",
+   "resource": "statefulsets",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "PUT",
+   "group": "apps",
+   "version": "v1",
+   "resource": "statefulsets",
+   "subresource": "status",
+   "scope": "resource",
+   "code": "200",
+   "value": 12.0
+  },
+  {
+   "verb": "LIST",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applications",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "LIST",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applications",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 20.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applications",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 12.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applications",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 7.0
+  },
+  {
+   "verb": "GET",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applications",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 270.0
+  },
+  {
+   "verb": "PATCH",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applications",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 163.0
+  },
+  {
+   "verb": "PUT",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applications",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 24.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applications",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 7.0
+  },
+  {
+   "verb": "LIST",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applicationsets",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applicationsets",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "LIST",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applicationsets",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 8.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applicationsets",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 6.0
+  },
+  {
+   "verb": "LIST",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "appprojects",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "appprojects",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "LIST",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "appprojects",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 16.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "appprojects",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 9.0
+  },
+  {
+   "verb": "GET",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "appprojects",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "LIST",
+   "group": "autoscaling",
+   "version": "v2",
+   "resource": "horizontalpodautoscalers",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "autoscaling",
+   "version": "v2",
+   "resource": "horizontalpodautoscalers",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "LIST",
+   "group": "batch",
+   "version": "v1",
+   "resource": "cronjobs",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "batch",
+   "version": "v1",
+   "resource": "cronjobs",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "LIST",
+   "group": "batch",
+   "version": "v1",
+   "resource": "jobs",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "batch",
+   "version": "v1",
+   "resource": "jobs",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "LIST",
+   "group": "batch",
+   "version": "v1",
+   "resource": "jobs",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 4.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "batch",
+   "version": "v1",
+   "resource": "jobs",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 4.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "batch",
+   "version": "v1",
+   "resource": "jobs",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 4.0
+  },
+  {
+   "verb": "GET",
+   "group": "batch",
+   "version": "v1",
+   "resource": "jobs",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 20.0
+  },
+  {
+   "verb": "PATCH",
+   "group": "batch",
+   "version": "v1",
+   "resource": "jobs",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 4.0
+  },
+  {
+   "verb": "PUT",
+   "group": "batch",
+   "version": "v1",
+   "resource": "jobs",
+   "subresource": "status",
+   "scope": "resource",
+   "code": "200",
+   "value": 18.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "certificates.k8s.io",
+   "version": "v1",
+   "resource": "certificatesigningrequests",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "coordination.k8s.io",
+   "version": "v1",
+   "resource": "leases",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "coordination.k8s.io",
+   "version": "v1",
+   "resource": "leases",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "PUT",
+   "group": "coordination.k8s.io",
+   "version": "v1",
+   "resource": "leases",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 133.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "discovery.k8s.io",
+   "version": "v1",
+   "resource": "endpointslices",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 4.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "discovery.k8s.io",
+   "version": "v1",
+   "resource": "endpointslices",
+   "subresource": "",
+   "scope": "namespace",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "discovery.k8s.io",
+   "version": "v1",
+   "resource": "endpointslices",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 22.0
+  },
+  {
+   "verb": "GET",
+   "group": "discovery.k8s.io",
+   "version": "v1",
+   "resource": "endpointslices",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 91.0
+  },
+  {
+   "verb": "PUT",
+   "group": "discovery.k8s.io",
+   "version": "v1",
+   "resource": "endpointslices",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 67.0
+  },
+  {
+   "verb": "LIST",
+   "group": "flowcontrol.apiserver.k8s.io",
+   "version": "v1",
+   "resource": "flowschemas",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "flowcontrol.apiserver.k8s.io",
+   "version": "v1",
+   "resource": "flowschemas",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "APPLY",
+   "group": "flowcontrol.apiserver.k8s.io",
+   "version": "v1",
+   "resource": "flowschemas",
+   "subresource": "status",
+   "scope": "resource",
+   "code": "200",
+   "value": 13.0
+  },
+  {
+   "verb": "LIST",
+   "group": "flowcontrol.apiserver.k8s.io",
+   "version": "v1",
+   "resource": "prioritylevelconfigurations",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "flowcontrol.apiserver.k8s.io",
+   "version": "v1",
+   "resource": "prioritylevelconfigurations",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "LIST",
+   "group": "helm.cattle.io",
+   "version": "v1",
+   "resource": "helmchartconfigs",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "helm.cattle.io",
+   "version": "v1",
+   "resource": "helmchartconfigs",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "LIST",
+   "group": "helm.cattle.io",
+   "version": "v1",
+   "resource": "helmcharts",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "helm.cattle.io",
+   "version": "v1",
+   "resource": "helmcharts",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "LIST",
+   "group": "k3s.cattle.io",
+   "version": "v1",
+   "resource": "addons",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "k3s.cattle.io",
+   "version": "v1",
+   "resource": "addons",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "PUT",
+   "group": "k3s.cattle.io",
+   "version": "v1",
+   "resource": "addons",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 4.0
+  },
+  {
+   "verb": "LIST",
+   "group": "k3s.cattle.io",
+   "version": "v1",
+   "resource": "etcdsnapshotfiles",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "k3s.cattle.io",
+   "version": "v1",
+   "resource": "etcdsnapshotfiles",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "LIST",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "ingressclasses",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "ingressclasses",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "LIST",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "ingresses",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "ingresses",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "LIST",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "ipaddresses",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "ipaddresses",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "ipaddresses",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 22.0
+  },
+  {
+   "verb": "LIST",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "networkpolicies",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "networkpolicies",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "networkpolicies",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 18.0
+  },
+  {
+   "verb": "LIST",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "servicecidrs",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "servicecidrs",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 4.0
+  },
+  {
+   "verb": "PATCH",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "servicecidrs",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "APPLY",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "servicecidrs",
+   "subresource": "status",
+   "scope": "resource",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "LIST",
+   "group": "node.k8s.io",
+   "version": "v1",
+   "resource": "runtimeclasses",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "node.k8s.io",
+   "version": "v1",
+   "resource": "runtimeclasses",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "LIST",
+   "group": "policy",
+   "version": "v1",
+   "resource": "poddisruptionbudgets",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "policy",
+   "version": "v1",
+   "resource": "poddisruptionbudgets",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "LIST",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "clusterrolebindings",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 6.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "clusterrolebindings",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "clusterrolebindings",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 9.0
+  },
+  {
+   "verb": "LIST",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "clusterroles",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 6.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "clusterroles",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "APPLY",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "clusterroles",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 7.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "clusterroles",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 9.0
+  },
+  {
+   "verb": "LIST",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "rolebindings",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "rolebindings",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "rolebindings",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 21.0
+  },
+  {
+   "verb": "LIST",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "roles",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "roles",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "roles",
+   "subresource": "",
+   "scope": "resource",
+   "code": "200",
+   "value": 21.0
+  },
+  {
+   "verb": "LIST",
+   "group": "resource.k8s.io",
+   "version": "v1",
+   "resource": "deviceclasses",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "resource.k8s.io",
+   "version": "v1",
+   "resource": "deviceclasses",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "LIST",
+   "group": "resource.k8s.io",
+   "version": "v1",
+   "resource": "resourceclaims",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "resource.k8s.io",
+   "version": "v1",
+   "resource": "resourceclaims",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "LIST",
+   "group": "resource.k8s.io",
+   "version": "v1",
+   "resource": "resourceclaimtemplates",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "resource.k8s.io",
+   "version": "v1",
+   "resource": "resourceclaimtemplates",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "resource.k8s.io",
+   "version": "v1",
+   "resource": "resourceslices",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "LIST",
+   "group": "resource.k8s.io",
+   "version": "v1",
+   "resource": "resourceslices",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "resource.k8s.io",
+   "version": "v1",
+   "resource": "resourceslices",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "LIST",
+   "group": "scheduling.k8s.io",
+   "version": "v1",
+   "resource": "priorityclasses",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "scheduling.k8s.io",
+   "version": "v1",
+   "resource": "priorityclasses",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "LIST",
+   "group": "storage.k8s.io",
+   "version": "v1",
+   "resource": "csidrivers",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "storage.k8s.io",
+   "version": "v1",
+   "resource": "csidrivers",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 5.0
+  },
+  {
+   "verb": "LIST",
+   "group": "storage.k8s.io",
+   "version": "v1",
+   "resource": "csinodes",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "storage.k8s.io",
+   "version": "v1",
+   "resource": "csinodes",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "LIST",
+   "group": "storage.k8s.io",
+   "version": "v1",
+   "resource": "csistoragecapacities",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "storage.k8s.io",
+   "version": "v1",
+   "resource": "csistoragecapacities",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "LIST",
+   "group": "storage.k8s.io",
+   "version": "v1",
+   "resource": "storageclasses",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 2.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "storage.k8s.io",
+   "version": "v1",
+   "resource": "storageclasses",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "LIST",
+   "group": "storage.k8s.io",
+   "version": "v1",
+   "resource": "volumeattachments",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "storage.k8s.io",
+   "version": "v1",
+   "resource": "volumeattachments",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 3.0
+  },
+  {
+   "verb": "LIST",
+   "group": "storage.k8s.io",
+   "version": "v1",
+   "resource": "volumeattributesclasses",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "storage.k8s.io",
+   "version": "v1",
+   "resource": "volumeattributesclasses",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "200",
+   "value": 1.0
+  },
+  {
+   "verb": "POST",
+   "group": "",
+   "version": "v1",
+   "resource": "configmaps",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 43.0
+  },
+  {
+   "verb": "POST",
+   "group": "",
+   "version": "v1",
+   "resource": "endpoints",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 30.0
+  },
+  {
+   "verb": "POST",
+   "group": "",
+   "version": "v1",
+   "resource": "events",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 466.0
+  },
+  {
+   "verb": "POST",
+   "group": "",
+   "version": "v1",
+   "resource": "namespaces",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 7.0
+  },
+  {
+   "verb": "POST",
+   "group": "",
+   "version": "v1",
+   "resource": "nodes",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 1.0
+  },
+  {
+   "verb": "POST",
+   "group": "",
+   "version": "v1",
+   "resource": "pods",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 47.0
+  },
+  {
+   "verb": "POST",
+   "group": "",
+   "version": "v1",
+   "resource": "pods",
+   "subresource": "binding",
+   "scope": "resource",
+   "code": "201",
+   "value": 47.0
+  },
+  {
+   "verb": "POST",
+   "group": "",
+   "version": "v1",
+   "resource": "secrets",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 16.0
+  },
+  {
+   "verb": "POST",
+   "group": "",
+   "version": "v1",
+   "resource": "serviceaccounts",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 72.0
+  },
+  {
+   "verb": "POST",
+   "group": "",
+   "version": "v1",
+   "resource": "serviceaccounts",
+   "subresource": "token",
+   "scope": "resource",
+   "code": "201",
+   "value": 64.0
+  },
+  {
+   "verb": "POST",
+   "group": "",
+   "version": "v1",
+   "resource": "services",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 30.0
+  },
+  {
+   "verb": "POST",
+   "group": "apiextensions.k8s.io",
+   "version": "v1",
+   "resource": "customresourcedefinitions",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 7.0
+  },
+  {
+   "verb": "POST",
+   "group": "apiregistration.k8s.io",
+   "version": "v1",
+   "resource": "apiservices",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 24.0
+  },
+  {
+   "verb": "POST",
+   "group": "apps",
+   "version": "v1",
+   "resource": "controllerrevisions",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 4.0
+  },
+  {
+   "verb": "POST",
+   "group": "apps",
+   "version": "v1",
+   "resource": "deployments",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 36.0
+  },
+  {
+   "verb": "POST",
+   "group": "apps",
+   "version": "v1",
+   "resource": "replicasets",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 36.0
+  },
+  {
+   "verb": "POST",
+   "group": "apps",
+   "version": "v1",
+   "resource": "statefulsets",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 4.0
+  },
+  {
+   "verb": "POST",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applications",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 8.0
+  },
+  {
+   "verb": "POST",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "appprojects",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 1.0
+  },
+  {
+   "verb": "POST",
+   "group": "authorization.k8s.io",
+   "version": "v1",
+   "resource": "selfsubjectaccessreviews",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 8.0
+  },
+  {
+   "verb": "POST",
+   "group": "authorization.k8s.io",
+   "version": "v1",
+   "resource": "subjectaccessreviews",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 4.0
+  },
+  {
+   "verb": "POST",
+   "group": "batch",
+   "version": "v1",
+   "resource": "jobs",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 4.0
+  },
+  {
+   "verb": "POST",
+   "group": "coordination.k8s.io",
+   "version": "v1",
+   "resource": "leases",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 2.0
+  },
+  {
+   "verb": "POST",
+   "group": "discovery.k8s.io",
+   "version": "v1",
+   "resource": "endpointslices",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 30.0
+  },
+  {
+   "verb": "POST",
+   "group": "events.k8s.io",
+   "version": "v1",
+   "resource": "events",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 48.0
+  },
+  {
+   "verb": "POST",
+   "group": "flowcontrol.apiserver.k8s.io",
+   "version": "v1",
+   "resource": "flowschemas",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 11.0
+  },
+  {
+   "verb": "POST",
+   "group": "flowcontrol.apiserver.k8s.io",
+   "version": "v1",
+   "resource": "prioritylevelconfigurations",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 8.0
+  },
+  {
+   "verb": "POST",
+   "group": "k3s.cattle.io",
+   "version": "v1",
+   "resource": "addons",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 4.0
+  },
+  {
+   "verb": "POST",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "ipaddresses",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 30.0
+  },
+  {
+   "verb": "POST",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "networkpolicies",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 24.0
+  },
+  {
+   "verb": "POST",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "servicecidrs",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 1.0
+  },
+  {
+   "verb": "POST",
+   "group": "node.k8s.io",
+   "version": "v1",
+   "resource": "runtimeclasses",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 10.0
+  },
+  {
+   "verb": "POST",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "clusterrolebindings",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 68.0
+  },
+  {
+   "verb": "POST",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "clusterroles",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 85.0
+  },
+  {
+   "verb": "POST",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "rolebindings",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 36.0
+  },
+  {
+   "verb": "POST",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "roles",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 35.0
+  },
+  {
+   "verb": "POST",
+   "group": "scheduling.k8s.io",
+   "version": "v1",
+   "resource": "priorityclasses",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 2.0
+  },
+  {
+   "verb": "POST",
+   "group": "storage.k8s.io",
+   "version": "v1",
+   "resource": "csinodes",
+   "subresource": "",
+   "scope": "resource",
+   "code": "201",
+   "value": 1.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "",
+   "resource": "",
+   "subresource": "openapi/v3",
+   "scope": "",
+   "code": "304",
+   "value": 21.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "",
+   "resource": "",
+   "subresource": "api",
+   "scope": "",
+   "code": "304",
+   "value": 17.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "",
+   "resource": "",
+   "subresource": "apis",
+   "scope": "",
+   "code": "304",
+   "value": 16.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "v1",
+   "resource": "configmaps",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 81.0
+  },
+  {
+   "verb": "PUT",
+   "group": "",
+   "version": "v1",
+   "resource": "configmaps",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 1.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "",
+   "version": "v1",
+   "resource": "endpoints",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 42.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "v1",
+   "resource": "endpoints",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 1.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "v1",
+   "resource": "namespaces",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 6.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "v1",
+   "resource": "nodes",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 4.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "v1",
+   "resource": "pods",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 1.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "v1",
+   "resource": "secrets",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 22.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "",
+   "version": "v1",
+   "resource": "serviceaccounts",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 1.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "v1",
+   "resource": "serviceaccounts",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 100.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "v1",
+   "resource": "services",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 66.0
+  },
+  {
+   "verb": "GET",
+   "group": "apiextensions.k8s.io",
+   "version": "v1",
+   "resource": "customresourcedefinitions",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 3.0
+  },
+  {
+   "verb": "GET",
+   "group": "apps",
+   "version": "v1",
+   "resource": "deployments",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 109.0
+  },
+  {
+   "verb": "GET",
+   "group": "apps",
+   "version": "v1",
+   "resource": "statefulsets",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 10.0
+  },
+  {
+   "verb": "GET",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applications",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 9.0
+  },
+  {
+   "verb": "GET",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "appprojects",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 1.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "batch",
+   "version": "v1",
+   "resource": "jobs",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 4.0
+  },
+  {
+   "verb": "GET",
+   "group": "batch",
+   "version": "v1",
+   "resource": "jobs",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 5.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "coordination.k8s.io",
+   "version": "v1",
+   "resource": "leases",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 1.0
+  },
+  {
+   "verb": "GET",
+   "group": "coordination.k8s.io",
+   "version": "v1",
+   "resource": "leases",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 4.0
+  },
+  {
+   "verb": "POST",
+   "group": "coordination.k8s.io",
+   "version": "v1",
+   "resource": "leases",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 1.0
+  },
+  {
+   "verb": "GET",
+   "group": "discovery.k8s.io",
+   "version": "v1",
+   "resource": "endpointslices",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 8.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "k3s.cattle.io",
+   "version": "v1",
+   "resource": "addons",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 2.0
+  },
+  {
+   "verb": "GET",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "networkpolicies",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 60.0
+  },
+  {
+   "verb": "GET",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "clusterrolebindings",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 81.0
+  },
+  {
+   "verb": "GET",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "clusterroles",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 105.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "rolebindings",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 1.0
+  },
+  {
+   "verb": "GET",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "rolebindings",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 71.0
+  },
+  {
+   "verb": "DELETE",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "roles",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 1.0
+  },
+  {
+   "verb": "GET",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "roles",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 71.0
+  },
+  {
+   "verb": "GET",
+   "group": "scheduling.k8s.io",
+   "version": "v1",
+   "resource": "priorityclasses",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 2.0
+  },
+  {
+   "verb": "GET",
+   "group": "storage.k8s.io",
+   "version": "v1",
+   "resource": "csinodes",
+   "subresource": "",
+   "scope": "resource",
+   "code": "404",
+   "value": 2.0
+  },
+  {
+   "verb": "POST",
+   "group": "",
+   "version": "v1",
+   "resource": "namespaces",
+   "subresource": "",
+   "scope": "resource",
+   "code": "409",
+   "value": 4.0
+  },
+  {
+   "verb": "PATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "nodes",
+   "subresource": "",
+   "scope": "resource",
+   "code": "409",
+   "value": 1.0
+  },
+  {
+   "verb": "PUT",
+   "group": "",
+   "version": "v1",
+   "resource": "nodes",
+   "subresource": "",
+   "scope": "resource",
+   "code": "409",
+   "value": 1.0
+  },
+  {
+   "verb": "POST",
+   "group": "",
+   "version": "v1",
+   "resource": "secrets",
+   "subresource": "",
+   "scope": "resource",
+   "code": "409",
+   "value": 3.0
+  },
+  {
+   "verb": "PATCH",
+   "group": "apps",
+   "version": "v1",
+   "resource": "deployments",
+   "subresource": "",
+   "scope": "resource",
+   "code": "409",
+   "value": 3.0
+  },
+  {
+   "verb": "PUT",
+   "group": "apps",
+   "version": "v1",
+   "resource": "deployments",
+   "subresource": "status",
+   "scope": "resource",
+   "code": "409",
+   "value": 58.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "helm.cattle.io",
+   "version": "v1",
+   "resource": "helmchartconfigs",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "429",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "helm.cattle.io",
+   "version": "v1",
+   "resource": "helmcharts",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "429",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "k3s.cattle.io",
+   "version": "v1",
+   "resource": "addons",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "429",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "k3s.cattle.io",
+   "version": "v1",
+   "resource": "etcdsnapshotfiles",
+   "subresource": "",
+   "scope": "cluster",
+   "code": "429",
+   "value": 1.0
+  },
+  {
+   "verb": "GET",
+   "group": "",
+   "version": "",
+   "resource": "",
+   "subresource": "/readyz",
+   "scope": "",
+   "code": "500",
+   "value": 23.0
+  }
+ ],
+ "apiserver_longrunning_requests": [
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "configmaps",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "configmaps",
+   "subresource": "",
+   "scope": "namespace",
+   "value": 5.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "configmaps",
+   "subresource": "",
+   "scope": "resource",
+   "value": 26.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "endpoints",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "limitranges",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "namespaces",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 6.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "nodes",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 7.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "nodes",
+   "subresource": "",
+   "scope": "resource",
+   "value": 2.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "persistentvolumeclaims",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 4.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "persistentvolumes",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 4.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "pods",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 6.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "podtemplates",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 2.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "replicationcontrollers",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "resourcequotas",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "secrets",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 4.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "secrets",
+   "subresource": "",
+   "scope": "namespace",
+   "value": 13.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "secrets",
+   "subresource": "",
+   "scope": "resource",
+   "value": 6.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "serviceaccounts",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 4.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "",
+   "version": "v1",
+   "resource": "services",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 7.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "admissionregistration.k8s.io",
+   "version": "v1",
+   "resource": "mutatingadmissionpolicies",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "admissionregistration.k8s.io",
+   "version": "v1",
+   "resource": "mutatingadmissionpolicybindings",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "admissionregistration.k8s.io",
+   "version": "v1",
+   "resource": "mutatingwebhookconfigurations",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "admissionregistration.k8s.io",
+   "version": "v1",
+   "resource": "validatingadmissionpolicies",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "admissionregistration.k8s.io",
+   "version": "v1",
+   "resource": "validatingadmissionpolicybindings",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "admissionregistration.k8s.io",
+   "version": "v1",
+   "resource": "validatingwebhookconfigurations",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "apiextensions.k8s.io",
+   "version": "v1",
+   "resource": "customresourcedefinitions",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "apiregistration.k8s.io",
+   "version": "v1",
+   "resource": "apiservices",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "apps",
+   "version": "v1",
+   "resource": "controllerrevisions",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 2.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "apps",
+   "version": "v1",
+   "resource": "daemonsets",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 2.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "apps",
+   "version": "v1",
+   "resource": "deployments",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 2.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "apps",
+   "version": "v1",
+   "resource": "replicasets",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "apps",
+   "version": "v1",
+   "resource": "statefulsets",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applications",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 2.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applications",
+   "subresource": "",
+   "scope": "namespace",
+   "value": 4.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applications",
+   "subresource": "",
+   "scope": "resource",
+   "value": 0.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applicationsets",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 2.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "applicationsets",
+   "subresource": "",
+   "scope": "namespace",
+   "value": 2.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "appprojects",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 2.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "argoproj.io",
+   "version": "v1alpha1",
+   "resource": "appprojects",
+   "subresource": "",
+   "scope": "namespace",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "autoscaling",
+   "version": "v2",
+   "resource": "horizontalpodautoscalers",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 2.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "batch",
+   "version": "v1",
+   "resource": "cronjobs",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 2.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "batch",
+   "version": "v1",
+   "resource": "jobs",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "batch",
+   "version": "v1",
+   "resource": "jobs",
+   "subresource": "",
+   "scope": "resource",
+   "value": 0.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "certificates.k8s.io",
+   "version": "v1",
+   "resource": "certificatesigningrequests",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "coordination.k8s.io",
+   "version": "v1",
+   "resource": "leases",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "coordination.k8s.io",
+   "version": "v1",
+   "resource": "leases",
+   "subresource": "",
+   "scope": "namespace",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "discovery.k8s.io",
+   "version": "v1",
+   "resource": "endpointslices",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 4.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "discovery.k8s.io",
+   "version": "v1",
+   "resource": "endpointslices",
+   "subresource": "",
+   "scope": "namespace",
+   "value": 2.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "flowcontrol.apiserver.k8s.io",
+   "version": "v1",
+   "resource": "flowschemas",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "flowcontrol.apiserver.k8s.io",
+   "version": "v1",
+   "resource": "prioritylevelconfigurations",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "helm.cattle.io",
+   "version": "v1",
+   "resource": "helmchartconfigs",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "helm.cattle.io",
+   "version": "v1",
+   "resource": "helmcharts",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "k3s.cattle.io",
+   "version": "v1",
+   "resource": "addons",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "k3s.cattle.io",
+   "version": "v1",
+   "resource": "etcdsnapshotfiles",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 2.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "ingressclasses",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "ingresses",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 2.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "ipaddresses",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "networkpolicies",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "servicecidrs",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 4.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "networking.k8s.io",
+   "version": "v1",
+   "resource": "servicecidrs",
+   "subresource": "",
+   "scope": "resource",
+   "value": 1.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "node.k8s.io",
+   "version": "v1",
+   "resource": "runtimeclasses",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 4.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "policy",
+   "version": "v1",
+   "resource": "poddisruptionbudgets",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "clusterrolebindings",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 4.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "clusterroles",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "rolebindings",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "rbac.authorization.k8s.io",
+   "version": "v1",
+   "resource": "roles",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "resource.k8s.io",
+   "version": "v1",
+   "resource": "deviceclasses",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 4.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "resource.k8s.io",
+   "version": "v1",
+   "resource": "resourceclaims",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 4.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "resource.k8s.io",
+   "version": "v1",
+   "resource": "resourceclaimtemplates",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 2.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "resource.k8s.io",
+   "version": "v1",
+   "resource": "resourceslices",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 4.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "scheduling.k8s.io",
+   "version": "v1",
+   "resource": "priorityclasses",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "storage.k8s.io",
+   "version": "v1",
+   "resource": "csidrivers",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 5.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "storage.k8s.io",
+   "version": "v1",
+   "resource": "csinodes",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "storage.k8s.io",
+   "version": "v1",
+   "resource": "csistoragecapacities",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 3.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "storage.k8s.io",
+   "version": "v1",
+   "resource": "storageclasses",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 4.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "storage.k8s.io",
+   "version": "v1",
+   "resource": "volumeattachments",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 4.0
+  },
+  {
+   "verb": "WATCH",
+   "group": "storage.k8s.io",
+   "version": "v1",
+   "resource": "volumeattributesclasses",
+   "subresource": "",
+   "scope": "cluster",
+   "value": 2.0
+  }
+ ],
+ "t": 1792403453.666062,
+ "harness": {
+  "kubectl": 1279,
+  "raw_gets": 1255
+ }
+}

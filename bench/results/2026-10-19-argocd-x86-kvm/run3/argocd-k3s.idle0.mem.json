@@ -1,0 +1,115 @@
+{
+ "buckets": {
+  "os/other": {
+   "rss_kib": 168932,
+   "pss_kib": 79859,
+   "procs": 18,
+   "comms": {
+    "systemd": 2,
+    "systemd-journal": 1,
+    "multipathd": 1,
+    "systemd-udevd": 1,
+    "systemd-resolve": 1,
+    "systemd-timesyn": 1,
+    "systemd-network": 1,
+    "cron": 1,
+    "dbus-daemon": 1,
+    "polkitd": 1,
+    "systemd-logind": 1,
+    "udisksd": 1,
+    "rsyslogd": 1,
+    "agetty": 2,
+    "ModemManager": 1,
+    "(sd-pam)": 1
+   }
+  },
+  "sshd": {
+   "rss_kib": 25892,
+   "pss_kib": 7893,
+   "procs": 3,
+   "comms": {
+    "sshd": 3
+   }
+  },
+  "k3s-server": {
+   "rss_kib": 475700,
+   "pss_kib": 414334,
+   "procs": 1,
+   "comms": {
+    "k3s-server": 1
+   }
+  },
+  "containerd": {
+   "rss_kib": 168872,
+   "pss_kib": 107506,
+   "procs": 1,
+   "comms": {
+    "containerd": 1
+   }
+  },
+  "containerd-shim": {
+   "rss_kib": 18032,
+   "pss_kib": 18028,
+   "procs": 1,
+   "comms": {
+    "containerd-shim": 1
+   }
+  },
+  "pod sandbox (pause)": {
+   "rss_kib": 748,
+   "pss_kib": 740,
+   "procs": 1,
+   "comms": {
+    "pause": 1
+   }
+  },
+  "k8s addon pods": {
+   "rss_kib": 59332,
+   "pss_kib": 59328,
+   "procs": 1,
+   "comms": {
+    "coredns": 1
+   }
+  }
+ },
+ "pods": {
+  "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-poda8a577df_3641_4338_99b6_a9f1f2eac4a0.slice": {
+   "kind": "k8s addon pods",
+   "pss_kib": 59328,
+   "comms": [
+    "coredns"
+   ]
+  }
+ },
+ "categories": {
+  "os/other": {
+   "rss_kib": 168932,
+   "pss_kib": 79859
+  },
+  "node-agent": {
+   "rss_kib": 25892,
+   "pss_kib": 7893
+  },
+  "control-plane": {
+   "rss_kib": 475700,
+   "pss_kib": 414334
+  },
+  "runtime": {
+   "rss_kib": 187652,
+   "pss_kib": 126274
+  },
+  "addons": {
+   "rss_kib": 59332,
+   "pss_kib": 59328
+  }
+ },
+ "system": {
+  "mem_total_kib": 2014840,
+  "mem_available_kib": 1310348,
+  "mem_used_kib": 704492
+ },
+ "cgroup_memory_current_kib": {
+  "system.slice/k3s.service": 746020,
+  "kubepods.slice": 10784
+ }
+}

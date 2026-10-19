@@ -1,0 +1,81 @@
+{
+ "server_version": "v1.36.5+k3s1",
+ "k3s_version": "k3s version v1.36.5+k3s1 (3dd98cc5)",
+ "crun_version": "",
+ "chart": "[{\"name\":\"argocd\",\"namespace\":\"argocd\",\"revision\":\"1\",\"updated\":\"2026-10-19 09:28:35.183262818 +0000 UTC\",\"status\":\"deployed\",\"chart\":\"argo-cd-10.10.5\",\"app_version\":\"v3.5.5\"}]",
+ "pods": [
+  {
+   "ns": "argocd",
+   "name": "argocd-application-controller-0",
+   "images": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "argocd",
+   "name": "argocd-applicationset-controller-7945794676-9nh59",
+   "images": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "argocd",
+   "name": "argocd-dex-server-7f75b5f664-swqdq",
+   "images": [
+    "ghcr.io/dexidp/dex:v2.46.0"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "argocd",
+   "name": "argocd-notifications-controller-79bdbc4989-s4xb6",
+   "images": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "argocd",
+   "name": "argocd-redis-5f55c85596-j98th",
+   "images": [
+    "ecr-public.aws.com/docker/library/redis:8.6.4-alpine"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "argocd",
+   "name": "argocd-repo-server-85d94bd987-dn86h",
+   "images": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "argocd",
+   "name": "argocd-server-859f86f446-kp2vw",
+   "images": [
+    "quay.io/argoproj/argocd:v3.5.5"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "guestbook",
+   "name": "guestbook-ui-5d6468fd55-4nxdz",
+   "images": [
+    "gcr.io/google-samples/gb-frontend:v5"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "kube-system",
+   "name": "coredns-7cfb7bc9c7-6765z",
+   "images": [
+    "rancher/mirrored-coredns-coredns:1.14.7"
+   ],
+   "restarts": 0
+  }
+ ],
+ "mem_total_kib": 2014840
+}
