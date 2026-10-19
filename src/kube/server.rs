@@ -333,6 +333,18 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
     tokio::spawn(super::controllers::run(state.clone()));
     tokio::spawn(super::aggregator::run(state.clone()));
     tokio::spawn(expire_events(state.clone()));
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    tokio::spawn(async {
+        // Big LIST responses and watch replays come and go in bursts (a
+        // controller relisting every resource), and glibc keeps the freed
+        // pages: under Argo CD the API server held twice its live heap.
+        // Returning them takes a few milliseconds.
+        let mut tick = tokio::time::interval(Duration::from_secs(30));
+        loop {
+            tick.tick().await;
+            unsafe { libc::malloc_trim(0) };
+        }
+    });
 
     // The local node comes first: where pods reach this host (Docker's
     // host-gateway, crun's bridge address) decides where DNS and the in-cluster port can listen.
