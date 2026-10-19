@@ -89,6 +89,8 @@ pub struct Cluster {
     pub addr: String,
     pub raft: Raft<TypeConfig>,
     pub peers: Arc<Peers>,
+    /// Where Raft and its connections run.
+    runtime: tokio::runtime::Handle,
     data_dir: PathBuf,
     raft_dir: PathBuf,
     session: u64,
@@ -237,8 +239,36 @@ impl Cluster {
         let log = log::LogStore::open(&raft_dir.join("log"))?;
         let state_machine = sm::StateMachine::open(&snap_dir, store.clone())?;
         let peers = Arc::new(Peers::new(ca_pem, secret)?);
-        let raft = Raft::new(id, Arc::new(raft_config()?), Network { peers: peers.clone() }, log, state_machine)
+        // Raft runs on threads of its own: a burst of API work (a chart's
+        // CRDs, admission) on a 2-core server must not delay heartbeats
+        // into elections.
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("raft")
+            .enable_all()
+            .build()
+            .context("failed to start the raft runtime")?;
+        let handle = runtime.handle().clone();
+        peers.set_raft_runtime(handle.clone());
+        // The runtime goes when the server's main runtime does.
+        tokio::spawn(async move {
+            struct Guard(Option<tokio::runtime::Runtime>);
+            impl Drop for Guard {
+                fn drop(&mut self) {
+                    if let Some(rt) = self.0.take() {
+                        rt.shutdown_background();
+                    }
+                }
+            }
+            let _guard = Guard(Some(runtime));
+            std::future::pending::<()>().await
+        });
+        let config = Arc::new(raft_config()?);
+        let network = Network { peers: peers.clone() };
+        let raft = handle
+            .spawn(async move { Raft::new(id, config, network, log, state_machine).await })
             .await
+            .context("raft runtime")?
             .context("failed to start raft")?;
         let me = ServerNode { name: opts.name.clone(), addr: opts.advertise.clone() };
         if fresh && opts.cluster_init {
@@ -271,6 +301,7 @@ impl Cluster {
             addr: opts.advertise.clone(),
             raft,
             peers,
+            runtime: handle,
             data_dir: opts.data_dir.clone(),
             raft_dir,
             session: sm::rand_u64(),
@@ -446,7 +477,7 @@ impl Cluster {
                 let _ = tokio::time::timeout(Duration::from_millis(200).min(remaining), m.changed()).await;
                 continue;
             };
-            match self.peers.call_json::<ProposeAnswer>(&addr, Method::POST, "/propose", &cmd, remaining).await {
+            match self.peers.call_json_on::<ProposeAnswer>(net::Lane::Raft, &addr, Method::POST, "/propose", &cmd, remaining).await {
                 Ok(answer) => {
                     // Read-your-writes: answer once this server has it too.
                     let left = deadline.saturating_duration_since(tokio::time::Instant::now()).max(Duration::from_secs(1));
@@ -483,7 +514,7 @@ impl Cluster {
                     let addr = self.addr_of(l).ok_or("unknown leader address")?;
                     let v: Value = self
                         .peers
-                        .call_json(&addr, Method::POST, "/readindex", &json!({}), READ_TIMEOUT)
+                        .call_json_on(net::Lane::Raft, &addr, Method::POST, "/readindex", &json!({}), READ_TIMEOUT)
                         .await
                         .map_err(|e| format!("{e:#}"))?;
                     return v["index"].as_u64().ok_or_else(|| format!("leader answered {v}"));
@@ -588,6 +619,10 @@ impl Cluster {
 
     pub async fn shutdown(&self) {
         let _ = self.raft.shutdown().await;
+    }
+
+    pub fn runtime(&self) -> &tokio::runtime::Handle {
+        &self.runtime
     }
 
     pub fn data_dir(&self) -> &Path {

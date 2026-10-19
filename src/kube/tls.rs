@@ -53,8 +53,14 @@ pub struct ServerTls {
     config: Arc<rustls::ServerConfig>,
     /// The same, with X25519 as the only key exchange group (see `accept`).
     x25519: Arc<rustls::ServerConfig>,
+    /// For Raft connections between servers (ALPN [`RAFT_ALPN`]).
+    raft: Arc<rustls::ServerConfig>,
     ca_pem: String,
 }
+
+/// The ALPN protocol HA servers use for Raft connections: they are served
+/// apart from API requests (see `server.rs`).
+pub const RAFT_ALPN: &[u8] = b"litek8s-raft";
 
 impl ServerTls {
     pub fn load_or_create(data_dir: Option<&Path>) -> Result<Self> {
@@ -96,9 +102,13 @@ impl ServerTls {
         };
         let mut x25519 = rustls::crypto::ring::default_provider();
         x25519.kx_groups = vec![rustls::crypto::ring::kx_group::X25519];
+        let config = build(rustls::crypto::ring::default_provider())?;
+        let mut raft = (*config).clone();
+        raft.alpn_protocols = vec![RAFT_ALPN.to_vec()];
         Ok(Self {
-            config: build(rustls::crypto::ring::default_provider())?,
+            config,
             x25519: build(x25519)?,
+            raft: Arc::new(raft),
             ca_pem: stored.ca_pem,
         })
     }
@@ -122,6 +132,14 @@ impl ServerTls {
     }
 
     /// The cluster CA, as published in every namespace's `kube-root-ca.crt`.
+    /// Accept a Raft connection (ALPN [`RAFT_ALPN`]).
+    pub async fn accept_raft<IO>(&self, io: IO) -> std::io::Result<tokio_rustls::server::TlsStream<IO>>
+    where
+        IO: AsyncRead + AsyncWrite + Unpin,
+    {
+        tokio_rustls::TlsAcceptor::from(self.raft.clone()).accept(io).await
+    }
+
     pub fn ca_pem(&self) -> &str {
         &self.ca_pem
     }
@@ -164,6 +182,32 @@ fn generate() -> Result<Stored> {
 
 /// Whether a DER certificate carries an authority key identifier extension
 /// (OID 2.5.29.35).
+/// Whether the TLS ClientHello waiting on `stream` asks for ALPN `proto`,
+/// read without consuming it (the connection is then accepted as usual).
+/// `None` when no complete ClientHello arrives in time.
+pub async fn peek_alpn(stream: &tokio::net::TcpStream, proto: &[u8]) -> Option<bool> {
+    let mut buf = vec![0u8; 16 * 1024];
+    for _ in 0..50 {
+        let n = stream.peek(&mut buf).await.ok()?;
+        if n == 0 {
+            return None;
+        }
+        let mut acceptor = rustls::server::Acceptor::default();
+        let mut slice = &buf[..n];
+        while !slice.is_empty() {
+            if acceptor.read_tls(&mut slice).is_err() {
+                return None;
+            }
+        }
+        match acceptor.accept() {
+            Ok(Some(accepted)) => return Some(accepted.client_hello().alpn().is_some_and(|mut p| p.any(|p| p == proto))),
+            Ok(None) if n < buf.len() => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+            _ => return None,
+        }
+    }
+    None
+}
+
 fn has_authority_key_identifier(der: &[u8]) -> bool {
     der.windows(5).any(|w| w == [0x06, 0x03, 0x55, 0x1d, 0x23])
 }

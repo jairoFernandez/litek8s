@@ -112,6 +112,8 @@ struct Inner {
     last_purged: Option<LogId<NodeId>>,
     vote: Option<Vote<NodeId>>,
     committed: Option<LogId<NodeId>>,
+    /// When `committed.json` was last written.
+    committed_saved: Option<std::time::Instant>,
 }
 
 struct FlushJob {
@@ -187,7 +189,7 @@ impl LogStore {
         if let Some(purged) = last_purged {
             index.retain(|i, _| *i > purged.index);
         }
-        let inner = Arc::new(Mutex::new(Inner { dir: dir.to_path_buf(), segments, index, last_purged, vote, committed }));
+        let inner = Arc::new(Mutex::new(Inner { dir: dir.to_path_buf(), segments, index, last_purged, vote, committed, committed_saved: None }));
         let (tx, rx) = mpsc::channel::<FlushJob>();
         std::thread::Builder::new().name("raft-log-flush".into()).spawn(move || flusher(rx))?;
         Ok(Self { inner, flusher: tx })
@@ -333,9 +335,11 @@ impl RaftLogStorage<TypeConfig> for LogStore {
 
     async fn save_committed(&mut self, committed: Option<LogId<NodeId>>) -> Result<(), StorageError<NodeId>> {
         let mut inner = self.inner.lock().unwrap();
-        if inner.committed != committed {
-            inner.committed = committed;
-            // Best effort: on restart it only saves waiting for the leader.
+        inner.committed = committed;
+        // Best effort, once a second: on restart it only saves waiting for
+        // the leader (a stale value is a smaller one, which is safe).
+        if inner.committed_saved.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1)) {
+            inner.committed_saved = Some(std::time::Instant::now());
             let _ = write_json_atomic(&inner.dir.join("committed.json"), &committed, false);
         }
         Ok(())

@@ -58,23 +58,45 @@ pub fn body(bytes: impl Into<Bytes>) -> ClientBody {
     Full::new(bytes.into()).map_err(|never| match never {}).boxed()
 }
 
+/// Which connections a request uses: API requests, or Raft's own (RPCs,
+/// proposals, read indexes), which the other side serves on its Raft
+/// runtime (TLS ALPN `litek8s-raft`), apart from API work that could delay
+/// heartbeats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Lane {
+    Api,
+    Raft,
+}
+
 /// Connections to the other servers.
 pub struct Peers {
     tls: Arc<rustls::ClientConfig>,
+    raft_tls: Arc<rustls::ClientConfig>,
     secret: String,
-    pool: Mutex<HashMap<String, Vec<SendRequest<ClientBody>>>>,
+    pool: Mutex<HashMap<(String, Lane), Vec<SendRequest<ClientBody>>>>,
     /// Peers this server cannot reach: a network partition, for tests.
     blocked: RwLock<HashSet<String>>,
+    /// Raft-lane connections live on the Raft runtime.
+    raft_runtime: std::sync::OnceLock<tokio::runtime::Handle>,
 }
 
 impl Peers {
     pub fn new(ca_pem: &str, secret: &str) -> Result<Self> {
+        let tls = crate::kube::join::pinned_client_config(ca_pem)?;
+        let mut raft = (*tls).clone();
+        raft.alpn_protocols = vec![crate::kube::tls::RAFT_ALPN.to_vec()];
         Ok(Self {
-            tls: crate::kube::join::pinned_client_config(ca_pem)?,
+            tls,
+            raft_tls: Arc::new(raft),
             secret: secret.to_string(),
             pool: Mutex::default(),
             blocked: RwLock::default(),
+            raft_runtime: std::sync::OnceLock::new(),
         })
+    }
+
+    pub fn set_raft_runtime(&self, handle: tokio::runtime::Handle) {
+        let _ = self.raft_runtime.set(handle);
     }
 
     pub fn secret(&self) -> &str {
@@ -86,7 +108,7 @@ impl Peers {
         let mut set = self.blocked.write().unwrap();
         if blocked {
             set.insert(addr.to_string());
-            self.pool.lock().unwrap().remove(addr);
+            self.pool.lock().unwrap().retain(|(a, _), _| a != addr);
         } else {
             set.remove(addr);
         }
@@ -96,35 +118,21 @@ impl Peers {
         self.blocked.read().unwrap().contains(addr)
     }
 
-    async fn connect(&self, addr: &str) -> Result<SendRequest<ClientBody>> {
-        self.dial(addr).await.map_err(|e| anyhow::Error::new(NotSent(format!("{e:#}"))))
+    async fn connect(&self, addr: &str, lane: Lane) -> Result<SendRequest<ClientBody>> {
+        let dialed = match (lane, self.raft_runtime.get()) {
+            (Lane::Raft, Some(rt)) => {
+                let (addr, tls, blocked) = (addr.to_string(), self.raft_tls.clone(), self.is_blocked(addr));
+                rt.spawn(async move { dial(&addr, tls, blocked).await }).await.map_err(|e| anyhow::anyhow!("{e}")).and_then(|r| r)
+            }
+            (Lane::Raft, None) => dial(addr, self.raft_tls.clone(), self.is_blocked(addr)).await,
+            (Lane::Api, _) => dial(addr, self.tls.clone(), self.is_blocked(addr)).await,
+        };
+        dialed.map_err(|e| anyhow::Error::new(NotSent(format!("{e:#}"))))
     }
 
-    async fn dial(&self, addr: &str) -> Result<SendRequest<ClientBody>> {
-        if self.is_blocked(addr) {
-            bail!("{addr} is unreachable (partitioned)");
-        }
-        let tcp = tokio::time::timeout(Duration::from_secs(2), tokio::net::TcpStream::connect(addr))
-            .await
-            .with_context(|| format!("timed out connecting to {addr}"))?
-            .with_context(|| format!("failed to connect to {addr}"))?;
-        let _ = tcp.set_nodelay(true);
-        let keepalive = socket2::TcpKeepalive::new().with_time(Duration::from_secs(10)).with_interval(Duration::from_secs(3));
-        let _ = socket2::SockRef::from(&tcp).set_tcp_keepalive(&keepalive);
-        let name = rustls::pki_types::ServerName::try_from(crate::kube::join::SERVER_NAME)?;
-        let tls = tokio::time::timeout(Duration::from_secs(5), tokio_rustls::TlsConnector::from(self.tls.clone()).connect(name, tcp))
-            .await
-            .with_context(|| format!("TLS handshake with {addr} timed out"))??;
-        let (sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tls)).await?;
-        tokio::spawn(async move {
-            let _ = conn.with_upgrades().await;
-        });
-        Ok(sender)
-    }
-
-    fn take_pooled(&self, addr: &str) -> Option<SendRequest<ClientBody>> {
+    fn take_pooled(&self, addr: &str, lane: Lane) -> Option<SendRequest<ClientBody>> {
         let mut pool = self.pool.lock().unwrap();
-        let conns = pool.get_mut(addr)?;
+        let conns = pool.get_mut(&(addr.to_string(), lane))?;
         while let Some(c) = conns.pop() {
             if !c.is_closed() && c.is_ready() {
                 return Some(c);
@@ -133,12 +141,12 @@ impl Peers {
         None
     }
 
-    fn put_back(&self, addr: &str, conn: SendRequest<ClientBody>) {
+    fn put_back(&self, addr: &str, lane: Lane, conn: SendRequest<ClientBody>) {
         if conn.is_closed() || self.is_blocked(addr) {
             return;
         }
         let mut pool = self.pool.lock().unwrap();
-        let conns = pool.entry(addr.to_string()).or_default();
+        let conns = pool.entry((addr.to_string(), lane)).or_default();
         if conns.len() < 16 {
             conns.push(conn);
         }
@@ -160,22 +168,30 @@ impl Peers {
     /// One request with a small body, answered with a small body; reuses
     /// pooled connections.
     pub async fn call(&self, addr: &str, method: Method, path: &str, payload: Bytes, timeout: Duration) -> Result<(StatusCode, Bytes)> {
-        let (parts, bytes) = self.send(addr, timeout, || self.build(addr, method.clone(), path, &[], body(payload.clone()))).await?;
+        self.call_on(Lane::Api, addr, method, path, payload, timeout).await
+    }
+
+    pub async fn call_on(&self, lane: Lane, addr: &str, method: Method, path: &str, payload: Bytes, timeout: Duration) -> Result<(StatusCode, Bytes)> {
+        let (parts, bytes) = self.send_on(lane, addr, timeout, || self.build(addr, method.clone(), path, &[], body(payload.clone()))).await?;
         Ok((parts.status, bytes))
     }
 
     /// Send the request `make` builds on a pooled connection (again on a
     /// fresh one if the pooled one turns out closed) and read the answer.
     pub async fn send(&self, addr: &str, timeout: Duration, make: impl Fn() -> Result<Request<ClientBody>>) -> Result<(hyper::http::response::Parts, Bytes)> {
+        self.send_on(Lane::Api, addr, timeout, make).await
+    }
+
+    pub async fn send_on(&self, lane: Lane, addr: &str, timeout: Duration, make: impl Fn() -> Result<Request<ClientBody>>) -> Result<(hyper::http::response::Parts, Bytes)> {
         let attempt = async {
             if self.is_blocked(addr) {
                 return Err(anyhow::Error::new(NotSent(format!("{addr} is unreachable (partitioned)"))));
             }
             for fresh in [false, true] {
-                let pooled = if fresh { None } else { self.take_pooled(addr) };
+                let pooled = if fresh { None } else { self.take_pooled(addr, lane) };
                 let mut conn = match pooled {
                     Some(c) => c,
-                    None => self.connect(addr).await?,
+                    None => self.connect(addr, lane).await?,
                 };
                 let resp = match conn.send_request(make()?).await {
                     Ok(r) => r,
@@ -186,7 +202,7 @@ impl Peers {
                 };
                 let (parts, body) = resp.into_parts();
                 let bytes = body.collect().await?.to_bytes();
-                self.put_back(addr, conn);
+                self.put_back(addr, lane, conn);
                 return Ok((parts, bytes));
             }
             bail!("request to {addr} failed")
@@ -196,7 +212,11 @@ impl Peers {
 
     /// A JSON request to a peer's `server.litek8s.dev` endpoint.
     pub async fn call_json<T: DeserializeOwned>(&self, addr: &str, method: Method, path: &str, payload: &impl Serialize, timeout: Duration) -> Result<T> {
-        let (status, bytes) = self.call(addr, method, &format!("{PREFIX}{path}"), serde_json::to_vec(payload)?.into(), timeout).await?;
+        self.call_json_on(Lane::Api, addr, method, path, payload, timeout).await
+    }
+
+    pub async fn call_json_on<T: DeserializeOwned>(&self, lane: Lane, addr: &str, method: Method, path: &str, payload: &impl Serialize, timeout: Duration) -> Result<T> {
+        let (status, bytes) = self.call_on(lane, addr, method, &format!("{PREFIX}{path}"), serde_json::to_vec(payload)?.into(), timeout).await?;
         if !status.is_success() {
             bail!("{addr} answered {status}: {}", String::from_utf8_lossy(&bytes).trim());
         }
@@ -206,7 +226,11 @@ impl Peers {
     /// A request on a connection of its own, its answer streamed (logs,
     /// upgrades, snapshots).
     pub async fn open(&self, addr: &str, req: Request<ClientBody>) -> Result<Response<Incoming>> {
-        let mut conn = self.connect(addr).await?;
+        self.open_on(Lane::Api, addr, req).await
+    }
+
+    pub async fn open_on(&self, lane: Lane, addr: &str, req: Request<ClientBody>) -> Result<Response<Incoming>> {
+        let mut conn = self.connect(addr, lane).await?;
         Ok(conn.send_request(req).await?)
     }
 
@@ -214,6 +238,29 @@ impl Peers {
         self.build(addr, method, path, extra, body)
     }
 }
+
+/// A TLS connection to a peer, ready for HTTP/1.1 requests.
+async fn dial(addr: &str, tls: Arc<rustls::ClientConfig>, blocked: bool) -> Result<SendRequest<ClientBody>> {
+    if blocked {
+        bail!("{addr} is unreachable (partitioned)");
+    }
+        let tcp = tokio::time::timeout(Duration::from_secs(2), tokio::net::TcpStream::connect(addr))
+            .await
+            .with_context(|| format!("timed out connecting to {addr}"))?
+            .with_context(|| format!("failed to connect to {addr}"))?;
+        let _ = tcp.set_nodelay(true);
+        let keepalive = socket2::TcpKeepalive::new().with_time(Duration::from_secs(10)).with_interval(Duration::from_secs(3));
+        let _ = socket2::SockRef::from(&tcp).set_tcp_keepalive(&keepalive);
+        let name = rustls::pki_types::ServerName::try_from(crate::kube::join::SERVER_NAME)?;
+        let tls = tokio::time::timeout(Duration::from_secs(5), tokio_rustls::TlsConnector::from(tls).connect(name, tcp))
+            .await
+            .with_context(|| format!("TLS handshake with {addr} timed out"))??;
+        let (sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tls)).await?;
+        tokio::spawn(async move {
+            let _ = conn.with_upgrades().await;
+        });
+        Ok(sender)
+    }
 
 /// Raft's view of the network.
 pub struct Network {
@@ -241,7 +288,7 @@ impl Conn {
         let bytes = serde_json::to_vec(req).map_err(|e| RPCError::Network(NetworkError::new(&e)))?;
         let (status, body) = self
             .peers
-            .call(&self.addr, Method::POST, &format!("{PREFIX}/raft/{path}"), bytes.into(), option.hard_ttl())
+            .call_on(Lane::Raft, &self.addr, Method::POST, &format!("{PREFIX}/raft/{path}"), bytes.into(), option.hard_ttl())
             .await
             .map_err(|e| RPCError::Unreachable(Unreachable::new(&std::io::Error::other(format!("{e:#}")))))?;
         if !status.is_success() {
@@ -284,7 +331,7 @@ impl RaftNetwork<TypeConfig> for Conn {
             .request(&self.addr, Method::POST, &format!("{PREFIX}/raft/snapshot"), &[(SNAPSHOT_HEADER, header)], BodyExt::boxed(StreamBody::new(stream)))
             .map_err(unreachable)?;
         let send = async {
-            let resp = self.peers.open(&self.addr, req).await?;
+            let resp = self.peers.open_on(Lane::Raft, &self.addr, req).await?;
             let status = resp.status();
             let bytes = resp.into_body().collect().await?.to_bytes();
             if !status.is_success() {

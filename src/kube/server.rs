@@ -736,6 +736,18 @@ async fn serve_listener_filtered(state: Arc<ApiState>, listener: TcpListener, lo
             // with 0x16, an HTTP request with a method name.
             let mut first = [0u8; 1];
             let is_tls = matches!(stream.peek(&mut first).await, Ok(1)) && first[0] == 0x16;
+            // HA: another server's Raft connection is served on the Raft
+            // runtime, apart from API work.
+            if is_tls {
+                if let Some(cluster) = state.ha() {
+                    if super::tls::peek_alpn(&stream, super::tls::RAFT_ALPN).await == Some(true) {
+                        if let Ok(std_stream) = stream.into_std() {
+                            cluster.runtime().spawn(serve_raft_connection(state.clone(), std_stream));
+                        }
+                        return;
+                    }
+                }
+            }
             let service_state = state.clone();
             let service = service_fn(move |req| {
                 let state = service_state.clone();
@@ -766,6 +778,18 @@ async fn serve_listener_filtered(state: Arc<ApiState>, listener: TcpListener, lo
             }
         });
     }
+}
+
+/// One Raft connection from another server (on the Raft runtime).
+async fn serve_raft_connection(state: Arc<ApiState>, stream: std::net::TcpStream) {
+    let Ok(stream) = tokio::net::TcpStream::from_std(stream) else { return };
+    let Some(tls) = state.tls() else { return };
+    let Ok(tls_stream) = tls.accept_raft(stream).await else { return };
+    let service = service_fn(move |req| {
+        let state = state.clone();
+        async move { Ok::<_, Infallible>(super::ha::serve(&state, req).await) }
+    });
+    let _ = http1::Builder::new().serve_connection(TokioIo::new(tls_stream), service).await;
 }
 
 pub fn write_kubeconfig(path: &Path, server: &str) -> Result<()> {
