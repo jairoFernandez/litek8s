@@ -602,9 +602,13 @@ impl ImageStore {
             download(response, &tmp_file, digest).await?;
             let tmp_dir = self.root.join("tmp").join(random_hex(8));
             let (src, dst, expected, owners) = (tmp_file.clone(), tmp_dir.clone(), diff_id.to_string(), self.owners);
-            tokio::task::spawn_blocking(move || unpack_layer(&src, &dst, &expected, owners))
-                .await?
-                .with_context(|| format!("failed to unpack layer {digest}"))?;
+            let unpacked = tokio::task::spawn_blocking(move || unpack_layer(&src, &dst, &expected, owners)).await?;
+            if let Err(e) = unpacked {
+                // A failed unpack is retried with the pod's backoff: do not
+                // leave a partial tree behind each time.
+                let _ = std::fs::remove_dir_all(&tmp_dir);
+                return Err(e.context(format!("failed to unpack layer {digest}")));
+            }
             if let Err(e) = std::fs::rename(&tmp_dir, &dir) {
                 let _ = std::fs::remove_dir_all(&tmp_dir);
                 if !dir.is_dir() {
@@ -680,7 +684,10 @@ impl ImageStore {
                 continue;
             }
             let tmp = self.staging_dir().join(random_hex(8));
-            unpack_layer(&path, &tmp, diff_id, self.owners).with_context(|| format!("failed to unpack layer {file}"))?;
+            if let Err(e) = unpack_layer(&path, &tmp, diff_id, self.owners) {
+                let _ = std::fs::remove_dir_all(&tmp);
+                return Err(e.context(format!("failed to unpack layer {file}")));
+            }
             if let Err(e) = std::fs::rename(&tmp, &dest) {
                 let _ = std::fs::remove_dir_all(&tmp);
                 if !dest.is_dir() {
