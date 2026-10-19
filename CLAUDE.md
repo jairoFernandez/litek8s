@@ -15,7 +15,7 @@ cargo run -- serve             # start daemon
 cargo run -- apply -f examples/nginx.yaml  # deploy a workload
 ```
 
-Integration tests in `tests/integration.rs` require a running Docker daemon; they use `tokio::test(flavor = "multi_thread")` and serialize via an async mutex to avoid Docker socket conflicts. Unit tests live next to the code (`#[cfg(test)]`). `tests/kube_apiserver.rs` exercises the API server over HTTP and needs no Docker.
+Integration tests in `tests/integration.rs` require a Docker API (Docker, OrbStack, or litek8s's own: `eval "$(dev/stable.sh env)"`, see docs/develop-without-docker.md); they use `tokio::test(flavor = "multi_thread")` and serialize via an async mutex to avoid Docker socket conflicts. Unit tests live next to the code (`#[cfg(test)]`). `tests/kube_apiserver.rs` exercises the API server over HTTP and needs no Docker.
 
 Kubernetes compatibility corpus (needs kubectl, perl, python3; L4 needs helm):
 ```bash

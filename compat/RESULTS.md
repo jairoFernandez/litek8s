@@ -64,6 +64,27 @@ Helm v4.3.0 on an Apple M3 Max, Docker 29.8.2 under OrbStack.
   descheduler, Trivy operator. Tried and left out because they fail on k3s
   too: fluent-bit, authelia, immich, ollama (see `charts.txt`).
 
+## Without Docker (2026-10-19, 119 cases)
+
+L1 has grown to 43 cases (CRD validation, server-side apply), so the
+corpus is 119 cases. Both runs on the Mac with no OrbStack involved
+([docs/develop-without-docker.md](../docs/develop-without-docker.md)):
+
+| tier | k3s via k3d on litek8s's Docker API | litek8s dev, macOS VM |
+|---|---|---|
+| L0 | 7/7 | **7/7** |
+| L1 | 43/43 | **43/43** |
+| L2 | 15/15 | **15/15** |
+| L3 | 7/7 | **7/7** |
+| L4 | 47/47 | **47/47** |
+| **all** | **119/119** | **119/119** |
+
+`results/20261019-114221-k3d-on-litek8s/` (k3d's nodes as privileged
+containers with nested containerd in the litek8s dev VM) and
+`results/20261019-110349-litek8s-dev-macos-vm/` (one chart rerun after
+removing a conflicting release left on the cluster by hand); each
+directory's README has the details.
+
 ## What the 27 new charts exposed (fixed)
 
 - **Protobuf from client-go**: `SelfSubjectAccessReview` (prometheus-operator)

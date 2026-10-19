@@ -29,8 +29,12 @@ compat/run.sh --tiers L0,L1                     # some tiers
 compat/run.sh --only cm_create_get,patch_json   # specific cases
 compat/run.sh --max-case-seconds 45             # cap timeouts for a quick score
 COMPAT_HELM_TIMEOUT=2m compat/run.sh --tiers L4 # shorter helm --wait
-compat/baseline-k3d.sh                          # reference run on k3s (k3d)
+compat/baseline-k3d.sh                          # reference run on k3s (k3d), any Docker API incl. litek8s's
+compat/baseline-k3s-vm.sh                       # reference run on k3s in a qemu VM, no Docker at all
 ```
+
+Without Docker or OrbStack (litek8s's own cluster and Docker API): see
+[docs/develop-without-docker.md](../docs/develop-without-docker.md).
 
 Against the litek8s API server:
 

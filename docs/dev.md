@@ -89,7 +89,9 @@ if the binary lacks it, `dev up` runs an ad-hoc signed copy
 default 4096, an upper bound: the VM's footprint is what it touches) and
 `--cpus` (default half the Mac's).
 
-Build the guest once (needs Docker or any Linux box for the musl build):
+Build the guest once (needs a Docker API or any Linux box for the musl
+build; a running `litek8s dev` serves one, so litek8s can build its next
+guest itself, see [develop-without-docker.md](develop-without-docker.md)):
 
 ```bash
 dev/vm/build.sh   # static litek8s, then kernel + initramfs from Alpine packages

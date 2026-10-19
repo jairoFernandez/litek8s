@@ -33,17 +33,20 @@ if [[ -n "${BENCH_BUILD_VM:-}" ]]; then
   echo "$ROOT/$TARGET_DIR/release/litek8s"
   exit 0
 fi
-args=(--rm --platform "linux/${ARCH}" -u "$(id -u):$(id -g)" -v "${ROOT}:/work" -w /work)
+# Runs as root and hands the output to you afterwards: on the macOS dev VM's
+# virtiofs share, a non-root uid sees directories as root's for a moment while
+# they change and cargo fails with EACCES (root is not checked).
+args=(--rm --platform "linux/${ARCH}" -v "${ROOT}:/work" -w /work)
 [[ -n "${CARGO_BUILD_JOBS:-}" ]] && args+=(-e "CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}")
+OWNER="$(id -u):$(id -g)"
 if [[ -n "${LITEK8S_BUILD_VOLUME:-}" ]]; then
   mkdir -p "$ROOT/$TARGET_DIR/release"
-  # A fresh volume belongs to root: hand it to the build user first.
-  docker run --rm -v "${LITEK8S_BUILD_VOLUME}:/cache" busybox:1.36 chown "$(id -u):$(id -g)" /cache
   docker run "${args[@]}" -v "${LITEK8S_BUILD_VOLUME}:/cache" \
     -e CARGO_TARGET_DIR=/cache/target -e CARGO_HOME=/cache/cargo-home \
-    rust:1.90 sh -c "cargo build --release && cp /cache/target/release/litek8s /work/${TARGET_DIR}/release/litek8s.tmp" >&2
+    rust:1.90 sh -c "cargo build --release && cp /cache/target/release/litek8s /work/${TARGET_DIR}/release/litek8s.tmp && chown ${OWNER} /work/${TARGET_DIR}/release/litek8s.tmp" >&2
   mv "$ROOT/$TARGET_DIR/release/litek8s.tmp" "$ROOT/$TARGET_DIR/release/litek8s"
 else
-  docker run "${args[@]}" -e "CARGO_TARGET_DIR=/work/${TARGET_DIR}" rust:1.90 cargo build --release >&2
+  docker run "${args[@]}" -e "CARGO_TARGET_DIR=/work/${TARGET_DIR}" \
+    rust:1.90 sh -c "cargo build --release; rc=\$?; chown -R ${OWNER} /work/${TARGET_DIR}; exit \$rc" >&2
 fi
 echo "${ROOT}/${TARGET_DIR}/release/litek8s"

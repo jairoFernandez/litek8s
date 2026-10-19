@@ -5,7 +5,7 @@
 # See docs/develop-without-docker.md.
 #
 #   dev/stable.sh install [rev]   build <rev> (default HEAD) into $LITEK8S_STABLE
-#   dev/stable.sh up [dev up args] | down | status
+#   dev/stable.sh up [dev up args] | down | status | reset
 #   dev/stable.sh env             eval "$(dev/stable.sh env)": DOCKER_HOST, KUBECONFIG
 #
 # LITEK8S_STABLE (default ~/.litek8s/stable) holds bin/litek8s, vm/{Image,initramfs.gz},
@@ -56,7 +56,7 @@ install() {
 case "${1:-}" in
   install) shift; install "$@" ;;
   up) shift; dev up "$@" ;;
-  down | status) dev "$1" ;;
+  down | status | reset) dev "$1" ;;
   env)
     echo "export DOCKER_HOST=unix://$SOCK"
     echo "export KUBECONFIG=$STABLE/kubeconfig"
