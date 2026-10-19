@@ -284,6 +284,11 @@ pub async fn run(port: Option<u16>) -> Result<()> {
     let mut cmd = std::process::Command::new("/proc/self/exe");
     cmd.arg("dev-sandbox").args(["dev", "__apiserver", "--data-dir"]).arg(&data);
     cmd.env("LITEK8S_DEV_ROOTLESS", if rootless { "1" } else { "0" });
+    if which("pasta").is_some() {
+        if let Some(gw) = std::fs::read_to_string("/proc/net/route").ok().and_then(|t| super::hostinfo::parse_default_gateway(&t)) {
+            cmd.env("LITEK8S_DEV_HOST_GATEWAY", gw);
+        }
+    }
     if rootless {
         // SAFETY: no preconditions.
         let (uid, gid) = unsafe { (libc::getuid(), libc::getgid()) };

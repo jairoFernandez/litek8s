@@ -3,7 +3,11 @@
 
 use std::path::Path;
 
-pub fn resolv_conf_without_loopback(host: &str, fallback: &str) -> String {
+///
+/// `unreachable` are servers the sandbox cannot use either: pasta maps the
+/// host's default gateway address to the host's loopback, so a home
+/// router that is both gateway and DNS server is not reachable as such.
+pub fn resolv_conf_without_loopback(host: &str, fallback: &str, unreachable: &[&str]) -> String {
     let mut out = String::new();
     let mut servers = 0;
     for line in host.lines() {
@@ -11,7 +15,7 @@ pub fn resolv_conf_without_loopback(host: &str, fallback: &str) -> String {
         match words.next() {
             Some("nameserver") => {
                 let addr = words.next().unwrap_or_default();
-                if addr.starts_with("127.") || addr == "::1" {
+                if addr.starts_with("127.") || addr == "::1" || unreachable.contains(&addr) {
                     continue;
                 }
                 servers += 1;
@@ -72,9 +76,10 @@ mod tests {
     #[test]
     fn resolv_conf_drops_loopback_stubs() {
         let host = "# managed\nnameserver 127.0.0.53\noptions edns0 trust-ad\nsearch lan\n";
-        assert_eq!(resolv_conf_without_loopback(host, "169.254.1.1"), "nameserver 169.254.1.1\noptions edns0 trust-ad\nsearch lan\n");
+        assert_eq!(resolv_conf_without_loopback(host, "169.254.1.1", &[]), "nameserver 169.254.1.1\noptions edns0 trust-ad\nsearch lan\n");
+        assert_eq!(resolv_conf_without_loopback("nameserver 192.168.0.1\nsearch .\n", "169.254.1.1", &["192.168.0.1"]), "nameserver 169.254.1.1\nsearch .\n");
         let upstream = "nameserver 10.0.2.3\nnameserver fec0::3\n";
-        assert_eq!(resolv_conf_without_loopback(upstream, "169.254.1.1"), upstream);
+        assert_eq!(resolv_conf_without_loopback(upstream, "169.254.1.1", &[]), upstream);
     }
 
     #[test]

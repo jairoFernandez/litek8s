@@ -1534,6 +1534,14 @@ impl Engine {
             Ok(()) => Ok(()),
             Err(e) => {
                 let msg = format!("{e:#}");
+                {
+                    // Waiters (`docker run` waits for the next exit) and
+                    // attachers waiting for this start must not hang.
+                    let mut rt = ctr.rt.lock().unwrap();
+                    rt.exits += 1;
+                    rt.pending_attach = 0;
+                    rt.attach_gen += 1;
+                }
                 self.update(&ctr, |r| {
                     r.state.status = if r.state.started_at == ZERO_TIME { "created".into() } else { "exited".into() };
                     r.state.exit_code = 128;

@@ -18,13 +18,19 @@ mkdir -p "$LOG"
 export DOCKER_CLI_HINTS=false
 PASS=0; FAIL=0; FAILED=()
 
+now_ms() { perl -MTime::HiRes=time -e 'printf "%d", time * 1000'; }
+elapsed() { # start in ms -> seconds with one decimal
+  local ms=$(( $(now_ms) - $1 ))
+  echo "$((ms / 1000)).$(( (ms % 1000) / 100 ))"
+}
+
 check() { # name, command...
   local name="$1"; shift
-  local start=$(date +%s.%N)
+  local start=$(now_ms)
   if "$@" >"$LOG/$name.log" 2>&1; then
-    PASS=$((PASS + 1)); printf 'PASS  %-28s %6.1fs\n' "$name" "$(echo "$(date +%s.%N) - $start" | bc)"
+    PASS=$((PASS + 1)); printf 'PASS  %-28s %6ss\n' "$name" "$(elapsed "$start")"
   else
-    FAIL=$((FAIL + 1)); FAILED+=("$name"); printf 'FAIL  %-28s %6.1fs  (%s)\n' "$name" "$(echo "$(date +%s.%N) - $start" | bc)" "$LOG/$name.log"
+    FAIL=$((FAIL + 1)); FAILED+=("$name"); printf 'FAIL  %-28s %6ss  (%s)\n' "$name" "$(elapsed "$start")" "$LOG/$name.log"
     tail -5 "$LOG/$name.log" | sed 's/^/      /'
   fi
 }
@@ -211,7 +217,11 @@ case_testcontainers() {
 case_devcontainer() {
   command -v npx >/dev/null || return 0
   local d="$WORK/devcontainer"; cp -r "$HERE/devcontainer" "$d"
-  (cd "$d" && git init -q . 2>/dev/null; npx -y @devcontainers/cli@latest up --workspace-folder "$d" | tail -1 | grep -q '"outcome":"success"') &&
+  # With buildx installed the CLI builds with BuildKit, which on litek8s runs
+  # in a container and cannot see local images (the UID-update build on
+  # Linux needs one): use the classic builder (see docs/docker.md).
+  export DOCKER_BUILDKIT=0
+  (cd "$d" && git init -q . 2>/dev/null; npx -y @devcontainers/cli@latest up --buildkit never --workspace-folder "$d" | tail -1 | grep -q '"outcome":"success"') &&
   eq "1000 devcontainer" "$(npx -y @devcontainers/cli@latest exec --workspace-folder "$d" sh -c 'echo $(id -u) $LITEK8S_TEST' | tail -1)" &&
   npx -y @devcontainers/cli@latest exec --workspace-folder "$d" sh -c 'touch made-in-container' &&
   [[ "$(stat -c %u "$d/made-in-container" 2>/dev/null || stat -f %u "$d/made-in-container")" == "$(id -u)" ]]

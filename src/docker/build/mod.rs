@@ -280,6 +280,10 @@ fn extract_context(tar_path: &Path, dest: &Path) -> Result<()> {
     }
     let raw = std::io::Cursor::new(magic[..n].to_vec()).chain(f);
     let reader: Box<dyn Read> = if magic == [0x1f, 0x8b] { Box::new(flate2::read::MultiGzDecoder::new(raw)) } else { Box::new(raw) };
+    // The CLI may end the tar right after the last file's data (when the
+    // Dockerfile is outside the context): zeros complete the last block and
+    // add the end-of-archive marker.
+    let reader = reader.chain(std::io::repeat(0).take(1536));
     let mut a = tar::Archive::new(reader);
     a.set_preserve_permissions(true);
     a.set_preserve_mtime(true);

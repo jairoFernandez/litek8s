@@ -232,7 +232,8 @@ fn sandbox_resolv_conf() -> String {
         .iter()
         .find_map(|p| std::fs::read_to_string(p).ok())
         .unwrap_or_default();
-    super::hostinfo::resolv_conf_without_loopback(&host, DNS_FORWARD)
+    let gateway = std::env::var("LITEK8S_DEV_HOST_GATEWAY").unwrap_or_default();
+    super::hostinfo::resolv_conf_without_loopback(&host, DNS_FORWARD, &[gateway.as_str()])
 }
 
 fn pid1(mut input: std::io::BufReader<std::fs::File>, mut output: std::fs::File, args: &[String]) -> ! {
