@@ -52,15 +52,33 @@ case_run_attach() {
 }
 
 case_tty() {
-  # A pseudo-terminal for the container (script(1) gives the CLI one).
-  command -v script >/dev/null || return 0
-  local out
-  if [[ "$(uname)" == Darwin ]]; then
-    out=$(script -q /dev/null docker run --rm -t alpine:3.20 sh -c 'tty; stty size' 2>&1 | tr -d '\r')
-  else
-    out=$(script -qec "docker run --rm -t alpine:3.20 sh -c 'tty; stty size'" /dev/null 2>&1 | tr -d '\r')
-  fi
-  echo "$out" | grep -q '/dev/pts/0'
+  # docker run -it in a pseudo-terminal: the container gets a pty with the
+  # client's window size, typed input and its exit code.
+  command -v python3 >/dev/null || return 0
+  python3 - <<'PY'
+import os, pty, select, struct, fcntl, termios, time
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp("docker", ["docker", "run", "--rm", "-it", "alpine:3.20", "sh"])
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+out = b""
+def read(t):
+    global out
+    end = time.time() + t
+    while time.time() < end:
+        if select.select([fd], [], [], 0.1)[0]:
+            try:
+                out += os.read(fd, 4096)
+            except OSError:
+                return
+read(1.5)
+os.write(fd, b"tty; stty size; echo typed-ok\n"); read(1.5)
+os.write(fd, b"exit 7\n"); read(1.5)
+code = os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1])
+text = out.decode(errors="replace")
+print(text)
+assert "/dev/pts/0" in text and "40 120" in text and "typed-ok" in text and code == 7, code
+PY
 }
 
 case_detach_logs_exec() {
@@ -189,6 +207,8 @@ case_compose_basic() {
   docker compose --project-directory "$d" logs client | grep -q 'alias-ok' &&
   curl -sf localhost:18080 | grep -q 'litek8s compose' &&
   docker compose --project-directory "$d" restart db &&
+  # restart returns once the container runs, not once postgres accepts.
+  for _ in $(seq 1 60); do docker compose --project-directory "$d" exec -T db pg_isready -U postgres >/dev/null 2>&1 && break; sleep 0.5; done &&
   docker compose --project-directory "$d" exec -T db pg_isready -U postgres
   local rc=$?
   (cd "$d" && docker compose down -v >/dev/null 2>&1)
