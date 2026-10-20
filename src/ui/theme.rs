@@ -539,11 +539,16 @@ impl Theme {
         let total = width * 8;
         let mut ends = Vec::with_capacity(parts.len());
         let mut cum = 0.0f64;
-        for (share, _, _) in parts {
-            cum += if share.is_finite() { share.max(0.0) } else { 0.0 };
-            ends.push(((cum * total as f64).round() as usize).min(total));
+        let mut prev = 0;
+        for (share, _, glyph) in parts {
+            let share = if share.is_finite() { share.max(0.0) } else { 0.0 };
+            cum += share;
+            // A solid part that is there gets an eighth at least.
+            let floor = prev + usize::from(share > 0.0 && *glyph == "█");
+            prev = ((cum * total as f64).round() as usize).max(floor).min(total);
+            ends.push(prev);
         }
-        let mut end = ends.last().copied().unwrap_or(0);
+        let mut end = prev;
         if end == 0 && cum > 0.0 && width > 0 {
             end = 1;
         }
@@ -880,6 +885,9 @@ mod tests {
         assert_eq!(t.stacked(&parts, 8)[1].content, "██");
         assert_eq!(text(t.stacked(&[(0.3, Style::new(), "█")], 4)), "█▎░░");
         assert_eq!(text(t.stacked(&[(0.001, Style::new(), "█"), (0.001, Style::new(), "▒")], 4)), "▏░░░");
+        // In use beats cache in a sliver: three tiny solid parts, more cache.
+        let tiny = [(0.0005, Style::new(), "█"), (0.0003, Style::new(), "█"), (0.0017, Style::new(), "█"), (0.0016, Style::new(), "▒")];
+        assert_eq!(text(t.stacked(&tiny, 29)), format!("▍{}", "░".repeat(28)));
         assert_eq!(text(t.stacked(&[(2.0, Style::new(), "█")], 4)), "████");
         // A tiny share still shows.
         assert_eq!(t.bar(0.0001, 5, Style::new()).content, "▏    ");
