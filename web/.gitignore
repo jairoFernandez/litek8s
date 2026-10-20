@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.astro/
+.vercel/
+# Generated from the repository's markdown by scripts/sync-docs.mjs
+src/content/docs/docs/
+public/docs-assets/

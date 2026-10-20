@@ -1,0 +1,76 @@
+/* The SVG diagrams in src/diagrams/, on the landing page and in the docs.
+   Colors come from the --d-* tokens each page defines for light and dark. */
+
+.lk-diagram {
+  margin: 0;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+}
+.lk-diagram svg {
+  display: block;
+  width: 100%;
+  min-width: 600px;
+  height: auto;
+  font-family: var(--d-font, ui-sans-serif, system-ui, sans-serif);
+}
+
+.d text { fill: var(--d-fg); }
+.d .d-t { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+.d .d-s { font-size: 12.5px; fill: var(--d-muted); font-weight: 400; }
+.d .d-s-accent { fill: var(--d-accent); font-weight: 600; }
+.d .d-mono, .d .d-l { font-family: var(--d-mono, ui-monospace, Menlo, monospace); }
+.d .d-mono { font-size: 13px; fill: var(--d-accent); font-weight: 600; }
+.d .d-l { font-size: 11.5px; fill: var(--d-fg); }
+.d .d-l-muted { fill: var(--d-muted); }
+.d .d-l-wg { fill: var(--d-ok); }
+.d .d-fl { font-size: 11px; font-weight: 600; letter-spacing: 0.12em; text-transform: uppercase; fill: var(--d-muted); }
+.d .d-note { font-size: 15px; font-weight: 600; fill: var(--d-fg); }
+.d .d-note-muted { font-size: 12.5px; font-weight: 400; fill: var(--d-muted); }
+
+.d .d-pill { fill: var(--d-pill); stroke: var(--d-line); }
+.d .d-box { fill: var(--d-box); stroke: var(--d-line); }
+.d .d-box-accent { stroke: var(--d-accent-line); }
+.d .d-box-ok { stroke: var(--d-ok-line); }
+.d .d-box-leader { stroke: var(--d-accent); stroke-width: 1.5; }
+.d .d-frame { fill: var(--d-frame); stroke: var(--d-line); }
+.d .d-frame-accent { stroke: var(--d-accent-line); }
+.d .d-frame-dashed { stroke-dasharray: 5 5; }
+.d .d-store { fill: var(--d-box); stroke: var(--d-accent-line); }
+.d .d-store-lid { fill: none; stroke: var(--d-accent-line); }
+.d .d-head { fill: var(--d-edge); }
+
+.d .d-edge { fill: none; stroke: var(--d-edge); stroke-width: 1.5; }
+.d .d-edge-dashed { stroke-dasharray: 4 5; }
+.d .d-edge-wg { stroke: var(--d-ok-line); stroke-dasharray: 2 5; stroke-linecap: round; }
+
+.d .d-ready { fill: var(--d-ok); }
+.d .d-leader-ring { fill: none; stroke: var(--d-accent); stroke-width: 1; opacity: 0; transform-box: fill-box; transform-origin: center; }
+
+/* Motion: a short bright dash ("comet") travels along an edge; Ready dots
+   breathe; the leader sends heartbeats. Off by default (the docs keep the
+   diagrams still); pages opt in with .lk-diagram.is-animated, and the
+   landing page pauses diagrams that are off screen. */
+.d .d-comet { fill: none; stroke: none; stroke-width: 2.5; stroke-linecap: round; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .is-animated .d .d-comet {
+    stroke: var(--d-accent);
+    stroke-dasharray: 7 93;
+    stroke-dashoffset: 100;
+    animation: d-comet 2.6s linear infinite;
+    animation-delay: var(--delay, 0s);
+  }
+  .is-animated .d .d-comet-wg { stroke: var(--d-ok); animation-duration: 3.4s; }
+  .is-animated .d .d-comet-fast { animation-duration: 1.3s; }
+  .is-animated .d .d-pulse { animation: d-pulse 2.4s ease-in-out infinite; animation-delay: var(--delay, 0s); transform-box: fill-box; transform-origin: center; }
+  .is-animated .d .d-leader-ring { animation: d-ring 2.6s ease-out infinite; }
+  .is-paused .d * { animation-play-state: paused !important; }
+}
+
+@keyframes d-comet { to { stroke-dashoffset: 0; } }
+@keyframes d-pulse { 50% { opacity: 0.45; transform: scale(0.7); } }
+@keyframes d-ring {
+  0% { opacity: 0.7; transform: scale(1); }
+  100% { opacity: 0; transform: scale(1.18, 1.4); }
+}

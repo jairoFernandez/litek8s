@@ -1,8 +1,12 @@
 name: test
 
 on:
+  # The website (web/, Astro, deployed by Vercel) is not part of the crate:
+  # changes only there do not run the Rust tests.
   push:
+    paths-ignore: ["web/**"]
   pull_request:
+    paths-ignore: ["web/**"]
   workflow_dispatch:
 
 concurrency:

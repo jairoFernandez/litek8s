@@ -1,0 +1,71 @@
+---
+// "What's in the binary". Wide screens: the section is tall and its content
+// sticky; scrolling walks through the items (src/scripts/landing.ts sets
+// .active) and the panel on the right follows. Narrow screens: a plain list
+// with each item's panel under its text.
+import Icon from './Icon.astro';
+import type { Dict } from '../../i18n/en';
+
+interface Props { t: Dict['features'] }
+const { t } = Astro.props;
+const n = t.items.length;
+type Item = Dict['features']['items'][number];
+const panelTitle = (it: Item) => (it.image ? 'litek8s ui' : `~ ${it.id === 'crds' ? 'crd.yaml' : 'zsh'}`);
+---
+<section id="features" class="story" data-story style={`--n:${n}`}>
+  <div class="story-sticky wrap">
+    <div>
+      <div class="story-head" data-reveal>
+        <span class="eyebrow">{t.eyebrow}</span>
+        <h2 class="h2">{t.title}</h2>
+      </div>
+      <ol class="story-list" style="list-style:none;padding:0;margin:0">
+        {t.items.map((it, i) => (
+          <li class:list={['story-item', { active: i === 0 }]} data-story-item={i}>
+            <h3 style="margin:0;font:inherit">
+              <button type="button" class="story-btn">
+                <span class="story-num">{String(i + 1).padStart(2, '0')}</span>
+                {it.title}
+                <span class="story-dot" aria-hidden="true"></span>
+              </button>
+            </h3>
+            <div class="story-body">
+              <div>
+                <p>{it.body}</p>
+                <a class="story-more" href={it.href}>{t.more}<span class="sr-only">: {it.title}</span><Icon name="arrow" class="arrow" /></a>
+                <div class="story-inline">
+                  <div class="panel">
+                    <div class="panel-bar" aria-hidden="true"><i></i><i></i><i></i><span>{panelTitle(it)}</span></div>
+                    {it.image ? (
+                        <img src={`/docs-assets/ui/${it.image}-dark.svg`} alt="litek8s ui: the Kubernetes view, a k9s-style list of pods" width="1028" height="700" loading="lazy" decoding="async" />
+                    ) : (
+                      <pre set:html={it.code!.join('\n')} />
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </li>
+        ))}
+      </ol>
+    </div>
+    <div class="story-stage" aria-hidden="true">
+      {t.items.map((it, i) => (
+        <div class:list={['story-panel', { active: i === 0 }]} id={`story-panel-${it.id}`} data-story-panel={i}>
+          <div class="panel">
+            <div class="panel-bar"><i></i><i></i><i></i><span>{panelTitle(it)}</span></div>
+            {it.image ? (
+              <img src={`/docs-assets/ui/${it.image}-dark.svg`} alt="" width="1028" height="700" loading="lazy" decoding="async" />
+            ) : (
+              <pre set:html={it.code!.join('\n')} />
+            )}
+          </div>
+        </div>
+      ))}
+      <div class="story-progress"><i></i></div>
+    </div>
+  </div>
+</section>
+<style>
+  .story-more :global(svg) { width: 16px; height: 16px; }
+</style>

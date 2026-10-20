@@ -1,0 +1,46 @@
+---
+// The four diagrams (src/diagrams/*.svg, also used in the docs) as tabs.
+import Icon from './Icon.astro';
+import architecture from '../../diagrams/architecture.svg?raw';
+import local from '../../diagrams/local.svg?raw';
+import multinode from '../../diagrams/multinode.svg?raw';
+import ha from '../../diagrams/ha.svg?raw';
+import type { Dict } from '../../i18n/en';
+
+interface Props { t: Dict['how'] }
+const { t } = Astro.props;
+const svgs: Record<string, string> = { architecture, local, multinode, ha };
+const docs: Record<string, string> = { architecture: '/docs/', local: '/docs/dev/', multinode: '/docs/multi-node/', ha: '/docs/ha/' };
+---
+<section id="how" class="section">
+  <div class="wrap">
+    <div class="section-head" data-reveal>
+      <span class="eyebrow">{t.eyebrow}</span>
+      <h2 class="h2">{t.title}</h2>
+    </div>
+    <div data-tabs data-reveal style="--d:1">
+      <div class="tabs" role="tablist" aria-label={t.eyebrow}>
+        {t.tabs.map((tab, i) => (
+          <button type="button" class="tab" role="tab" id={`how-tab-${tab.id}`} aria-controls={`how-panel-${tab.id}`} aria-selected={i === 0 ? 'true' : 'false'} tabindex={i === 0 ? 0 : -1}>{tab.label}</button>
+        ))}
+      </div>
+      <div class="how-panels">
+        {t.tabs.map((tab, i) => (
+          <div class="how-panel" role="tabpanel" id={`how-panel-${tab.id}`} aria-labelledby={`how-tab-${tab.id}`} hidden={i !== 0} tabindex="0">
+            <div>
+              <figure class="lk-diagram is-animated is-paused" data-diagram={tab.id} set:html={svgs[tab.id]} />
+              <p class="scroll-hint" aria-hidden="true">← scroll →</p>
+            </div>
+            <div>
+              <p>{tab.text}</p>
+              <a class="btn" href={docs[tab.id]}>{t.docs}<Icon name="arrow" class="arrow" /></a>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  </div>
+</section>
+<style>
+  .btn :global(svg) { width: 16px; height: 16px; }
+</style>

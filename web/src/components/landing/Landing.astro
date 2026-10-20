@@ -1,0 +1,257 @@
+---
+// The landing page, for one language's dictionary (src/i18n/*.ts).
+import '../../styles/landing.css';
+import displayFont from '@fontsource-variable/space-grotesk/files/space-grotesk-latin-wght-normal.woff2?url';
+import Icon from './Icon.astro';
+import Copy from './Copy.astro';
+import Logo from './Logo.astro';
+import Terminal from './Terminal.astro';
+import Numbers from './Numbers.astro';
+import Features from './Features.astro';
+import How from './How.astro';
+import type { Dict } from '../../i18n/en';
+
+interface Props { t: Dict }
+const { t } = Astro.props;
+const site = Astro.site ?? new URL('http://localhost:4321');
+const canonical = new URL(Astro.url.pathname, site);
+const og = new URL('/og.png', site);
+const md = (s: string) => s.replace(/`([^`]+)`/g, '<code>$1</code>');
+// Words of the tagline; the components it replaces (etcd … containerd)
+// light up in the accent color.
+const words = t.tagline.text.split(' ');
+const from = words.indexOf('etcd,');
+const to = words.indexOf('containerd,');
+const hl = (i: number) => i >= from && i <= to && !['the', 'and'].includes(words[i]);
+---
+<!doctype html>
+<html lang={t.lang} class="no-js">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{t.meta.title}</title>
+    <meta name="description" content={t.meta.description} />
+    <link rel="canonical" href={canonical} />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/favicon-32.png" sizes="32x32" type="image/png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <meta name="theme-color" content="#0c0b12" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#fbfaff" media="(prefers-color-scheme: light)" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content={t.meta.title} />
+    <meta property="og:description" content={t.meta.description} />
+    <meta property="og:url" content={canonical} />
+    <meta property="og:image" content={og} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preload" href={displayFont} as="font" type="font/woff2" crossorigin />
+    <script is:inline>
+      // Before first paint: the theme (shared with the docs, which use
+      // Starlight's `starlight-theme` key) and whether motion is wanted.
+      (function () {
+        var d = document.documentElement, t = null;
+        try { t = localStorage.getItem('starlight-theme'); } catch (e) {}
+        if (t !== 'light' && t !== 'dark') t = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        d.dataset.theme = t;
+        d.classList.remove('no-js');
+        if (matchMedia('(prefers-reduced-motion: no-preference)').matches) {
+          d.classList.add('motion');
+          // If the page script never runs, do not leave content hidden.
+          setTimeout(function () { if (!window.__lk) d.classList.remove('motion'); }, 3500);
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <a class="skip" href="#main">{t.nav.skip}</a>
+
+    <header class="nav" data-nav>
+      <div class="wrap nav-inner">
+        <a class="brand" href="/" aria-label="litek8s home"><Logo id="nav-logo" />litek8s</a>
+        <ul class="nav-links" id="nav-links">
+          {t.nav.items.map((it) => <li><a href={it.href}>{it.label}</a></li>)}
+        </ul>
+        <div class="nav-actions">
+          <a class="icon-btn nav-gh" href={t.links.github} aria-label={t.nav.github}><Icon name="github" /></a>
+          <button type="button" class="icon-btn theme-toggle" data-theme-toggle aria-label={t.nav.theme} title={t.nav.theme}>
+            <Icon name="moon" class="moon" /><Icon name="sun" class="sun" />
+          </button>
+          <button type="button" class="icon-btn menu-toggle" data-menu aria-label={t.nav.menu} aria-expanded="false" aria-controls="nav-links"><Icon name="menu" /></button>
+        </div>
+      </div>
+    </header>
+
+    <main id="main">
+      <section class="hero">
+        <div class="bg-grid" aria-hidden="true"></div>
+        <div class="glow glow-1" aria-hidden="true"></div>
+        <div class="glow glow-2" aria-hidden="true"></div>
+        <div class="wrap">
+          <a class="badge" href={t.links.releases} data-in style="--i:0"><span class="dot" aria-hidden="true"></span>{t.hero.badge}</a>
+          <h1>
+            {t.hero.lines.map((l, i) => (
+              <span class="line"><span class:list={{ accent: i === t.hero.lines.length - 1 }} style={`--i:${i}`}>{l}</span></span>
+            ))}
+          </h1>
+          <p class="lead" data-in style="--i:1">{t.hero.lead}</p>
+          <div class="hero-ctas" data-in style="--i:2">
+            <a class="btn btn-primary" href="#install">{t.hero.primary}<Icon name="arrow" class="arrow" /></a>
+            <a class="btn" href={t.links.docs}>{t.hero.secondary}<Icon name="arrow-up-right" class="arrow arrow-up" /></a>
+          </div>
+          <div class="hero-install" data-in style="--i:3">
+            <div class="cmd"><span class="pr" aria-hidden="true">$</span><code>{t.hero.install}</code><Copy text={t.hero.install} label={t.hero.copy} done={t.hero.copied} /></div>
+          </div>
+          <div class="hero-shot">
+            <div class="tilt"><Terminal t={t.demo} /></div>
+            <p class="demo-caption" set:html={`${md(t.demo.caption)} <a href="${t.demo.captionSource.href}">${t.demo.captionSource.label}</a>`} />
+          </div>
+        </div>
+      </section>
+
+      <section class="strip" aria-label={t.strip.label}>
+        <p class="strip-label">{t.strip.label}</p>
+        <div class="marquee">
+          <ul class="marquee-track">{t.strip.items.map((s) => <li>{s}</li>)}</ul>
+          <ul class="marquee-track" aria-hidden="true">{t.strip.items.map((s) => <li>{s}</li>)}</ul>
+        </div>
+      </section>
+
+      <section class="tagline" data-scrub>
+        <div class="wrap">
+          <span class="eyebrow" data-reveal>{t.tagline.eyebrow}</span>
+          <p>{words.map((w, i) => <><span class:list={['w', { hl: hl(i) }]}>{w}</span>{i < words.length - 1 ? ' ' : ''}</>)}</p>
+        </div>
+      </section>
+
+      <Numbers t={t.numbers} />
+      <Features t={t.features} />
+      <How t={t.how} />
+
+      <section id="install" class="section">
+        <div class="wrap">
+          <div class="section-head" data-reveal>
+            <span class="eyebrow">{t.install.eyebrow}</span>
+            <h2 class="h2">{t.install.title}</h2>
+            <p class="lead">{t.install.lead}</p>
+          </div>
+          <div class="install-grid">
+            <div class="card install-card spot" data-reveal data-tabs>
+              <div class="tabs" role="tablist" aria-label={t.install.eyebrow}>
+                {t.install.methods.map((m, i) => (
+                  <button type="button" class="tab" role="tab" id={`inst-tab-${m.id}`} aria-controls={`inst-panel-${m.id}`} aria-selected={i === 0 ? 'true' : 'false'} tabindex={i === 0 ? 0 : -1}>{m.label}</button>
+                ))}
+              </div>
+              {t.install.methods.map((m, i) => (
+                <div role="tabpanel" id={`inst-panel-${m.id}`} aria-labelledby={`inst-tab-${m.id}`} hidden={i !== 0}>
+                  <div class="cmd"><span class="pr" aria-hidden="true">$</span><code>{m.code}</code><Copy text={m.code} label={t.hero.copy} done={t.hero.copied} /></div>
+                </div>
+              ))}
+              <ul class="notes">{t.install.notes.map((n) => <li set:html={md(n)} />)}</ul>
+            </div>
+            <div class="panel quick" data-reveal style="--d:1">
+              <div class="panel-bar" aria-hidden="true"><i></i><i></i><i></i><span>{t.install.quickstart}</span></div>
+              <Copy text={t.install.quick.map(([c]) => c).join('\n')} label={t.hero.copy} done={t.hero.copied} />
+              <pre>{t.install.quick.map(([c, note]) => (
+                <><span class="c">$</span> {c}{note ? <span class="ln-c">{`  # ${note}`}</span> : ''}{'\n'}</>
+              ))}</pre>
+            </div>
+          </div>
+          <div class="server-row" data-reveal>
+            <p><strong>{t.install.servers}.</strong> {t.install.serversText}</p>
+            <a class="btn" href="/docs/multi-node/">{t.install.serversLink}<Icon name="arrow" class="arrow" /></a>
+          </div>
+        </div>
+      </section>
+
+      <section id="platforms" class="section" style="padding-top:0">
+        <div class="wrap">
+          <div class="section-head" data-reveal>
+            <span class="eyebrow">{t.platforms.eyebrow}</span>
+            <h2 class="h2">{t.platforms.title}</h2>
+          </div>
+          <div class="table-wrap" data-reveal style="--d:1" tabindex="0" role="region" aria-label={t.platforms.title}>
+            <table>
+              <thead><tr>{t.platforms.head.map((h, i) => (i === 0 ? <td></td> : <th scope="col">{h}</th>))}</tr></thead>
+              <tbody>
+                {t.platforms.rows.map((r) => (
+                  <tr>
+                    <th scope="row">{r[0]}</th>
+                    {r.slice(1).map((c) => (
+                      <td><span class:list={{ yes: /^yes/.test(c), no: /^(no|–)/.test(c) }}>{c}</span></td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p class="table-note" data-reveal set:html={md(t.platforms.note)} />
+        </div>
+      </section>
+
+      <section id="limitations" class="section" style="padding-top:0">
+        <div class="wrap">
+          <div class="section-head" data-reveal>
+            <span class="eyebrow">{t.limits.eyebrow}</span>
+            <h2 class="h2">{t.limits.title}</h2>
+            <p class="lead">{t.limits.lead}</p>
+          </div>
+          <div class="limits-grid">
+            {t.limits.items.map((l, i) => (
+              <article class:list={['card', 'limit', 'spot', { strong: l.strong }]} data-reveal style={`--d:${i % 3}`}>
+                <span class="ico" aria-hidden="true"><Icon name={l.strong ? 'alert' : 'info'} /></span>
+                <h3>{l.title}</h3>
+                <p>{l.text}</p>
+              </article>
+            ))}
+          </div>
+          <a class="limits-more" href={t.limits.moreHref} data-reveal>{t.limits.more}<Icon name="arrow-up-right" class="arrow" /></a>
+        </div>
+      </section>
+
+      <section class="cta">
+        <div class="bg-grid" aria-hidden="true"></div>
+        <div class="glow glow-1" aria-hidden="true"></div>
+        <div class="wrap">
+          <div class="cta-mark" data-reveal data-hop><Logo id="cta-logo" class="cta-logo" /></div>
+          <h2 data-reveal>{t.cta.title.map((l, i) => <span class:list={{ accent: i === 1 }}>{l}</span>)}</h2>
+          <p data-reveal style="--d:1">{t.cta.text}</p>
+          <div class="hero-install" data-reveal style="--d:2">
+            <div class="cmd"><span class="pr" aria-hidden="true">$</span><code>{t.hero.install}</code><Copy text={t.hero.install} label={t.hero.copy} done={t.hero.copied} /></div>
+          </div>
+          <div class="hero-ctas" data-reveal style="--d:3">
+            <a class="btn btn-primary" href={t.links.docs}>{t.cta.primary}<Icon name="arrow" class="arrow" /></a>
+            <a class="btn" href={t.links.github}><Icon name="github" />{t.cta.star}</a>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="wrap">
+        <div class="footer-grid">
+          <div class="footer-brand">
+            <a class="brand" href="/"><Logo id="foot-logo" />litek8s</a>
+            <p>{t.footer.tagline}</p>
+          </div>
+          {t.footer.cols.map((c) => (
+            <nav aria-label={c.title}>
+              <h3>{c.title}</h3>
+              <ul>{c.links.map((l) => <li><a href={l.href}>{l.label}</a></li>)}</ul>
+            </nav>
+          ))}
+        </div>
+        <p class="footer-legal">{t.footer.legal}</p>
+      </div>
+    </footer>
+
+    <script>
+      import '../../scripts/landing.ts';
+    </script>
+  </body>
+</html>
+<style>
+  .btn :global(svg) { width: 16px; height: 16px; }
+  .cta-mark :global(svg) { width: 100%; height: 100%; }
+  .limits-more :global(svg) { width: 16px; height: 16px; }
+</style>

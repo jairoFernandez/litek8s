@@ -1,0 +1,15 @@
+---
+// Starlight's site title, linking to the landing page with the inline mark.
+import Logo from '../landing/Logo.astro';
+---
+<a href="/" class="lk-title">
+  <Logo id="docs-logo" class="lk-title-mark" />
+  <span>litek8s</span>
+  <span class="lk-title-docs">docs</span>
+</a>
+<style>
+  .lk-title { display: inline-flex; align-items: center; gap: 0.55rem; text-decoration: none; color: var(--sl-color-white); font: 700 1.2rem/1 var(--lk-font-display); letter-spacing: -0.03em; white-space: nowrap; }
+  .lk-title :global(.lk-title-mark) { width: 1.75rem; height: 1.75rem; transition: transform 0.7s cubic-bezier(0.32, 0.72, 0, 1); }
+  .lk-title:hover :global(.lk-title-mark) { transform: rotate(120deg); }
+  .lk-title-docs { font: 500 0.72rem/1 var(--sl-font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--sl-color-gray-3); padding: 0.3rem 0.45rem; border: 1px solid var(--sl-color-hairline); border-radius: 0.4rem; }
+</style>

@@ -1,0 +1,76 @@
+---
+// The README's numbers table as bar comparisons (shorter is better) and two
+// score rings. Bars are linear, relative to the largest value in each row, and
+// every value is printed next to its bar, so the bars are never the only
+// way to read a number.
+import Icon from './Icon.astro';
+import type { Dict } from '../../i18n/en';
+
+interface Props { t: Dict['numbers'] }
+const { t } = Astro.props;
+const fmt = (v: number) => v.toLocaleString('en-US', { maximumFractionDigits: 2 });
+const fmtUnit = (v: number, unit: string, prefix = '') => `${prefix}${fmt(v)} ${unit}`;
+const md = (s: string) => s.replace(/`([^`]+)`/g, '<code>$1</code>');
+---
+<section id="numbers" class="section">
+  <div class="wrap">
+    <div class="section-head" data-reveal>
+      <span class="eyebrow">{t.eyebrow}</span>
+      <h2 class="h2">{t.title}</h2>
+      <p class="lead">{t.lead} {t.smaller}</p>
+    </div>
+    <div class="numbers-grid">
+      {t.rows.map((r, i) => {
+        const max = Math.max(...r.bars.map((b) => b.value));
+        const us = r.bars.find((b) => b.us)!;
+        return (
+          <article class="card metric spot" data-reveal style={`--d:${i % 2}`}>
+            <div class="metric-head">
+              <div>
+                <h3 class="metric-label" set:html={md(r.label)} />
+                <p class="metric-note">{r.note}</p>
+              </div>
+              <a class="metric-src" href={r.href}>{r.src}<Icon name="arrow-up-right" class="sm" /></a>
+            </div>
+            <p class="metric-big"><span data-count={us.value} data-prefix={r.prefix ?? ''}>{(r.prefix ?? '') + fmt(us.value)}</span><small>{r.unit}</small></p>
+            <ul class="bars">
+              {r.bars.map((b, j) => (
+                <li class:list={['bar', { us: b.us }]} style={`--f:${(b.value / max).toFixed(4)};--d:${j}`}>
+                  <span class="bar-name" title={b.name}>{b.name}</span>
+                  <span class="bar-track"><span class="bar-fill"></span><span class="bar-val">{fmtUnit(b.value, r.unit, b.us ? (r.prefix ?? '') : '')}</span></span>
+                </li>
+              ))}
+            </ul>
+          </article>
+        );
+      })}
+    </div>
+    <div class="scores">
+      {t.scores.map((s, i) => (
+        <article class="card metric score spot" data-reveal style={`--d:${i}`}>
+          <svg class="ring" aria-hidden="true" viewBox="0 0 36 36" style={`--pct:${((s.value / s.of) * 100).toFixed(2)}`}>
+            <circle class="bgc" cx="18" cy="18" r="15.9155" pathLength="100" />
+            <circle class="fgc" cx="18" cy="18" r="15.9155" pathLength="100" />
+          </svg>
+          <div>
+            <div class="metric-head">
+              <div>
+                <h3 class="metric-label">{s.label}</h3>
+                <p class="metric-note">{s.note}</p>
+              </div>
+            </div>
+            <p class="metric-big"><span data-count={s.value}>{s.value}</span><small>/ {s.of}</small></p>
+            <p class="ref">{s.ref} · <a href={s.href}>{s.src}</a></p>
+          </div>
+        </article>
+      ))}
+    </div>
+    <p class="footnote" data-reveal>
+      {t.footnote}{' '}
+      {t.footLinks.map((l, i) => (<><a href={l.href}>{l.label}</a>{i < t.footLinks.length - 1 ? ', ' : '.'}</>))}
+    </p>
+  </div>
+</section>
+<style>
+  .metric-src :global(svg) { width: 12px; height: 12px; }
+</style>
