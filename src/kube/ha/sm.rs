@@ -341,11 +341,16 @@ impl RaftStateMachine<TypeConfig> for StateMachine {
     }
 
     async fn get_current_snapshot(&mut self) -> Result<Option<Snapshot<TypeConfig>>, StorageError<NodeId>> {
-        let Some(path) = newest_snapshot(&self.dir) else { return Ok(None) };
-        let header = {
-            let file = File::open(&path).map_err(|e| snap_err(ErrorVerb::Read, e))?;
-            read_header(&mut BufReader::new(file)).map_err(|e| snap_err(ErrorVerb::Read, e))?
-        };
+        let dir = self.dir.clone();
+        let found = tokio::task::spawn_blocking(move || -> std::io::Result<Option<(PathBuf, Header)>> {
+            let Some(path) = newest_snapshot(&dir) else { return Ok(None) };
+            let header = read_header(&mut BufReader::new(File::open(&path)?))?;
+            Ok(Some((path, header)))
+        })
+        .await
+        .map_err(|e| snap_err(ErrorVerb::Read, std::io::Error::other(e.to_string())))?
+        .map_err(|e| snap_err(ErrorVerb::Read, e))?;
+        let Some((path, header)) = found else { return Ok(None) };
         // The seed is not a Raft snapshot (no log id); Raft never asks for it.
         if header.meta.last_log_id.is_none() {
             return Ok(None);

@@ -92,7 +92,9 @@ pub(crate) fn read_json<T: DeserializeOwned>(path: &Path) -> io::Result<Option<T
 
 struct Segment {
     path: PathBuf,
-    file: Arc<File>,
+    /// Opened by the flusher on the segment's first write.
+    file: Option<Arc<File>>,
+    /// Bytes appended so far (written or still queued).
     len: u64,
 }
 
@@ -105,26 +107,67 @@ struct Loc {
     log_id: LogId<NodeId>,
 }
 
+/// An appended entry the flusher has not written yet: reads take it from here.
+struct Pending {
+    /// Tells a re-append of the same index (after a truncate) apart.
+    seq: u64,
+    payload: Arc<[u8]>,
+}
+
 struct Inner {
     dir: PathBuf,
     segments: BTreeMap<u64, Segment>,
     index: BTreeMap<u64, Loc>,
+    pending: BTreeMap<u64, Pending>,
+    seq: u64,
     last_purged: Option<LogId<NodeId>>,
     vote: Option<Vote<NodeId>>,
     committed: Option<LogId<NodeId>>,
-    /// When `committed.json` was last written.
+    /// When `committed.json` was last queued.
     committed_saved: Option<std::time::Instant>,
 }
 
-struct FlushJob {
-    files: Vec<Arc<File>>,
-    callback: LogFlushed<TypeConfig>,
+enum Done {
+    Raft(LogFlushed<TypeConfig>),
+    #[cfg(test)]
+    Test(mpsc::Sender<io::Result<()>>),
+}
+
+impl Done {
+    fn complete(self, result: io::Result<()>) {
+        match self {
+            Done::Raft(cb) => cb.log_io_completed(result),
+            #[cfg(test)]
+            Done::Test(tx) => {
+                let _ = tx.send(result);
+            }
+        }
+    }
+}
+
+struct Record {
+    segment: u64,
+    offset: u64,
+    bytes: Vec<u8>,
+    index: u64,
+    seq: u64,
+}
+
+/// The disk work, done in order by the flusher thread: the Raft core never
+/// waits on a write, an fsync or an unlink (with the disk busy unpacking
+/// image layers they can take seconds, and a Raft core stuck that long
+/// misses heartbeats and votes).
+enum Job {
+    Write { records: Vec<Record>, done: Done },
+    Truncate { segment: u64, offset: u64, remove: Vec<PathBuf> },
+    Purge { purged: LogId<NodeId>, remove: Vec<PathBuf> },
+    Committed(Option<LogId<NodeId>>),
 }
 
 /// The log storage handed to openraft.
 pub struct LogStore {
     inner: Arc<Mutex<Inner>>,
-    flusher: mpsc::Sender<FlushJob>,
+    flusher: mpsc::Sender<Job>,
 }
 
 /// A reader sharing the log (replication tasks read concurrently).
@@ -184,106 +227,219 @@ impl LogStore {
                 file.sync_all()?;
                 broken = true;
             }
-            segments.insert(first, Segment { path, file: Arc::new(file), len: pos as u64 });
+            segments.insert(first, Segment { path, file: Some(Arc::new(file)), len: pos as u64 });
         }
         if let Some(purged) = last_purged {
             index.retain(|i, _| *i > purged.index);
         }
-        let inner = Arc::new(Mutex::new(Inner { dir: dir.to_path_buf(), segments, index, last_purged, vote, committed, committed_saved: None }));
-        let (tx, rx) = mpsc::channel::<FlushJob>();
-        std::thread::Builder::new().name("raft-log-flush".into()).spawn(move || flusher(rx))?;
+        let inner = Arc::new(Mutex::new(Inner {
+            dir: dir.to_path_buf(),
+            segments,
+            index,
+            pending: BTreeMap::new(),
+            seq: 0,
+            last_purged,
+            vote,
+            committed,
+            committed_saved: None,
+        }));
+        let (tx, rx) = mpsc::channel::<Job>();
+        let shared = inner.clone();
+        std::thread::Builder::new().name("raft-log-flush".into()).spawn(move || flusher(rx, shared))?;
         Ok(Self { inner, flusher: tx })
     }
-}
 
-impl LogStore {
-    /// Write entries (not yet durable); returns the files to sync.
-    fn write_entries(&self, entries: impl IntoIterator<Item = Entry<TypeConfig>>) -> Result<Vec<Arc<File>>, StorageError<NodeId>> {
-        let mut files: Vec<Arc<File>> = Vec::new();
-        let mut inner = self.inner.lock().unwrap();
-        for entry in entries {
-            let payload = serde_json::to_vec(&entry).map_err(log_err)?;
-            let first = inner.active(entry.log_id.index).map_err(log_err)?;
-            let seg = inner.segments.get_mut(&first).unwrap();
-            let mut record = Vec::with_capacity(HEADER + payload.len());
-            record.extend_from_slice(&(payload.len() as u32).to_le_bytes());
-            record.extend_from_slice(&crc32(&payload).to_le_bytes());
-            record.extend_from_slice(&payload);
-            seg.file.write_all_at(&record, seg.len).map_err(log_err)?;
-            let loc = Loc { segment: first, offset: seg.len, len: payload.len() as u32, log_id: entry.log_id };
-            seg.len += record.len() as u64;
-            if !files.iter().any(|f| Arc::ptr_eq(f, &seg.file)) {
-                files.push(seg.file.clone());
+    /// Lay out `entries` in the log (in memory) and queue their write.
+    fn queue_entries(&self, entries: impl IntoIterator<Item = Entry<TypeConfig>>, done: Done) -> Result<(), StorageError<NodeId>> {
+        let mut records = Vec::new();
+        {
+            let mut inner = self.inner.lock().unwrap();
+            for entry in entries {
+                let payload = serde_json::to_vec(&entry).map_err(log_err)?;
+                let first = inner.active(entry.log_id.index);
+                let seg = inner.segments.get_mut(&first).unwrap();
+                let mut bytes = Vec::with_capacity(HEADER + payload.len());
+                bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+                bytes.extend_from_slice(&crc32(&payload).to_le_bytes());
+                bytes.extend_from_slice(&payload);
+                let loc = Loc { segment: first, offset: seg.len, len: payload.len() as u32, log_id: entry.log_id };
+                seg.len += bytes.len() as u64;
+                inner.seq += 1;
+                let seq = inner.seq;
+                inner.index.insert(entry.log_id.index, loc);
+                inner.pending.insert(entry.log_id.index, Pending { seq, payload: payload.into() });
+                records.push(Record { segment: first, offset: loc.offset, bytes, index: entry.log_id.index, seq });
             }
-            inner.index.insert(entry.log_id.index, loc);
         }
-        Ok(files)
+        self.send(Job::Write { records, done })
+    }
+
+    fn send(&self, job: Job) -> Result<(), StorageError<NodeId>> {
+        self.flusher.send(job).map_err(|_| log_err(io::Error::other("raft log flusher stopped")))
     }
 }
 
-/// Make appends durable, as many at a time as have queued up.
-fn flusher(rx: mpsc::Receiver<FlushJob>) {
+/// The file of `segment`, opened (created) on first use.
+fn segment_file(inner: &Arc<Mutex<Inner>>, segment: u64) -> io::Result<Option<Arc<File>>> {
+    let (path, existing) = {
+        let guard = inner.lock().unwrap();
+        match guard.segments.get(&segment) {
+            Some(seg) => (seg.path.clone(), seg.file.clone()),
+            // Truncated or purged away since: nothing to write.
+            None => return Ok(None),
+        }
+    };
+    if let Some(file) = existing {
+        return Ok(Some(file));
+    }
+    let file = Arc::new(OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path)?);
+    if let Some(dir) = path.parent() {
+        File::open(dir)?.sync_all()?;
+    }
+    let mut guard = inner.lock().unwrap();
+    match guard.segments.get_mut(&segment) {
+        Some(seg) => {
+            seg.file = Some(file.clone());
+            Ok(Some(file))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Do the disk work in order, syncing every write that queued up together
+/// with one `fdatasync` per file (group commit) before acknowledging them.
+fn flusher(rx: mpsc::Receiver<Job>, inner: Arc<Mutex<Inner>>) {
     while let Ok(first) = rx.recv() {
         let mut jobs = vec![first];
         while let Ok(more) = rx.try_recv() {
             jobs.push(more);
         }
-        let mut files: Vec<Arc<File>> = Vec::new();
-        for job in &jobs {
-            for f in &job.files {
-                if !files.iter().any(|x| Arc::ptr_eq(x, f)) {
-                    files.push(f.clone());
+        let mut touched: Vec<Arc<File>> = Vec::new();
+        let mut written: Vec<(u64, u64)> = Vec::new();
+        let mut waiting: Vec<Done> = Vec::new();
+        let mut result: io::Result<()> = Ok(());
+        for job in jobs {
+            match job {
+                Job::Write { records, done } => {
+                    if result.is_ok() {
+                        for r in &records {
+                            let write = segment_file(&inner, r.segment).and_then(|f| match f {
+                                Some(f) => {
+                                    f.write_all_at(&r.bytes, r.offset)?;
+                                    if !touched.iter().any(|t| Arc::ptr_eq(t, &f)) {
+                                        touched.push(f);
+                                    }
+                                    Ok(())
+                                }
+                                None => Ok(()),
+                            });
+                            if let Err(e) = write {
+                                result = Err(e);
+                                break;
+                            }
+                            written.push((r.index, r.seq));
+                        }
+                    }
+                    waiting.push(done);
+                }
+                Job::Truncate { segment, offset, remove } => {
+                    if let Ok(Some(f)) = segment_file(&inner, segment) {
+                        if let Err(e) = f.set_len(offset).and_then(|_| f.sync_all()) {
+                            result = Err(e);
+                        }
+                    }
+                    for path in remove {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+                Job::Purge { purged, remove } => {
+                    let dir = inner.lock().unwrap().dir.clone();
+                    if let Err(e) = write_json_atomic(&dir.join("purged.json"), &purged, true) {
+                        eprintln!("apiserver: raft log: saving the purge point: {e}");
+                    } else {
+                        for path in remove {
+                            let _ = std::fs::remove_file(path);
+                        }
+                    }
+                }
+                Job::Committed(committed) => {
+                    let dir = inner.lock().unwrap().dir.clone();
+                    let _ = write_json_atomic(&dir.join("committed.json"), &committed, false);
                 }
             }
         }
-        let mut result: io::Result<()> = Ok(());
-        for f in &files {
-            if let Err(e) = f.sync_data() {
-                result = Err(e);
-                break;
+        if result.is_ok() {
+            for f in &touched {
+                if let Err(e) = f.sync_data() {
+                    result = Err(e);
+                    break;
+                }
             }
         }
-        for job in jobs {
+        if result.is_ok() {
+            let mut guard = inner.lock().unwrap();
+            for (index, seq) in written {
+                if guard.pending.get(&index).is_some_and(|p| p.seq == seq) {
+                    guard.pending.remove(&index);
+                }
+            }
+        }
+        for done in waiting {
             let r = match &result {
                 Ok(()) => Ok(()),
                 Err(e) => Err(io::Error::new(e.kind(), e.to_string())),
             };
-            job.callback.log_io_completed(r);
+            done.complete(r);
         }
     }
 }
 
+/// Where to read an entry: still in memory, or in its segment file.
+enum Source {
+    Memory(Arc<[u8]>, LogId<NodeId>),
+    File(Option<Arc<File>>, Loc),
+}
+
 impl Inner {
-    fn read_range(&self, start: Bound<u64>, end: Bound<u64>) -> Vec<(Arc<File>, Loc)> {
+    fn read_range(&self, start: Bound<u64>, end: Bound<u64>) -> Vec<Source> {
         self.index
             .range((start, end))
-            .map(|(_, loc)| (self.segments[&loc.segment].file.clone(), *loc))
+            .map(|(i, loc)| match self.pending.get(i) {
+                Some(p) => Source::Memory(p.payload.clone(), loc.log_id),
+                None => Source::File(self.segments.get(&loc.segment).and_then(|s| s.file.clone()), *loc),
+            })
             .collect()
     }
 
-    /// The segment to append to, rotated when full.
-    fn active(&mut self, next_index: u64) -> io::Result<u64> {
+    /// The segment to append to, a new one (opened by the flusher) when
+    /// the last is full.
+    fn active(&mut self, next_index: u64) -> u64 {
         let rotate = match self.segments.iter().next_back() {
             None => true,
             Some((_, seg)) => seg.len >= SEGMENT_BYTES,
         };
         if rotate {
             let path = segment_path(&self.dir, next_index);
-            let file = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path)?;
-            File::open(&self.dir)?.sync_all()?;
-            self.segments.insert(next_index, Segment { path, file: Arc::new(file), len: 0 });
+            self.segments.insert(next_index, Segment { path, file: None, len: 0 });
         }
-        Ok(*self.segments.keys().next_back().unwrap())
+        *self.segments.keys().next_back().unwrap()
     }
 }
 
-fn read_entries(locs: Vec<(Arc<File>, Loc)>) -> Result<Vec<Entry<TypeConfig>>, StorageError<NodeId>> {
-    let mut out = Vec::with_capacity(locs.len());
-    for (file, loc) in locs {
-        let mut buf = vec![0u8; loc.len as usize];
-        file.read_exact_at(&mut buf, loc.offset + HEADER as u64)
-            .map_err(|e| io_err(ErrorSubject::Log(loc.log_id), ErrorVerb::Read, e))?;
-        let entry = serde_json::from_slice(&buf).map_err(|e| io_err(ErrorSubject::Log(loc.log_id), ErrorVerb::Read, e))?;
+fn read_entries(sources: Vec<Source>) -> Result<Vec<Entry<TypeConfig>>, StorageError<NodeId>> {
+    let mut out = Vec::with_capacity(sources.len());
+    for source in sources {
+        let (bytes, log_id): (std::borrow::Cow<'_, [u8]>, _) = match source {
+            Source::Memory(payload, log_id) => (std::borrow::Cow::Owned(payload.to_vec()), log_id),
+            Source::File(file, loc) => {
+                let file = file.ok_or_else(|| io_err(ErrorSubject::Log(loc.log_id), ErrorVerb::Read, io::Error::other("segment not written")))?;
+                let mut buf = vec![0u8; loc.len as usize];
+                file.read_exact_at(&mut buf, loc.offset + HEADER as u64)
+                    .map_err(|e| io_err(ErrorSubject::Log(loc.log_id), ErrorVerb::Read, e))?;
+                (std::borrow::Cow::Owned(buf), loc.log_id)
+            }
+        };
+        let entry = serde_json::from_slice(&bytes).map_err(|e| io_err(ErrorSubject::Log(log_id), ErrorVerb::Read, e))?;
         out.push(entry);
     }
     Ok(out)
@@ -296,16 +452,16 @@ fn bounds<RB: RangeBounds<u64>>(range: &RB) -> (Bound<u64>, Bound<u64>) {
 impl RaftLogReader<TypeConfig> for LogReader {
     async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + Send>(&mut self, range: RB) -> Result<Vec<Entry<TypeConfig>>, StorageError<NodeId>> {
         let (s, e) = bounds(&range);
-        let locs = self.inner.lock().unwrap().read_range(s, e);
-        read_entries(locs)
+        let sources = self.inner.lock().unwrap().read_range(s, e);
+        read_entries(sources)
     }
 }
 
 impl RaftLogReader<TypeConfig> for LogStore {
     async fn try_get_log_entries<RB: RangeBounds<u64> + Clone + Debug + Send>(&mut self, range: RB) -> Result<Vec<Entry<TypeConfig>>, StorageError<NodeId>> {
         let (s, e) = bounds(&range);
-        let locs = self.inner.lock().unwrap().read_range(s, e);
-        read_entries(locs)
+        let sources = self.inner.lock().unwrap().read_range(s, e);
+        read_entries(sources)
     }
 }
 
@@ -323,9 +479,14 @@ impl RaftLogStorage<TypeConfig> for LogStore {
     }
 
     async fn save_vote(&mut self, vote: &Vote<NodeId>) -> Result<(), StorageError<NodeId>> {
-        let mut inner = self.inner.lock().unwrap();
-        write_json_atomic(&inner.dir.join("vote.json"), vote, true).map_err(|e| io_err(ErrorSubject::Vote, ErrorVerb::Write, e))?;
-        inner.vote = Some(*vote);
+        // Durable before Raft answers, but off the Raft threads.
+        let path = self.inner.lock().unwrap().dir.join("vote.json");
+        let v = *vote;
+        tokio::task::spawn_blocking(move || write_json_atomic(&path, &v, true))
+            .await
+            .map_err(|e| io_err(ErrorSubject::Vote, ErrorVerb::Write, io::Error::other(e.to_string())))?
+            .map_err(|e| io_err(ErrorSubject::Vote, ErrorVerb::Write, e))?;
+        self.inner.lock().unwrap().vote = Some(v);
         Ok(())
     }
 
@@ -334,13 +495,19 @@ impl RaftLogStorage<TypeConfig> for LogStore {
     }
 
     async fn save_committed(&mut self, committed: Option<LogId<NodeId>>) -> Result<(), StorageError<NodeId>> {
-        let mut inner = self.inner.lock().unwrap();
-        inner.committed = committed;
-        // Best effort, once a second: on restart it only saves waiting for
-        // the leader (a stale value is a smaller one, which is safe).
-        if inner.committed_saved.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1)) {
-            inner.committed_saved = Some(std::time::Instant::now());
-            let _ = write_json_atomic(&inner.dir.join("committed.json"), &committed, false);
+        let queue = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.committed = committed;
+            // Best effort, once a second: on restart it only saves waiting for
+            // the leader (a stale value is a smaller one, which is safe).
+            let due = inner.committed_saved.is_none_or(|t| t.elapsed() >= std::time::Duration::from_secs(1));
+            if due {
+                inner.committed_saved = Some(std::time::Instant::now());
+            }
+            due
+        };
+        if queue {
+            self.send(Job::Committed(committed))?;
         }
         Ok(())
     }
@@ -354,46 +521,43 @@ impl RaftLogStorage<TypeConfig> for LogStore {
         I: IntoIterator<Item = Entry<TypeConfig>> + Send,
         I::IntoIter: Send,
     {
-        let files = self.write_entries(entries)?;
-        self.flusher
-            .send(FlushJob { files, callback })
-            .map_err(|_| log_err(io::Error::other("raft log flusher stopped")))?;
-        Ok(())
+        self.queue_entries(entries, Done::Raft(callback))
     }
 
     async fn truncate(&mut self, log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
-        let mut inner = self.inner.lock().unwrap();
-        let Some(first_loc) = inner.index.range(log_id.index..).next().map(|(_, l)| *l) else { return Ok(()) };
-        inner.index.retain(|i, _| *i < log_id.index);
-        let doomed: Vec<u64> = inner.segments.range(first_loc.segment + 1..).map(|(k, _)| *k).collect();
-        for first in doomed {
-            if let Some(seg) = inner.segments.remove(&first) {
-                let _ = std::fs::remove_file(&seg.path);
-            }
-        }
-        let seg = inner.segments.get_mut(&first_loc.segment).unwrap();
-        seg.file.set_len(first_loc.offset).map_err(log_err)?;
-        seg.file.sync_all().map_err(log_err)?;
-        seg.len = first_loc.offset;
-        Ok(())
+        let job = {
+            let mut inner = self.inner.lock().unwrap();
+            let Some(first_loc) = inner.index.range(log_id.index..).next().map(|(_, l)| *l) else { return Ok(()) };
+            inner.index.retain(|i, _| *i < log_id.index);
+            inner.pending.retain(|i, _| *i < log_id.index);
+            let doomed: Vec<u64> = inner.segments.range(first_loc.segment + 1..).map(|(k, _)| *k).collect();
+            let remove = doomed.into_iter().filter_map(|first| inner.segments.remove(&first)).map(|seg| seg.path).collect();
+            inner.segments.get_mut(&first_loc.segment).unwrap().len = first_loc.offset;
+            Job::Truncate { segment: first_loc.segment, offset: first_loc.offset, remove }
+        };
+        self.send(job)
     }
 
     async fn purge(&mut self, log_id: LogId<NodeId>) -> Result<(), StorageError<NodeId>> {
-        let mut inner = self.inner.lock().unwrap();
-        write_json_atomic(&inner.dir.join("purged.json"), &log_id, true).map_err(log_err)?;
-        inner.last_purged = Some(log_id);
-        inner.index.retain(|i, _| *i > log_id.index);
-        // A segment goes once the next one starts at or before the first
-        // entry still needed; the active (last) one always stays.
-        let firsts: Vec<u64> = inner.segments.keys().copied().collect();
-        for pair in firsts.windows(2) {
-            if pair[1] <= log_id.index + 1 {
-                if let Some(seg) = inner.segments.remove(&pair[0]) {
-                    let _ = std::fs::remove_file(&seg.path);
+        let job = {
+            let mut inner = self.inner.lock().unwrap();
+            inner.last_purged = Some(log_id);
+            inner.index.retain(|i, _| *i > log_id.index);
+            inner.pending.retain(|i, _| *i > log_id.index);
+            // A segment goes once the next one starts at or before the first
+            // entry still needed; the active (last) one always stays.
+            let firsts: Vec<u64> = inner.segments.keys().copied().collect();
+            let mut remove = Vec::new();
+            for pair in firsts.windows(2) {
+                if pair[1] <= log_id.index + 1 {
+                    if let Some(seg) = inner.segments.remove(&pair[0]) {
+                        remove.push(seg.path);
+                    }
                 }
             }
-        }
-        Ok(())
+            Job::Purge { purged: log_id, remove }
+        };
+        self.send(job)
     }
 }
 
@@ -407,9 +571,16 @@ mod tests {
     }
 
     async fn append(log: &mut LogStore, entries: Vec<Entry<TypeConfig>>) {
-        for f in log.write_entries(entries).unwrap() {
-            f.sync_data().unwrap();
-        }
+        let (tx, rx) = mpsc::channel();
+        log.queue_entries(entries, Done::Test(tx)).unwrap();
+        rx.recv().unwrap().unwrap();
+    }
+
+    /// Wait until the flusher has done everything queued so far.
+    fn settle(log: &LogStore) {
+        let (tx, rx) = mpsc::channel();
+        log.send(Job::Write { records: Vec::new(), done: Done::Test(tx) }).unwrap();
+        rx.recv().unwrap().unwrap();
     }
 
     #[test]
@@ -426,6 +597,7 @@ mod tests {
             log.truncate(LogId::new(CommittedLeaderId::new(1, 1), 8)).await.unwrap();
             append(&mut log, (8..=12).map(|i| entry(2, i)).collect()).await;
             log.save_vote(&Vote::new(2, 1)).await.unwrap();
+            settle(&log);
             let got = log.try_get_log_entries(5..=9).await.unwrap();
             assert_eq!(got.iter().map(|e| (e.log_id.leader_id.term, e.log_id.index)).collect::<Vec<_>>(), vec![(1, 5), (1, 6), (1, 7), (2, 8), (2, 9)]);
         }
@@ -435,11 +607,26 @@ mod tests {
         assert_eq!(log.read_vote().await.unwrap(), Some(Vote::new(2, 1)));
         log.purge(LogId::new(CommittedLeaderId::new(1, 1), 6)).await.unwrap();
         assert_eq!(log.try_get_log_entries(..).await.unwrap().first().map(|e| e.log_id.index), Some(7));
+        settle(&log);
         drop(log);
         let mut log = LogStore::open(dir.path()).unwrap();
         let state = log.get_log_state().await.unwrap();
         assert_eq!(state.last_purged_log_id.map(|l| l.index), Some(6));
         assert_eq!(log.try_get_log_entries(..).await.unwrap().len(), 6);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn queued_entries_read_from_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = LogStore::open(dir.path()).unwrap();
+        let (tx, rx) = mpsc::channel();
+        log.queue_entries((1..=5).map(|i| entry(1, i)), Done::Test(tx)).unwrap();
+        // Before or after the flusher got to them, they read the same.
+        let mut reader = LogReader { inner: log.inner.clone() };
+        assert_eq!(reader.try_get_log_entries(..).await.unwrap().len(), 5);
+        rx.recv().unwrap().unwrap();
+        assert!(log.inner.lock().unwrap().pending.is_empty());
+        assert_eq!(reader.try_get_log_entries(2..4).await.unwrap().len(), 2);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -465,16 +652,13 @@ mod tests {
     async fn segments_rotate_and_purge_whole_files() {
         let dir = tempfile::tempdir().unwrap();
         let mut log = LogStore::open(dir.path()).unwrap();
-        {
-            let mut inner = log.inner.lock().unwrap();
-            inner.active(1).unwrap();
-            // Pretend the first segment is full so the next append rotates.
-        }
         append(&mut log, vec![entry(1, 1)]).await;
+        // Pretend the first segment is full so the next append rotates.
         log.inner.lock().unwrap().segments.get_mut(&1).unwrap().len = SEGMENT_BYTES;
         append(&mut log, vec![entry(1, 2), entry(1, 3)]).await;
         assert_eq!(log.inner.lock().unwrap().segments.len(), 2);
         log.purge(LogId::new(CommittedLeaderId::new(1, 1), 1)).await.unwrap();
+        settle(&log);
         assert_eq!(log.inner.lock().unwrap().segments.keys().copied().collect::<Vec<_>>(), vec![2]);
         assert!(!segment_path(dir.path(), 1).exists());
     }
