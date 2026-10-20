@@ -343,7 +343,7 @@ kube-prometheus-stack + Loki"):
 | series kept | 69.7 k | 342 (a curated set, see above) |
 | metrics on disk | 2.0–4.1 GB for 10 days | ≈ 10 MB for 90 days (1.6 bytes/sample) |
 | logs on disk beyond the CRI files | ≈ 52 MiB/day | 0 |
-| queries | < 2 ms metrics, 15–50 ms logs | < 5 ms metrics, ≈ 30 ms logs |
+| queries | < 2 ms metrics, 15–50 ms logs | < 5 ms metrics, 11–27 ms logs |
 
 The store itself, on a simulated 3-node cluster with 240 containers (5,560
 series, 6 hours of 10 s samples; `cargo test --release --lib

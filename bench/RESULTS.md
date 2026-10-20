@@ -588,14 +588,18 @@ it. Raw data: [`results/2026-10-20-obs-x86-kvm/`](results/2026-10-20-obs-x86-kvm
 | Logs on disk, beyond the CRI files both keep (18–19 MiB/h here) | Loki chunks +2.2 MiB/h (+ its WAL) → ≈ 52 MiB/day, 365 MiB at 7 days | **0** (search reads the CRI files; removed containers' logs kept up to 512 MiB/node) |
 | Metric query, instant (7 dashboard queries) | 0.3–0.5 ms | 0.2–0.4 ms |
 | Metric query, 1 h range at 15 s | 0.4–1.5 ms | 0.8–4.3 ms |
-| Log query: ERRORs of `app=loggen`, last hour, 1,000 lines | 49 ms (round 2: 29) | 33 ms |
-| Log query: "timeout" in every pod, last 15 min, 1,000 lines | 20 ms (round 2: 15) | 32 ms (before bisecting to the time range; see below) |
+| Log query: ERRORs of `app=loggen`, last hour, 1,000 lines | 49 ms (round 2: 29) | 33 ms; **27 ms** since `d1c22ac`³ |
+| Log query: "timeout" in every pod, last 15 min, 1,000 lines | 20 ms (round 2: 15) | 32 ms; **11 ms** since `d1c22ac`³ |
 | Restarts, OOM kills | 0, none | 0, none |
 
 ¹ A 60 min window does not reach Prometheus's first block (it cuts one when
 its head spans 3 h); its head chunks on disk grew only 131 KiB in round 2
 while the WAL grew 22.6 MiB in 30 min, so the compressed size is estimated
 from the samples ingested and the 1–2 bytes per sample Prometheus documents.
+³ After the run, the agent bisects each log file to the first line of the
+query's time range (records are in time order) instead of reading it
+whole; re-measured on a fresh guest with the same workload, queried at the
+same uptime (91 min): [`obs-litek8s.queries-d1c22ac.json`](results/2026-10-20-obs-x86-kvm/obs-litek8s.queries-d1c22ac.json).
 ² Measured: the raw tier grew 192 KiB in the hour (1.60 bytes/sample); the
 1-minute tier 45 KiB for its first downsampled hours (≈1.1 bytes/point).
 Steady state with the default tiers: 6 h raw ≈ 1.2 MB, 7 d at 1 min ≈ 3.8 MB,
@@ -633,12 +637,6 @@ should be read that way:
 - Disk: Prometheus at its default 10 days is gigabytes because of the
   series count; litek8s downsamples (1 min after 6 h, 10 min after 7 days),
   so old data answers at a coarser resolution.
-
-**Log search, after the run.** The 15-minute search read each container's
-whole log file (up to 10 MiB + the rotated one) to find the last 15 minutes.
-Since `d1c22ac` the agent bisects each file to the first line in range
-(records are in time order); re-measured on the same workload at the same
-uptime: see the follow-up note below.
 
 **Rerun:** `LITEK8S_BIN=<linux binary> bench/run.sh obs-k3s obs-litek8s`
 (`OBS_WARMUP_SECS`, `OBS_WINDOW_SECS`, `OBS_QUERY_RUNS`, `OBS_VM_MEM`), then
