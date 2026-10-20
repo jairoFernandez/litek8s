@@ -16,7 +16,12 @@ def load(name):
     if not os.path.exists(p):
         return None
     with open(p) as f:
-        return json.load(f)
+        text = f.read()
+    try:
+        return json.loads(text)
+    except ValueError:
+        # Several JSON documents (a command's output, then the measurement): the last.
+        return json.loads(text.strip().splitlines()[-1])
 
 
 def mib(kib):

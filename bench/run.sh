@@ -764,7 +764,7 @@ phase_obs() {
       helm install kube-prometheus-stack kube-prometheus-stack-*.tgz -n monitoring -f kps-values.yaml --wait --timeout 15m >/dev/null
       helm install loki loki-*.tgz -n monitoring -f loki-values.yaml --wait --timeout 15m >/dev/null
       helm install alloy alloy-*.tgz -n monitoring -f alloy-values.yaml --wait --timeout 10m >/dev/null; '"$wait_pods" >"$OUT/$tag.obs.pods.txt"
-    echo "{"install_secs": $(( $(date +%s) - t0 ))}" | save "$tag.install.json"
+    printf '{"install_secs": %s}\n' "$(( $(date +%s) - t0 ))" | save "$tag.install.json"
   else
     log "$tag: restarting the API server with observability on (pods keep running)"
     local t0; t0=$(date +%s)
@@ -772,10 +772,10 @@ phase_obs() {
       systemd-run --unit=litek8s --quiet /usr/local/bin/litek8s apiserver --listen 127.0.0.1:6443         --data-dir /var/lib/litek8s/apiserver --kubeconfig /root/litek8s.kubeconfig --runtime crun
       for i in $(seq 1 100); do curl -sf '"$KUBE_URL"'/readyz >/dev/null && break; sleep 0.1; done'
     rroot "$vm" "$K $wait_pods" >"$OUT/$tag.obs.pods.txt"
-    echo "{"install_secs": $(( $(date +%s) - t0 ))}" | save "$tag.install.json"
+    printf '{"install_secs": %s}\n' "$(( $(date +%s) - t0 ))" | save "$tag.install.json"
   fi
   local disk2; disk2="$(disk_used_kib "$vm")"
-  echo "{"base_kib": $disk0, "with_workload_kib": $disk1, "with_observability_kib": $disk2}" | save "$tag.disk.json"
+  printf '{"base_kib": %s, "with_workload_kib": %s, "with_observability_kib": %s}\n' "$disk0" "$disk1" "$disk2" | save "$tag.disk.json"
 
   log "$tag: warm-up ${OBS_WARMUP_SECS}s"
   sleep "$OBS_WARMUP_SECS"

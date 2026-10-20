@@ -63,9 +63,11 @@ def storage(system):
     prom = glob.glob("/var/lib/kubelet/pods/*/volumes/kubernetes.io~empty-dir/prometheus-kube-prometheus-stack-prometheus-db")
     parts = {}
     for p in prom:
+        # The chart's volume holds the database at its root (or in prometheus-db/).
+        root = f"{p}/prometheus-db" if os.path.isdir(f"{p}/prometheus-db") else p
         for sub in ("wal", "chunks_head"):
-            parts[sub] = du([f"{p}/prometheus-db/{sub}"])
-        parts["blocks"] = du(glob.glob(f"{p}/prometheus-db/01*"))
+            parts[sub] = du([f"{root}/{sub}"])
+        parts["blocks"] = du(glob.glob(f"{root}/01*"))
     loki = glob.glob("/var/lib/rancher/k3s/storage/*loki*")
     loki_parts = {}
     for p in loki:
@@ -101,6 +103,13 @@ def tsdb(system):
         "samples_appended": prom_query(base, "sum(prometheus_tsdb_head_samples_appended_total)"),
         "targets_up": prom_query(base, "count(up == 1)"),
         "targets": prom_query(base, "count(up)"),
+        # Prometheus's own view of its storage: compressed head chunks on
+        # disk, the WAL, persisted blocks.
+        "head_chunks_bytes": prom_query(base, "prometheus_tsdb_head_chunks_storage_size_bytes"),
+        "wal_bytes": prom_query(base, "prometheus_tsdb_wal_storage_size_bytes"),
+        "blocks_bytes": prom_query(base, "prometheus_tsdb_storage_blocks_bytes"),
+        "head_chunks": prom_query(base, "prometheus_tsdb_head_chunks"),
+        "series_by_job": {r["metric"].get("job", ""): float(r["value"][1]) for r in json.loads(get(f"{base}/api/v1/query?" + urllib.parse.urlencode({"query": "count by (job) ({__name__=~\".+\"})"}))[1])["data"]["result"]},
     }
 
 

@@ -1,0 +1,244 @@
+{
+ "buckets": {
+  "os/other": {
+   "rss_kib": 170268,
+   "pss_kib": 81403,
+   "procs": 18,
+   "comms": {
+    "systemd": 2,
+    "systemd-journal": 1,
+    "multipathd": 1,
+    "systemd-udevd": 1,
+    "systemd-resolve": 1,
+    "systemd-timesyn": 1,
+    "systemd-network": 1,
+    "cron": 1,
+    "dbus-daemon": 1,
+    "polkitd": 1,
+    "systemd-logind": 1,
+    "udisksd": 1,
+    "rsyslogd": 1,
+    "ModemManager": 1,
+    "agetty": 2,
+    "(sd-pam)": 1
+   }
+  },
+  "sshd": {
+   "rss_kib": 25904,
+   "pss_kib": 7927,
+   "procs": 3,
+   "comms": {
+    "sshd": 3
+   }
+  },
+  "k3s-server": {
+   "rss_kib": 753948,
+   "pss_kib": 691988,
+   "procs": 1,
+   "comms": {
+    "k3s-server": 1
+   }
+  },
+  "containerd": {
+   "rss_kib": 186688,
+   "pss_kib": 124728,
+   "procs": 1,
+   "comms": {
+    "containerd": 1
+   }
+  },
+  "containerd-shim": {
+   "rss_kib": 255372,
+   "pss_kib": 90576,
+   "procs": 14,
+   "comms": {
+    "containerd-shim": 14
+   }
+  },
+  "pod sandbox (pause)": {
+   "rss_kib": 10512,
+   "pss_kib": 1244,
+   "procs": 14,
+   "comms": {
+    "pause": 14
+   }
+  },
+  "k8s addon pods": {
+   "rss_kib": 112484,
+   "pss_kib": 109976,
+   "procs": 4,
+   "comms": {
+    "sh": 2,
+    "local-path-prov": 1,
+    "coredns": 1
+   }
+  },
+  "workload": {
+   "rss_kib": 36092,
+   "pss_kib": 12988,
+   "procs": 9,
+   "comms": {
+    "nginx": 9
+   }
+  },
+  "observability": {
+   "rss_kib": 1108712,
+   "pss_kib": 1082772,
+   "procs": 11,
+   "comms": {
+    "node_exporter": 1,
+    "operator": 1,
+    "kube-state-metr": 1,
+    "alertmanager": 1,
+    "prometheus-conf": 3,
+    "prometheus": 1,
+    "loki": 1,
+    "python": 1,
+    "alloy": 1
+   }
+  }
+ },
+ "pods": {
+  "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod71c69eb6_8ba1_4c9e_a8f3_2690f99d07ce.slice": {
+   "kind": "k8s addon pods",
+   "pss_kib": 1470,
+   "comms": [
+    "sh"
+   ]
+  },
+  "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-podaeca77f1_7d37_4f5c_92af_82f3b54c0c42.slice": {
+   "kind": "k8s addon pods",
+   "pss_kib": 1426,
+   "comms": [
+    "sh"
+   ]
+  },
+  "/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod12cf2e1b_20e5_4572_8aff_6e794765f5bc.slice": {
+   "kind": "k8s addon pods",
+   "pss_kib": 41872,
+   "comms": [
+    "local-path-prov"
+   ]
+  },
+  "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-podfafdfa82_f306_4f9b_b635_98c2cdad8a0f.slice": {
+   "kind": "workload",
+   "pss_kib": 4304,
+   "comms": [
+    "nginx"
+   ]
+  },
+  "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod1c09d4cb_6f43_418d_89b4_48dbeb143bec.slice": {
+   "kind": "workload",
+   "pss_kib": 4293,
+   "comms": [
+    "nginx"
+   ]
+  },
+  "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod60836598_1649_4a2a_b3da_eba9486b3b77.slice": {
+   "kind": "workload",
+   "pss_kib": 4391,
+   "comms": [
+    "nginx"
+   ]
+  },
+  "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-podf0f263c3_083c_4ea9_8990_8e4191ce3d95.slice": {
+   "kind": "k8s addon pods",
+   "pss_kib": 65208,
+   "comms": [
+    "coredns"
+   ]
+  },
+  "/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-podc38b5af3_d3bc_48a2_a52f_08f0ca644134.slice": {
+   "kind": "observability",
+   "pss_kib": 23684,
+   "comms": [
+    "node_exporter"
+   ]
+  },
+  "/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod8e34eb71_f86b_4fe8_ad07_8b71d19498e0.slice": {
+   "kind": "observability",
+   "pss_kib": 71924,
+   "comms": [
+    "operator"
+   ]
+  },
+  "/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod5467e2ae_30eb_49e6_b278_033daec98882.slice": {
+   "kind": "observability",
+   "pss_kib": 57388,
+   "comms": [
+    "kube-state-metr"
+   ]
+  },
+  "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod566aa3bd_f6ec_4c35_891b_1e67861a92b1.slice": {
+   "kind": "observability",
+   "pss_kib": 61928,
+   "comms": [
+    "alertmanager",
+    "prometheus-conf"
+   ]
+  },
+  "/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pode1d5ee48_0cbb_4c7b_bea4_4daeb79b4e7b.slice": {
+   "kind": "observability",
+   "pss_kib": 359440,
+   "comms": [
+    "prometheus",
+    "prometheus-conf"
+   ]
+  },
+  "/kubepods.slice/kubepods-besteffort.slice/kubepods-besteffort-pod275da02f_04ce_47ad_b9f1_c691c00f6996.slice": {
+   "kind": "observability",
+   "pss_kib": 240844,
+   "comms": [
+    "loki",
+    "python"
+   ]
+  },
+  "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod687d118b_1d5c_4595_a69f_5dc435a58ba5.slice": {
+   "kind": "observability",
+   "pss_kib": 267564,
+   "comms": [
+    "alloy",
+    "prometheus-conf"
+   ]
+  }
+ },
+ "categories": {
+  "os/other": {
+   "rss_kib": 170268,
+   "pss_kib": 81403
+  },
+  "node-agent": {
+   "rss_kib": 25904,
+   "pss_kib": 7927
+  },
+  "control-plane": {
+   "rss_kib": 753948,
+   "pss_kib": 691988
+  },
+  "runtime": {
+   "rss_kib": 452572,
+   "pss_kib": 216548
+  },
+  "addons": {
+   "rss_kib": 112484,
+   "pss_kib": 109976
+  },
+  "workload": {
+   "rss_kib": 36092,
+   "pss_kib": 12988
+  },
+  "observability": {
+   "rss_kib": 1108712,
+   "pss_kib": 1082772
+  }
+ },
+ "system": {
+  "mem_total_kib": 2977660,
+  "mem_available_kib": 1196812,
+  "mem_used_kib": 1780848
+ },
+ "cgroup_memory_current_kib": {
+  "system.slice/k3s.service": 1800220,
+  "kubepods.slice": 706188
+ }
+}
