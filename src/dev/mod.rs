@@ -725,7 +725,8 @@ pub async fn resources(cluster: &str) -> (Option<memory::Breakdown>, Option<cpu:
     let stats = env::cell_stats(&base.join("sandbox"));
     let mem = memory::cgroup(&base).map(|(used, cache)| {
         let (shown, others) = split(&stats);
-        memory::sandbox_breakdown(used, cache, cluster, shown, &others)
+        let limit = std::fs::read_to_string(base.join("memory.max")).ok().and_then(|v| v.trim().parse::<u64>().ok());
+        memory::sandbox_breakdown(used, cache, cluster, shown, &others, limit, memory::meminfo().as_ref())
     });
     let (cshown, others_usec, n) = cpu_split(&stats);
     let cpu = cpu::usage_usec(&base).map(|total| cpu::Sample {

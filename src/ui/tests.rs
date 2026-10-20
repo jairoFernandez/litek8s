@@ -743,6 +743,54 @@ fn statuses_look_the_same_everywhere() {
     assert_eq!(find(&ctrs, "○"), Some(t.done.fg.unwrap()));
 }
 
+/// The memory meter is what the guest holds against the VM's `--memory`,
+/// colored by how short the guest is: macOS's footprint (4.3 GB here, more
+/// than the 4 GiB VM because it keeps pages the guest freed) neither fills
+/// it nor turns it red; a guest with little available does.
+#[test]
+fn memory_meter_is_in_use_against_the_limit_not_the_footprint() {
+    use super::theme::{Bg, Depth, Preset};
+    use ratatui::style::Color;
+    let mut app = sample_app();
+    app.kube.theme = theme(Preset::Default, Depth::True, false, Some(Bg::Dark));
+    let t = *app.theme();
+    let shown = crate::dev::memory::Usage { litek8s: 40 << 20, containers: 600 << 20, cache: 0 };
+    let roomy = crate::dev::memory::parse_meminfo("MemTotal: 4000000 kB\nMemFree: 2600000 kB\nMemAvailable: 3500000 kB\nCached: 1000000 kB\nSUnreclaim: 40000 kB\n");
+    let mut home = app.home.clone();
+    home.mem_used = Some(4_300_000_000);
+    home.memory = Some(crate::dev::memory::vm_breakdown(4_300_000_000, 4096 << 20, &roomy, 0, None, "dev", shown, &[]));
+    app.apply(Msg::Home(Box::new(home.clone())));
+    let pct_color = |buf: &ratatui::buffer::Buffer| {
+        let row = (0..buf.area.height).find(|y| (0..buf.area.width).map(|x| buf[(x, *y)].symbol()).collect::<String>().contains("VM limit")).unwrap();
+        // The memory meter's percentage: the last one before the text (the
+        // CPU box shares the row on wide terminals).
+        let text: Vec<&str> = (0..buf.area.width).map(|x| buf[(x, row)].symbol()).collect();
+        let at = (0..text.len()).find(|i| text[*i..].concat().starts_with("VM limit")).unwrap();
+        let x = (0..at as u16).rev().find(|x| buf[(*x, row)].symbol() == "%").unwrap();
+        buf[(x, row)].fg
+    };
+    for (w, h) in [(80, 24), (120, 40)] {
+        let s = render(&app, w, h);
+        assert!(s.contains("in use · VM limit 4.0 GiB") && !s.contains("short"), "{s}");
+        assert!(!s.contains("4.3 GB of"), "the footprint is not the meter: {s}");
+        // In use: litek8s, pods and the kernel, well under half.
+        let line = s.lines().find(|l| l.contains("VM limit")).unwrap();
+        assert!(line.contains('▒') && line.contains('█'), "stacked parts, cache and freed apart: {line}");
+        assert_eq!(pct_color(&render_buf(&app, w, h)), t.level(0.0).fg.unwrap(), "green while the guest has memory available");
+    }
+    // The history follows what is in use, not the footprint.
+    let (_, mem) = *app.history.back().unwrap();
+    assert!(mem < 0.5, "{mem}");
+    // A guest with 100 MB available is short: red, and it says so.
+    let tight = crate::dev::memory::parse_meminfo("MemTotal: 4000000 kB\nMemFree: 50000 kB\nMemAvailable: 100000 kB\nCached: 80000 kB\nSUnreclaim: 40000 kB\n");
+    home.memory = Some(crate::dev::memory::vm_breakdown(4_300_000_000, 4096 << 20, &tight, 0, None, "dev", crate::dev::memory::Usage { litek8s: 40 << 20, containers: 3500 << 20, cache: 0 }, &[]));
+    app.apply(Msg::Home(Box::new(home)));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("· short"), "{s}");
+    let red = pct_color(&render_buf(&app, 80, 24));
+    assert!(matches!(red, Color::Rgb(r, g, _) if r > 0xe0 && g < 0x90), "{red:?}");
+}
+
 /// `cargo test --lib ui::tests::print_screens -- --ignored --nocapture`:
 /// every view at 80x24 and 120x40, to look at.
 #[test]

@@ -171,6 +171,29 @@ pub struct Line {
     pub label: String,
     pub bytes: u64,
     pub note: &'static str,
+    /// Which part of the meter it is.
+    pub seg: Seg,
+}
+
+/// The parts of a memory meter, in the order they stack.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Seg {
+    Litek8s,
+    Pods,
+    Others,
+    /// The kernel, the VM's base, the sandbox's own processes.
+    Base,
+    /// Page cache: the kernel drops it when it needs the memory.
+    Cache,
+    /// Freed in the guest, still charged by macOS.
+    Freed,
+}
+
+impl Seg {
+    /// Memory the owner holds (not cache, not freed pages).
+    pub fn in_use(self) -> bool {
+        !matches!(self, Seg::Cache | Seg::Freed)
+    }
 }
 
 /// The Home view's memory breakdown.
@@ -180,10 +203,32 @@ pub struct Breakdown {
     pub total: u64,
     pub what: String,
     pub lines: Vec<Line>,
+    /// What the memory is a share of: the VM's `--memory`, the sandbox's
+    /// limit, the host's or node's RAM; and its name.
+    pub limit: Option<u64>,
+    pub limit_what: &'static str,
+    /// How short of memory the guest, sandbox or node is, 0..1: 1 less
+    /// what it could still get (MemAvailable, and on the Mac what the
+    /// balloon would give back) over its size; for a sandbox with a limit,
+    /// what it holds over the limit. Not the macOS footprint, which also
+    /// counts pages the guest freed long ago.
+    pub pressure: Option<f64>,
 }
 
-fn line(label: impl Into<String>, bytes: u64, note: &'static str) -> Line {
-    Line { label: label.into(), bytes, note }
+impl Breakdown {
+    /// Memory held by its owners: everything but cache and freed pages.
+    pub fn in_use(&self) -> u64 {
+        self.lines.iter().filter(|l| l.seg.in_use()).map(|l| l.bytes).sum()
+    }
+}
+
+fn line(label: impl Into<String>, bytes: u64, note: &'static str, seg: Seg) -> Line {
+    Line { label: label.into(), bytes, note, seg }
+}
+
+/// 1 - available / size, within 0..1.
+fn short(available: u64, size: u64) -> Option<f64> {
+    (size > 0).then(|| 1.0 - (available as f64 / size as f64).min(1.0))
 }
 
 /// The macOS VM: `footprint` is what macOS charges the VM process,
@@ -209,18 +254,18 @@ pub fn vm_breakdown(footprint: u64, vm_bytes: u64, mem: &MemInfo, balloon: u64, 
     // own kernel memory) goes with the fixed cost.
     let attributed = kernel + cache + shown.litek8s + shown.containers + other.litek8s + other.containers;
     kernel += in_guest.saturating_sub(attributed);
-    let mut lines = vec![line(format!("litek8s ({cluster})"), shown.litek8s, "API server, controllers, node agent"), line("pods & containers", shown.containers, "")];
+    let mut lines = vec![line(format!("litek8s ({cluster})"), shown.litek8s, "API server, controllers, node agent", Seg::Litek8s), line("pods & containers", shown.containers, "", Seg::Pods)];
     if !others.is_empty() {
-        lines.push(line(format!("other clusters ({})", others.len()), other.litek8s + other.containers, "litek8s and pods of the rest"));
+        lines.push(line(format!("other clusters ({})", others.len()), other.litek8s + other.containers, "litek8s and pods of the rest", Seg::Others));
     }
-    lines.push(line("Linux kernel + base", kernel, "fixed cost: kernel, page tables"));
-    lines.push(line("cache", cache, "reclaimable"));
+    lines.push(line("Linux kernel + base", kernel, "fixed cost: kernel, page tables", Seg::Base));
+    lines.push(line("cache", cache, "reclaimable", Seg::Cache));
     // Memory the guest touched once and has freed (or handed to the
     // balloon since): the framework keeps charging it until the VM
     // stops; the guest reuses it before it touches more.
     let freed = footprint.saturating_sub(in_guest.max(attributed));
     if freed >= 1 << 20 {
-        lines.push(line("freed, still charged", freed, "macOS keeps it until the VM restarts"));
+        lines.push(line("freed, still charged", freed, "macOS keeps it until the VM restarts", Seg::Freed));
     }
     let gib = |b: u64| format!("{:.1}", b as f64 / (1u64 << 30) as f64);
     let what = match limit.filter(|l| *l < vm_bytes) {
@@ -228,30 +273,50 @@ pub fn vm_breakdown(footprint: u64, vm_bytes: u64, mem: &MemInfo, balloon: u64, 
         Some(l) => format!("what macOS charges; VM ceiling {}/{} GiB", gib(l), gib(vm_bytes)),
         None => "what macOS charges the VM".to_string(),
     };
-    Breakdown { total: footprint, what, lines }
+    // What the guest could still get: its available memory and what the
+    // balloon would give back (it deflates under pressure, up to the VM's
+    // size).
+    // (A guest that does not report MemAvailable, an older one, says 0:
+    // unknown, not out of memory.)
+    let pressure = if mem.available > 0 { short(mem.available + balloon, vm_bytes) } else { None };
+    Breakdown { total: footprint, what, lines, limit: Some(vm_bytes), limit_what: "VM limit", pressure }
 }
 
 /// The Linux sandbox: `sandbox` is its whole cgroup (supervisor, pasta,
-/// cell manager, clusters), `shown` and `others` the clusters.
-pub fn sandbox_breakdown(sandbox_used: u64, sandbox_cache: u64, cluster: &str, shown: Usage, others: &[Usage]) -> Breakdown {
+/// cell manager, clusters), `shown` and `others` the clusters; `limit` its
+/// cgroup's `memory.max`, `host` the machine's meminfo (what it is a share
+/// of without a limit).
+#[allow(clippy::too_many_arguments)]
+pub fn sandbox_breakdown(sandbox_used: u64, sandbox_cache: u64, cluster: &str, shown: Usage, others: &[Usage], limit: Option<u64>, host: Option<&MemInfo>) -> Breakdown {
     let other = others.iter().fold(Usage::default(), |a, b| a + *b);
     let rest = sandbox_used.saturating_sub(shown.litek8s + shown.containers + other.litek8s + other.containers);
-    let mut lines = vec![line(format!("litek8s ({cluster})"), shown.litek8s, "API server, controllers, node agent"), line("pods & containers", shown.containers, "")];
+    let mut lines = vec![line(format!("litek8s ({cluster})"), shown.litek8s, "API server, controllers, node agent", Seg::Litek8s), line("pods & containers", shown.containers, "", Seg::Pods)];
     if !others.is_empty() {
-        lines.push(line(format!("other clusters ({})", others.len()), other.litek8s + other.containers, "litek8s and pods of the rest"));
+        lines.push(line(format!("other clusters ({})", others.len()), other.litek8s + other.containers, "litek8s and pods of the rest", Seg::Others));
     }
-    lines.push(line("sandbox", rest, "supervisor, pasta, cell manager, their kernel memory"));
-    lines.push(line("cache", sandbox_cache, "reclaimable (file pages)"));
-    Breakdown { total: sandbox_used + sandbox_cache, what: "the sandbox's cgroup".into(), lines }
+    lines.push(line("sandbox", rest, "supervisor, pasta, cell manager, their kernel memory", Seg::Base));
+    lines.push(line("cache", sandbox_cache, "reclaimable (file pages)", Seg::Cache));
+    // Under a limit, short means near it (its cache goes first); without
+    // one, the host's own MemAvailable says.
+    let (size, limit_what, pressure) = match (limit, host) {
+        (Some(l), _) => (Some(l), "sandbox limit", short(l.saturating_sub(sandbox_used), l)),
+        (None, Some(h)) => (Some(h.total), "host RAM", if h.available > 0 { short(h.available, h.total) } else { None }),
+        (None, None) => (None, "", None),
+    };
+    Breakdown { total: sandbox_used + sandbox_cache, what: "the sandbox's cgroup".into(), lines, limit: size, limit_what, pressure }
 }
 
 /// A remote litek8s: what its API server's node reports.
 pub fn node_breakdown(n: &NodeMemory) -> Breakdown {
     let u = n.usage;
+    let mem = n.meminfo.filter(|m| m.total > 0);
     Breakdown {
         total: u.litek8s + u.containers + u.cache,
         what: "node of the API server".into(),
-        lines: vec![line("litek8s", u.litek8s, "API server, controllers, node agent"), line("pods & containers", u.containers, ""), line("cache", u.cache, "reclaimable")],
+        lines: vec![line("litek8s", u.litek8s, "API server, controllers, node agent", Seg::Litek8s), line("pods & containers", u.containers, "", Seg::Pods), line("cache", u.cache, "reclaimable", Seg::Cache)],
+        limit: mem.map(|m| m.total),
+        limit_what: "node RAM",
+        pressure: mem.filter(|m| m.available > 0).and_then(|m| short(m.available, m.total)),
     }
 }
 
@@ -293,6 +358,13 @@ mod tests {
         let b = vm_breakdown(600 << 20, 4096 << 20, &mem, 0, None, "dev", shown, &[]);
         assert_eq!(b.total, 600 << 20);
         assert_eq!(b.what, "what macOS charges the VM");
+        assert_eq!((b.limit, b.limit_what), (Some(4096 << 20), "VM limit"));
+        // MemAvailable was not in this meminfo (an older guest): unknown.
+        assert_eq!(b.pressure, None);
+        let mut with = mem;
+        with.available = 3 << 30;
+        let b = vm_breakdown(600 << 20, 4096 << 20, &with, 0, None, "dev", shown, &[]);
+        assert!((b.pressure.unwrap() - 0.25).abs() < 1e-9);
         let get = |l: &str| b.lines.iter().find(|x| x.label.starts_with(l)).map(|x| x.bytes);
         assert_eq!(get("litek8s (dev)"), Some(12 << 20));
         assert_eq!(get("cache"), Some((125000 - 51200 + 10000) * 1024));
@@ -323,9 +395,20 @@ mod tests {
 
     #[test]
     fn explains_the_sandbox() {
-        let b = sandbox_breakdown(100 << 20, 40 << 20, "dev", Usage { litek8s: 8 << 20, containers: 50 << 20, cache: 5 << 20 }, &[]);
+        let b = sandbox_breakdown(100 << 20, 40 << 20, "dev", Usage { litek8s: 8 << 20, containers: 50 << 20, cache: 5 << 20 }, &[], None, None);
         assert_eq!(b.total, 140 << 20);
         assert_eq!(b.lines.iter().find(|l| l.label == "sandbox").unwrap().bytes, 42 << 20);
+        assert_eq!(b.in_use(), 100 << 20);
+        assert_eq!((b.limit, b.pressure), (None, None));
+        // Against its limit: 100 of 400 MiB held.
+        let b = sandbox_breakdown(100 << 20, 40 << 20, "dev", Usage::default(), &[], Some(400 << 20), None);
+        assert_eq!((b.limit, b.limit_what), (Some(400 << 20), "sandbox limit"));
+        assert!((b.pressure.unwrap() - 0.25).abs() < 1e-9);
+        // Without one, against the host's RAM and what it has available.
+        let host = MemInfo { total: 32 << 30, available: 24 << 30, ..Default::default() };
+        let b = sandbox_breakdown(100 << 20, 40 << 20, "dev", Usage::default(), &[], None, Some(&host));
+        assert_eq!((b.limit, b.limit_what), (Some(32 << 30), "host RAM"));
+        assert!((b.pressure.unwrap() - 0.25).abs() < 1e-9);
         let n = NodeMemory { node: "x".into(), usage: Usage { litek8s: 1, containers: 2, cache: 3 }, meminfo: None };
         let json = serde_json::to_value(&n).unwrap();
         assert_eq!(json["litek8s"], 1);

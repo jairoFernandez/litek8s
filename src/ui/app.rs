@@ -768,7 +768,10 @@ impl App {
                 // of 2 s steps).
                 if self.tab == Tab::Home && self.logs.is_none() && self.home.status == DevStatus::Up {
                     let cpu = self.home.cpu_pct.zip(self.home_cpus()).map(|(p, c)| (p / 100.0 / c.max(1.0)) as f32);
-                    let mem = self.home.mem_used.zip(self.home_memory()).map(|(u, t)| (u as f64 / t.max(1) as f64) as f32);
+                    // Memory in use against its limit when the breakdown says
+                    // (the footprint also counts pages the guest freed).
+                    let in_use = self.home.memory.as_ref().and_then(|b| b.limit.filter(|l| *l > 0).map(|l| (b.in_use() as f64 / l as f64) as f32));
+                    let mem = in_use.or_else(|| self.home.mem_used.zip(self.home_memory()).map(|(u, t)| (u as f64 / t.max(1) as f64) as f32));
                     if let (Some(c), Some(m)) = (cpu, mem) {
                         if self.history.len() == HISTORY {
                             self.history.pop_front();

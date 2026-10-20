@@ -531,6 +531,30 @@ impl Theme {
         merge(out)
     }
 
+    /// A meter of stacked parts `width` cells wide: each part (share, style,
+    /// glyph) gets its cells by its share (a part that is there gets at
+    /// least one while there is room), the rest a dotted track.
+    pub fn stacked(&self, parts: &[(f64, Style, &'static str)], width: usize) -> Vec<Span<'static>> {
+        let mut out: Vec<Span<'static>> = Vec::new();
+        let (mut used, mut cum) = (0usize, 0.0f64);
+        for (share, style, glyph) in parts {
+            let share = if share.is_finite() { share.max(0.0) } else { 0.0 };
+            cum += share;
+            let mut end = ((cum * width as f64).round() as usize).min(width);
+            if share > 0.0 && end <= used && used < width {
+                end = used + 1;
+            }
+            if end > used {
+                out.push(Span::styled(glyph.repeat(end - used), *style));
+                used = end;
+            }
+        }
+        if used < width {
+            out.push(Span::styled("░".repeat(width - used), self.track));
+        }
+        merge(out)
+    }
+
     /// An inline bar for a share (`pods ████▏ 4.8%`): eighths, one color,
     /// at least a sliver when the share is not zero.
     pub fn bar(&self, ratio: f64, width: usize, style: Style) -> Span<'static> {
@@ -832,6 +856,11 @@ mod tests {
         assert_eq!(text(t.meter(1.0, 4)), "████");
         assert_eq!(text(t.meter(2.0, 4)), "████");
         assert_eq!(text(t.meter(f64::NAN, 3)), "░░░");
+        // Stacked: parts by share, a tiny one still shows, the rest track.
+        let parts = [(0.25, Style::new(), "█"), (0.001, Style::new().bold(), "█"), (0.25, Style::new(), "▒")];
+        assert_eq!(text(t.stacked(&parts, 8)), "███▒░░░░");
+        assert_eq!(t.stacked(&parts, 8)[1].content, "█");
+        assert_eq!(text(t.stacked(&[(2.0, Style::new(), "█")], 4)), "████");
         // A tiny share still shows.
         assert_eq!(t.bar(0.0001, 5, Style::new()).content, "▏    ");
         assert_eq!(t.bar(0.0, 3, Style::new()).content, "   ");
