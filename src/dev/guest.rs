@@ -313,6 +313,69 @@ mod init {
         }
     }
 
+    /// Discard the data disk's free blocks (FITRIM): the framework punches
+    /// them out of the sparse disk.img on the Mac, so deleted images and
+    /// containers give their space back. Bytes discarded.
+    fn trim(dir: &str) -> std::io::Result<u64> {
+        #[repr(C)]
+        struct Range {
+            start: u64,
+            len: u64,
+            minlen: u64,
+        }
+        const FITRIM: libc::c_ulong = 0xC018_5879; // _IOWR('X', 121, struct fstrim_range)
+        let f = std::fs::File::open(dir)?;
+        let mut range = Range { start: 0, len: u64::MAX, minlen: 0 };
+        use std::os::fd::AsRawFd;
+        // SAFETY: the ioctl reads and updates the struct we own.
+        if unsafe { libc::ioctl(f.as_raw_fd(), FITRIM as _, &mut range) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(range.len)
+    }
+
+    /// Sectors written to `disk` so far and requests in flight
+    /// (/sys/block/<disk>/stat).
+    fn disk_activity(disk: &str) -> Option<(u64, u64)> {
+        let name = disk.rsplit('/').next()?;
+        let stat = std::fs::read_to_string(format!("/sys/block/{name}/stat")).ok()?;
+        let f: Vec<u64> = stat.split_whitespace().filter_map(|v| v.parse().ok()).collect();
+        Some((*f.get(6)?, *f.get(8)?))
+    }
+
+    /// Trim the data disk at boot and then whenever it has been quiet for
+    /// a while (checked every 30 s, at most once a minute): ext4 only
+    /// discards block groups freed since the last trim, so a trim with
+    /// nothing new to give back costs next to nothing. Mounting with
+    /// `discard` would do it on every delete instead, in the middle of
+    /// image pulls and container churn.
+    fn trim_when_idle(disk: String) {
+        std::thread::sleep(Duration::from_secs(10));
+        let mut last_trim: Option<Instant> = None;
+        let mut last = disk_activity(&disk);
+        loop {
+            let now = disk_activity(&disk);
+            // Under 8 MiB written in the last 30 s, nothing in flight.
+            let quiet = match (last, now) {
+                (Some((w0, _)), Some((w1, inflight))) => w1.saturating_sub(w0) < 16384 && inflight == 0,
+                _ => true,
+            };
+            last = now;
+            if quiet && last_trim.is_none_or(|t| t.elapsed() >= Duration::from_secs(60)) {
+                match trim(DATA_DIR) {
+                    Ok(n) if n >= 64 << 20 && last_trim.is_some() => say(&format!("gave back {} MiB of deleted data on the disk", n >> 20)),
+                    Ok(_) => {}
+                    Err(e) => {
+                        say(&format!("cannot trim {DATA_DIR} ({e}); disk.img keeps deleted data"));
+                        return;
+                    }
+                }
+                last_trim = Some(Instant::now());
+            }
+            std::thread::sleep(Duration::from_secs(30));
+        }
+    }
+
     /// How long the memory watcher sleeps (ms) after `last`.
     fn interval(last: &Option<super::super::balloon::Report>) -> i32 {
         if last.is_some_and(|r| r.available < 512 << 20) { 250 } else { 2000 }
@@ -561,6 +624,10 @@ mod init {
             say(&format!("no vsock ({e}); the host cannot reach the cluster"));
         }
         std::thread::spawn(watch_memory);
+        if std::fs::read_to_string("/proc/mounts").is_ok_and(|m| m.lines().any(|l| l.split_whitespace().nth(1) == Some(DATA_DIR))) {
+            let disk = opts.disk.clone();
+            std::thread::spawn(move || trim_when_idle(disk));
+        }
         let mut main = spawn_manager();
         say(&format!("booted in {} ms (mounts {t_mounts}, modules {}, disk+share {t_disk})", started.elapsed().as_millis(), t_modules - t_mounts));
         println!("LITEK8S_GUEST vsock={VSOCK_PORT}");

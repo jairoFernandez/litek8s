@@ -309,7 +309,8 @@ fn node_lines(n: &NodeDisk, r: &Reclaimable) -> Vec<Line> {
 
 /// The macOS VM: litek8s's files, the shown cluster's data, the rest of
 /// the VM's filesystem (other clusters, ext4), and what the disk image
-/// keeps that the guest deleted (no TRIM: it never shrinks).
+/// still holds of what the guest deleted (until the guest trims its disk,
+/// within a minute or so, see `super::guest`).
 pub fn vm_breakdown(own: u64, image_alloc: u64, n: &NodeDisk, r: &Reclaimable, cluster: &str) -> Breakdown {
     let mut lines = vec![line("litek8s itself", own, "binary, VM kernel and root fs".into())];
     let mut node = node_lines(n, r);
@@ -319,7 +320,7 @@ pub fn vm_breakdown(own: u64, image_alloc: u64, n: &NodeDisk, r: &Reclaimable, c
     lines.push(line(&format!("cluster {cluster}"), n.total(), String::new()));
     lines.extend(node);
     lines.push(line("rest of the VM disk", n.fs_used.saturating_sub(n.total()), "other clusters, filesystem".into()));
-    lines.push(line("deleted in the VM", image_alloc.saturating_sub(n.fs_used), "kept by disk.img (it never shrinks)".into()));
+    lines.push(line("deleted in the VM", image_alloc.saturating_sub(n.fs_used), "disk.img gives it back within a minute".into()));
     Breakdown { total: own + image_alloc.max(n.fs_used), what: "litek8s and its VM disk", lines }
 }
 

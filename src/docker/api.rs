@@ -1311,6 +1311,10 @@ fn remove_image(engine: &Engine, name: &str, force: bool) -> ApiResult<Value> {
             engine.images.set_key(&info.id, Some(e))?;
         }
     }
+    // Free the layers now, as Docker does, not at the node's next image
+    // GC (layers written in the last minutes are kept: a pull may still
+    // need them).
+    let _ = engine.images.sweep();
     Ok(Value::Array(out))
 }
 
@@ -1336,6 +1340,9 @@ fn prune_images(engine: &Engine, q: &HashMap<String, String>) -> Value {
             }
         }
         deleted.push(json!({"Deleted": info.id}));
+    }
+    if !deleted.is_empty() {
+        let _ = engine.images.sweep();
     }
     json!({"ImagesDeleted": deleted, "SpaceReclaimed": space})
 }

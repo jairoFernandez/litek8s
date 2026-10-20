@@ -383,6 +383,29 @@ and image (~35 MiB) are the rest of the fixed cost; a 16K-page guest
 kernel would cut the first by four, but Alpine ships none and some arm64
 binaries (jemalloc's, for one) assume 4K pages; not tried.
 
+## The macOS VM's disk gives space back (2026-10-20)
+
+Home showed "deleted in the VM 1.5 GB — kept by disk.img (it never
+shrinks)". Unlike memory, the framework does reclaim disk: its virtio disk
+advertises discard (`discard_max_bytes` 64 GiB, granularity 512 B on vda)
+and punches discarded ranges out of the sparse `disk.img`. A 1 GiB file
+written and deleted in a pod left `du disk.img` at 1.07 GB; `fstrim` on the
+guest's ext4 brought it to 17 MB. The guest now trims at boot and whenever
+the disk has been quiet for 30 s (at most once a minute), and `docker rmi`
+/ image prune free the layers at once instead of at the node's next image
+GC (layers written in the last 10 minutes still wait for the GC):
+
+| `du disk.img` | before | now |
+|---|---|---|
+| a container writes 1 GiB, then `docker rm` | 2.6 GB, for good | 1.3 GB again 55 s later |
+| `docker pull python:3.13`, `docker rmi` after 10 min | 1.54 GB, for good | 1.29 → 0.78 GB within 3 min (854 MiB given back); the last 667 MB of layers, written under 10 minutes before, went at the next GC: 123 MB 9 min later |
+| first boot of the new guest on an old disk | – | 1.60 → 1.23 GB (deleted data an older guest left) |
+
+The compat corpus passes 119/119 on the trimming guest
+([compat/results/20261020-010915-litek8s-dev-macos-vm-trim](../compat/results/20261020-010915-litek8s-dev-macos-vm-trim/summary.md)),
+the Docker corpus 16/16 (compose_basic once another session's VM had
+released localhost:18080).
+
 ## Argo CD on k3s and on litek8s (2026-10-19, x86_64/KVM)
 
 Does the advantage hold for a heavy, real workload? Argo CD's application
