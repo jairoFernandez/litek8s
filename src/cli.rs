@@ -21,16 +21,64 @@ const HELP_TEMPLATE: &str = "\
 
 {all-args}{after-help}";
 
+/// `litek8s` with no arguments: commands grouped by what they talk to.
+/// Every visible subcommand is listed with its `about` (checked by
+/// `main_help_lists_every_command`).
+const MAIN_HELP_TEMPLATE: &str = "\
+{before-help}{name} {version}
+{about-with-newline}
+{usage-heading} {usage}
+
+Kubernetes:
+  dev            Local Kubernetes clusters for development (like kind/k3d), no Docker needed
+  ui             Terminal UI: clusters, containers, images, volumes, Kubernetes, metrics and alerts
+  apiserver      Run the Kubernetes API server (kubectl and Helm talk to it)
+  agent          Run a node agent that joins a litek8s API server
+  server         List or remove the API servers of a highly available control plane
+  lb             A TCP load balancer in front of the API servers of an HA control plane
+
+Observability (built into the API server):
+  logs           Search and follow pod logs, including containers that are gone
+  query          Run a PromQL query against the cluster's built-in metrics
+  alerts         List, silence and acknowledge the cluster's alerts
+
+Legacy daemon (litek8s.dev/v1alpha1 manifests, started with `litek8s serve`):
+  serve          Start the legacy litek8s daemon
+  apply          Apply a reduced Deployment or Service manifest
+  get            List the deployments managed by the daemon
+  describe       Show a single deployment in detail
+  delete         Delete a deployment or service by name or manifest
+  events         Show recent control-plane events
+  top            Watch live resource usage for the daemon and deployments
+  tree           Show a relationship tree of the control plane, nodes, deployments, and services
+  proxy          Open a local TCP proxy to a published deployment port
+  service        Manage stable local service listeners backed by deployments
+  node           Register a remote node reachable over ssh
+  cluster        Create and manage local multi-node daemon clusters in Docker containers
+  control-plane  Manage the daemon's Raft control-plane membership
+  vpn            Manage the WireGuard mesh that connects daemon nodes across clouds
+  infra          Scaffold Terraform + deploy projects for provisioning litek8s nodes
+
+Distributed compute (experimental):
+  tensor         Run distributed tensor (matrix) compute across the cluster nodes
+  pipeline       Run a feed-forward layer pipeline sharded across the cluster
+  model          Inspect and distribute model weights (safetensors)
+  llm            Generate text with a local LLM (safetensors model dir)
+
+  help           Print this message or the help of the given subcommand(s)
+
+Options:
+{options}{after-help}";
+
 const MAIN_AFTER_HELP: &str = "\
 Quickstart:
-  litek8s serve
-  litek8s apply -f examples/nginx.yaml
-  litek8s top --watch
-  litek8s describe deployment demo-nginx
+  litek8s dev up                    a local cluster; kubectl context litek8s-dev
+  kubectl get nodes
+  litek8s ui                        clusters, containers, pods, logs, metrics
+  litek8s query 'sum by (namespace) (container_memory_working_set_bytes)'
+  litek8s dev down
 
-Mental model:
-  `serve` runs the control loop.
-  Everything else talks to that daemon over a local Unix socket.";
+Docker clients use the same cluster: export DOCKER_HOST=unix://$HOME/.litek8s/docker.sock";
 
 const APISERVER_AFTER_HELP: &str = "\
 Examples:
@@ -253,20 +301,20 @@ Examples:
 #[command(
     name = "litek8s",
     version,
-    about = "Tiny k8s-like orchestration for one machine, one daemon, and Docker underneath.",
-    long_about = "Tiny k8s-like orchestration for one machine, one daemon, and Docker underneath.\n\nlitek8s keeps the UX familiar on purpose: apply a reduced Deployment manifest, inspect it, watch it, and let a small control loop keep the container alive.",
-    help_template = HELP_TEMPLATE,
+    about = "A lightweight Kubernetes for home, edge and local development: the real API, one binary.",
+    help_template = MAIN_HELP_TEMPLATE,
     after_help = MAIN_AFTER_HELP,
     styles = cli_styles(),
     next_line_help = true
 )]
 struct Cli {
-    #[arg(long, global = true, help = "Use a custom daemon socket path")]
+    #[arg(long, global = true, help = "Use a custom daemon socket path (legacy daemon)")]
     socket_path: Option<PathBuf>,
+    // Not global: agent, lb, server and the HA tools have a --server of
+    // their own (an API server), so this one goes before the subcommand.
     #[arg(
         long,
-        global = true,
-        help = "Connect to a daemon over TCP (e.g. 127.0.0.1:6443)"
+        help = "Connect to a legacy daemon over TCP, before the command (litek8s --server 127.0.0.1:6443 get)"
     )]
     server: Option<String>,
     #[command(subcommand)]
@@ -317,7 +365,7 @@ impl ObsArgs {
 #[derive(Debug, Subcommand)]
 enum Command {
     #[command(
-        about = "Start the local litek8s daemon",
+        about = "Start the legacy litek8s daemon",
         help_template = HELP_TEMPLATE,
         after_help = SERVE_AFTER_HELP
     )]
@@ -365,7 +413,7 @@ enum Command {
         node_resource_interval_secs: u64,
     },
     #[command(
-        about = "Run the Kubernetes-compatible API server (kubectl/Helm talk to it)",
+        about = "Run the Kubernetes API server (kubectl and Helm talk to it)",
         help_template = HELP_TEMPLATE,
         after_help = APISERVER_AFTER_HELP
     )]
@@ -424,7 +472,7 @@ enum Command {
         obs: ObsArgs,
     },
     #[command(
-        about = "A local Kubernetes cluster for development (like kind/k3d), without Docker",
+        about = "Local Kubernetes clusters for development (like kind/k3d), no Docker needed",
         help_template = HELP_TEMPLATE,
         after_help = DEV_AFTER_HELP
     )]
@@ -433,13 +481,13 @@ enum Command {
         command: crate::dev::DevCommand,
     },
     #[command(
-        about = "A terminal UI for the dev environment: cluster, containers, images, volumes, settings, pods",
+        about = "Terminal UI: clusters, containers, images, volumes, Kubernetes, metrics and alerts",
         help_template = HELP_TEMPLATE,
         after_help = UI_AFTER_HELP
     )]
     Ui(crate::ui::UiArgs),
     #[command(
-        about = "Run a node agent that joins a remote litek8s API server",
+        about = "Run a node agent that joins a litek8s API server",
         help_template = HELP_TEMPLATE,
         after_help = NODE_AGENT_AFTER_HELP
     )]
@@ -480,7 +528,7 @@ enum Command {
         file: PathBuf,
     },
     #[command(
-        about = "List the deployments managed by litek8s",
+        about = "List the deployments managed by the daemon",
         help_template = HELP_TEMPLATE,
         after_help = GET_AFTER_HELP
     )]
@@ -504,13 +552,13 @@ enum Command {
         name: String,
     },
     #[command(
-        about = "Read recent logs from the managed container",
+        about = "Search and follow pod logs, including containers that are gone",
         help_template = HELP_TEMPLATE,
         after_help = LOGS_AFTER_HELP
     )]
     Logs(crate::obs::cli::LogsArgs),
     #[command(
-        about = "Alerts of the cluster: list, silence, acknowledge",
+        about = "List, silence and acknowledge the cluster's alerts",
         help_template = HELP_TEMPLATE,
         after_help = ALERTS_AFTER_HELP
     )]
@@ -628,7 +676,7 @@ enum Command {
         name: Option<String>,
     },
     #[command(
-        about = "Manage control-plane HA cluster membership",
+        about = "Manage the daemon's Raft control-plane membership",
         help_template = HELP_TEMPLATE,
         after_help = CONTROL_PLANE_AFTER_HELP
     )]
@@ -646,7 +694,7 @@ enum Command {
         command: ServerCommand,
     },
     #[command(
-        about = "A TCP load balancer in front of the API servers of an HA control plane (one address for kubectl)",
+        about = "A TCP load balancer in front of the API servers of an HA control plane",
         help_template = HELP_TEMPLATE,
         after_help = LB_AFTER_HELP
     )]
@@ -689,7 +737,7 @@ enum Command {
         out: Option<PathBuf>,
     },
     #[command(
-        about = "Create and manage local multi-node clusters using Docker",
+        about = "Create and manage local multi-node daemon clusters in Docker containers",
         help_template = HELP_TEMPLATE,
         after_help = CLUSTER_AFTER_HELP
     )]
@@ -698,7 +746,7 @@ enum Command {
         command: ClusterCommand,
     },
     #[command(
-        about = "Manage the WireGuard mesh that connects nodes across clouds",
+        about = "Manage the WireGuard mesh that connects daemon nodes across clouds",
         help_template = HELP_TEMPLATE
     )]
     Vpn {
@@ -4788,6 +4836,98 @@ impl Drop for WatchDisplay {
             print!("\x1B[?25h\x1B[?1049l");
             let _ = io::stdout().flush();
         }
+    }
+}
+
+#[cfg(test)]
+mod main_help_tests {
+    use clap::CommandFactory;
+
+    use super::{Cli, MAIN_HELP_TEMPLATE};
+
+    /// `(name, description)` of each command line in the grouped list.
+    fn listed() -> Vec<(String, String)> {
+        let commands = MAIN_HELP_TEMPLATE.split("{usage}").nth(1).unwrap().split("Options:").next().unwrap();
+        commands
+            .lines()
+            .filter(|l| l.starts_with("  "))
+            .map(|l| {
+                let (name, about) = l.trim().split_once(' ').unwrap();
+                (name.to_string(), about.trim().to_string())
+            })
+            .collect()
+    }
+
+    #[test]
+    fn main_help_lists_every_command() {
+        let mut cmd = Cli::command();
+        cmd.build();
+        let mut visible: Vec<(String, String)> = cmd
+            .get_subcommands()
+            .filter(|c| !c.is_hide_set())
+            .map(|c| (c.get_name().to_string(), c.get_about().map(|a| a.to_string()).unwrap_or_default()))
+            .collect();
+        let mut listed = listed();
+        visible.sort();
+        listed.sort();
+        assert_eq!(listed, visible, "the grouped list in MAIN_HELP_TEMPLATE must match the visible subcommands and their about");
+    }
+
+    #[test]
+    fn main_help_renders_groups_and_options() {
+        let help = Cli::command().render_help().to_string();
+        for heading in ["Kubernetes:", "Observability", "Legacy daemon", "Options:", "Quickstart:", "--socket-path", "--version"] {
+            assert!(help.contains(heading), "{heading} missing from:\n{help}");
+        }
+        assert!(!help.contains("Tiny k8s-like"), "stale description");
+    }
+
+    #[test]
+    fn quickstart_commands_parse() {
+        let quickstart = super::MAIN_AFTER_HELP.split("Quickstart:").nth(1).unwrap();
+        let mut checked = 0;
+        for line in quickstart.lines().map(str::trim).filter(|l| l.starts_with("litek8s ")) {
+            let mut args: Vec<String> = Vec::new();
+            let (cmd, rest) = match line.split_once('\'') {
+                Some((before, quoted)) => (before, Some(quoted.trim_end_matches('\'').split('\'').next().unwrap())),
+                None => (line, None),
+            };
+            // Drop the trailing comment (two or more spaces, then prose).
+            let cmd = cmd.split("  ").next().unwrap();
+            args.extend(cmd.split_whitespace().map(String::from));
+            if let Some(q) = rest {
+                args.push(q.to_string());
+            }
+            Cli::try_parse_from_args(&args).unwrap_or_else(|e| panic!("{line}: {e}"));
+            checked += 1;
+        }
+        assert!(checked >= 4, "quickstart has litek8s commands");
+    }
+
+    impl Cli {
+        fn try_parse_from_args(args: &[String]) -> Result<Self, clap::Error> {
+            <Self as clap::Parser>::try_parse_from(args)
+        }
+    }
+
+    #[test]
+    fn node_agent_server_flag_parses() {
+        let cli = <Cli as clap::Parser>::try_parse_from(["litek8s", "node-agent", "--server", "http://127.0.0.1:6443", "--node-name", "n2"]).unwrap();
+        assert!(cli.server.is_none());
+        assert!(matches!(cli.command, super::Command::Agent { join: Some(ref j), .. } if j == "http://127.0.0.1:6443"));
+        let cli = <Cli as clap::Parser>::try_parse_from(["litek8s", "lb", "--server", "http://a:6443", "--server", "http://b:6443"]).unwrap();
+        assert!(matches!(cli.command, super::Command::Lb { ref servers, .. } if servers.len() == 2));
+        let cli = <Cli as clap::Parser>::try_parse_from(["litek8s", "--server", "127.0.0.1:6443", "get", "deployments"]).unwrap();
+        assert_eq!(cli.server.as_deref(), Some("127.0.0.1:6443"));
+        let cli = <Cli as clap::Parser>::try_parse_from(["litek8s", "agent", "--join", "https://10.0.0.1:6443", "--token", "t"]).unwrap();
+        assert!(matches!(cli.command, super::Command::Agent { join: Some(_), .. }));
+    }
+
+    #[test]
+    fn no_arguments_prints_the_grouped_help() {
+        let err = <Cli as clap::Parser>::try_parse_from(["litek8s"]).unwrap_err();
+        let text = err.render().to_string();
+        assert!(text.contains("Kubernetes:") && text.contains("dev ") && text.contains("Quickstart:"), "{text}");
     }
 }
 
