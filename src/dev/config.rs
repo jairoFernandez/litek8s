@@ -80,13 +80,10 @@ fn is_default_publish(p: &Publish) -> bool {
     *p == Publish::Localhost
 }
 
-/// `$LITEK8S_CONFIG`, else `~/.litek8s/config.yaml` (next to docker.sock).
+/// `$LITEK8S_CONFIG`, else `~/.litek8s/config.yaml` (next to docker.sock;
+/// `$LITEK8S_HOME/config.yaml`).
 pub fn path() -> PathBuf {
-    if let Some(p) = std::env::var_os("LITEK8S_CONFIG") {
-        return PathBuf::from(p);
-    }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    home.join(".litek8s").join("config.yaml")
+    crate::config::paths().dev_config
 }
 
 const HEADER: &str = "# litek8s dev settings, read by `litek8s dev up` (its flags win).\n\

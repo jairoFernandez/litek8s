@@ -22,8 +22,7 @@ const API_PORT: u16 = 6443;
 const RUST_BUILD_IMAGE: &str = "rust:1.90-bookworm";
 
 fn cluster_base_dir() -> Result<PathBuf> {
-    let home = env::var("HOME").context("$HOME is not set")?;
-    Ok(PathBuf::from(home).join(".litek8s").join("clusters"))
+    Ok(crate::config::paths().docker_clusters_dir)
 }
 
 fn cluster_dir(name: &str) -> Result<PathBuf> {

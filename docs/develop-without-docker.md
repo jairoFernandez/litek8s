@@ -16,14 +16,59 @@ OrbStack (or Docker Desktop) can stay installed as a fallback: nothing here
 stops, reconfigures or uses it. Unset `DOCKER_HOST` and it is what
 `docker` and `cargo test` talk to again.
 
+## Using litek8s vs developing it
+
+Up to three litek8s can live on one Mac without sharing anything:
+
+| | what | binary | `LITEK8S_HOME` | contexts |
+|---|---|---|---|---|
+| **using** it | the release | `brew install jairoFernandez/tap/litek8s` (or install.sh) | unset: `~/.litek8s`, the data directory, `~/.kube/config` | `litek8s-<cluster>` |
+| **developing** it | this checkout | `dev/lk` (builds `target/release/litek8s` when stale) | `~/.litek8s-dev` | `lkdev-<cluster>` |
+| **testing with** it | a pinned revision | `dev/stable.sh` (= `dev/lk stable`) | `~/.litek8s/stable` | `lkstable-<cluster>` |
+
+`LITEK8S_HOME=<dir>` moves every per-user path under `<dir>`: the Docker
+sockets (`docker.sock`, `<cluster>/docker.sock`), `config.yaml`, `ui.yaml`
+and the UI's state, the kubeconfig `dev up` writes (`<dir>/kubeconfig`
+unless `KUBECONFIG` is set), the data directory (`<dir>/data`: the dev VM,
+its disk, the clusters, `vm/` for the guest), and the legacy daemon's
+socket (`<dir>/run`). Contexts get the prefix `lkdev-`
+(`LITEK8S_CONTEXT_PREFIX`), the default cluster's docker context is `lkdev`.
+So `dev/lk dev up` starts a VM of its own, next to the release's, and
+`litek8s ui` / `dev/lk ui` each show only their own clusters. Both
+binaries say which one they are: a build from a checkout prints
+`litek8s 0.1.0 DEV <commit> (LITEK8S_HOME=...)` and the UI's header shows
+`DEV <commit> · ~/.litek8s-dev`; release builds (`LITEK8S_RELEASE=1`, set
+by the release workflow) print the plain version.
+
+```bash
+dev/lk --version                    # builds target/release/litek8s first if a source is newer
+dev/lk build-vm                     # the VM's guest from this checkout, into ~/.litek8s-dev/data/vm
+dev/lk dev up --cpus 4 --memory 4096
+dev/lk ui
+eval "$(dev/lk env)"                # DOCKER_HOST, KUBECONFIG of ~/.litek8s-dev for this shell
+dev/lk dev delete                   # and rm -rf ~/.litek8s-dev to forget it entirely
+```
+
+`dev/lk build-vm` compiles the guest on `~/.litek8s-dev`'s own Docker API
+when its VM runs, else on `DOCKER_HOST` / the docker context. The very
+first guest needs a VM to build in: boot the release's guest once with
+`LITEK8S_DEV_VM_ASSETS="$(brew --prefix)/share/litek8s/vm" dev/lk dev up`,
+then `dev/lk build-vm && dev/lk dev down && dev/lk dev up`.
+`dev/lk env` does not export `LITEK8S_HOME`, so `litek8s` from the PATH
+in that shell is still the release.
+
 ## The rule: develop with a pinned litek8s
 
 The cluster and Docker API you develop **with** must not be the code you
 are **editing**: a broken build would take down the tools that test it.
 `dev/stable.sh` keeps a known-good litek8s in `~/.litek8s/stable`
 (`$LITEK8S_STABLE`): the macOS binary, the VM's kernel, root image and
-initrd (with the static Linux litek8s as `/init`), the revision, and the cluster's own
-kubeconfig (`~/.kube/config` is not touched).
+initrd (with the static Linux litek8s as `/init`) and the revision. The
+directory is also its `LITEK8S_HOME`: its own VM and cluster (`data/`),
+`docker.sock` and kubeconfig (`~/.kube/config` is not touched), apart from
+the release and from `dev/lk`. For a binary pinned before `LITEK8S_HOME`
+existed, the script sets the single-path variables (`LITEK8S_DEV_HOME`,
+`LITEK8S_DOCKER_SOCKET`, `LITEK8S_CONFIG`, `KUBECONFIG`) to the same places.
 
 ```bash
 dev/stable.sh install origin/main   # or any rev; builds both binaries, see below
@@ -137,18 +182,15 @@ other process.
 ### Working on the guest or the Docker API itself
 
 The VM's `/init` is litek8s, so changes under `src/dev/`, `src/docker/` or
-`src/kube/` reach the VM only through a new guest. Build it with the stable
-cluster, then boot your guest instead of the stable one, and go back:
+`src/kube/` reach the VM only through a new guest. `dev/lk build-vm`
+builds one from the checkout (on `~/.litek8s-dev`'s own Docker API when its
+VM runs, else the stable cluster's after `eval "$(dev/stable.sh env)"`) and
+the next `dev/lk dev up` boots it, while the stable cluster keeps running:
 
 ```bash
-eval "$(dev/stable.sh env)"
-CARGO_BUILD_JOBS=4 dev/vm/build-guest-binary.sh
-python3 dev/vm/build-guest.py --litek8s target/guest-musl-arm64/release/litek8s \
-    --out target/dev-guest-vm --cache target/guest-apk-cache
-dev/stable.sh down
-LITEK8S_DEV_VM_ASSETS=$PWD/target/dev-guest-vm ~/.litek8s/stable/bin/litek8s dev up --cpus 4 --memory 4096
-# ... test; if it is broken, the stable guest is one command away:
-dev/stable.sh down && dev/stable.sh up
+dev/lk build-vm
+dev/lk dev down && dev/lk dev up --cpus 4 --memory 4096
+# ... test against ~/.litek8s-dev; the stable cluster is untouched
 ```
 
 The guest build is the slow part of this loop: the `litek8s` crate alone

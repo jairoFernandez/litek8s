@@ -184,11 +184,9 @@ pub struct DevState {
     pub docker_socket: Option<PathBuf>,
 }
 
+/// `litek8s dev`'s data: `$LITEK8S_DEV_HOME`, else `<data dir>/dev`.
 pub fn dev_home() -> Result<PathBuf> {
-    if let Some(dir) = std::env::var_os("LITEK8S_DEV_HOME") {
-        return Ok(PathBuf::from(dir));
-    }
-    Ok(crate::config::data_dir()?.join("dev"))
+    crate::config::paths().dev_home.context("failed to resolve a data directory for litek8s")
 }
 
 /// The macOS dev VM's kernel and root filesystem: `$LITEK8S_DEV_VM_ASSETS`,
@@ -206,7 +204,12 @@ pub(crate) fn vm_assets_dir(home: &Path) -> PathBuf {
         .ok()
         .and_then(|e| Some(e.parent()?.parent()?.join("share/litek8s/vm")))
         .filter(|d| d.join("Image").is_file());
-    installed.unwrap_or_else(|| home.parent().unwrap_or(home).join("vm"))
+    installed.unwrap_or_else(|| default_vm_assets_dir(home))
+}
+
+/// Where dev/vm/build.sh puts a guest built from source.
+pub(crate) fn default_vm_assets_dir(home: &Path) -> PathBuf {
+    home.parent().unwrap_or(home).join("vm")
 }
 
 pub(crate) fn state_path(home: &Path) -> PathBuf {

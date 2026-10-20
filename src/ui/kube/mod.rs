@@ -38,18 +38,19 @@ use super::model;
 
 /// The API server to use: `context` from the kubeconfig if given; else the
 /// local dev cluster if it runs; else the kubeconfig's `litek8s-dev`
-/// context, else its current one.
+/// context (`lkdev-dev` with `$LITEK8S_HOME`), else its current one.
 pub fn resolve(context: Option<&str>) -> Result<(Endpoint, String)> {
-    if context.is_none() {
-        if let Some(state) = crate::dev::running_state() {
-            let ep = Endpoint::parse_http(&format!("http://127.0.0.1:{}", state.port), None)?;
-            return Ok((ep, crate::dev::kubeconfig::CONTEXT.into()));
-        }
+    let default = crate::dev::kubeconfig::default_context();
+    if context.is_none()
+        && let Some(state) = crate::dev::running_state()
+    {
+        let ep = Endpoint::parse_http(&format!("http://127.0.0.1:{}", state.port), None)?;
+        return Ok((ep, default));
     }
     let cfg = auth::load()?;
     let name = match context {
         Some(c) => c.to_string(),
-        None if cfg.named("contexts", crate::dev::kubeconfig::CONTEXT).is_some() => crate::dev::kubeconfig::CONTEXT.into(),
+        None if cfg.named("contexts", &default).is_some() => default,
         None => cfg.current().unwrap_or_default(),
     };
     Ok((endpoint_for(&cfg.doc, &name, Path::new("."))?, name))

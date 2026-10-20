@@ -28,6 +28,8 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # build.rs: `--version` is the plain version, not `DEV <commit>`.
+  LITEK8S_RELEASE: "1"
   # Same image as dev/vm/build-guest-binary.sh.
   RUST_MUSL_IMAGE: rust:1.90-alpine
 
@@ -78,6 +80,7 @@ jobs:
           docker run --rm -v "$PWD:/work" -w /work \
             -e CARGO_TARGET_DIR=/work/target/musl \
             -e CARGO_PROFILE_RELEASE_STRIP=symbols \
+            -e LITEK8S_RELEASE \
             "$RUST_MUSL_IMAGE" \
             sh -c 'apk add -q musl-dev gcc g++ make perl >/dev/null && cargo build --release --locked --no-default-features'
           sudo chown -R "$(id -u):$(id -g)" target

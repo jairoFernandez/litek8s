@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::builder::styling::{AnsiColor, Effects, Styles};
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use crate::config;
 use crate::daemon::{self, ServerConfig};
@@ -1425,8 +1425,13 @@ impl crate::cluster_orchestrator::DaemonEndpoint for DaemonEndpoint {
     }
 }
 
+/// `--version` with the build and the `$LITEK8S_HOME` in use.
+fn command() -> clap::Command {
+    Cli::command().version(Box::leak(crate::config::version_line().into_boxed_str()) as &'static str)
+}
+
 pub async fn run() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = Cli::from_arg_matches(&command().get_matches()).unwrap_or_else(|e| e.exit());
     let endpoint = if let Some(server) = cli.server {
         DaemonEndpoint::Tcp(server)
     } else {
@@ -1564,7 +1569,6 @@ pub async fn run() -> Result<()> {
         Command::Ui(args) => crate::ui::run(args).await,
         Command::Mcp(args) => crate::mcp::run(args).await,
         Command::Completion { shell } => {
-            use clap::CommandFactory;
             let mut script = Vec::new();
             clap_complete::generate(shell, &mut Cli::command(), "litek8s", &mut script);
             // `litek8s completion zsh | head` closes the pipe early: not an error.

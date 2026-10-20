@@ -885,9 +885,7 @@ pub fn default_node_name() -> String {
 }
 
 pub fn default_root_dir() -> PathBuf {
-    directories::ProjectDirs::from("dev", "litek8s", "litek8s")
-        .map(|d| d.data_dir().join("node-agent"))
-        .unwrap_or_else(|| std::env::temp_dir().join("litek8s-node-agent"))
+    crate::config::paths().node_agent_dir
 }
 
 /// What a node needs to know about its place in the cluster network.
