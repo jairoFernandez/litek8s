@@ -29,6 +29,179 @@ compose project lists its containers, deleting a cluster says it deletes
 every object, image and volume and where they are, freeing space adds up
 what it frees.
 
+## Look
+
+The UI is drawn in the spirit of [btop](https://github.com/aristocratos/btop):
+rounded boxes with their titles set into the border, a header with the tabs
+and the shown cluster's badge (state, mode, uptime), meters that go from
+green through yellow to red with eighth-of-a-cell precision, history graphs
+for CPU and memory, breakdowns as inline bars, and the same status glyphs
+everywhere: `●` running, `◐` pending or starting, `✕` failed or crashing,
+`○` completed or exited. Lists have bold headers, dim secondary text, rows
+colored by state (plain while fine, yellow on the way, red when failing,
+dim when done) and, when the terminal says what its background is, a
+subtle zebra; the footer's keys are chips. The accent is litek8s's violet.
+
+Before and after, on the Mac with the same cluster (`--cpus 4 --memory
+4096`, a 3-replica deployment, a CPU-burning one, a crash-looping pod, a
+pending one, a finished job, a compose project), in a dark terminal:
+
+![Home before](ui/before-home.svg)
+
+![Home after](ui/home-dark.svg)
+
+The same in a light terminal, and the Kubernetes view (dark, with the
+zebra rows the terminal's reported background allows):
+
+![Home, light terminal](ui/home-light.svg)
+
+![Kubernetes, before](ui/before-kube.svg)
+
+![Kubernetes, after](ui/kube-dark.svg)
+
+As text, 80x24 before:
+
+```
+ litek8s  1 Home 2 Clusters 3 Ctrs 4 Images 5 Vols 6 Space 7 Kube 8 Settings
+┌ Cluster ui-design ───────────────────┐┌ Resources ───────────────────────────┐
+│● up  macOS VM, up 48m 12s            ││CPU    ██  24% of 1 CPU = 6% of 4     │
+│API      http://127.0.0.1:51814       ││Memory █████   644 MB / 4.1 GB        │
+│Docker   …tek8s/ui-design/docker.sock ││Disk      252 MB used, 44.4 GB free   │
+│Engine   API 27.5.1 (aarch64)         ││Ctrs   3/5 running   Pods 6/9         │
+│VM IP    192.168.64.37                ││Images 3  (93.3 MB)                   │
+└──────────────────────────────────────┘└──────────────────────────────────────┘
+┌ Memory · 644 MB (what macOS charges the VM)  b: next ────────────────────────┐
+│litek8s (ui-design)     11.3 MB   API server, controllers, node agent         │
+│pods & containers       26.5 MB                                               │
+│Linux kernel + base      331 MB   fixed cost: kernel, root fs in RAM          │
+│cache                    130 MB   reclaimable                                 │
+│freed in the VM          146 MB   macOS takes it back when it needs it        │
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ Your tools point at ─────────────────────────────────────────────────────────┐
+│✗ docker context   default                                                    │
+│  DOCKER_HOST      unset                                                      │
+│✓ kubectl context  litek8s-ui-design  (~/.kube/config)                        │
+└──────────────────────────────────────────────────────────────────────────────┘
+ Switch docker/kubectl to litek8s in Settings (8). Help: ?
+
+ u up  d down  R delete  b breakdown  2 clusters                         ? help
+```
+
+and after: one column, the header a single line, the meters, pods and
+containers by state, the breakdown `b` picks, where the tools point:
+
+```
+ litek8s  1 Home  2 Clust  3 Ctrs  4 Imgs  5 Vols  6 Space  7 Kube  8 Set
+╭─ ● ui-design · macOS VM · up 48m 8s ───────────────────────────── resources ─╮
+│ cpu    ██▍░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   7% of 4 CPUs · 26% of one      │
+│ memory █████▋░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  16% 644 MB of 4.1 GB            │
+│ disk   ▎░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   1% 311 MB used · 44.5 GB free  │
+│ pods   ● 6 running   ◐ 1 pending   ✕ 1 crashloop   ○ 1 completed             │
+│ ctrs   ● 3/5 running   ✕ 1 failed   ○ 1 exited   images 3 · 93.3 MB          │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Memory · 644 MB (what macOS charges the VM)  b: next ───────────────────────╮
+│ litek8s (ui-design)  ▎            11.3 MB  API server, controllers, node ag… │
+│ pods & containers    ▌            26.5 MB                                    │
+│ Linux kernel + base  █████▋        331 MB  fixed cost: kernel, page tables   │
+│ cache                ██▎           130 MB  reclaimable                       │
+│ freed, still charged ██▌           146 MB  macOS keeps it until the VM rest… │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ connections · your tools point at ──────────────────────────────────────────╮
+│ API     http://127.0.0.1:51814      ✗ docker context   default               │
+│ Docker  …itek8s/ui-design/docker.sock DOCKER_HOST      unset                 │
+│ Engine  API 27.5.1 (aarch64)        ✓ kubectl context  litek8s-ui-design     │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ Switch docker/kubectl to litek8s in Settings (8). Help: ?
+
+  u  up   d  down   R  delete   b  breakdown   2  clusters              ?  help
+```
+
+A wide and tall terminal (here 120x40) gets the boxed header, CPU and
+memory side by side with their history (one column per sample, 2 s apart,
+for as long as Home has been on screen), disk and the workloads under them:
+
+```
+╭─ litek8s ────────────────────────────────────────────────────────────────────── ● ui-design · macOS VM · up 49m 44s ─╮
+│  1 Home  2 Clusters  3 Containers  4 Images  5 Volumes  6 Free space  7 Kubernetes  8 Settings                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+╭─ cpu · the VM process ───────────────────────────────────╮╭─ memory · what macOS charges the VM ─────────────────────╮
+│                                                          ││                                                          │
+│                                                          ││                                                          │
+│                                                        ▁ ││                                                          │
+│                                                        █ ││                                                          │
+│                                                        █ ││                                                          │
+│                                                        █ ││                                                        █ │
+│ █▍░░░░░░░░░░░░░░░░░░░░░░░░░░   5% of 4 CPUs · 20% of one ││ █████▌░░░░░░░░░░░░░░░░░░░░░░░░░░░░  16% 661 MB of 4.1 GB │
+│ litek8s (ui-design) ▎          1.0%  API server, contro… ││ litek8s (ui-design) ▏       11.4 MB  API server, contro… │
+│ pods & containers   █████▍    18.4%                      ││ pods & containers   ▎       26.5 MB                      │
+│   pod default/burn… █▊         6.1%                      ││ Linux kernel + base ███      335 MB  fixed cost: kernel… │
+│   pod default/burn… █▊         6.0%                      ││ cache               █▏       130 MB  reclaimable         │
+│   pod default/burn… █▊         6.0%                      ││ freed, still charg… █▍       158 MB  macOS keeps it unt… │
+│ guest kernel & oth… ▏          0.1%  interrupts, networ… ││                                                          │
+│ VM overhead         ▎          0.9%  virtual devices, v… ││                                                          │
+╰──────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+╭─ disk · litek8s and its VM disk ─────────────────────────╮╭─ workloads ──────────────────────────────────────────────╮
+│ ▏░░░░░░░░░░░░░░░░░░░░░░░   1% 311 MB used · 47.3 GB free ││ pods        ● 6 running   ◐ 1 pending   ✕ 1 crashloop    │
+│ litek8s itself      ███▌     178 MB  binary, VM kernel … ││             ○ 1 completed                                │
+│ cluster ui-design   ██       103 MB                      ││ containers  ● 3/5 running   ✕ 1 failed   ○ 1 exited      │
+│   images            █▉      99.9 MB  layers shared by p… ││ images      3 · 93.3 MB                                  │
+│   container layers  ▏        688 kB  what containers wr… ││ volumes     2 · 0 B                                      │
+│   volumes           ▏        229 kB  Docker volumes, em… ││                                                          │
+│   logs              ▏       36.9 kB  pods and container… ││                                                          │
+│   objects           ▏        1.7 MB  Kubernetes objects… ││                                                          │
+│   other             ▏        872 kB  metadata, IP alloc… ││                                                          │
+│ rest of the VM disk ▏        2.1 MB  other clusters, fi… ││                                                          │
+│ deleted in the VM   ▌       26.7 MB  kept by disk.img (… ││                                                          │
+```
+
+**Terminals.** Nothing needs a Nerd Font: only box-drawing and block
+characters and a few common symbols. The UI adapts at start:
+
+| | how it is decided | what changes |
+|---|---|---|
+| colors | `NO_COLOR` (non-empty): none; `COLORTERM=truecolor`/`24bit`: 24-bit; a `TERM` with `256` (and tmux, kitty, alacritty, ghostty, wezterm): 256; else 16 | 256: each color the nearest of the xterm palette; 16: the terminal's own named colors (made for its background), the selection in reverse video; none: bold, dim, underline and reverse only |
+| background | `background:` in ui.yaml; else asked of the terminal once with OSC 11 (see below); else `COLORFGBG` | dark: lighter tones; light: darker ones and pale selections; unknown: mid tones that read on both, and a strong selection with its own text color; zebra rows only when the exact color is known |
+| characters | `ascii: true` in ui.yaml, `LITEK8S_UI_ASCII=1`, or `TERM=linux`/`vt100`/`vt220` | box corners `+`, lines `-` `|`, blocks `#`, `●` `*`, `◐` `~`, `✕` `x`, `○` `o`, `…` `~`: a last pass over the finished frame, so the views draw one set of symbols |
+| theme | `theme:` in ui.yaml | `default`; `high-contrast`: the terminal's bright colors, bold failures, no gray text or borders; `mono`: no colors at all |
+
+```yaml
+# ~/.litek8s/ui.yaml
+theme: default        # high-contrast, mono
+background: auto      # dark, light: skips asking the terminal
+ascii: false          # true: ASCII for fonts without box and block characters
+```
+
+Settings (8) shows what was found (`Look: default, 24-bit color, dark
+background`).
+
+**Asking for the background** costs nothing that can fail: before the input
+reader starts, the UI writes an OSC 11 query followed by a DA1 query and
+reads the answers straight from the terminal. Terminals answer in order and
+practically all answer DA1, so the wait ends at that answer: 0.1 ms in
+tmux on the Mac, 11 ms over SSH to omarchy (one round trip); a terminal
+that answers neither costs at most 150 ms once, and the UI starts with the
+colors for either background. (The cursor-position query that once failed
+the start in terminals that never answer is still not used.) It is skipped
+when ui.yaml sets `background`, the theme is `mono`, or there are 16 colors
+or fewer.
+
+**Cost.** The history is a ring of 240 samples (two `f32` each), filled by
+Home's 2 s samples only while Home is on screen, so it adds no timer and
+no wake-up; hidden, nothing samples faster than before. Idle 60 s per view,
+main against this look:
+
+| | Home | Containers | Kubernetes |
+|---|---|---|---|
+| macOS, 120x40, CPU (`ps`) | 0.07 % → 0.08 % | 0.00 % → 0.02 % | 0.00 % → 0.00 % |
+| Linux (omarchy), 80x24, CPU (`/proc`) | 0.12 % → 0.12 % | 0.02 % → 0.00 % | 0.00 % → 0.00 % |
+| Linux, wake-ups (context switches) per minute | 124 → 130 | 19 → 8 | 13 → 13 |
+| Linux, 120x40, Home | 0.12 % → 0.12 %, 137 → 119 wake-ups | | |
+
+The first frame comes 1.0 ms → 1.2 ms after start (Mac, tmux). The
+binary grows by 70 KiB stripped on macOS arm64 (35 460 136 → 35 532 200
+bytes; 42 798 032 → 42 889 088 as built) and 12 KiB on Linux x86_64
+(41 294 312 → 41 306 696), with no new dependency.
+
 ## Screens
 
 Captured from real sessions on the macOS VM and, over SSH, the Linux
@@ -39,37 +212,44 @@ shown here as a default install has them (`~/.litek8s`, `~/.kube/config`,
 Home:
 
 ```
- litek8s  1 Home 2 Clusters 3 Ctrs 4 Images 5 Vols 6 Space 7 Kube 8 Settings
-┌ Cluster dev ─────────────────────────┐┌ Resources ───────────────────────────┐
-│● up  macOS VM, up 22m 50s            ││CPU             1% of 4 CPUs          │
-│API      http://127.0.0.1:6443        ││Memory ████    466 MB / 4.1 GB        │
-│Docker   ~/.litek8s/docker.sock       ││Disk      269 MB used, 131 GB free    │
-│Engine   API 27.5.1 (aarch64)         ││Ctrs   3/3 running   Pods 4/4         │
-│VM IP    192.168.64.21                ││Images 4  (200 MB)                    │
-└──────────────────────────────────────┘└──────────────────────────────────────┘
-┌ Your tools point at ─────────────────────────────────────────────────────────┐
-│✗ docker context   default                                                    │
-│  DOCKER_HOST      unset                                                      │
-│✓ kubectl context  litek8s-dev  (~/.kube/config)                              │
-└──────────────────────────────────────────────────────────────────────────────┘
+ litek8s  1 Home  2 Clust  3 Ctrs  4 Imgs  5 Vols  6 Space  7 Kube  8 Set
+╭─ ● ui-design · macOS VM · up 48m 8s ───────────────────────────── resources ─╮
+│ cpu    ██▍░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   7% of 4 CPUs · 26% of one      │
+│ memory █████▋░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  16% 644 MB of 4.1 GB            │
+│ disk   ▎░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   1% 311 MB used · 44.5 GB free  │
+│ pods   ● 6 running   ◐ 1 pending   ✕ 1 crashloop   ○ 1 completed             │
+│ ctrs   ● 3/5 running   ✕ 1 failed   ○ 1 exited   images 3 · 93.3 MB          │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Memory · 644 MB (what macOS charges the VM)  b: next ───────────────────────╮
+│ litek8s (ui-design)  ▎            11.3 MB  API server, controllers, node ag… │
+│ pods & containers    ▌            26.5 MB                                    │
+│ Linux kernel + base  █████▋        331 MB  fixed cost: kernel, page tables   │
+│ cache                ██▎           130 MB  reclaimable                       │
+│ freed, still charged ██▌           146 MB  macOS keeps it until the VM rest… │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ connections · your tools point at ──────────────────────────────────────────╮
+│ API     http://127.0.0.1:51814      ✗ docker context   default               │
+│ Docker  …itek8s/ui-design/docker.sock DOCKER_HOST      unset                 │
+│ Engine  API 27.5.1 (aarch64)        ✓ kubectl context  litek8s-ui-design     │
+╰──────────────────────────────────────────────────────────────────────────────╯
  Switch docker/kubectl to litek8s in Settings (8). Help: ?
 
- u up  d down  R delete  b breakdown  2 clusters                         ? help
+  u  up   d  down   R  delete   b  breakdown   2  clusters              ?  help
 ```
 
-Under it, Home explains its figures: what the Resources box's memory, CPU
-and disk are made of, one box at a time on 80x24 (`b` shows the next; a
+Under the meters, Home explains its figures: what memory, CPU and disk are
+made of, as inline bars, one box at a time on 80x24 (`b` shows the next; a
 tall terminal shows all three). Memory, on the Mac (a fresh VM running the
 compat corpus):
 
 ```
-┌ Memory · 589 MB (what macOS charges; VM ceiling 1.0/4.0 GiB)  b: next ───────┐
-│litek8s (dev)           11.9 MB   API server, controllers, node agent         │
-│pods & containers        635 kB                                               │
-│Linux kernel + base      214 MB   fixed cost: kernel, page tables             │
-│cache                    296 MB   reclaimable                                 │
-│freed, still charged    65.8 MB   macOS keeps it until the VM restarts        │
-└──────────────────────────────────────────────────────────────────────────────┘
+╭─ Memory · 589 MB (what macOS charges; VM ceiling 1.0/4.0 GiB)  b: next ──────╮
+│ litek8s (dev)        ▎            11.9 MB  API server, controllers, node ag… │
+│ pods & containers    ▏             635 kB                                    │
+│ Linux kernel + base  ████          214 MB  fixed cost: kernel, page tables   │
+│ cache                █████▌        296 MB  reclaimable                       │
+│ freed, still charged █▎           65.8 MB  macOS keeps it until the VM rest… │
+╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
 | line | what it is | from |
@@ -97,17 +277,18 @@ is sampled with the rest of Home: every 2 s while Home is on screen, not
 otherwise.
 
 CPU, between the last two samples (2 s), in % of one CPU, on the Mac with
-a busy-looping pod:
+three busy pods:
 
 ```
-┌ CPU · 100.4% of one CPU = 25% of 4 CPUs (the VM process)  b: next ───────────┐
-│litek8s (dev)              0.0%   API server, controllers, node agent         │
-│pods & containers        100.0%                                               │
-│  pod default/burn       100.0%                                               │
-│other clusters (1)         0.0%   litek8s and pods of the rest                │
-│guest kernel & other       0.3%   interrupts, network, the VM's init          │
-│VM overhead                0.1%   virtual devices, vCPU exits (macOS side)    │
-└──────────────────────────────────────────────────────────────────────────────┘
+╭─ CPU · 19.7% of one CPU = 5% of 4 CPUs (the VM process)  b: next ────────────╮
+│ litek8s (ui-design)      ▏              0.1%  API server, controllers, node… │
+│ pods & containers        █████████▋    18.9%                                 │
+│   pod default/burner-f5… ███▎           6.3%                                 │
+│   pod default/burner-f5… ███▏           6.2%                                 │
+│   pod default/burner-f5… ███▏           6.1%                                 │
+│ guest kernel & other     ▎              0.4%  interrupts, network, the VM's… │
+│ VM overhead              ▏              0.3%  virtual devices, vCPU exits (… │
+╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
 | line | what it is | from |
@@ -120,25 +301,25 @@ a busy-looping pod:
 | sandbox (Linux) | the supervisor, pasta and the cell manager | the sandbox's cgroup less the clusters' |
 
 The title's figure is the VM process's CPU time as macOS counts it, or the
-sandbox's cgroup; the Resources box says the same as `100% of 1 CPU = 25%
-of 4`.
+sandbox's cgroup; the cpu meter says the same as `5% of 4 CPUs · 20% of
+one`.
 
-Disk, on the Mac after a container wrote 20 MB and a volume 50 MB and both
-were removed (the walk is at most a minute old):
+Disk, on the Mac with the workloads above (the walk is at most a minute
+old):
 
 ```
-┌ Disk · 306 MB (litek8s and its VM disk)  b: next ────────────────────────────┐
-│litek8s itself           143 MB   binary, VM kernel and initramfs             │
-│cluster dev             78.0 MB                                               │
-│  images                77.2 MB   layers shared by pods, Docker, builds       │
-│  container layers       250 kB   what containers wrote                       │
-│  volumes               81.9 kB   Docker volumes, emptyDirs, PVs              │
-│  logs                   8.2 kB   pods and containers, 10 MiB each            │
-│  objects                172 kB   Kubernetes objects, keys                    │
-│  other                  254 kB   metadata, IP allocations                    │
-│rest of the VM disk      2.3 MB   other clusters, filesystem                  │
-│deleted in the VM       83.2 MB   kept by disk.img (it never shrinks)         │
-└──────────────────────────────────────────────────────────────────────────────┘
+╭─ Disk · 311 MB (litek8s and its VM disk)  b: next ───────────────────────────╮
+│ litek8s itself      ██████▍       178 MB  binary, VM kernel and root fs      │
+│ cluster ui-design   ███▋          103 MB                                     │
+│   images            ███▌         99.9 MB  layers shared by pods, Docker, bu… │
+│   container layers  ▏             688 kB  what containers wrote              │
+│   volumes           ▏             229 kB  Docker volumes, emptyDirs, PVs     │
+│   logs              ▏            36.9 kB  pods and containers, 10 MiB each   │
+│   objects           ▏             1.7 MB  Kubernetes objects, keys           │
+│   other             ▏             872 kB  metadata, IP allocations           │
+│ rest of the VM disk ▏             2.1 MB  other clusters, filesystem         │
+│ deleted in the VM   █            26.6 MB  kept by disk.img (it never shrink… │
+╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
 | line | what it is |
@@ -175,40 +356,48 @@ After `u` on a stopped cluster, the output of `litek8s dev up` shows under
 it (here on Linux, over SSH):
 
 ```
-┌ Output ──────────────────────────────────────────────────────────────────────┐
+╭─ output ─────────────────────────────────────────────────────────────────────╮
 │$ litek8s dev up                                                              │
 │litek8s-dev ready in 0.10s (rootless, http://127.0.0.1:6443, kubectl context  │
-└──────────────────────────────────────────────────────────────────────────────┘
+╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
-On Linux the mode is `rootless sandbox`; with a CPU or memory limit set
-(Settings), the gauges are against the limit (a 4-thread busy loop under a
-2-CPU limit):
+On Linux the mode is `rootless sandbox`, and the meters are against the
+machine (here omarchy's 16 CPUs and 33.6 GB, over SSH) or, with a CPU or
+memory limit set in Settings, against the limit:
 
 ```
-┌ Cluster dev ─────────────────────────┐┌ Resources ───────────────────────────┐
-│● up  rootless sandbox, up 20s        ││CPU    ████████200% of 2 CPUs ████████│
-│API      http://127.0.0.1:6443        ││Memory █      54.8 MB / 2.1 GB        │
+ litek8s  1 Home  2 Clust  3 Ctrs  4 Imgs  5 Vols  6 Space  7 Kube  8 Set  ● dev
+╭─ ● dev · rootless sandbox · up 6h 58m ─────────────────────────── resources ─╮
+│ cpu    ▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0% of 16 CPUs · 7% of one      │
+│ memory ▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0% 157 MB of 33.6 GB           │
+│ disk   ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0% 137 MB used · 1.5 TB free   │
+│ pods   ● 4 running   ◐ 1 pending   ✕ 1 crashloop   ○ 1 completed             │
+│ ctrs   ● 1/1 running   images 3 · 122 MB                                     │
+╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
-Containers, with a compose project and a confirmation:
+Containers, with a compose project (a worker that exited with 3) and a
+confirmation:
 
 ```
- litek8s  1 Home 2 Clusters 3 Ctrs 4 Images 5 Vols 6 Space 7 Kube 8 Settings
-┌ Containers (3/3 running) ────────────────────────────────────────────────────┐
-│NAME                      STATE     IMAGE                   PORTS             │
-│▾ shop                    3/3 up    compose project                           │
-│  cache                   running   redis:alpine            6379/tcp          │
-│  web                     running   nginx:alpine            18080->80/tcp     │
-│  worker                  running   busybox                                   │
-│                                                                              │
-│                     ┌ Stop shop-worker-1? ─────────────┐                     │
-│                     │shop-worker-1 (busybox, running)  │                     │
-│                     │                                  │                     │
-│                     │y yes   n/esc no                  │                     │
-│                     └──────────────────────────────────┘                     │
-└──────────────────────────────────────────────────────────────────────────────┘
- l logs  s shell  u start  x stop  r restart  d remove  / filter         ? help
+ litek8s  1 Home  2 Clust  3 Ctrs  4 Imgs  5 Vols  6 Space  7 Kube  8 Set
+╭─ Containers ─────────────────────────────────────────────────── 3/5 running ─╮
+│ NAME                    STATE       IMAGE                   PORTS            │
+│ api                     ● running   nginx:1.27-alpine       18080->80/tcp    │
+│ scratch                 ○ exited    busybox:1.36                             │
+│▌▾ shop                  ◐ 2/3 up    compose project                          │
+│   cache                 ● running   redis:7-alpine          6379/tcp         │
+│   web                   ● running   nginx:1.27-alpine       80/tcp           │
+│   worker       ╭─ ⚠ Stop project shop? ────────────────────╮                 │
+│                │ shop-cache-1 (redis:7-alpine, running)    │                 │
+│                │ shop-web-1 (nginx:1.27-alpine, running)   │                 │
+│                │ shop-worker-1 (busybox:1.36, exited)      │                 │
+│                │                                           │                 │
+│                │  y  yes    n/esc  no                      │                 │
+│                ╰───────────────────────────────────────────╯                 │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ l logs  s shell  u start  x stop  r restart  d remove  / filter        ?  help
 ```
 
 `l` follows a container's (or pod's) log; `↑`/`PgUp` scroll back and stop
@@ -216,12 +405,16 @@ following, `G` or `f` follow again, `w` wraps long lines. Escape sequences
 are stripped, so colored logs cannot paint over the UI:
 
 ```
-┌ logs: shop-worker-1  [follow] ───────────────────────────────────────────────┐
-│tick 110                                                                      │
-│tick 111                                                                      │
-│tick 112                                                                      │
-└──────────────────────────────────────────────────────────────────────────────┘
- esc back  f follow  w wrap  ↑↓ scroll  g/G top/end                      ? help
+╭─ logs: api ─────────────────────────────────────────────────────── ● follow ─╮
+│2026/10/20 05:02:04 [notice] 1#1: OS: Linux 6.12.113-0-virt                   │
+│2026/10/20 05:02:04 [notice] 1#1: getrlimit(RLIMIT_NOFILE): 4096:4096         │
+│2026/10/20 05:02:04 [notice] 1#1: start worker processes                      │
+│2026/10/20 05:02:04 [notice] 1#1: start worker process 25                     │
+│2026/10/20 05:02:04 [notice] 1#1: start worker process 26                     │
+│2026/10/20 05:02:04 [notice] 1#1: start worker process 27                     │
+│2026/10/20 05:02:04 [notice] 1#1: start worker process 28                     │
+╰──────────────────────────────────────────────────────────────────────────────╯
+  esc  back   f  follow   w  wrap   ↑↓  scroll   g/G  top/end           ?  help
 ```
 
 `s` suspends the UI and opens a shell in the container (bash if it has one,
@@ -232,86 +425,84 @@ come back. It is `docker exec -it` over the Docker API, so it needs no
 Images:
 
 ```
-┌ Images (4, 200 MB) ──────────────────────────────────────────────────────────┐
-│IMAGE                           SIZE     AGE   USED BY                        │
-│alpine:latest                   8.7 MB   31d   unused                         │
-│busybox:latest                  4.2 MB   159d  shop-worker-1 +1               │
-│nginx:alpine                    68.5 MB  4d    shop-web-1 +3                  │
-│redis:alpine                    119 MB   27d   shop-cache-1                   │
-└──────────────────────────────────────────────────────────────────────────────┘
+ litek8s  1 Home  2 Clust  3 Ctrs  4 Imgs  5 Vols  6 Space  7 Kube  8 Set
+╭─ Images ─────────────────────────────────────────────────────── 3 · 93.3 MB ─╮
+│ IMAGE                           SIZE     AGE   USED BY                       │
+│▌busybox:1.36                      4.1 MB 1250d scratch +7                    │
+│ nginx:1.27-alpine                49.7 MB 551d  api +4                        │
+│ redis:7-alpine                   39.5 MB 32d   shop-cache-1                  │
+╰──────────────────────────────────────────────────────────────────────────────╯
+  d  remove   /  filter   6  free space                                 ?  help
 ```
 
-Free space on Linux after two `docker build`s, then freeing stopped
-containers and unused images on the Mac:
+Free space, and what `p` asks before it frees anything:
 
 ```
-┌ Reclaimable space ───────────────────────────────────────────────────────────┐
-│    WHAT                                                      ITEMS  SIZE     │
-│[x] Stopped containers                                        1      0 B      │
-│[x] Dangling images (untagged, unused)                        0      0 B      │
-│[x] Build cache                                               2      5.2 MB   │
-│[ ] Unused images (no container or pod)                       2      23.1 MB  │
-│[ ] Unused volumes (data is lost)                             0      0 B      │
-│                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
- Selected: 5.2 MB   p frees it (asks first)
-
- litek8s data  73.7 kB in ~/.local/share/litek8s/dev
- disk free    1.5 TB
+ litek8s  1 Home  2 Clust  3 Ctrs  4 Imgs  5 Vols  6 Space  7 Kube  8 Set
+╭─ Reclaimable space ───────────────────────────────────────────── 0 B in all ─╮
+│     WHAT                                        ITEMS  SIZE                  │
+│▌[✓] Stopped containers                               2       0 B             │
+│ [✓] Dangling images (untagged, unused)               0       0 B             │
+│ [✓] Build cache                                      0       0 B             │
+│ [ ] Unused images (no container or pod)              0       0 B             │
+│ [ ] Unused volumes (data is lost)                    1       0 B             │
+╰────────────────╭─ ⚠ Free space? ───────────────────────────╮─────────────────╯
+ Selected  0 B   │ Stopped containers: 2 (0 B)               │
+                 │ About 0 B freed. This cannot be undone.   │
+ litek8s data  31│                                           │d/env/devhome
+ disk free    47.│  y  yes    n/esc  no                      │
+                 ╰───────────────────────────────────────────╯
+ Docker and Kubernetes share one image store: images no container or pod
+ uses are unused (pods pull them again when needed). Volumes are never
+ selected by default: they hold data.
+  space  select   p  free selected                                      ?  help
 ```
 
-```
-│[x] Stopped containers                                        2      0 B      │
-│[x] Dangling images (untagged, unused)                        0      0 B      │
-│[x] Build cache                                               0      0 B      │
-│[x] Unused images (no container or pod)                       2      11.8 MB  │
-│[ ] Unused volumes (data is lost)                             0      0 B      │
-│             ┌ Free space? ─────────────────────────────────────┐             │
-└─────────────│Stopped containers: 2 (0 B)                       │─────────────┘
- Selected: 11.│Unused images (no container or pod): 2 (11.8 MB)  │
-              │About 11.8 MB freed. This cannot be undone.       │
-              │                                                  │
-              │y yes   n/esc no                                  │
-              └──────────────────────────────────────────────────┘
-```
 
-Kubernetes, all namespaces (`0`), `ctrl-z` would keep the two crashing pods:
+Kubernetes, all namespaces (`0`); `ctrl-z` would keep the crashing and
+pending ones:
 
 ```
- litek8s  1 Home 2 Clusters 3 Ctrs 4 Images 5 Vols 6 Space 7 Kube 8 Settings
- ⎈ litek8s-ui-test  ns all  │ pods
-┌ pods(all) [6] ───────────────────────────────────────────────────────────────┐
-│ NAMESPACE NAME                   READY STATUS           RESTARTS AGE         │
-│ default   web-8567f99496-mtcrn   2/2   Running          0        33m         │
-│ default   web-8567f99496-r7hnq   2/2   Running          0        29m         │
-│ shop      api-6df8b694fd-ck8sd   0/1   CrashLoopBackOff 1        16s         │
-│ shop      api-6df8b694fd-x697f   0/1   CrashLoopBackOff 1        16s         │
-│ shop      cache-599d9956dc-r8xlm 1/1   Running          0        16s         │
-│ shop      migrate-6lslk          0/1   Completed        0        16s         │
-└──────────────────────────────────────────────────────────────────────────────┘
- : cmd  / filter  l logs  s shell  d describe  F fwd  m menu             ? help
+ litek8s  1 Home  2 Clust  3 Ctrs  4 Imgs  5 Vols  6 Space  7 Kube  8 Set
+ ⎈ litek8s-ui-design  ns all  │ pods
+╭─ pods(all) [9] ──────────────────────────────────────────────────────────────╮
+│   NAMESPACE NAME                   READY STATUS           RESTARTS AGE       │
+│ ● default   burner-f57f75b8d-2gpz6 1/1   Running          0        8m40s     │
+│ ● default   burner-f57f75b8d-qvcq2 1/1   Running          0        8m40s     │
+│ ● default   burner-f57f75b8d-vfp2z 1/1   Running          0        11m       │
+│ ✕ default   crashy                 0/1   CrashLoopBackOff 14       49m       │
+│ ○ default   migrate-m72pw          0/1   Completed        0        49m       │
+│ ◐ default   waiting                0/1   Pending          0        49m       │
+│ ● default   web-574b8887b7-8xkrz   1/1   Running          0        49m       │
+│ ● default   web-574b8887b7-f84qb   1/1   Running          0        49m       │
+│ ● default   web-574b8887b7-fjmtf   1/1   Running          0        49m       │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ : cmd  / filter  l logs  s shell  d describe  F fwd  m menu            ?  help
 ```
 
 More of it in [Kubernetes](#kubernetes-a-cluster-ui).
 
-Settings, after changing the shares and where ports listen while the VM
-runs:
+Settings of a cluster started with `--cpus 4` while the file names none (so
+its default, 7, would need a restart), and what the UI found about the
+terminal:
 
 ```
-┌ Settings ────────────────────────────────────────────────────────────────────┐
-│SETTING              VALUE                                                    │
-│VM CPUs              4                                                        │
-│VM memory (MiB)      4096                                                     │
-│Shared directories   /Users/me, /Users/Shared                                 │
-│API port (dev)       6443 (default)                                           │
-│Published ports on   all interfaces (LAN)                                     │
-│docker context       default  (enter: use litek8s)                            │
-│kubectl context      other  (enter: use litek8s-dev)                          │
-│Config file          ~/.litek8s/config.yaml  (enter: $EDITOR)                 │
-└──────────────────────────────────────────────────────────────────────────────┘
- ⟳ Restart needed for published ports, shared directories: Home (1), d then u.
+╭─ Settings ───────────────────────────────────────────────────────────────────╮
+│ SETTING              VALUE                                                   │
+│▌VM CPUs              7 (default)                                             │
+│ VM memory (MiB)      4096 (default)                                          │
+│ Shared directories   $HOME (default)                                         │
+│ API port (dev)       6443 (default)                                          │
+│ Published ports on   localhost only                                          │
+│ docker context       default  (enter: use litek8s)                           │
+│ kubectl context      litek8s-ui-design ✓  (enter: switch back)               │
+│ Config file          ~/.litek8s/config.yaml  (enter: $EDITOR)                 │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ ⟳ Restart needed for CPUs: Home (1), d then u.
  CPUs, memory and shares size the macOS VM.
  Settings apply on the next `litek8s dev up` (its flags win).
+ Look: default, 24-bit color, background unknown (ui.yaml)
+  enter  edit   del  default   space  toggle                            ?  help
 ```
 
 ## Clusters
@@ -323,22 +514,23 @@ sandbox's size and what it uses, and the other contexts of your kubeconfig
 and a stopped one:
 
 ```
- litek8s  1 Home 2 Clusters 3 Ctrs 4 Images 5 Vols 6 Space 7 Kube 8 Settings
-┌ Local clusters · shared VM: 4 CPUs, 4.3 GB max, 412 MB used ─────────────────┐
-│NAME           STATE     API              NODES MEMORY    AGE  CONTEXT        │
-│● dev          up        127.0.0.1:6443   1     27.2 MB   8m   litek8s-dev    │
-│  ci           up        127.0.0.1:61325  3     5.6 MB    2m   litek8s-ci     │
-│  old          down      -                1     -         3d   litek8s-old    │
-└──────────────────────────────────────────────────────────────────────────────┘
-┌ Other kubeconfig contexts (read-only; enter: Kubernetes view) ───────────────┐
-│  home                          https://192.168.1.10:6443                     │
-└──────────────────────────────────────────────────────────────────────────────┘
+ litek8s  1 Home  2 Clust  3 Ctrs  4 Imgs  5 Vols  6 Space  7 Kube  8 Set  ● dev
+╭─ Local clusters ──────────────── shared VM: 4 CPUs, 4.3 GB max, 412 MB used ─╮
+│ NAME           STATE       API              NODES MEMORY    AGE  CONTEXT     │
+│▌› dev          ● up        127.0.0.1:6443   1     27.2 MB   8m   litek8s-dev │
+│   ci           ● up        127.0.0.1:61325  3     5.6 MB    2m   litek8s-ci  │
+│   old          ○ down      -                1     -         3d   litek8s-old │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Other kubeconfig contexts ───────────── read-only · enter: Kubernetes view ─╮
+│   home                          https://192.168.1.10:6443                    │
+╰──────────────────────────────────────────────────────────────────────────────╯
  All clusters share one VM (its CPUs and memory: Settings).
 
- n new  u up  d down  D delete  enter use                                ? help
+  n  new   u  up   d  down   D  delete   enter  use                     ?  help
 ```
 
-`●` marks the cluster the other views show. MEMORY is the cluster's own:
+`›` marks the cluster the other views show; `●` up, `◐` starting or
+stopping, `○` down. MEMORY is the cluster's own:
 its nodes' processes and pods, counted the way `docker stats` counts a
 container (the binary and the VM's kernel are shared and not in it); the
 title's figure is the whole VM (or sandbox). NODES shows `2/3` while a node
@@ -347,15 +539,16 @@ is not Ready.
 `n` asks for a name and a node count, and says what the cluster shares:
 
 ```
-         ┌ New cluster ───────────────────────────────────────────────┐
-         │Name   ci2█                                                 │
-         │Nodes  3                                                    │
-         │                                                            │
-         │Runs in the shared VM: 4 CPUs, 4096 MiB for all clusters.   │
-         │Context litek8s-ci2, socket ~/.litek8s/ci2/docker.sock      │
-         │Nodes after the first are workers joined like real nodes.   │
-         │tab next field   enter create   esc cancel                  │
-         └────────────────────────────────────────────────────────────┘
+      ╭─ New cluster ────────────────────────────────────────────────────╮
+      │ › Name   ci2█                                                    │
+      │   Nodes  1                                                       │
+      │                                                                  │
+      │ Runs in the shared VM: 4 CPUs, 4096 MiB for all clusters.        │
+      │ Context litek8s-ci2, socket ~/.litek8s/ci2/docker.sock             │
+      │ Nodes after the first are workers joined like real nodes.        │
+      │                                                                  │
+      │   tab  next field   enter  create   esc  cancel                  │
+      ╰──────────────────────────────────────────────────────────────────╯
 ```
 
 and runs `litek8s dev up --name ci2 --nodes 3 --no-switch` (kubectl's
@@ -363,14 +556,14 @@ current context stays as it is), its output under the list. `D` says what
 goes before it goes (here on Linux):
 
 ```
- ┌ Delete cluster t1? ────────────────────────────────────────────────────────┐
+ ╭─ Delete cluster t1? ───────────────────────────────────────────────────────╮
  │Stops it and DELETES all of its data:                                       │
  │Kubernetes objects, pods, Docker containers, images, volumes                │
  │and the build cache, in ~/.local/share/litek8s/dev/clusters/t1/data.        │
  │The kubectl context litek8s-t1 is removed. This cannot be undone.           │
  │                                                                            │
- │y yes   n/esc no                                                            │
- └────────────────────────────────────────────────────────────────────────────┘
+ │ y  yes    n/esc  no                                                        │
+ ╰────────────────────────────────────────────────────────────────────────────╯
 ```
 
 `enter` on a local cluster shows it everywhere (Home, Containers, Images,
@@ -382,8 +575,7 @@ in the Kubernetes view only (nothing to start or stop there); `enter` on a
 local cluster comes back.
 
 While a cluster or its engine is down, Home says so instead of counting
-nothing: `Ctrs –`, `Pods –`, `Images – (engine not running)`, not `0/0` and
-`0 (0 B)`.
+nothing: `pods –`, `ctrs – (engine not running)`, not `0/0` and `0 (0 B)`.
 
 ## Settings: `~/.litek8s/config.yaml`
 
@@ -530,7 +722,7 @@ as comment lines (`# Error: ...`) over your edit; a valid change shows as a
 diff, which `y` applies (`e` edits again, `esc` drops it):
 
 ```
-┌ edit deploy/team-0/web (validated by the server; not applied yet)  y apply · e edit · esc drop ──┐
+╭─ edit deploy/team-0/web (validated by the server; not applied yet)  y apply · e edit · esc drop ─╮
 │@@ -13,7 +13,7 @@                                                                                 │
 │   uid: 256ba4d2-d410-42be-99f6-f48045d36606                                                      │
 │ spec:                                                                                            │
@@ -545,16 +737,17 @@ diff, which `y` applies (`e` edits again, `esc` drops it):
 `l` on a pod with several containers asks which (or all of them); on a
 deployment, statefulset, daemonset, job or service it follows every
 container of every pod it selects (up to `logs.maxStreams`, 30), each with
-a colored prefix, interleaved by time:
+a colored prefix, interleaved by time (here nginx's start-up lines):
 
 ```
-┌ logs deploy/default/web (all pods)  [follow]  4 streams ─────────────────────┐
-│mtcrn/ticker ERROR something odd 3000                                         │
-│r7hnq/ticker tick 2776 from web-8567f99496-r7hnq                              │
-│mtcrn/ticker tick 3001 from web-8567f99496-mtcrn                              │
-│r7hnq/ticker tick 2777 from web-8567f99496-r7hnq                              │
-└──────────────────────────────────────────────────────────────────────────────┘
- esc back  f follow  / filter  t time  w wrap  p previous  ^s save       ? help
+╭─ logs deploy/default/web (all pods) ────────────────── ● follow · 3 streams ─╮
+│ fjmtf/nginx 2026/10/20 05:02:04 [notice] 1#1: nginx/1.27.5                   │
+│ fjmtf/nginx 2026/10/20 05:02:04 [notice] 1#1: built by gcc 14.2.0 (Alpine 14.│
+│ fjmtf/nginx 2026/10/20 05:02:04 [notice] 1#1: OS: Linux 6.12.113-0-virt      │
+│ fjmtf/nginx 2026/10/20 05:02:04 [notice] 1#1: getrlimit(RLIMIT_NOFILE): 4096:│
+│ fjmtf/nginx 2026/10/20 05:02:04 [notice] 1#1: start worker processes         │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ esc back  f follow  / filter  t time  w wrap  p previous  ^s save      ?  help
 ```
 
 `f` pauses and follows again, `/` keeps the matching lines (highlighted;
@@ -576,18 +769,20 @@ connection counts.
 ### xray
 
 ```
-┌ xray deployments(shop) ──────────────────────────────────────────────────────┐
-│▾ deploy api  0/2 ready                                                       │
-│  ▾ rs api-6df8b694fd  0/2 ready, revision 1                                  │
-│    ▾ pod api-6df8b694fd-ck8sd  CrashLoopBackOff 0/1, 8 restarts              │
-│        container busybox  waiting (CrashLoopBackOff), not ready, busybox:1.36│
-│    ▾ pod api-6df8b694fd-x697f  CrashLoopBackOff 0/1, 8 restarts              │
-│        container busybox  waiting (CrashLoopBackOff), not ready, busybox:1.36│
-│▾ deploy cache  1/1 ready                                                     │
-│  ▾ rs cache-599d9956dc  1/1 ready, revision 1                                │
-│    ▾ pod cache-599d9956dc-r8xlm  Running 1/1                                 │
-│        container redis  running, ready, redis:7-alpine                       │
-└──────────────────────────────────────────────────────────────────────────────┘
+╭─ xray deployments(all) ──────────────────────────────────────────────────────╮
+│ ▾ ● deploy default/burner  3/3 ready                                         │
+│   ▾ ● rs burner-f57f75b8d  3/3 ready, revision 1                             │
+│     ▾ ● pod burner-f57f75b8d-2gpz6  Running 1/1                              │
+│         ● container burn  running, ready, busybox:1.36                       │
+│     ▾ ● pod burner-f57f75b8d-qvcq2  Running 1/1                              │
+│         ● container burn  running, ready, busybox:1.36                       │
+│     ▾ ● pod burner-f57f75b8d-vfp2z  Running 1/1                              │
+│         ● container burn  running, ready, busybox:1.36                       │
+│ ▾ ● deploy default/web  3/3 ready                                            │
+│   ▾ ● rs web-574b8887b7  3/3 ready, revision 1                               │
+│     ▾ ● pod web-574b8887b7-8xkrz  Running 1/1                                │
+│         ● container nginx  running, ready, nginx:1.27-alpine                 │
+╰──────────────────────────────────────────────────────────────────────────────╯
 ```
 
 `enter` folds a branch; `d`, `y`, `e`, `l`, `s`, `ctrl-d` act on the row's
@@ -617,7 +812,10 @@ plugins:                        # your commands, on the selected row
     args: [-n, $NAMESPACE, $NAME]
     background: true            # output in a pager instead of the terminal
     confirm: false              # true: ask first
-skin:                           # names, 0-255 or #rrggbb; default: the terminal's colors
+theme: default                  # high-contrast, mono; see Look
+background: auto                # dark, light
+ascii: false                    # true (or LITEK8S_UI_ASCII=1): ASCII only
+skin:                           # names, 0-255 or #rrggbb, over the theme's colors
   accent: cyan
   selected: darkgray
   warn: yellow
@@ -629,7 +827,8 @@ kubectl: kubectl                # which kubectl `:kubectl` runs
 
 Hotkeys and plugins are checked before the built-in keys, so they can take
 any of them. Variables are also passed to plugins as environment variables.
-`NO_COLOR` turns colors off (the selection is reverse video then). `--mouse`
+`skin` colors go over the theme's (see [Look](#look)); `NO_COLOR` and
+`theme: mono` ignore them. `--mouse`
 selects rows with a click and scrolls with the wheel.
 
 ### Kubernetes keys
@@ -751,6 +950,9 @@ on screen, and waits on sockets otherwise:
   note), every 60 s otherwise (to notice the API port moving); the data
   directory's size (a directory walk) at most every 30 s and only while it
   is shown. When the engine is down it is retried with backoff up to 10 s.
+- **The look** adds no timer: Home's history graphs are filled by its own
+  2 s samples while it is on screen, and the terminal's background is
+  asked once, before the first frame (see [Look](#look)).
 - **Input** comes from crossterm's event stream, which waits in the
   terminal reader (no timer); while a shell or an editor has the terminal
   the stream is dropped, so nothing else reads keystrokes. The only timers
@@ -819,7 +1021,8 @@ crossterm are about 200 KiB.
 
 The Kubernetes view's cluster UI (src/ui/kube) adds 1.92 MiB more to the
 stripped macOS arm64 binary (33.41 MB on main c620693, 35.43 MB with it;
-40.37 → 42.76 MB as built), with no new dependency.
+40.37 → 42.76 MB as built), with no new dependency. The [look](#look)
+(src/ui/theme.rs) adds 70 KiB on macOS and 12 KiB on Linux.
 
 ## Keys
 

@@ -1223,7 +1223,7 @@ fn log_view(f: &mut Frame, t: &Theme, v: &super::app::LogView, area: Rect) {
     if let Some(e) = &v.ended {
         right.push(Span::styled(format!("  [{e}]"), t.warn));
     }
-    let b = t.block_with(Line::from(Span::styled(v.title.clone(), t.title)), right);
+    let b = t.block_with(Line::from(Span::styled(v.title.clone(), t.title)), right).padding(Padding::left(1));
     let inner = b.inner(area);
     let height = inner.height as usize;
     let len = v.lines.len();
