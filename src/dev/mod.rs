@@ -15,6 +15,7 @@
 //! Clusters have names (`--name`, default `dev`; see [`cluster`]). They all
 //! share one VM or sandbox ([`env`]), each in cells of its own ([`cells`]).
 
+pub mod balloon;
 pub mod broker;
 #[cfg(target_os = "linux")]
 pub mod cells;
@@ -706,7 +707,7 @@ pub async fn resources(cluster: &str) -> (Option<memory::Breakdown>, Option<cpu:
     if e.mode == "vm" {
         let Ok(r) = env::request(&home, &env::Request::Stats, Duration::from_secs(3)).await else { return (None, None) };
         let (shown, others) = split(&r.stats);
-        let mem = (|| Some(memory::vm_breakdown(env_memory(&e)?, e.memory_mib? << 20, r.meminfo.as_ref()?, cluster, shown, &others)))();
+        let mem = (|| Some(memory::vm_breakdown(env_memory(&e)?, e.memory_mib? << 20, r.meminfo.as_ref()?, r.balloon.unwrap_or(0), r.memory_limit, cluster, shown, &others)))();
         let (cshown, others_usec, n) = cpu_split(&r.stats);
         let cpu = env_cpu_time_ns(&e).map(|ns| cpu::Sample {
             at: Some(std::time::Instant::now()),
@@ -832,7 +833,16 @@ async fn status(cluster: &cluster::Cluster) -> Result<()> {
     if let Some(e) = env::running(&home) {
         let others: Vec<String> = cluster::list(&home).into_iter().filter(|c| c.name != cluster.name && running(&c.home(&home)).is_some()).map(|c| c.name).collect();
         let what = if e.mode == "vm" { "VM" } else { "sandbox" };
-        let mem = env_memory(&e).map(|m| format!(", {}", mib(m))).unwrap_or_default();
+        let mut mem = env_memory(&e).map(|m| format!(", {}", mib(m))).unwrap_or_default();
+        // The VM's ceiling, when the guest may not use all of its memory.
+        if e.mode == "vm" {
+            let limit = env::request(&home, &env::Request::Stats, Duration::from_secs(3)).await.ok().and_then(|r| r.memory_limit);
+            if let (Some(l), Some(m)) = (limit, e.memory_mib) {
+                if l < m << 20 {
+                    mem.push_str(&format!(", may use {} of {m} MiB now", l >> 20));
+                }
+            }
+        }
         let with = if others.is_empty() { "no other cluster".to_string() } else { others.join(", ") };
         out!("  shared:   the {what} (pid {}{mem}) with {with}", e.pid);
     }

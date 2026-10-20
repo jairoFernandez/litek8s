@@ -563,7 +563,7 @@ fn home_explains_the_memory_figure() {
     let mem = crate::dev::memory::parse_meminfo("MemTotal: 3934000 kB\nMemFree: 3700000 kB\nCached: 125000 kB\nShmem: 51200 kB\nSReclaimable: 10000 kB\nSUnreclaim: 35000 kB\n");
     let shown = crate::dev::memory::Usage { litek8s: 12 << 20, containers: 30 << 20, cache: 0 };
     let mut home = app.home.clone();
-    home.memory = Some(crate::dev::memory::vm_breakdown(421 << 20, 4096 << 20, &mem, "dev", shown, &[]));
+    home.memory = Some(crate::dev::memory::vm_breakdown(421 << 20, 4096 << 20, &mem, 0, None, "dev", shown, &[]));
     app.apply(Msg::Home(Box::new(home)));
     let s = render(&app, 80, 24);
     assert!(s.contains("Memory · 441 MB (what macOS charges the VM)"), "{s}");
@@ -573,6 +573,16 @@ fn home_explains_the_memory_figure() {
     app.key(key('?'));
     let s = render(&app, 80, 24);
     assert!(s.contains("fixed cost") && s.contains("Any key closes") && s.contains("memory/CPU/disk"), "{s}");
+    app.key(key('x'));
+    // Under a ceiling the title says so, and still fits with the hint.
+    let mut small = mem;
+    small.free -= 3 << 30;
+    let mut home = app.home.clone();
+    home.memory = Some(crate::dev::memory::vm_breakdown(421 << 20, 4096 << 20, &small, 3 << 30, Some(1 << 30), "dev", shown, &[]));
+    home.cpu_sample = None;
+    app.apply(Msg::Home(Box::new(home)));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("Memory · 441 MB (what macOS charges; VM ceiling 1.0/4.0 GiB)"), "{s}");
 }
 
 #[test]

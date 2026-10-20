@@ -1,6 +1,8 @@
 //! Where a node's memory goes, in words a user can act on: litek8s itself,
 //! pods and containers, page cache; and, for the macOS VM, what the guest
-//! kernel costs and what the guest freed but macOS still charges for.
+//! kernel costs, what the guest freed but macOS still charges for, and how
+//! much of its memory the guest may use now (its ceiling, see
+//! [`super::balloon`]).
 //!
 //! The numbers come from cgroup v2 files and `/proc/meminfo` (Linux only;
 //! elsewhere everything is `None`/zero):
@@ -97,6 +99,9 @@ pub fn cluster(dir: &Path) -> Option<Usage> {
 pub struct MemInfo {
     pub total: u64,
     pub free: u64,
+    /// MemAvailable.
+    #[serde(default)]
+    pub available: u64,
     pub cached: u64,
     pub buffers: u64,
     pub shmem: u64,
@@ -115,6 +120,7 @@ pub fn parse_meminfo(text: &str) -> MemInfo {
         match key {
             "MemTotal" => m.total = v,
             "MemFree" => m.free = v,
+            "MemAvailable" => m.available = v,
             "Cached" => m.cached = v,
             "Buffers" => m.buffers = v,
             "Shmem" => m.shmem = v,
@@ -172,7 +178,7 @@ pub struct Line {
 pub struct Breakdown {
     /// The figure being explained, and what it is.
     pub total: u64,
-    pub what: &'static str,
+    pub what: String,
     pub lines: Vec<Line>,
 }
 
@@ -181,18 +187,24 @@ fn line(label: impl Into<String>, bytes: u64, note: &'static str) -> Line {
 }
 
 /// The macOS VM: `footprint` is what macOS charges the VM process,
-/// `vm_bytes` the VM's memory size, `mem` the guest's meminfo, `shown` and
-/// `others` the clusters' usage (the shown one and the rest).
-pub fn vm_breakdown(footprint: u64, vm_bytes: u64, mem: &MemInfo, cluster: &str, shown: Usage, others: &[Usage]) -> Breakdown {
+/// `vm_bytes` the VM's memory size, `mem` the guest's meminfo, `balloon`
+/// what its balloon holds and `limit` what the guest may use now (its
+/// ceiling), `shown` and `others` the clusters' usage (the shown one and
+/// the rest).
+#[allow(clippy::too_many_arguments)]
+pub fn vm_breakdown(footprint: u64, vm_bytes: u64, mem: &MemInfo, balloon: u64, limit: Option<u64>, cluster: &str, shown: Usage, others: &[Usage]) -> Breakdown {
     let other = others.iter().fold(Usage::default(), |a, b| a + *b);
+    // The balloon's pages count as used in MemTotal when the driver may
+    // deflate on OOM (the framework's does), else they leave MemTotal.
+    let balloon_in_total = if mem.total + balloon > vm_bytes { balloon } else { 0 };
     // Memory the kernel keeps before it counts any (its image, the page
-    // structures), its unreclaimable slab, stacks, page tables, and the
-    // root filesystem held in RAM (the initramfs: litek8s's binary, crun,
-    // iptables): the VM's fixed cost.
-    let reserved = vm_bytes.saturating_sub(mem.total);
+    // structures), its unreclaimable slab, stacks, page tables, and
+    // tmpfs (an initramfs root filesystem held in RAM): the VM's fixed
+    // cost.
+    let reserved = vm_bytes.saturating_sub(mem.total + (balloon - balloon_in_total));
     let mut kernel = reserved + mem.slab_unreclaimable + mem.kernel_stack + mem.page_tables + mem.shmem;
     let cache = (mem.cached + mem.buffers).saturating_sub(mem.shmem) + mem.slab_reclaimable;
-    let in_guest = vm_bytes.saturating_sub(mem.free);
+    let in_guest = vm_bytes.saturating_sub(mem.free + balloon);
     // What is left (the VM's init, cell manager, DHCP client; the cgroups'
     // own kernel memory) goes with the fixed cost.
     let attributed = kernel + cache + shown.litek8s + shown.containers + other.litek8s + other.containers;
@@ -201,13 +213,22 @@ pub fn vm_breakdown(footprint: u64, vm_bytes: u64, mem: &MemInfo, cluster: &str,
     if !others.is_empty() {
         lines.push(line(format!("other clusters ({})", others.len()), other.litek8s + other.containers, "litek8s and pods of the rest"));
     }
-    lines.push(line("Linux kernel + base", kernel, "fixed cost: kernel, root fs in RAM"));
+    lines.push(line("Linux kernel + base", kernel, "fixed cost: kernel, page tables"));
     lines.push(line("cache", cache, "reclaimable"));
+    // Memory the guest touched once and has freed (or handed to the
+    // balloon since): the framework keeps charging it until the VM
+    // stops; the guest reuses it before it touches more.
     let freed = footprint.saturating_sub(in_guest.max(attributed));
     if freed >= 1 << 20 {
-        lines.push(line("freed in the VM", freed, "macOS takes it back when it needs it"));
+        lines.push(line("freed, still charged", freed, "macOS keeps it until the VM restarts"));
     }
-    Breakdown { total: footprint, what: "what macOS charges the VM", lines }
+    let gib = |b: u64| format!("{:.1}", b as f64 / (1u64 << 30) as f64);
+    let what = match limit.filter(|l| *l < vm_bytes) {
+        // Short enough for the box's title at 80 columns with "b: next".
+        Some(l) => format!("what macOS charges; VM ceiling {}/{} GiB", gib(l), gib(vm_bytes)),
+        None => "what macOS charges the VM".to_string(),
+    };
+    Breakdown { total: footprint, what, lines }
 }
 
 /// The Linux sandbox: `sandbox` is its whole cgroup (supervisor, pasta,
@@ -221,7 +242,7 @@ pub fn sandbox_breakdown(sandbox_used: u64, sandbox_cache: u64, cluster: &str, s
     }
     lines.push(line("sandbox", rest, "supervisor, pasta, cell manager, their kernel memory"));
     lines.push(line("cache", sandbox_cache, "reclaimable (file pages)"));
-    Breakdown { total: sandbox_used + sandbox_cache, what: "the sandbox's cgroup", lines }
+    Breakdown { total: sandbox_used + sandbox_cache, what: "the sandbox's cgroup".into(), lines }
 }
 
 /// A remote litek8s: what its API server's node reports.
@@ -229,7 +250,7 @@ pub fn node_breakdown(n: &NodeMemory) -> Breakdown {
     let u = n.usage;
     Breakdown {
         total: u.litek8s + u.containers + u.cache,
-        what: "node of the API server",
+        what: "node of the API server".into(),
         lines: vec![line("litek8s", u.litek8s, "API server, controllers, node agent"), line("pods & containers", u.containers, ""), line("cache", u.cache, "reclaimable")],
     }
 }
@@ -269,8 +290,9 @@ mod tests {
         let mem = parse_meminfo("MemTotal: 3934000 kB\nMemFree: 3700000 kB\nBuffers: 0 kB\nCached: 125000 kB\nShmem: 51200 kB\nSReclaimable: 10000 kB\nSUnreclaim: 35000 kB\nKernelStack: 2000 kB\nPageTables: 1000 kB\n");
         assert_eq!(mem.total, 3934000 * 1024);
         let shown = Usage { litek8s: 12 << 20, containers: 0, cache: 3 << 20 };
-        let b = vm_breakdown(600 << 20, 4096 << 20, &mem, "dev", shown, &[]);
+        let b = vm_breakdown(600 << 20, 4096 << 20, &mem, 0, None, "dev", shown, &[]);
         assert_eq!(b.total, 600 << 20);
+        assert_eq!(b.what, "what macOS charges the VM");
         let get = |l: &str| b.lines.iter().find(|x| x.label.starts_with(l)).map(|x| x.bytes);
         assert_eq!(get("litek8s (dev)"), Some(12 << 20));
         assert_eq!(get("cache"), Some((125000 - 51200 + 10000) * 1024));
@@ -280,9 +302,23 @@ mod tests {
         let sum: u64 = b.lines.iter().filter(|l| !l.label.starts_with("freed")).map(|l| l.bytes).sum();
         assert_eq!(sum, in_guest);
         assert_eq!(get("freed"), Some((600u64 << 20) - in_guest));
-        let b = vm_breakdown(421 << 20, 4096 << 20, &mem, "dev", shown, &[Usage { litek8s: 2 << 20, containers: 1 << 20, cache: 0 }]);
+        let b = vm_breakdown(421 << 20, 4096 << 20, &mem, 0, None, "dev", shown, &[Usage { litek8s: 2 << 20, containers: 1 << 20, cache: 0 }]);
         assert_eq!(b.lines[2].label, "other clusters (1)");
         assert_eq!(b.lines[2].bytes, 3 << 20);
+        // A 1 GiB ceiling: 3 GiB in the balloon, counted as used in
+        // MemTotal (the framework's driver deflates on OOM). The guest
+        // uses what it used before; the title says how much it may use.
+        let mut small = mem;
+        small.free -= 3 << 30;
+        let b = vm_breakdown(600 << 20, 4096 << 20, &small, 3 << 30, Some(1 << 30), "dev", shown, &[]);
+        assert_eq!(b.what, "what macOS charges; VM ceiling 1.0/4.0 GiB");
+        let sum: u64 = b.lines.iter().filter(|l| !l.label.starts_with("freed")).map(|l| l.bytes).sum();
+        assert_eq!(sum, in_guest);
+        // A driver that takes ballooned pages out of MemTotal instead.
+        let mut out = small;
+        out.total -= 3 << 30;
+        let b2 = vm_breakdown(600 << 20, 4096 << 20, &out, 3 << 30, Some(1 << 30), "dev", shown, &[]);
+        assert_eq!(b2.lines, b.lines);
     }
 
     #[test]

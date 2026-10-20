@@ -15,7 +15,7 @@
 #   cpu_pct        over 60 s idle: litek8s VM process CPU; kind/k3d node
 #                  containers' cgroup CPU (% of one CPU)
 #   disk_mib       litek8s: data dir (sparse disk's allocated blocks) + guest
-#                  kernel/initramfs + binary; kind/k3d: node image + writable layers
+#                  kernel/root image + binary; kind/k3d: node image + writable layers
 set -euo pipefail
 TOOL="$1"; RUNS="${2:-3}"
 LK="${LITEK8S:-$PWD/target/release/litek8s}"
@@ -93,7 +93,7 @@ kubectl wait --for=condition=available deployment/web --timeout=300s >/dev/null
 sleep 30
 if [[ $TOOL == litek8s ]]; then mem5="$(vm_footprint) footprint, $(guest_used) MiB used in the guest"; else mem5="$(container_mem) MiB"; fi
 case $TOOL in
-  litek8s) disk=$(du -sm "$HOME_DEV" "$HOME_DEV/../vm/Image" "$HOME_DEV/../vm/initramfs.gz" "$LK" | awk '{s+=$1}END{print s}') ;;
+  litek8s) disk=$( (du -sm "$HOME_DEV" "$HOME_DEV"/../vm/{Image,initramfs.gz,initrd.gz,root.img} "$LK" 2>/dev/null || true) | awk '{s+=$1}END{print s}') ;;
   *) img=$KIND_IMAGE; [[ $TOOL == k3d ]] && img=$K3S_IMAGE
      disk=$(python3 -c "print(round(($(docker image inspect -f '{{.Size}}' "$img") + $(for id in $(nodes); do docker inspect -s -f '{{.SizeRw}}' "$id"; done | paste -sd+ - | bc))/1048576))") ;;
 esac
