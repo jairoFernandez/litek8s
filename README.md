@@ -19,13 +19,19 @@ litek8s ui            # terminal UI for the cluster, containers and images
 
 ## Install
 
-macOS (Apple silicon) and Linux (x86_64, aarch64):
+macOS (Apple silicon) and Linux (x86_64, aarch64), with Homebrew:
+
+```bash
+brew install jairoFernandez/tap/litek8s
+```
+
+or with the install script:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jairoFernandez/litek8s/main/install.sh | sh
 ```
 
-It downloads the latest release for your OS and architecture, checks its
+The script downloads the latest release for your OS and architecture, checks its
 SHA-256, and installs `litek8s` to `~/.local/bin` (on macOS also the dev
 VM's guest kernel and root image to `~/.local/share/litek8s/vm`). Options:
 `LITEK8S_VERSION=v0.1.0`, `LITEK8S_INSTALL_DIR=/usr/local/bin`. Or
@@ -37,8 +43,9 @@ On Linux, dev clusters run rootless and need `crun`, `uidmap`, `passt`
 everything and says what is missing ([docs/dev.md](docs/dev.md#what-it-needs)).
 macOS needs nothing else: no Docker Desktop, no Lima, no sudo.
 
-From source: `cargo install --git https://github.com/jairoFernandez/litek8s`
-(Rust ≥ 1.90; macOS also needs the guest, see [docs/dev.md](docs/dev.md)).
+From source: `cargo install litek8s` (crates.io) or `cargo install --git
+https://github.com/jairoFernandez/litek8s` (Rust ≥ 1.90; macOS also needs the
+guest, see [docs/dev.md](docs/dev.md)).
 
 ## Quickstart
 
