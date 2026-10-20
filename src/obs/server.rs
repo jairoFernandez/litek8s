@@ -226,6 +226,17 @@ fn install_crds(api: &ApiState) {
     }
 }
 
+/// Open the store and start collecting for `api` (its HTTP endpoints then
+/// answer).
+pub fn start(api: &Arc<ApiState>, config: ObsConfig) -> Result<Arc<Obs>> {
+    let obs = Arc::new(Obs::open(config)?);
+    if api.obs.set(obs.clone()).is_err() {
+        anyhow::bail!("observability already started");
+    }
+    tokio::spawn(run(api.clone(), obs.clone()));
+    Ok(obs)
+}
+
 /// Collect, maintain and alert, until the process ends.
 pub async fn run(api: Arc<ApiState>, obs: Arc<Obs>) {
     install_crds(&api);

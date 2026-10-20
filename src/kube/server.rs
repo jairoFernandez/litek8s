@@ -408,11 +408,8 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
         if obs.dir.is_none() {
             obs.dir = config.data_dir.as_ref().map(|d| d.join("obs"));
         }
-        match crate::obs::server::Obs::open(obs) {
+        match crate::obs::server::start(&state, obs) {
             Ok(obs) => {
-                let obs = Arc::new(obs);
-                let _ = state.obs.set(obs.clone());
-                tokio::spawn(crate::obs::server::run(state.clone(), obs.clone()));
                 if let Some(addr) = config.prometheus_listen {
                     match TcpListener::bind(addr).await {
                         Ok(l) => {

@@ -838,7 +838,11 @@ fn sparkline(values: &[Option<f64>], max: f64) -> String {
 }
 
 fn cpu_text(cores: f64) -> String {
-    if cores >= 1.0 { format!("{cores:.2}") } else { format!("{:.0}m", cores * 1000.0) }
+    match cores * 1000.0 {
+        m if m >= 1000.0 => format!("{cores:.2}"),
+        m if m >= 10.0 || m == 0.0 => format!("{m:.0}m"),
+        m => format!("{m:.1}m"),
+    }
 }
 
 fn observe(f: &mut Frame, app: &App, area: Rect) {
