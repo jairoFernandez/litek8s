@@ -5,11 +5,30 @@ edition = "2024"
 description = "A lightweight Kubernetes in one binary: the real API, dev clusters, a Docker API, a terminal UI and built-in observability"
 license = "Apache-2.0"
 repository = "https://github.com/jairoFernandez/litek8s"
+homepage = "https://github.com/jairoFernandez/litek8s"
 readme = "README.md"
 keywords = ["kubernetes", "containers", "orchestration", "crun", "edge"]
 categories = ["command-line-utilities", "virtualization"]
-# Benchmark and corpus results are large and only matter in the repository.
-exclude = ["bench/results/", "compat/results/"]
+rust-version = "1.90"
+# What the crate needs to build (the docs and skill are compiled in for
+# `litek8s mcp` / `litek8s skill`) and its tests; benchmark and corpus
+# results, scripts and images stay in the repository.
+include = [
+    "/src/**",
+    "/build.rs",
+    "/proto/**",
+    "/tests/**",
+    "/examples/**",
+    "/skills/**",
+    "/docs/*.md",
+    "/compat/CONFORMANCE.md",
+    "/README.md",
+    "/LICENSE",
+    "/NOTICE",
+    "/THIRD-PARTY.md",
+    "/CONTRIBUTING.md",
+    "/SECURITY.md",
+]
 
 [dependencies]
 anyhow = "1.0.97"

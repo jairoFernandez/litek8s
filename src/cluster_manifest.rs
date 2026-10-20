@@ -194,7 +194,7 @@ spec:
       labels:
         role: edge
     - name: laptop
-      ssh: jairo@home
+      ssh: me@home
       vpnIp: 10.42.0.3
   workloads:
     - file: examples/nginx.yaml
