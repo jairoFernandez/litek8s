@@ -6,7 +6,8 @@
 //! (`/apis/server.litek8s.dev/v1/servers`), checks each one's `/readyz`
 //! every second, and passes each connection whole (plain HTTP or TLS) to a
 //! ready server, preferring the one it used last so watches and long
-//! requests stay put. A VIP (keepalived) or a DNS name with every server's
+//! requests stay put (with none ready, an election, to the last one anyway:
+//! servers hold requests until there is a leader). A VIP (keepalived) or a DNS name with every server's
 //! address work too; see docs/ha.md.
 
 use std::collections::BTreeMap;
@@ -35,7 +36,12 @@ impl Pool {
             }
         }
         let ready: Vec<&String> = self.servers.iter().filter(|(_, r)| **r).map(|(s, _)| s).collect();
-        let pick = ready.first().map(|s| s.to_string())?;
+        // None ready (an election): any server still holds the request until
+        // there is a leader, better than refusing the connection.
+        let pick = match ready.first() {
+            Some(s) => s.to_string(),
+            None => return self.last.clone().or_else(|| self.servers.keys().next().cloned()),
+        };
         self.last = Some(pick.clone());
         Some(pick)
     }

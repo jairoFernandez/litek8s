@@ -518,13 +518,16 @@ impl Cluster {
     /// everything it has heard is committed.
     pub fn ready(&self) -> bool {
         let m = self.raft.metrics().borrow().clone();
+        // Twice the longest a follower waits before calling an election: a
+        // slow disk flush is not being cut off.
+        let limit = 2 * self.raft.config().election_timeout_max;
         match m.current_leader {
             // A leader that has not heard from a quorum lately is likely
             // cut off: let load balancers send clients elsewhere.
-            Some(l) if l == self.id => m.millis_since_quorum_ack.is_some_and(|ms| ms < 3_000) || m.membership_config.membership().voter_ids().count() == 1,
+            Some(l) if l == self.id => m.millis_since_quorum_ack.is_some_and(|ms| ms < limit) || m.membership_config.membership().voter_ids().count() == 1,
             // A follower the leader has not reached lately: an election, or
             // this server is cut off.
-            Some(_) => self.started.elapsed().as_millis() as u64 - self.leader_contact.load(Ordering::Relaxed) < 3_000,
+            Some(_) => (self.started.elapsed().as_millis() as u64).saturating_sub(self.leader_contact.load(Ordering::Relaxed)) < limit,
             None => false,
         }
     }
