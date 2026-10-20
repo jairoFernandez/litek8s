@@ -531,26 +531,43 @@ impl Theme {
         merge(out)
     }
 
-    /// A meter of stacked parts `width` cells wide: each part (share, style,
-    /// glyph) gets its cells by its share (a part that is there gets at
-    /// least one while there is room), the rest a dotted track.
+    /// A meter of stacked parts `width` cells wide, in eighths of a cell:
+    /// each cell takes the part that covers most of it, the cell where the
+    /// parts end shows the eighths they reach (a sliver at least when any
+    /// part is there), the rest a dotted track.
     pub fn stacked(&self, parts: &[(f64, Style, &'static str)], width: usize) -> Vec<Span<'static>> {
-        let mut out: Vec<Span<'static>> = Vec::new();
-        let (mut used, mut cum) = (0usize, 0.0f64);
-        for (share, style, glyph) in parts {
-            let share = if share.is_finite() { share.max(0.0) } else { 0.0 };
-            cum += share;
-            let mut end = ((cum * width as f64).round() as usize).min(width);
-            if share > 0.0 && end <= used && used < width {
-                end = used + 1;
-            }
-            if end > used {
-                out.push(Span::styled(glyph.repeat(end - used), *style));
-                used = end;
-            }
+        let total = width * 8;
+        let mut ends = Vec::with_capacity(parts.len());
+        let mut cum = 0.0f64;
+        for (share, _, _) in parts {
+            cum += if share.is_finite() { share.max(0.0) } else { 0.0 };
+            ends.push(((cum * total as f64).round() as usize).min(total));
         }
-        if used < width {
-            out.push(Span::styled("░".repeat(width - used), self.track));
+        let mut end = ends.last().copied().unwrap_or(0);
+        if end == 0 && cum > 0.0 && width > 0 {
+            end = 1;
+        }
+        let mut out: Vec<Span<'static>> = Vec::new();
+        for c in 0..width {
+            let (lo, hi) = (c * 8, c * 8 + 8);
+            if end <= lo {
+                out.push(Span::styled("░".repeat(width - c), self.track));
+                break;
+            }
+            // The part covering most of this cell.
+            let mut best = (0usize, 0usize);
+            let mut start = 0;
+            for (k, e) in ends.iter().enumerate() {
+                let cover = (*e).min(hi).saturating_sub(start.max(lo));
+                if cover > best.1 {
+                    best = (k, cover);
+                }
+                start = *e;
+            }
+            let k = if best.1 == 0 { parts.iter().position(|p| p.0 > 0.0).unwrap_or(0) } else { best.0 };
+            let (_, style, glyph) = parts[k];
+            let sym = if end < hi && glyph == "█" { EIGHTHS[end - lo - 1] } else { glyph };
+            out.push(Span::styled(sym, style));
         }
         merge(out)
     }
@@ -856,10 +873,13 @@ mod tests {
         assert_eq!(text(t.meter(1.0, 4)), "████");
         assert_eq!(text(t.meter(2.0, 4)), "████");
         assert_eq!(text(t.meter(f64::NAN, 3)), "░░░");
-        // Stacked: parts by share, a tiny one still shows, the rest track.
-        let parts = [(0.25, Style::new(), "█"), (0.001, Style::new().bold(), "█"), (0.25, Style::new(), "▒")];
-        assert_eq!(text(t.stacked(&parts, 8)), "███▒░░░░");
-        assert_eq!(t.stacked(&parts, 8)[1].content, "█");
+        // Stacked: parts by share in eighths, the rest track; a tiny total
+        // is a sliver, not a cell per part.
+        let parts = [(0.25, Style::new(), "█"), (0.25, Style::new().bold(), "█"), (0.2, Style::new(), "▒")];
+        assert_eq!(text(t.stacked(&parts, 8)), "████▒▒░░");
+        assert_eq!(t.stacked(&parts, 8)[1].content, "██");
+        assert_eq!(text(t.stacked(&[(0.3, Style::new(), "█")], 4)), "█▎░░");
+        assert_eq!(text(t.stacked(&[(0.001, Style::new(), "█"), (0.001, Style::new(), "▒")], 4)), "▏░░░");
         assert_eq!(text(t.stacked(&[(2.0, Style::new(), "█")], 4)), "████");
         // A tiny share still shows.
         assert_eq!(t.bar(0.0001, 5, Style::new()).content, "▏    ");
