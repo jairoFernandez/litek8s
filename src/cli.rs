@@ -58,6 +58,10 @@ Observability (built into the API server):
   query          Run a PromQL query against the cluster's built-in metrics
   alerts         List, silence and acknowledge the cluster's alerts
 
+Agents:
+  mcp            MCP server for LLM agents on stdin/stdout (claude mcp add litek8s -- litek8s mcp)
+  skill          Print or install the litek8s agent skill (SKILL.md and references)
+
 Legacy daemon (litek8s.dev/v1alpha1 manifests, started with `litek8s serve`):
   serve          Start the legacy litek8s daemon
   apply          Apply a reduced Deployment or Service manifest
@@ -273,6 +277,22 @@ Examples:
   litek8s query 'topk(5, sum by (namespace, pod) (rate(container_cpu_usage_seconds_total[5m])))'
   litek8s query 'container_memory_working_set_bytes{namespace=\"default\"}' --range 1h --step 5m
 Grafana: add a Prometheus data source with URL http://<server>:6443/prometheus.";
+
+const MCP_AFTER_HELP: &str = "\
+Add it to Claude Code:
+  claude mcp add litek8s -- litek8s mcp
+  claude mcp add litek8s-ro -- litek8s mcp --read-only --context litek8s-dev
+Tools: clusters_list, cluster_status/up/down/delete, contexts_list, get, describe, events,
+diagnose_pod, apply, delete, pod_logs, logs_search, query, query_range, alerts_list,
+alert_silence/unsilence, docker_ps/images/logs. Resources: the skill and docs/*.md.
+It refuses kube contexts whose server is not litek8s; delete, cluster_down and
+cluster_delete need confirm: true. See docs/agents.md.";
+
+const SKILL_AFTER_HELP: &str = "\
+Examples:
+  litek8s skill                               # SKILL.md
+  litek8s skill observability                 # PromQL recipes, log search, alerts
+  litek8s skill --install ~/.claude/skills    # writes ~/.claude/skills/litek8s/";
 
 const PROXY_AFTER_HELP: &str = "\
 Examples:
@@ -493,6 +513,25 @@ enum Command {
     Dev {
         #[command(subcommand)]
         command: crate::dev::DevCommand,
+    },
+    #[command(
+        about = "MCP server for LLM agents on stdin/stdout (claude mcp add litek8s -- litek8s mcp)",
+        help_template = HELP_TEMPLATE,
+        after_help = MCP_AFTER_HELP
+    )]
+    Mcp(crate::mcp::McpArgs),
+    #[command(
+        about = "Print or install the litek8s agent skill (SKILL.md and references)",
+        help_template = HELP_TEMPLATE,
+        after_help = SKILL_AFTER_HELP
+    )]
+    Skill {
+        #[arg(help = "A reference to print instead of SKILL.md: dev-clusters, observability, docker, ha-and-join, differences, troubleshooting")]
+        reference: Option<String>,
+        #[arg(long, help = "List the skill's files")]
+        list: bool,
+        #[arg(long, value_name = "DIR", help = "Write the skill into DIR/litek8s (e.g. ~/.claude/skills or .claude/skills)")]
+        install: Option<PathBuf>,
     },
     #[command(
         about = "Terminal UI: clusters, containers, images, volumes, Kubernetes, metrics and alerts",
@@ -1497,6 +1536,8 @@ pub async fn run() -> Result<()> {
             }
         }
         Command::Ui(args) => crate::ui::run(args).await,
+        Command::Mcp(args) => crate::mcp::run(args).await,
+        Command::Skill { reference, list, install } => skill(reference, list, install),
         Command::Agent { join: Some(join), token, node_name, node_ip, node_dir, runtime, wireguard_port, no_wireguard, node_grace_period, .. } => {
             let token = token.context("--token is required with --join")?;
             let node_name = node_name.unwrap_or_else(crate::kube::agent::default_node_name);
@@ -4851,6 +4892,31 @@ impl Drop for WatchDisplay {
             let _ = io::stdout().flush();
         }
     }
+}
+
+/// `litek8s skill`: the agent skill compiled into this binary.
+fn skill(reference: Option<String>, list: bool, install: Option<PathBuf>) -> Result<()> {
+    use crate::mcp::resources::{SKILL, skill_file};
+    if list {
+        for d in SKILL {
+            println!("{:<34} {}", d.path, d.description);
+        }
+        return Ok(());
+    }
+    if let Some(dir) = install {
+        let root = dir.join("litek8s");
+        for d in SKILL {
+            let p = root.join(d.path);
+            std::fs::create_dir_all(p.parent().unwrap_or(&root)).with_context(|| format!("cannot create {}", root.display()))?;
+            std::fs::write(&p, d.text).with_context(|| format!("cannot write {}", p.display()))?;
+        }
+        println!("installed the litek8s skill in {}", root.display());
+        return Ok(());
+    }
+    let name = reference.unwrap_or_else(|| "SKILL.md".into());
+    let doc = skill_file(&name).with_context(|| format!("no skill file {name:?} (litek8s skill --list)"))?;
+    print!("{}", doc.text);
+    Ok(())
 }
 
 #[cfg(test)]

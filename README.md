@@ -21,6 +21,11 @@ OrbStack: the cluster's state and resources, containers by compose project
 with logs and shells, images, volumes, freeing space, settings and a light
 Kubernetes view; keyboard-driven, 80x24, works over SSH. See [docs/ui.md](docs/ui.md).
 
+For LLM agents, `litek8s mcp` is an MCP server with tools for dev clusters,
+objects, diagnosis of broken pods, logs, PromQL and alerts (it refuses
+clusters that are not litek8s), and `litek8s skill` prints an agent skill:
+`claude mcp add litek8s -- litek8s mcp`. See [docs/agents.md](docs/agents.md).
+
 ## Commands
 
 ```bash
