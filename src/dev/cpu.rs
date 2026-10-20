@@ -184,7 +184,8 @@ pub fn breakdown(prev: &Sample, now: &Sample, cluster: &str, name: &dyn Fn(&str)
         })
         .collect();
     per.sort_by(|a, b| b.1.total_cmp(&a.1));
-    let containers: f64 = per.iter().map(|(_, p)| p).sum();
+    // fold from 0.0: summing an empty f64 iterator yields -0.0, shown as "-0.0%".
+    let containers: f64 = per.iter().fold(0.0, |a, (_, p)| a + p);
     let line = |label: String, pct: f64, note: &str| Line { label, pct, note: note.to_string(), indent: false };
     let mut lines = vec![line(format!("litek8s ({cluster})"), litek8s, "API server, controllers, node agent")];
     lines.push(line("pods & containers".into(), containers, ""));

@@ -51,6 +51,15 @@ pub fn cgroup(dir: &Path) -> Option<(u64, u64)> {
     Some((current.saturating_sub(file), file))
 }
 
+/// Anonymous memory of one cgroup: what its processes really hold (heap,
+/// stacks). Kernel memory charged to the cgroup (slab for the files it
+/// touched, socket buffers) is left out on purpose: the kernel and cache
+/// lines already count it system-wide, and adding it here counted it twice
+/// and made litek8s look several times heavier than its processes are.
+fn anon(dir: &Path) -> Option<u64> {
+    stat_field(dir, "anon")
+}
+
 /// In use by the cgroups of pods, containers and builds under `root`.
 fn containers(root: &Path) -> u64 {
     let base = root.join("litek8s");
@@ -64,15 +73,16 @@ fn containers(root: &Path) -> u64 {
     for sub in ["docker", "build"] {
         dirs.extend(std::fs::read_dir(base.join(sub)).into_iter().flatten().flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).map(|e| e.path()));
     }
-    dirs.iter().filter_map(|d| cgroup(d)).map(|(used, _)| used).sum()
+    dirs.iter().filter_map(|d| anon(d)).sum()
 }
 
 /// One node: `root` is its cgroup (a cell's, as the host sees it, or
 /// `/sys/fs/cgroup` from inside the cell).
 pub fn node(root: &Path) -> Option<Usage> {
-    let (used, file) = cgroup(root)?;
+    let (_, file) = cgroup(root)?;
+    let own = anon(root)?;
     let containers = containers(root);
-    Some(Usage { litek8s: used.saturating_sub(containers), containers, cache: file })
+    Some(Usage { litek8s: own.saturating_sub(containers), containers, cache: file })
 }
 
 /// A cluster's nodes: `dir` holds one cgroup per node (`cells/<cluster>`).
@@ -209,7 +219,7 @@ pub fn sandbox_breakdown(sandbox_used: u64, sandbox_cache: u64, cluster: &str, s
     if !others.is_empty() {
         lines.push(line(format!("other clusters ({})", others.len()), other.litek8s + other.containers, "litek8s and pods of the rest"));
     }
-    lines.push(line("sandbox", rest, "supervisor, pasta, cell manager"));
+    lines.push(line("sandbox", rest, "supervisor, pasta, cell manager, their kernel memory"));
     lines.push(line("cache", sandbox_cache, "reclaimable (file pages)"));
     Breakdown { total: sandbox_used + sandbox_cache, what: "the sandbox's cgroup", lines }
 }
@@ -228,25 +238,29 @@ pub fn node_breakdown(n: &NodeMemory) -> Breakdown {
 mod tests {
     use super::*;
 
-    fn write(dir: &Path, current: u64, file: u64) {
+    /// A fake cgroup: `current` = anon + file + the kernel memory charged
+    /// to it (slab, sockets), which the breakdown must not count as its own.
+    fn write(dir: &Path, current: u64, file: u64, anon: u64) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("memory.current"), current.to_string()).unwrap();
-        std::fs::write(dir.join("memory.stat"), format!("anon 1\nfile {file}\nfile_mapped 3\n")).unwrap();
+        std::fs::write(dir.join("memory.stat"), format!("anon {anon}\nfile {file}\nfile_mapped 3\n")).unwrap();
     }
 
     #[test]
     fn splits_a_node_into_litek8s_pods_and_cache() {
         let d = tempfile::tempdir().unwrap();
         let cell = d.path().join("cells/ci/0");
-        write(&cell, 100 << 20, 30 << 20);
-        write(&cell.join("litek8s/pod_abc"), 40 << 20, 10 << 20);
-        write(&cell.join("litek8s/docker/1234"), 6 << 20, 1 << 20);
-        write(&cell.join("litek8s/shims"), 2 << 20, 0);
+        // The cell holds 10 MiB of kernel memory (slab for files it read)
+        // on top of anon + file: it must stay out of litek8s's figure.
+        write(&cell, 100 << 20, 30 << 20, 60 << 20);
+        write(&cell.join("litek8s/pod_abc"), 40 << 20, 10 << 20, 28 << 20);
+        write(&cell.join("litek8s/docker/1234"), 6 << 20, 1 << 20, 4 << 20);
+        write(&cell.join("litek8s/shims"), 2 << 20, 0, 2 << 20);
         let u = node(&cell).unwrap();
-        assert_eq!(u, Usage { litek8s: 35 << 20, containers: 35 << 20, cache: 30 << 20 });
-        write(&d.path().join("cells/ci/1"), 10 << 20, 2 << 20);
+        assert_eq!(u, Usage { litek8s: 28 << 20, containers: 32 << 20, cache: 30 << 20 });
+        write(&d.path().join("cells/ci/1"), 10 << 20, 2 << 20, 7 << 20);
         let all = cluster(&d.path().join("cells/ci")).unwrap();
-        assert_eq!(all, Usage { litek8s: 43 << 20, containers: 35 << 20, cache: 32 << 20 });
+        assert_eq!(all, Usage { litek8s: 35 << 20, containers: 32 << 20, cache: 32 << 20 });
         assert!(cluster(&d.path().join("cells/none")).is_none());
     }
 
