@@ -121,10 +121,14 @@ def metric_growth(r):
 
 
 def compressed_growth(r):
-    # Prometheus: the head chunks on disk (the compressed samples; the WAL
-    # holds them uncompressed until a block is cut). litek8s: its blocks.
+    # Prometheus: its head chunks on disk plus blocks (the compressed samples;
+    # the WAL holds them again until a block is cut), from its own metrics.
+    # litek8s: its block files.
     if not (r["st0"] and r["st1"]):
         return 0
+    if r["ts1"] and r["ts1"].get("head_chunks_bytes") is not None:
+        size = lambda t: (t.get("head_chunks_bytes") or 0) + (t.get("blocks_bytes") or 0)
+        return size(r["ts1"]) - size(r["ts0"])
     p0, p1 = r["st0"]["metrics_parts"], r["st1"]["metrics_parts"]
     keys = ["chunks_head", "blocks"] if "chunks_head" in p1 else ["raw", "60s", "600s"]
     return sum(p1.get(k, 0) - p0.get(k, 0) for k in keys)
@@ -135,19 +139,22 @@ line("… compressed samples only (Prometheus: chunks_head; litek8s: blocks)", l
 line("Bytes per sample (compressed)", lambda r: f"{compressed_growth(r) / (rate(r) * window):.2f}" if rate(r) else "-")
 
 
-def logs_growth(r):
-    if r["stf"] and r["st0"]:
-        return r["stf"]["logs_bytes"] - r["st0"].get("logs_bytes", 0)
-    if r["st0"] and r["st1"]:
-        return r["st1"].get("logs_bytes", r["st1"].get("log_archive_bytes", 0)) - r["st0"].get("logs_bytes", r["st0"].get("log_archive_bytes", 0))
-    return 0
+def logs_growth(r, part=None):
+    after = r["stf"] or r["st1"]
+    if not (after and r["st0"]):
+        return 0
+    if part:
+        return after.get("logs_parts", {}).get(part, 0) - r["st0"].get("logs_parts", {}).get(part, 0)
+    key = "logs_bytes" if "logs_bytes" in after else "log_archive_bytes"
+    return after.get(key, 0) - r["st0"].get(key, 0)
 
 
-line("Log store growth over the window (Loki after a flush; litek8s: its archive)", lambda r: human(logs_growth(r)))
+line("Log store growth over the window (Loki after a flush, WAL included; litek8s: its archive)", lambda r: human(logs_growth(r)))
+line("… compressed chunks only (Loki)", lambda r: human(logs_growth(r, "chunks")) if r["stf"] else "–")
 line("Container log files (CRI, both systems keep them)", lambda r: human(r["st1"]["container_log_files_bytes"]) if r["st1"] else "-")
 per_day = 86400 / window
 line("Metrics per day of retention, compressed", lambda r: human(compressed_growth(r) * per_day))
-line("Logs per day of retention", lambda r: human(logs_growth(r) * per_day))
+line("Logs per day of retention (Loki: chunks)", lambda r: human((logs_growth(r, "chunks") if r["stf"] else logs_growth(r)) * per_day))
 out.append("")
 out.append("### Queries, median ms (p90), 20 runs each\n")
 out.append("| query | " + " | ".join(n for _, n in SYS) + " |")

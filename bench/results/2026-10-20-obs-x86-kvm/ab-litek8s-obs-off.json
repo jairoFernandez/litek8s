@@ -1,0 +1,1 @@
+{"flags": "--no-observability", "apiserver_pss_mib": [30.2, 30.2], "runtime_pss_mib": [9.4, 9.4], "used_mib": [340, 338], "cpu_pct_one_core": {"control-plane": 0.01, "node-agent": 0.001, "os/other": 0.0, "runtime": 0.049, "workload": 2.243}, "guest_busy_pct": 1.154, "window_s": 900.0}

@@ -1,0 +1,2 @@
+{"status": 204}
+{"metrics_bytes": 32702464, "metrics_parts": {"wal": 32542720, "chunks_head": 135168, "blocks": 0}, "logs_bytes": 3674112, "logs_parts": {"chunks": 1257472, "wal": 2277376, "tsdb-shipper-active": 61440, "tsdb-shipper-cache": 4096, "compactor": 65536}, "container_log_files_bytes": 9196568}

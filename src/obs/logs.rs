@@ -207,7 +207,13 @@ impl Source {
         for f in &self.files {
             let Ok(data) = std::fs::read(f) else { continue };
             let complete = data.iter().rposition(|b| *b == b'\n').map_or(0, |p| p + 1);
-            lines.feed(&data[..complete], |ts, stream, text| {
+            // Records are in time order: skip straight to the first one in
+            // the range (a recent window of a big file reads little of it).
+            let start = q.since.as_deref().map_or(0, |since| first_record_at_or_after(&data[..complete], since));
+            if start > 0 {
+                lines = Lines::default();
+            }
+            lines.feed(&data[start..complete], |ts, stream, text| {
                 let Some(ts) = normalize_ts(ts) else { return };
                 if q.wants_line(&ts, text) {
                     if out.len() == q.limit {
@@ -219,6 +225,42 @@ impl Source {
         }
         out
     }
+}
+
+/// The offset of the first record whose time is at or after `since` (a
+/// normalized time), by bisection over line starts; records are in time
+/// order. A partial (`P`) record found there starts its line anyway: the
+/// line's earlier part was before `since`.
+fn first_record_at_or_after(data: &[u8], since: &str) -> usize {
+    let line_start = |pos: usize| -> usize {
+        if pos == 0 {
+            return 0;
+        }
+        data[pos - 1..].iter().position(|b| *b == b'\n').map_or(data.len(), |i| pos + i)
+    };
+    let time_at = |start: usize| -> Option<String> {
+        let end = data[start..].iter().position(|b| *b == b' ').map(|i| start + i)?;
+        normalize_ts(std::str::from_utf8(&data[start..end]).ok()?)
+    };
+    let before = |start: usize| time_at(start).is_some_and(|t| t.as_str() < since);
+    // Bisect while the range is big (every record before `lo` is before
+    // `since`), then walk the few lines left.
+    let (mut lo, mut hi) = (0usize, data.len());
+    while hi - lo > 4096 {
+        let mid = line_start(lo + (hi - lo) / 2);
+        if mid >= hi {
+            break;
+        }
+        if before(mid) {
+            lo = line_start(mid + 1);
+        } else {
+            hi = mid;
+        }
+    }
+    while lo < data.len() && before(lo) {
+        lo = line_start(lo + 1);
+    }
+    lo
 }
 
 /// Merge per-source results (each sorted) into the newest `limit`, oldest
@@ -476,6 +518,24 @@ mod tests {
         assert!(!q.wants("default", "web-1", "app", &a.labels));
         let q = Compiled::new(LogQuery { pod: Some("^db".into()), ..Default::default() }).unwrap();
         assert!(q.wants("default", "db-0", "app", &b.labels) && !q.wants("default", "web-1", "app", &a.labels));
+    }
+
+    #[test]
+    fn since_bisects_to_the_first_line_in_range() {
+        let data: String = (0..1000).map(|i| rec(&format!("2026-10-19T10:{:02}:{:02}.000000000Z", i / 60, i % 60), "stdout", true, &format!("n{i}"))).collect();
+        let b = data.as_bytes();
+        for (since, want) in [("2026-10-19T10:00:00.000000000Z", 0), ("2026-10-19T10:05:00.000000000Z", 300), ("2026-10-19T10:05:00.500000000Z", 301), ("2026-10-19T11:00:00.000000000Z", 1000)] {
+            let off = first_record_at_or_after(b, since);
+            let line = data[off..].lines().next().unwrap_or("");
+            assert_eq!(line.rsplit(' ').next().unwrap_or(""), if want < 1000 { format!("n{want}") } else { String::new() }, "since {since}");
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let s = source(dir.path(), "big", "p", &[], &data);
+        let since = chrono::DateTime::parse_from_rfc3339("2026-10-19T10:16:00Z").unwrap().timestamp_millis();
+        let q = Compiled::new(LogQuery { since_ms: Some(since), ..Default::default() }).unwrap();
+        let got = s.search(&q, "n");
+        assert_eq!(got.len(), 40);
+        assert_eq!(got[0].line, "n960");
     }
 
     #[test]
