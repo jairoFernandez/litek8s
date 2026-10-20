@@ -69,9 +69,11 @@ same sandbox minus the user namespace (cgroup `/sys/fs/cgroup/litek8s-dev`).
 
 `dev up` boots a Linux VM with Apple's Virtualization.framework (the
 `litek8s dev-vm` process; no Docker Desktop, OrbStack, Lima or vfkit). The
-guest is Alpine's `linux-virt` kernel and an initramfs of crun, iptables,
-iproute2, e2fsprogs and busybox around a static litek8s that runs as PID 1;
-a sparse disk holds images and objects. The Mac side:
+guest is Alpine's `linux-virt` kernel and a read-only root disk (a romfs
+image of crun, iptables, iproute2, e2fsprogs and busybox around a static
+litek8s that runs as PID 1; a 0.75 MiB initrd mounts it under a tmpfs
+overlay and hands over); a sparse disk holds images and objects. The Mac
+side:
 
 - forwards `127.0.0.1:<port>` to the API server (6443 when free);
 - watches the Services and listens on `127.0.0.1:<nodePort>` for every
@@ -84,22 +86,101 @@ a sparse disk holds images and objects. The Mac side:
   on the Mac, IN_ATTRIB in the guest), so inotify watchers see Mac edits;
 - shares Rosetta when it is installed, so `linux/amd64` images run;
 - serves the Docker API on `~/.litek8s/docker.sock` (see [docker.md](docker.md));
-- uses the console as the control channel (the guest reports its address,
-  `dev down` powers it off cleanly).
+- uses the console as the control channel (the guest reports its address
+  and its memory, `dev down` powers it off cleanly);
+- keeps the guest on as little of its memory as it needs, growing it on
+  demand ([Memory](#memory-on-macos)).
 
 The framework requires the `com.apple.security.virtualization` entitlement;
 if the binary lacks it, `dev up` runs an ad-hoc signed copy
 (`codesign --sign -`), so nothing needs `sudo`. VM size: `--memory` (MiB,
-default 4096, an upper bound: the VM's footprint is what it touches) and
-`--cpus` (default half the Mac's).
+default 4096, an upper bound the guest grows into, see below) and `--cpus`
+(default half the Mac's).
 
 Build the guest once (needs a Docker API or any Linux box for the musl
 build; a running `litek8s dev` serves one, so litek8s can build its next
 guest itself, see [develop-without-docker.md](develop-without-docker.md)):
 
 ```bash
-dev/vm/build.sh   # static litek8s, then kernel + initramfs from Alpine packages
+dev/vm/build.sh   # static litek8s, then kernel + root image + initrd from Alpine packages
 ```
+
+### Memory on macOS
+
+Virtualization.framework never gives a VM's memory back to macOS: every
+page the guest has touched once stays charged to the VM's process (its
+footprint, what Activity Monitor shows) until the VM stops, however much
+the guest frees. Dropping 1.5 GB of guest page cache moved the footprint by
+nothing; its balloon device does not help either (it offers no free page
+reporting, and pages handed to it stay charged: inflating it by 3 GiB moved
+the footprint by 0 MB, or by +540 MB with Alpine's `init_on_alloc`), and
+saving and restoring the VM brings all of its memory back in (4.2 GB
+footprint for a guest using 300 MB). Only stopping the VM returns memory;
+OrbStack and Docker Desktop got dynamic memory by leaving the framework for
+their own VMMs on Hypervisor.framework.
+
+What litek8s does instead is keep the guest off memory it does not need, so
+there is less to charge:
+
+- **A ceiling that grows on demand.** The VM boots with 1 GiB (a quarter
+  of `--memory` if that is more) for the guest; the balloon takes the rest
+  before the guest has touched it, which costs nothing (the guest kernel
+  runs with `init_on_alloc=0`, so it does not zero what it hands over).
+  The guest reports its memory on the console every 2 s when it changes
+  (every 250 ms when little is left) and at once when a PSI trigger fires
+  (memory stalls of 100 ms in a second); `litek8s dev-vm` grows the ceiling
+  by half (at least 512 MiB) when MemAvailable drops under 256 MiB (1/16
+  of the VM) or memory stalls while free memory is short (stalls with
+  plenty free come from elsewhere, a pod at its own memory limit for
+  one), and to the whole VM when it is nearly out.
+  It shrinks again, by half the excess at a time, once the guest has been
+  calm for 2 minutes with more than twice that available: page cache then
+  stays within memory the guest already has instead of spreading over all
+  of it (an image pull no longer leaves the VM charged for gigabytes), and
+  the guest drops its oldest cache first (MGLRU); hot cache shows up as
+  stalls and grows the ceiling back.
+- **No livelock under the ceiling.** With the root filesystem on a disk,
+  the code everything runs is reclaimable page cache; a burst of
+  allocations used to make the guest evict and re-read it for a minute
+  (the node agent lost its connection) instead of running out of memory.
+  The guest protects its working set of the last second
+  (`lru_gen/min_ttl_ms=1000`), so the kernel takes its OOM path at once,
+  and there the balloon deflates (the framework's balloon may deflate on
+  OOM) before anything is killed; the host grows the ceiling meanwhile.
+- **A smaller fixed cost.** The root filesystem is a disk image the guest
+  reads as it needs it (an initramfs is unpacked into RAM and stays there:
+  56 MiB, plus the 25 MiB archive the framework loads at boot), and the
+  kernel skips its 64 MiB of bounce buffers (`swiotlb=noforce`: virtio
+  devices here reach all memory).
+
+`LITEK8S_DEV_DYNAMIC_MEMORY=0 litek8s dev up` gives the guest all of
+`--memory` from the start. The ceiling and what moved it are in the VM's
+log (`litek8s dev-vm: memory ceiling 1024 -> 1536 MiB (little available;
+...)`, `env.log` in the dev data directory), and `litek8s ui` shows it with
+the memory breakdown. To hand back memory the VM once used (after a big
+build, say), restart it: `litek8s dev down && litek8s dev up` (objects,
+images and volumes are kept; pods restart).
+
+What macOS charges the VM (`--cpus 4 --memory 4096`, fresh cluster each
+time, `bench/vm-memory.sh`; before: the guest from before these changes,
+an initramfs and no ceiling):
+
+| | before | now |
+|---|---|---|
+| idle, nothing deployed | 384 MB | 295 MB |
+| idle, a pod | 461 MB | 389 MB |
+| Argo CD installed (7 pods) | 1847 MB | 1140 MB (the ceiling stayed at 1 GiB) |
+| then a 1 GB image pulled | 3296 MB | 1200 MB |
+| then 5 minutes idle | 3296 MB | 1210 MB |
+| then 1 GiB allocated at once in a pod | 0.39 s, 4083 MB | 0.36 s, 1596 MB (ceiling 1 → 4 GiB); no OOM kill either way |
+| 1 GiB written, read and deleted in a container | +1058 MB, for good | +733 MB, for good |
+
+After the 1 GiB burst the ceiling came back down within 4 minutes (4096 →
+2471 → 1662 → 1257 → 1052 MiB) while a 600 MB file read every 10 s stayed
+in the guest's cache throughout (125 ms per read, no refaults). For
+comparison, OrbStack's VM (its own VMM) grew by 2.3 GB for the same 1 GiB
+container write and was back to where it started 30 s later: that, the
+framework does not allow. Details and the experiments behind this: [bench/RESULTS.md](../bench/RESULTS.md#the-macos-vms-memory-a-ceiling-instead-of-a-ratchet-2026-10-19).
 
 ## Settings
 

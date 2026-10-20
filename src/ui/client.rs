@@ -3,6 +3,7 @@
 //! exec and port-forward. Replies are kept as JSON values: the UI reads a
 //! few fields and should not fail on what other engines add or leave out.
 
+use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -26,6 +27,14 @@ pub enum Transport {
     Tls { addr: String, server_name: String, config: Option<Arc<rustls::ClientConfig>> },
 }
 
+/// Credentials that change (a kubeconfig's exec plugin): the
+/// `Authorization` header for the next request.
+pub trait Credentials: Send + Sync {
+    fn header(&self) -> Pin<Box<dyn Future<Output = Result<String>> + Send + '_>>;
+    /// The server refused the last one (401): get a new one next time.
+    fn invalidate(&self);
+}
+
 /// Where an API is and how to authenticate to it.
 #[derive(Clone)]
 pub struct Endpoint {
@@ -38,6 +47,7 @@ pub struct Endpoint {
     pub headers: Vec<(String, String)>,
     /// What to show the user.
     pub display: String,
+    pub creds: Option<Arc<dyn Credentials>>,
 }
 
 impl std::fmt::Debug for Endpoint {
@@ -49,7 +59,7 @@ impl std::fmt::Debug for Endpoint {
 
 impl Endpoint {
     pub fn unix(path: PathBuf) -> Self {
-        Endpoint { display: format!("unix://{}", path.display()), transport: Transport::Unix(path), host: "localhost".into(), base: String::new(), headers: Vec::new() }
+        Endpoint { display: format!("unix://{}", path.display()), transport: Transport::Unix(path), host: "localhost".into(), base: String::new(), headers: Vec::new(), creds: None }
     }
 
     /// `unix:///path`, `tcp://host:port` or `http://host:port` (`DOCKER_HOST` syntax).
@@ -60,7 +70,7 @@ impl Endpoint {
         if let Some(rest) = url.strip_prefix("tcp://").or_else(|| url.strip_prefix("http://")) {
             let addr = rest.trim_end_matches('/').to_string();
             let addr = if addr.contains(':') { addr } else { format!("{addr}:2375") };
-            return Ok(Endpoint { display: format!("tcp://{addr}"), host: addr.clone(), transport: Transport::Tcp(addr), base: String::new(), headers: Vec::new() });
+            return Ok(Endpoint { display: format!("tcp://{addr}"), host: addr.clone(), transport: Transport::Tcp(addr), base: String::new(), headers: Vec::new(), creds: None });
         }
         if url.starts_with('/') {
             return Ok(Self::unix(PathBuf::from(url)));
@@ -88,7 +98,7 @@ impl Endpoint {
         };
         let addr = if has_port { authority.to_string() } else { format!("{authority}:{default_port}") };
         let transport = if secure { Transport::Tls { addr: addr.clone(), server_name: host_only, config: tls } } else { Transport::Tcp(addr.clone()) };
-        Ok(Endpoint { transport, host: authority.to_string(), base, headers: Vec::new(), display: url.trim_end_matches('/').to_string() })
+        Ok(Endpoint { transport, host: authority.to_string(), base, headers: Vec::new(), display: url.trim_end_matches('/').to_string(), creds: None })
     }
 
     pub async fn connect(&self) -> Result<Box<dyn Io>> {
@@ -120,10 +130,13 @@ impl Endpoint {
         }
     }
 
-    fn request(&self, method: Method, path: &str, content_type: Option<&str>, body: Vec<u8>) -> Result<Request<Full<Bytes>>> {
+    async fn request(&self, method: Method, path: &str, content_type: Option<&str>, body: Vec<u8>) -> Result<Request<Full<Bytes>>> {
         let mut req = Request::builder().method(method).uri(format!("{}{path}", self.base)).header(hyper::header::HOST, &self.host);
         for (k, v) in &self.headers {
             req = req.header(k.as_str(), v.as_str());
+        }
+        if let Some(c) = &self.creds {
+            req = req.header(hyper::header::AUTHORIZATION, c.header().await?);
         }
         if let Some(ct) = content_type {
             req = req.header(hyper::header::CONTENT_TYPE, ct);
@@ -138,7 +151,33 @@ impl Endpoint {
         tokio::spawn(async move {
             let _ = conn.await;
         });
-        Ok(sender.send_request(self.request(method, path, content_type, body)?).await?)
+        let resp = sender.send_request(self.request(method, path, content_type, body).await?).await?;
+        if resp.status() == StatusCode::UNAUTHORIZED {
+            if let Some(c) = &self.creds {
+                c.invalidate();
+            }
+        }
+        Ok(resp)
+    }
+
+    /// Like [`Endpoint::send`] with more headers (`Accept`).
+    pub async fn send_with(&self, method: Method, path: &str, headers: &[(&str, &str)], content_type: Option<&str>, body: Vec<u8>) -> Result<Response<Incoming>> {
+        let io = self.connect().await?;
+        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(io)).await?;
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        let mut req = self.request(method, path, content_type, body).await?;
+        for (k, v) in headers {
+            req.headers_mut().insert(hyper::header::HeaderName::from_bytes(k.as_bytes())?, v.parse()?);
+        }
+        let resp = sender.send_request(req).await?;
+        if resp.status() == StatusCode::UNAUTHORIZED {
+            if let Some(c) = &self.creds {
+                c.invalidate();
+            }
+        }
+        Ok(resp)
     }
 
     /// A request whose reply is JSON (`null` for an empty body); an error
@@ -160,6 +199,16 @@ impl Endpoint {
         Ok(serde_json::from_slice(&data).with_context(|| format!("{path}: not JSON"))?)
     }
 
+    /// A GET whose reply is JSON, with an `Accept` (Tables, discovery),
+    /// read into `T` (typed lists keep only the fields they name).
+    pub async fn json_accept<T: serde::de::DeserializeOwned>(&self, path: &str, accept: &str) -> Result<T> {
+        let resp = tokio::time::timeout(Duration::from_secs(30), self.send_with(Method::GET, path, &[("Accept", accept)], None, Vec::new())).await.context("timed out")??;
+        let status = resp.status();
+        let data = resp.into_body().collect().await?.to_bytes();
+        check(status, &data)?;
+        Ok(serde_json::from_slice(&data).with_context(|| format!("{path}: not JSON"))?)
+    }
+
     /// An upgraded connection (`Upgrade: <protocol>`): exec, port-forward.
     pub async fn upgrade(&self, method: Method, path: &str, protocol: &str, extra: &[(&str, &str)], body: Option<&Value>) -> Result<(Response<()>, Pin<Box<dyn Io>>)> {
         let io = self.connect().await?;
@@ -168,7 +217,7 @@ impl Endpoint {
             let _ = conn.with_upgrades().await;
         });
         let bytes = body.map(|b| serde_json::to_vec(b).unwrap_or_default()).unwrap_or_default();
-        let mut req = self.request(method, path, body.map(|_| "application/json"), bytes)?;
+        let mut req = self.request(method, path, body.map(|_| "application/json"), bytes).await?;
         let h = req.headers_mut();
         h.insert(hyper::header::CONNECTION, "Upgrade".parse()?);
         h.insert(hyper::header::UPGRADE, protocol.parse()?);
@@ -190,7 +239,7 @@ impl Endpoint {
 
 /// An error for a non-2xx status, with the message Docker (`message`) or
 /// Kubernetes (`message` of a Status) put in the body.
-fn check(status: StatusCode, body: &[u8]) -> Result<()> {
+pub fn check(status: StatusCode, body: &[u8]) -> Result<()> {
     if status.is_success() || status == StatusCode::NOT_MODIFIED {
         return Ok(());
     }

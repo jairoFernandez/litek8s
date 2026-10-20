@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Build the macOS dev VM's guest: a Linux kernel and an initramfs.
+"""Build the macOS dev VM's guest: a Linux kernel, its root filesystem and a
+small initramfs.
 
 Everything comes from Alpine's arm64 packages, fetched and unpacked here (no
 Docker, no root): the `linux-virt` kernel (its EFI zboot image unpacked to
@@ -10,9 +11,14 @@ build-guest-binary.sh), which runs the cluster as PID 1.
 
     dev/vm/build-guest.py --litek8s target/guest-musl-arm64/release/litek8s --out <dir>
 
-writes <dir>/Image and <dir>/initramfs.gz (what `litek8s dev up` boots; it
-looks in ~/Library/Application Support/dev.civojairo.litek8s/vm/ or
-$LITEK8S_DEV_VM_ASSETS).
+writes <dir>/Image, <dir>/root.img and <dir>/initrd.gz (what `litek8s dev
+up` boots; it looks in ~/Library/Application Support/dev.civojairo.litek8s/vm/
+or $LITEK8S_DEV_VM_ASSETS). The root filesystem is a read-only romfs image
+the VM attaches as a disk, so the guest reads only the parts it runs and its
+kernel can drop them again (an initramfs stays in RAM, whole, for good: ~55
+MiB, which macOS charged the VM for all along); initrd.gz only loads the
+modules for that disk and overlays a tmpfs on it for the few files init
+writes (`--initramfs` builds the old single initramfs.gz instead).
 """
 
 import argparse
@@ -144,6 +150,145 @@ class Cpio:
         return self.buf.getvalue()
 
 
+class Romfs:
+    """romfs image writer (Documentation/filesystems/romfs.rst): no
+    compression, no owners (all root), modes 0644/0755; the simplest
+    filesystem the kernel mounts read-only from a block device."""
+
+    DIR, FILE, LINK, HARD = 1, 2, 3, 0
+
+    @staticmethod
+    def _pad(n):
+        return (n + 15) & ~15
+
+    @staticmethod
+    def _checksum(data):
+        """The word that makes the big-endian 32-bit words of data sum to 0."""
+        total = sum(struct.unpack(f">{len(data) // 4}I", data)) & 0xFFFFFFFF
+        return (-total) & 0xFFFFFFFF
+
+    def __init__(self, root):
+        self.root = root
+
+    def _header_size(self, name):
+        return 16 + self._pad(len(name.encode()) + 1)
+
+    def build(self):
+        # Layout: the superblock, then each directory's entries together
+        # ("." and ".." first), directories breadth first.
+        volname = b"litek8s"
+        first = 16 + self._pad(len(volname) + 1)
+        offset = first
+        entries = []  # (offset, name, kind, path, dir_path)
+        inodes = {}   # (dev, ino) -> offset of the first entry of that file
+        dir_header = {self.root: first}  # dir path -> offset of its header
+        dir_first = {}                   # dir path -> offset of its first entry
+        queue = [(self.root, self.root)]
+        while queue:
+            path, parent = queue.pop(0)
+            dir_first[path] = offset
+            names = sorted(os.listdir(path))
+            items = [(".", "dot", path), ("..", "dotdot", parent)] + [(n, None, os.path.join(path, n)) for n in names]
+            for name, special, p in items:
+                if special == "dot" and path == self.root:
+                    kind = "rootdot"
+                elif special:
+                    kind = special
+                else:
+                    st = os.lstat(p)
+                    if stat.S_ISLNK(st.st_mode):
+                        kind = "link"
+                    elif stat.S_ISDIR(st.st_mode):
+                        kind = "dir"
+                        dir_header[p] = offset
+                        queue.append((p, path))
+                    elif stat.S_ISREG(st.st_mode):
+                        key = (st.st_dev, st.st_ino)
+                        kind = ("hard", inodes[key]) if key in inodes else "file"
+                        inodes.setdefault(key, offset)
+                    else:
+                        continue
+                size = self._header_size(name)
+                if kind == "file":
+                    size += self._pad(os.path.getsize(p))
+                elif kind == "link":
+                    size += self._pad(len(os.readlink(p).encode()) + 1)
+                entries.append((offset, name, kind, p, path))
+                offset += size
+        total = (offset + 1023) & ~1023
+        out = bytearray(total)
+        # Entries of one directory chain through `next`; the last has 0.
+        by_dir = {}
+        for e in entries:
+            by_dir.setdefault(e[4], []).append(e)
+        nxt = {}
+        for lst in by_dir.values():
+            for a, b in zip(lst, lst[1:] + [None]):
+                nxt[a[0]] = b[0] if b else 0
+        for off, name, kind, p, dirpath in entries:
+            data = b""
+            spec = 0
+            mode = 0
+            if kind == "rootdot":
+                t, spec, mode = self.DIR, dir_first[dirpath], 8
+            elif kind == "dot":
+                t, spec = self.HARD, dir_header[dirpath]
+            elif kind == "dotdot":
+                t, spec = self.HARD, dir_header[p]
+            elif kind == "dir":
+                t, spec, mode = self.DIR, dir_first[p], 8
+            elif kind == "link":
+                t, data = self.LINK, os.readlink(p).encode() + b"\0"
+            elif kind == "file":
+                t = self.FILE
+                with open(p, "rb") as f:
+                    data = f.read()
+                if os.lstat(p).st_mode & 0o111:
+                    mode = 8
+            else:
+                t, spec = self.HARD, kind[1]
+            nm = name.encode()
+            nm = nm + b"\0" * (self._pad(len(nm) + 1) - len(nm))
+            size = len(data) - 1 if t == self.LINK else len(data)
+            hdr = bytearray(struct.pack(">IIII", nxt[off] | mode | t, spec, size, 0) + nm)
+            struct.pack_into(">I", hdr, 12, self._checksum(bytes(hdr)))
+            out[off:off + len(hdr)] = hdr
+            out[off + len(hdr):off + len(hdr) + len(data)] = data
+        sb = bytearray(b"-rom1fs-" + struct.pack(">II", total, 0) + volname + b"\0" * (first - 16 - len(volname)))
+        out[0:len(sb)] = sb
+        struct.pack_into(">I", out, 12, self._checksum(bytes(out[:min(512, total)])))
+        return bytes(out)
+
+
+# The initramfs's /init with a root disk: load what mounting it takes, put a
+# tmpfs over it (init writes /etc/resolv.conf, creates the shares' mount
+# points), and hand over to litek8s, which runs as PID 1 from the disk.
+DISK_INIT = """#!/bin/busybox sh
+bb=/bin/busybox
+$bb mount -t devtmpfs devtmpfs /dev
+$bb mount -t proc proc /proc
+for m in /lib/modules/*.ko.gz; do $bb insmod "$m"; done
+root=/dev/vdb
+for w in $($bb cat /proc/cmdline); do case "$w" in litek8s.root=*) root="${w#litek8s.root=}";; esac; done
+i=0
+while [ ! -b "$root" ] && [ $i -lt 200 ]; do $bb usleep 10000; i=$((i+1)); done
+$bb mkdir -p /lower /rw /root
+if $bb mount -t romfs -o ro "$root" /lower; then
+  $bb mount -t tmpfs -o mode=755 tmpfs /rw
+  $bb mkdir -p /rw/upper /rw/work
+  $bb mount -t overlay -o lowerdir=/lower,upperdir=/rw/upper,workdir=/rw/work overlay /root
+fi
+if [ ! -x /root/init ]; then
+  echo "litek8s-guest: cannot mount the root disk $root" > /dev/console
+  $bb sleep 5
+  $bb poweroff -f
+fi
+$bb umount /proc
+$bb umount /dev
+exec $bb switch_root /root /init
+"""
+
+
 def unpack_apk(path, dest, keep):
     with gzip.open(path) as gz, tarfile.open(fileobj=gz, mode="r|") as t:
         for m in t:
@@ -191,6 +336,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--release", default="v3.22")
     ap.add_argument("--cache", default=None)
+    ap.add_argument("--initramfs", action="store_true", help="the old layout: everything in one initramfs.gz")
     args = ap.parse_args()
     out = os.path.abspath(args.out)
     cache = args.cache or os.path.join(out, "build", "cache")
@@ -270,14 +416,49 @@ def main():
         b.write(a.read())
     os.chmod(init, 0o755)
     os.symlink("/init", os.path.join(root, "bin", "litek8s"))
+    packages = " ".join(n for n in names if n != "linux-virt")
+    if args.initramfs:
+        cpio = Cpio()
+        cpio.add_tree(root)
+        data = cpio.finish()
+        with gzip.open(os.path.join(out, "initramfs.gz"), "wb", compresslevel=6) as f:
+            f.write(data)
+        for stale in ["root.img", "initrd.gz"]:
+            if os.path.exists(os.path.join(out, stale)):
+                os.remove(os.path.join(out, stale))
+        print(f"kernel {kernel_version}: {out}/Image ({os.path.getsize(os.path.join(out, 'Image')) >> 20} MiB), "
+              f"{out}/initramfs.gz ({os.path.getsize(os.path.join(out, 'initramfs.gz')) >> 20} MiB, "
+              f"{len(data) >> 20} MiB unpacked); packages: {packages}")
+        return
+    image = Romfs(root).build()
+    with open(os.path.join(out, "root.img.part"), "wb") as f:
+        f.write(image)
+    os.rename(os.path.join(out, "root.img.part"), os.path.join(out, "root.img"))
+    # The initramfs: busybox, the disk's modules, /init.
+    small = os.path.join(build, "initrd")
+    if os.path.exists(small):
+        import shutil
+        shutil.rmtree(small)
+    for d in ["bin", "dev", "proc", "lib/modules", "lower", "rw", "root"]:
+        os.makedirs(os.path.join(small, d), exist_ok=True)
+    with open(os.path.join(root, "bin", bb), "rb") as a, open(os.path.join(small, "bin", "busybox"), "wb") as b:
+        b.write(a.read())
+    os.chmod(os.path.join(small, "bin", "busybox"), 0o755)
+    for i, mod in enumerate(["kernel/drivers/block/virtio_blk.ko.gz", "kernel/fs/romfs/romfs.ko.gz", "kernel/fs/overlayfs/overlay.ko.gz"]):
+        with open(os.path.join(src, mod), "rb") as a, open(os.path.join(small, "lib/modules", f"{i}-{os.path.basename(mod)}"), "wb") as b:
+            b.write(a.read())
+    with open(os.path.join(small, "init"), "w") as f:
+        f.write(DISK_INIT)
+    os.chmod(os.path.join(small, "init"), 0o755)
     cpio = Cpio()
-    cpio.add_tree(root)
-    data = cpio.finish()
-    with gzip.open(os.path.join(out, "initramfs.gz"), "wb", compresslevel=6) as f:
-        f.write(data)
+    cpio.add_tree(small)
+    with gzip.open(os.path.join(out, "initrd.gz"), "wb", compresslevel=9) as f:
+        f.write(cpio.finish())
+    if os.path.exists(os.path.join(out, "initramfs.gz")):
+        os.remove(os.path.join(out, "initramfs.gz"))
     print(f"kernel {kernel_version}: {out}/Image ({os.path.getsize(os.path.join(out, 'Image')) >> 20} MiB), "
-          f"{out}/initramfs.gz ({os.path.getsize(os.path.join(out, 'initramfs.gz')) >> 20} MiB, "
-          f"{len(data) >> 20} MiB unpacked); packages: {' '.join(n for n in names if n != 'linux-virt')}")
+          f"{out}/root.img ({len(image) >> 20} MiB romfs), {out}/initrd.gz ({os.path.getsize(os.path.join(out, 'initrd.gz')) >> 10} KiB); "
+          f"packages: {packages}")
 
 
 if __name__ == "__main__":

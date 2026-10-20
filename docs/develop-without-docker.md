@@ -21,8 +21,8 @@ stops, reconfigures or uses it. Unset `DOCKER_HOST` and it is what
 The cluster and Docker API you develop **with** must not be the code you
 are **editing**: a broken build would take down the tools that test it.
 `dev/stable.sh` keeps a known-good litek8s in `~/.litek8s/stable`
-(`$LITEK8S_STABLE`): the macOS binary, the VM's kernel and initramfs (with
-the static Linux litek8s as `/init`), the revision, and the cluster's own
+(`$LITEK8S_STABLE`): the macOS binary, the VM's kernel, root image and
+initrd (with the static Linux litek8s as `/init`), the revision, and the cluster's own
 kubeconfig (`~/.kube/config` is not touched).
 
 ```bash
@@ -46,7 +46,7 @@ first one needs some Linux: OrbStack/Docker Desktop if installed (leave
 [bench/build-linux.sh](../bench/build-linux.sh)), or another machine's
 `target/guest-musl-arm64/release/litek8s` passed to `dev/vm/build-guest.py`.
 There are no published releases yet; a release workflow that uploads the
-macOS binary and the VM's `Image`/`initramfs.gz` would remove this step.
+macOS binary and the VM's `Image`/`root.img`/`initrd.gz` would remove this step.
 
 Keep the footprint modest on a shared laptop: `--cpus 4 --memory 4096`
 (the defaults are half the Mac's CPUs and 4096 MiB), `CARGO_BUILD_JOBS=4`

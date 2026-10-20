@@ -17,10 +17,10 @@ pub fn endpoint(context: Option<&str>) -> Result<Endpoint> {
         let path = crate::dev::kubeconfig::default_path();
         let doc: serde_yaml::Value = serde_yaml::from_str(&std::fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?)?;
         if let Some(cur) = doc["current-context"].as_str().filter(|c| !c.is_empty()) {
-            return Ok(crate::ui::kube::resolve(Some(cur))?.0);
+            return Ok(crate::ui::resolve_kube(Some(cur))?.0);
         }
     }
-    Ok(crate::ui::kube::resolve(context)?.0)
+    Ok(crate::ui::resolve_kube(context)?.0)
 }
 
 #[derive(Debug, clap::Args)]

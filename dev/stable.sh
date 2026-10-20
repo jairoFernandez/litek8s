@@ -8,7 +8,7 @@
 #   dev/stable.sh up [dev up args] | down | status | reset
 #   dev/stable.sh env             eval "$(dev/stable.sh env)": DOCKER_HOST, KUBECONFIG
 #
-# LITEK8S_STABLE (default ~/.litek8s/stable) holds bin/litek8s, vm/{Image,initramfs.gz},
+# LITEK8S_STABLE (default ~/.litek8s/stable) holds bin/litek8s, vm/{Image,root.img,initrd.gz},
 # REVISION and the cluster's kubeconfig (~/.kube/config is left alone).
 # `install` builds the macOS binary with this machine's cargo (target dir:
 # target/stable-host of this checkout) and the VM's Linux binary in a

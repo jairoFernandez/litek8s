@@ -35,32 +35,9 @@ pub async fn shell(ep: &Endpoint, id: &str) -> Result<i64> {
     let _ = ep.json(Method::POST, &format!("/exec/{exec}/resize?h={rows}&w={cols}"), None).await;
     let (mut from, mut to) = tokio::io::split(io);
 
-    // Keystrokes: a thread polling stdin, so it can stop without eating the
-    // first key the UI should get back.
-    let stop = Arc::new(AtomicBool::new(false));
-    let (keys_tx, mut keys) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
-    let reader = {
-        let stop = stop.clone();
-        std::thread::spawn(move || {
-            let fd = std::io::stdin().as_raw_fd();
-            let mut buf = [0u8; 4096];
-            while !stop.load(Ordering::Relaxed) {
-                let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
-                // SAFETY: one valid pollfd.
-                let n = unsafe { libc::poll(&mut pfd, 1, 100) };
-                if n <= 0 || pfd.revents & libc::POLLIN == 0 {
-                    continue;
-                }
-                // SAFETY: reads into our buffer.
-                let r = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-                if r <= 0 || keys_tx.send(buf[..r as usize].to_vec()).is_err() {
-                    break;
-                }
-            }
-        })
-    };
+    let mut keys = Keys::start();
     let input = async {
-        while let Some(k) = keys.recv().await {
+        while let Some(k) = keys.rx.recv().await {
             if to.write_all(&k).await.is_err() {
                 break;
             }
@@ -93,12 +70,64 @@ pub async fn shell(ep: &Endpoint, id: &str) -> Result<i64> {
         _ = input => {}
         _ = resize => {}
     }
-    stop.store(true, Ordering::Relaxed);
-    let _ = tokio::task::spawn_blocking(move || reader.join()).await;
+    keys.stop().await;
     let inspect = ep.json(Method::GET, &format!("/exec/{exec}/json"), None).await?;
     match inspect["ExitCode"].as_i64() {
         Some(code) => Ok(code),
         None if inspect["Running"].as_bool() == Some(true) => bail!("the exec is still running"),
         None => Ok(0),
+    }
+}
+
+/// Keystrokes while the UI is suspended: a thread polling stdin, so it can
+/// stop without eating the first key the UI should get back.
+pub struct Keys {
+    pub rx: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Keys {
+    pub fn start() -> Keys {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+        let thread = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                let fd = std::io::stdin().as_raw_fd();
+                let mut buf = [0u8; 4096];
+                while !stop.load(Ordering::Relaxed) {
+                    let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+                    // SAFETY: one valid pollfd.
+                    let n = unsafe { libc::poll(&mut pfd, 1, 100) };
+                    if n <= 0 || pfd.revents & libc::POLLIN == 0 {
+                        continue;
+                    }
+                    // SAFETY: reads into our buffer.
+                    let r = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+                    if r <= 0 || tx.send(buf[..r as usize].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            })
+        };
+        Keys { rx, stop, thread: Some(thread) }
+    }
+
+    pub async fn stop(mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = tokio::task::spawn_blocking(move || t.join()).await;
+        }
+    }
+}
+
+impl Drop for Keys {
+    fn drop(&mut self) {
+        // The thread polls with a 100 ms timeout: it is gone right after.
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            let _ = t.join();
+        }
     }
 }
