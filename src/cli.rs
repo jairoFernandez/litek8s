@@ -83,10 +83,19 @@ Distributed compute (experimental):
   tensor         Run distributed tensor (matrix) compute across the cluster nodes
   pipeline       Run a feed-forward layer pipeline sharded across the cluster
 ", llm_help_lines!(), "
+  completion     Print a shell completion script (bash, zsh, fish, powershell, elvish)
   help           Print this message or the help of the given subcommand(s)
 
 Options:
 {options}{after-help}");
+
+const COMPLETION_AFTER_HELP: &str = "\
+Load it once per shell session, or install it:
+  zsh:   litek8s completion zsh > \"${fpath[1]}/_litek8s\"   (then restart the shell)
+         or in ~/.zshrc: source <(litek8s completion zsh)
+  bash:  litek8s completion bash > ~/.local/share/bash-completion/completions/litek8s
+  fish:  litek8s completion fish > ~/.config/fish/completions/litek8s.fish
+Homebrew installs them for you.";
 
 const MAIN_AFTER_HELP: &str = "\
 Quickstart:
@@ -526,6 +535,15 @@ enum Command {
         after_help = MCP_AFTER_HELP
     )]
     Mcp(crate::mcp::McpArgs),
+    #[command(
+        about = "Print a shell completion script (bash, zsh, fish, powershell, elvish)",
+        help_template = HELP_TEMPLATE,
+        after_help = COMPLETION_AFTER_HELP
+    )]
+    Completion {
+        #[arg(value_enum, help = "The shell")]
+        shell: clap_complete::Shell,
+    },
     #[command(
         about = "Print or install the litek8s agent skill (SKILL.md and references)",
         help_template = HELP_TEMPLATE,
@@ -1545,6 +1563,11 @@ pub async fn run() -> Result<()> {
         }
         Command::Ui(args) => crate::ui::run(args).await,
         Command::Mcp(args) => crate::mcp::run(args).await,
+        Command::Completion { shell } => {
+            use clap::CommandFactory;
+            clap_complete::generate(shell, &mut Cli::command(), "litek8s", &mut io::stdout());
+            Ok(())
+        }
         Command::Skill { reference, list, install } => skill(reference, list, install),
         Command::Agent { join: Some(join), token, node_name, node_ip, node_dir, runtime, wireguard_port, no_wireguard, node_grace_period, .. } => {
             let token = token.context("--token is required with --join")?;
@@ -5049,6 +5072,18 @@ mod main_help_tests {
         assert_eq!(cli.server.as_deref(), Some("127.0.0.1:6443"));
         let cli = <Cli as clap::Parser>::try_parse_from(["litek8s", "agent", "--join", "https://10.0.0.1:6443", "--token", "t"]).unwrap();
         assert!(matches!(cli.command, super::Command::Agent { join: Some(_), .. }));
+    }
+
+    #[test]
+    fn completion_scripts_cover_every_shell() {
+        use clap::{CommandFactory, ValueEnum};
+        for shell in clap_complete::Shell::value_variants() {
+            let mut out = Vec::new();
+            clap_complete::generate(*shell, &mut Cli::command(), "litek8s", &mut out);
+            let script = String::from_utf8(out).unwrap();
+            assert!(script.contains("litek8s") && script.contains("dev"), "{shell}: {script}");
+        }
+        assert!(<Cli as clap::Parser>::try_parse_from(["litek8s", "completion", "zsh"]).is_ok());
     }
 
     #[test]

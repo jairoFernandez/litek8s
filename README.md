@@ -43,6 +43,10 @@ On Linux, dev clusters run rootless and need `crun`, `uidmap`, `passt`
 everything and says what is missing ([docs/dev.md](docs/dev.md#what-it-needs)).
 macOS needs nothing else: no Docker Desktop, no Lima, no sudo.
 
+Shell completion: Homebrew installs it; otherwise `litek8s completion zsh`
+(or bash, fish, powershell, elvish) prints the script, e.g. `source <(litek8s
+completion zsh)` in `~/.zshrc`.
+
 From source: `cargo install litek8s` (crates.io) or `cargo install --git
 https://github.com/jairoFernandez/litek8s` (Rust ≥ 1.90; macOS also needs the
 guest, see [docs/dev.md](docs/dev.md)).
