@@ -46,7 +46,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         View::Pager(p) => pager(f, p, t, body),
         View::Logs(l) => logs(f, l, t, body),
         View::Xray(x) => xray(f, x, t, body),
-        View::Forwards { sel } => forwards(f, ui, *sel, body),
+        View::Forwards { sel } => forwards(f, ui, *sel, app.now, body),
     }
     match &ui.overlay {
         Overlay::None | Overlay::Prompt(_) => {}
@@ -194,6 +194,9 @@ fn table(f: &mut Frame, app: &App, tv: &TableView, area: Rect) {
         title.push_str(&format!("/{}", tv.total));
     }
     title.push(']');
+    if !tv.synced && tv.total > 0 {
+        title.push_str(" loading…");
+    }
     if !tv.filter.raw.is_empty() {
         title.push_str(&format!(" </{}>", tv.filter.raw));
     }
@@ -263,7 +266,7 @@ fn table(f: &mut Frame, app: &App, tv: &TableView, area: Rect) {
         let mut spans = vec![Span::styled(if marked { "◆" } else { " " }, style)];
         for (ci, w) in &fitted {
             let c = &tv.cols[*ci];
-            let text = cell_value(tv, c, r, ui.now);
+            let text = cell_value(tv, c, r, app.now);
             spans.push(Span::styled(pad(&text, *w, c.numeric), style));
             spans.push(Span::styled(" ", style));
         }
@@ -503,7 +506,7 @@ fn xray(f: &mut Frame, x: &XrayView, t: &Theme, area: Rect) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn forwards(f: &mut Frame, ui: &KubeUi, sel: usize, area: Rect) {
+fn forwards(f: &mut Frame, ui: &KubeUi, sel: usize, now: i64, area: Rect) {
     let t = &ui.theme;
     let b = block(format!("port-forwards [{}]", ui.forwards.len()), t);
     let inner = b.inner(area);
@@ -515,7 +518,7 @@ fn forwards(f: &mut Frame, ui: &KubeUi, sel: usize, area: Rect) {
             style = style.patch(t.selected);
         }
         let target = format!("{}/{} → {}", fw.ns, fw.target, fw.pod);
-        let mut text = format!(" {:<22}{:<34}{:<7}{:<6}{}", format!("127.0.0.1:{}", fw.local), trunc(&target, 33), fw.remote, fw.connections, super::describe::human((ui.now - fw.started).max(0)));
+        let mut text = format!(" {:<22}{:<34}{:<7}{:<6}{}", format!("127.0.0.1:{}", fw.local), trunc(&target, 33), fw.remote, fw.connections, super::describe::human((now - fw.started).max(0)));
         if let Some(e) = &fw.error {
             text.push_str(&format!("  {e}"));
         }
@@ -567,7 +570,7 @@ fn input(f: &mut Frame, i: &Input, t: &Theme, area: Rect) {
 fn picker(f: &mut Frame, p: &Picker, t: &Theme, area: Rect) {
     let shown = p.shown();
     let height = (shown.len() as u16 + 3).clamp(5, area.height.saturating_sub(2).max(5));
-    let width = (p.items.iter().map(|(l, _)| l.chars().count()).max().unwrap_or(20) as u16 + 6).clamp(36, 78);
+    let width = (p.items.iter().map(|(l, _)| l.chars().count()).max().unwrap_or(20).max(p.title.chars().count() + 2) as u16 + 6).clamp(36, 78);
     let r = centered(area, width, height);
     f.render_widget(Clear, r);
     let b = Block::bordered().border_style(t.accent).title(Span::styled(format!(" {} ", p.title), t.bold));

@@ -301,7 +301,19 @@ async fn logs(ep: Endpoint, id: u64, target: LogTarget, previous: bool, tail: u3
     let sources: Vec<(String, String, String)> = sources.into_iter().take(max).collect();
     let pods: std::collections::BTreeSet<&str> = sources.iter().map(|(_, p, _)| p.as_str()).collect();
     let one_pod = pods.len() == 1;
-    let labels: Vec<String> = sources.iter().map(|(_, p, c)| if one_pod { c.clone() } else { format!("{p}/{c}") }).collect();
+    // Pods of one workload share a long prefix (`web-8567f99496-`): it goes.
+    let names: Vec<&str> = pods.iter().copied().collect();
+    let common = if names.len() > 1 {
+        let first = names[0];
+        let mut n = names.iter().fold(first.len(), |n, p| first.bytes().zip(p.bytes()).take(n).take_while(|(a, b)| a == b).count());
+        while n > 0 && !first.is_char_boundary(n) {
+            n -= 1;
+        }
+        first[..n].rfind('-').map(|i| i + 1).unwrap_or(0)
+    } else {
+        0
+    };
+    let labels: Vec<String> = sources.iter().map(|(_, p, c)| if one_pod { c.clone() } else { format!("{}/{c}", &p[common..]) }).collect();
     let _ = tx.send(Msg::Kube(KMsg::LogSources { id, sources: labels }));
     if total > max {
         let _ = tx.send(Msg::Done(Err(format!("showing {max} of {total} streams (logs.maxStreams in ui.yaml)"))));

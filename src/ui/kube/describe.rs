@@ -635,8 +635,21 @@ fn node(out: &mut Out, o: &Value, rel: &Related, now: i64) {
     }
     if let Some(info) = o.pointer("/status/nodeInfo").and_then(Value::as_object) {
         out.head(0, "System Info");
-        for (k, v) in info {
-            out.kv(2, &title(k), scalar(v));
+        for (k, label) in [
+            ("machineID", "Machine ID"),
+            ("systemUUID", "System UUID"),
+            ("bootID", "Boot ID"),
+            ("kernelVersion", "Kernel Version"),
+            ("osImage", "OS Image"),
+            ("operatingSystem", "Operating System"),
+            ("architecture", "Architecture"),
+            ("containerRuntimeVersion", "Container Runtime Version"),
+            ("kubeletVersion", "Kubelet Version"),
+            ("kubeProxyVersion", "Kube-Proxy Version"),
+        ] {
+            if let Some(v) = info.get(k).and_then(Value::as_str).filter(|v| !v.is_empty()) {
+                out.kv(2, label, v);
+            }
         }
     }
     if !s(o, "/spec/podCIDR").is_empty() {
@@ -646,7 +659,7 @@ fn node(out: &mut Out, o: &Value, rel: &Related, now: i64) {
         let pods: Vec<&Value> = rel.children.iter().filter(|p| !matches!(s(p, "/status/phase"), "Succeeded" | "Failed")).collect();
         out.head(0, &format!("Non-terminated Pods ({} in total)", pods.len()));
         let sum = |p: &Value, kind: &str, res: &str| -> f64 {
-            p["spec"]["containers"].as_array().into_iter().flatten().filter_map(|c| c["resources"][kind][res].as_str().and_then(super::table::quantity)).sum()
+            p["spec"]["containers"].as_array().into_iter().flatten().filter_map(|c| c["resources"][kind][res].as_str().and_then(super::table::quantity)).sum::<f64>() + 0.0
         };
         let q = |v: f64, res: &str| if v == 0.0 { "0".to_string() } else if res == "cpu" { format!("{}m", (v * 1000.0).round()) } else { format!("{}Mi", (v / 1048576.0).round()) };
         let rows = pods
@@ -666,7 +679,7 @@ fn node(out: &mut Out, o: &Value, rel: &Related, now: i64) {
         out.table(2, &["Namespace", "Name", "CPU Requests", "CPU Limits", "Memory Requests", "Memory Limits", "Age"], rows);
         let alloc = |res: &str| o["status"]["allocatable"][res].as_str().and_then(super::table::quantity).unwrap_or(0.0);
         let pct = |v: f64, res: &str| if alloc(res) > 0.0 { format!("{} ({}%)", q(v, res), (v / alloc(res) * 100.0).round()) } else { q(v, res) };
-        let total = |kind: &str, res: &str| pods.iter().map(|p| sum(p, kind, res)).sum::<f64>();
+        let total = |kind: &str, res: &str| pods.iter().map(|p| sum(p, kind, res)).sum::<f64>() + 0.0;
         out.head(0, "Allocated resources");
         out.table(
             2,

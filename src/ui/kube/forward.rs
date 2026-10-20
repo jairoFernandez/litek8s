@@ -73,6 +73,7 @@ impl Forwards {
         let task = tokio::spawn(async move {
             while let Ok((conn, _)) = listener.accept().await {
                 c2.fetch_add(1, Ordering::Relaxed);
+                let _ = tx.send(Msg::Kube(KMsg::Forwards(me.list())));
                 let (ep, path, e3, me, tx) = (ep.clone(), path.clone(), e2.clone(), me.clone(), tx.clone());
                 tokio::spawn(async move {
                     let extra = [("X-Stream-Protocol-Version", "portforward.k8s.io")];

@@ -112,6 +112,123 @@ pub fn columns(doc: &Value) -> Option<Vec<Column>> {
     )
 }
 
+/// A list reply as the informer reads it: a Table's columns and rows, or
+/// a plain list's items; of each object only the metadata the UI uses (no
+/// annotations, no managedFields), so big lists stay small.
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ListDoc {
+    pub kind: String,
+    pub column_definitions: Vec<ColDoc>,
+    pub rows: Vec<RowDoc>,
+    pub items: Vec<ObjDoc>,
+    pub metadata: ListMeta,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct ColDoc {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub priority: i64,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct RowDoc {
+    pub cells: Vec<Value>,
+    pub object: ObjDoc,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct ObjDoc {
+    pub metadata: MetaDoc,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct MetaDoc {
+    pub name: String,
+    pub namespace: String,
+    pub uid: String,
+    pub creation_timestamp: Option<String>,
+    pub deletion_timestamp: Option<String>,
+    pub labels: Option<serde_json::Map<String, Value>>,
+    pub owner_references: Vec<OwnerDoc>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+pub struct OwnerDoc {
+    pub kind: String,
+    pub name: String,
+    pub uid: String,
+    pub controller: Option<bool>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ListMeta {
+    pub resource_version: String,
+    #[serde(rename = "continue")]
+    pub cont: String,
+}
+
+impl ListDoc {
+    pub fn columns(&self) -> Option<Vec<Column>> {
+        (self.kind == "Table").then(|| self.column_definitions.iter().map(|c| Column { name: c.name.clone(), kind: if c.kind.is_empty() { "string".into() } else { c.kind.clone() }, priority: c.priority }).collect())
+    }
+
+    /// Its rows: a Table's, or a plain list's (Name, Age).
+    pub fn into_rows(self, columns: &[Column], kind: &str) -> Vec<Row> {
+        if self.kind == "Table" {
+            self.rows.into_iter().map(|r| row_of(r.object.metadata, r.cells.iter().map(cell_text).collect(), columns, kind)).collect()
+        } else {
+            let cols = plain_columns();
+            self.items.into_iter().map(|o| {
+                let name = o.metadata.name.clone();
+                row_of(o.metadata, vec![name, String::new()], &cols, kind)
+            }).collect()
+        }
+    }
+}
+
+fn row_of(m: MetaDoc, cells: Vec<String>, columns: &[Column], kind: &str) -> Row {
+    let labels = match m.labels {
+        Some(l) => serde_json::json!({"metadata": {"labels": l}}),
+        None => Value::Null,
+    };
+    let mut r = Row {
+        ns: m.namespace,
+        name: m.name,
+        uid: m.uid,
+        created: timestamp(m.creation_timestamp.as_deref()),
+        deleting: m.deletion_timestamp.is_some(),
+        labels,
+        owners: m.owner_references.into_iter().map(|o| Owner { kind: o.kind, name: o.name, uid: o.uid, controller: o.controller.unwrap_or(false) }).collect(),
+        health: Health::Ok,
+        haystack: String::new(),
+        cells,
+    };
+    finish(&mut r, columns, kind);
+    r
+}
+
+fn finish(r: &mut Row, columns: &[Column], kind: &str) {
+    if r.name.is_empty() {
+        r.name = r.cells.first().cloned().unwrap_or_default();
+    }
+    r.health = health(kind, columns, r);
+    let mut hay = r.name.to_lowercase();
+    for c in &r.cells {
+        hay.push(' ');
+        hay.push_str(&c.to_lowercase());
+    }
+    r.haystack = hay;
+}
+
 /// The columns without a Table: what every object has.
 pub fn plain_columns() -> Vec<Column> {
     vec![Column::new("Name", 0), Column::new("Age", 0)]
@@ -161,16 +278,7 @@ fn row(obj: &Value, cells: &[Value], columns: &[Column], kind: &str) -> Row {
         haystack: String::new(),
         cells,
     };
-    if r.name.is_empty() {
-        r.name = r.cells.first().cloned().unwrap_or_default();
-    }
-    r.health = health(kind, columns, &r);
-    let mut hay = r.name.to_lowercase();
-    for c in &r.cells {
-        hay.push(' ');
-        hay.push_str(&c.to_lowercase());
-    }
-    r.haystack = hay;
+    finish(&mut r, columns, kind);
     r
 }
 
@@ -372,6 +480,10 @@ mod tests {
         assert_eq!(rows[2].health, Health::Warn);
         assert!(rows[1].haystack.contains("crashloopbackoff"));
         assert!(columns(&json!({"kind": "PodList"})).is_none());
+        // The typed reader gives the same rows.
+        let doc: ListDoc = serde_json::from_value(t.clone()).unwrap();
+        let typed = doc.into_rows(&cols, "Pod");
+        assert_eq!(typed, rows);
         let p = plain_row(&json!({"metadata": {"name": "x", "namespace": "n"}}), "Thing");
         assert_eq!((p.key().as_str(), p.cells[0].as_str()), ("n/x", "x"));
     }

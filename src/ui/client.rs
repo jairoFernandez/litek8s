@@ -199,8 +199,9 @@ impl Endpoint {
         Ok(serde_json::from_slice(&data).with_context(|| format!("{path}: not JSON"))?)
     }
 
-    /// A GET whose reply is JSON, with an `Accept` (Tables, discovery).
-    pub async fn json_accept(&self, path: &str, accept: &str) -> Result<Value> {
+    /// A GET whose reply is JSON, with an `Accept` (Tables, discovery),
+    /// read into `T` (typed lists keep only the fields they name).
+    pub async fn json_accept<T: serde::de::DeserializeOwned>(&self, path: &str, accept: &str) -> Result<T> {
         let resp = tokio::time::timeout(Duration::from_secs(30), self.send_with(Method::GET, path, &[("Accept", accept)], None, Vec::new())).await.context("timed out")??;
         let status = resp.status();
         let data = resp.into_body().collect().await?.to_bytes();

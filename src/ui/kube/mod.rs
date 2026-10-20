@@ -28,7 +28,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use base64::Engine;
 use hyper::Method;
-use serde_json::{Value, json};
+use serde::Deserialize;
+use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
 
 use super::app::Msg;
@@ -181,41 +182,123 @@ fn key_of(o: &Value) -> String {
     format!("{}/{}", o.pointer("/metadata/namespace").and_then(Value::as_str).unwrap_or(""), o.pointer("/metadata/name").and_then(Value::as_str).unwrap_or(""))
 }
 
+/// A pod with only the fields [`model::pod`] reads: lists are read
+/// straight into these, so a cluster's pods never sit in memory whole.
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+struct PodLite {
+    metadata: PodMeta,
+    spec: PodSpec,
+    status: PodStatus,
+}
+
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default, rename_all = "camelCase")]
+struct PodMeta {
+    name: String,
+    namespace: String,
+    uid: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    creation_timestamp: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deletion_timestamp: Option<String>,
+    #[serde(serialize_with = "first_owner")]
+    owner_references: Vec<Named>,
+}
+
+fn first_owner<S: serde::Serializer>(v: &[Named], s: S) -> std::result::Result<S::Ok, S::Error> {
+    serde::Serialize::serialize(&v[..v.len().min(1)], s)
+}
+
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+struct Named {
+    name: String,
+}
+
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default, rename_all = "camelCase")]
+struct PodSpec {
+    containers: Vec<ContainerLite>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node_name: Option<String>,
+}
+
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+struct ContainerLite {
+    name: String,
+    image: String,
+    ports: Vec<PortLite>,
+}
+
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default, rename_all = "camelCase")]
+struct PortLite {
+    container_port: u64,
+}
+
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default, rename_all = "camelCase")]
+struct PodStatus {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    container_statuses: Vec<StatusLite>,
+}
+
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default, rename_all = "camelCase")]
+struct StatusLite {
+    ready: bool,
+    restart_count: i64,
+    #[serde(rename = "imageID")]
+    image_id: String,
+    state: Value,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(default)]
+struct PodList {
+    metadata: table::ListMeta,
+    items: Vec<PodLite>,
+}
+
 /// A pod with only the fields [`model::pod`] reads.
 pub fn slim_pod(p: &Value) -> Value {
-    let m = &p["metadata"];
-    let pick = |v: &Value, keys: &[&str]| -> Value {
-        let mut o = serde_json::Map::new();
-        for k in keys {
-            if let Some(x) = v.get(*k).filter(|x| !x.is_null()) {
-                o.insert(k.to_string(), x.clone());
-            }
-        }
-        Value::Object(o)
-    };
-    let containers: Vec<Value> = p.pointer("/spec/containers").and_then(Value::as_array).into_iter().flatten().map(|c| pick(c, &["name", "image", "ports"])).collect();
-    let statuses: Vec<Value> = p.pointer("/status/containerStatuses").and_then(Value::as_array).into_iter().flatten().map(|c| pick(c, &["ready", "restartCount", "imageID", "state"])).collect();
-    let owners: Vec<Value> = m["ownerReferences"].as_array().into_iter().flatten().take(1).map(|o| pick(o, &["name"])).collect();
-    let mut meta = pick(m, &["name", "namespace", "uid", "creationTimestamp", "deletionTimestamp"]);
-    meta["ownerReferences"] = json!(owners);
-    json!({
-        "metadata": meta,
-        "spec": {"containers": containers, "nodeName": p.pointer("/spec/nodeName")},
-        "status": {"phase": p.pointer("/status/phase"), "reason": p.pointer("/status/reason"), "containerStatuses": statuses},
-    })
+    PodLite::deserialize(p).ok().and_then(|l| serde_json::to_value(l).ok()).unwrap_or(Value::Null)
 }
 
 async fn watch_pods(ep: Endpoint, tx: UnboundedSender<Msg>) {
     const PATH: &str = "/api/v1/pods";
-    let msg = |items: &BTreeMap<String, Value>| Msg::Pods({
-        let mut v: Vec<model::Pod> = items.values().map(model::pod).collect();
+    let msg = |items: &BTreeMap<String, model::Pod>| Msg::Pods({
+        let mut v: Vec<model::Pod> = items.values().cloned().collect();
         v.sort_by(|a, b| a.namespace.cmp(&b.namespace).then_with(|| a.name.cmp(&b.name)));
         v
     });
     let mut backoff = Duration::from_secs(1);
     loop {
-        let list = match ep.json(Method::GET, PATH, None).await {
-            Ok(l) => l,
+        // Pages read straight into slim pods.
+        let mut items: BTreeMap<String, model::Pod> = BTreeMap::new();
+        let mut cont = String::new();
+        let listed: Result<String> = async {
+            loop {
+                let q = if cont.is_empty() { format!("{PATH}?limit=2000") } else { format!("{PATH}?limit=2000&continue={}", enc(&cont)) };
+                let page: PodList = ep.json_accept(&q, "application/json").await?;
+                for p in page.items {
+                    let v = serde_json::to_value(&p)?;
+                    items.insert(format!("{}/{}", p.metadata.namespace, p.metadata.name), model::pod(&v));
+                }
+                if page.metadata.cont.is_empty() {
+                    return Ok(page.metadata.resource_version);
+                }
+                cont = page.metadata.cont;
+            }
+        }
+        .await;
+        let rv = match listed {
+            Ok(rv) => rv,
             Err(e) => {
                 if tx.send(Msg::KubeDown(format!("{}: {e:#}", ep.display))).is_err() {
                     return;
@@ -226,9 +309,6 @@ async fn watch_pods(ep: Endpoint, tx: UnboundedSender<Msg>) {
             }
         };
         backoff = Duration::from_secs(1);
-        let rv = list.pointer("/metadata/resourceVersion").and_then(Value::as_str).unwrap_or("0").to_string();
-        let mut items: BTreeMap<String, Value> = list["items"].as_array().into_iter().flatten().map(|o| (key_of(o), slim_pod(o))).collect();
-        drop(list);
         if tx.send(msg(&items)).is_err() {
             return;
         }
@@ -243,9 +323,13 @@ async fn watch_pods(ep: Endpoint, tx: UnboundedSender<Msg>) {
         }
         let mut lines = Lines::new(resp.into_body());
         let mut dirty = false;
+        let mut since = std::time::Instant::now();
         loop {
-            // Coalesce bursts (a rollout changes many pods at once).
-            let next = if dirty { tokio::time::timeout(Duration::from_millis(100), lines.next()).await } else { Ok(lines.next().await) };
+            // Home counts pods: 500 ms of quiet, or every 2 s of a steady
+            // stream, is soon enough (and a cluster of thousands of pods
+            // is not converted again for every change).
+            let wait = Duration::from_millis(500).min(Duration::from_secs(2).saturating_sub(since.elapsed()));
+            let next = if dirty { tokio::time::timeout(wait, lines.next()).await } else { Ok(lines.next().await) };
             match next {
                 Err(_) => {
                     dirty = false;
@@ -257,9 +341,12 @@ async fn watch_pods(ep: Endpoint, tx: UnboundedSender<Msg>) {
                 Ok(Some(line)) => {
                     let Ok(ev) = serde_json::from_slice::<Value>(&line) else { continue };
                     let obj = &ev["object"];
+                    if !dirty {
+                        since = std::time::Instant::now();
+                    }
                     match ev["type"].as_str() {
                         Some("ADDED") | Some("MODIFIED") => {
-                            items.insert(key_of(obj), slim_pod(obj));
+                            items.insert(key_of(obj), model::pod(&slim_pod(obj)));
                             dirty = true;
                         }
                         Some("DELETED") => {

@@ -1,7 +1,7 @@
 //! Informers: one list (as a Table, 500 rows a page) and then a watch from
 //! its resourceVersion per resource type, namespace and field selector,
-//! keeping compact rows; bursts of changes go to the UI as one snapshot at
-//! most every 100 ms. The containers "type" watches one pod.
+//! keeping compact rows; changes go to the UI as one snapshot after 100 ms
+//! of quiet, at most one a second while they keep coming. The containers "type" watches one pod.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -52,19 +52,23 @@ fn rows_of(obj: &Value, columns: &[Column], kind: &str, containers: bool) -> Vec
     if obj["kind"].as_str() == Some("Table") { table::table_rows(obj, columns, kind) } else { vec![table::plain_row(obj, kind)] }
 }
 
-async fn list(ep: &Endpoint, res: &Resource, key: &WatchKey) -> anyhow::Result<State> {
+/// The whole list, page by page; each page is shown as it comes (a big
+/// cluster's first rows show before its last page arrives).
+async fn list(ep: &Endpoint, res: &Resource, key: &WatchKey, tx: &UnboundedSender<Msg>) -> anyhow::Result<State> {
     let containers = res.plural == CONTAINERS;
     let base = if containers { format!("/api/v1/namespaces/{}/pods", key.ns.as_deref().unwrap_or("default")) } else { res.list_path(key.ns.as_deref()) };
     let accept = if containers { "application/json" } else { TABLE_ACCEPT };
     let mut st = State { columns: Arc::new(Vec::new()), rows: BTreeMap::new(), rv: String::new() };
     let mut cont = String::new();
     loop {
-        let mut q = query(key, "limit=500&includeObject=Metadata");
+        // Pages read straight into rows (not JSON trees): each request is
+        // a connection, so fewer, bigger pages.
+        let mut q = query(key, "limit=2000&includeObject=Metadata");
         if !cont.is_empty() {
             q.push_str(&format!("&continue={}", enc(&cont)));
         }
-        let doc = ep.json_accept(&format!("{base}{q}"), accept).await?;
         if containers {
+            let doc: Value = ep.json_accept(&format!("{base}{q}"), accept).await?;
             let mut cols = Vec::new();
             for p in doc["items"].as_array().into_iter().flatten() {
                 let (c, rows) = container_rows(p);
@@ -74,25 +78,25 @@ async fn list(ep: &Endpoint, res: &Resource, key: &WatchKey) -> anyhow::Result<S
                 }
             }
             st.columns = Arc::new(if cols.is_empty() { container_rows(&Value::Null).0 } else { cols });
-        } else if let Some(cols) = table::columns(&doc) {
-            if !cols.is_empty() {
-                st.columns = Arc::new(cols);
-            }
-            for r in table::table_rows(&doc, &st.columns, &res.kind) {
-                st.rows.insert(r.key(), Arc::new(r));
-            }
-        } else {
-            st.columns = Arc::new(table::plain_columns());
-            for o in doc["items"].as_array().into_iter().flatten() {
-                let r = table::plain_row(o, &res.kind);
-                st.rows.insert(r.key(), Arc::new(r));
-            }
+            st.rv = doc.pointer("/metadata/resourceVersion").and_then(Value::as_str).unwrap_or_default().to_string();
+            return Ok(st);
         }
-        st.rv = doc.pointer("/metadata/resourceVersion").and_then(Value::as_str).unwrap_or_default().to_string();
-        cont = doc.pointer("/metadata/continue").and_then(Value::as_str).unwrap_or_default().to_string();
+        let doc: table::ListDoc = ep.json_accept(&format!("{base}{q}"), accept).await?;
+        st.rv = doc.metadata.resource_version.clone();
+        cont = doc.metadata.cont.clone();
+        match doc.columns() {
+            Some(cols) if !cols.is_empty() => st.columns = Arc::new(cols),
+            Some(_) => {}
+            None => st.columns = Arc::new(table::plain_columns()),
+        }
+        for r in doc.into_rows(&st.columns, &res.kind) {
+            st.rows.insert(r.key(), Arc::new(r));
+        }
         if cont.is_empty() {
             return Ok(st);
         }
+        let partial = Snapshot { columns: st.columns.clone(), rows: st.rows.values().cloned().collect(), synced: false, error: None };
+        let _ = tx.send(Msg::Kube(KMsg::Data(key.clone(), Arc::new(partial))));
     }
 }
 
@@ -101,7 +105,7 @@ async fn run(ep: Endpoint, res: Resource, key: WatchKey, tx: UnboundedSender<Msg
     let mut backoff = Duration::from_secs(1);
     let mut last: Option<State> = None;
     loop {
-        let mut st = match list(&ep, &res, &key).await {
+        let mut st = match list(&ep, &res, &key, &tx).await {
             Ok(st) => st,
             Err(e) => {
                 let msg = format!("{e:#}");
@@ -132,9 +136,13 @@ async fn run(ep: Endpoint, res: Resource, key: WatchKey, tx: UnboundedSender<Msg
             };
             let mut lines = Lines::new(resp.into_body());
             let mut dirty = false;
+            let mut since = std::time::Instant::now();
             let mut gone = false;
             loop {
-                let next = if dirty { tokio::time::timeout(Duration::from_millis(100), lines.next()).await } else { Ok(lines.next().await) };
+                // Changes go out after 100 ms of quiet, or once a second
+                // while they keep coming (a rollout, a busy cluster).
+                let wait = Duration::from_millis(100).min(Duration::from_secs(1).saturating_sub(since.elapsed()));
+                let next = if dirty { tokio::time::timeout(wait, lines.next()).await } else { Ok(lines.next().await) };
                 let line = match next {
                     Err(_) => {
                         dirty = false;
@@ -150,6 +158,9 @@ async fn run(ep: Endpoint, res: Resource, key: WatchKey, tx: UnboundedSender<Msg
                 let obj = &ev["object"];
                 if let Some(rv) = obj.pointer("/metadata/resourceVersion").and_then(Value::as_str) {
                     st.rv = rv.to_string();
+                }
+                if !dirty {
+                    since = std::time::Instant::now();
                 }
                 match ev["type"].as_str() {
                     Some("ADDED") | Some("MODIFIED") => {

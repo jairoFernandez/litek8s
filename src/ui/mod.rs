@@ -140,7 +140,7 @@ pub async fn run(args: UiArgs) -> Result<()> {
         kube_rt,
         log_task: None,
         input,
-        stats: Stats { started, first_frame: None, data_frame: None, containers_seen: false, frames: 0 },
+        stats: Stats { started, first_frame: None, data_frame: None, containers_seen: false, frames: 0, kube_frame: None, key_at: None, keys: 0, key_total: Duration::ZERO, key_max: Duration::ZERO },
     };
     rt.kube_rt.load_settings();
     let result = rt.event_loop(&mut terminal, &mut app, rx, &pace).await;
@@ -157,12 +157,16 @@ pub async fn run(args: UiArgs) -> Result<()> {
         let s = &rt.stats;
         let ms = |d: Option<Duration>| d.map(|d| format!("{:.1} ms", d.as_secs_f64() * 1000.0)).unwrap_or_else(|| "-".into());
         eprintln!(
-            "litek8s ui: first frame {}, first frame with containers {}, {} frames in {:.1} s",
+            "litek8s ui: first frame {}, first frame with containers {}, first Kubernetes list {}, {} frames in {:.1} s",
             ms(s.first_frame),
             ms(s.data_frame),
+            ms(s.kube_frame),
             s.frames,
             s.started.elapsed().as_secs_f64()
         );
+        if s.keys > 0 {
+            eprintln!("litek8s ui: key to frame: {} keys, {} on average, {} at most", s.keys, ms(Some(s.key_total / s.keys as u32)), ms(Some(s.key_max)));
+        }
     }
     result
 }
@@ -178,6 +182,13 @@ struct Stats {
     data_frame: Option<Duration>,
     containers_seen: bool,
     frames: u64,
+    /// The first frame of the Kubernetes view with its list.
+    kube_frame: Option<Duration>,
+    /// Keys to the frame they changed (filtering, moving).
+    key_at: Option<Instant>,
+    keys: u64,
+    key_total: Duration,
+    key_max: Duration,
 }
 
 const DEV_DOWN: &str = "the cluster is not running (Home: u starts it)";
@@ -283,6 +294,21 @@ impl Runtime {
         let mut last_status: Option<(String, bool)> = None;
         let mut ages_at = tokio::time::Instant::now() + AGES_EVERY;
         loop {
+            // What the Kubernetes view asked for on its own (informers for
+            // a new view or cluster, a container picked).
+            loop {
+                let more = app.kube.take_effects();
+                if more.is_empty() {
+                    break;
+                }
+                dirty = true;
+                for e in more {
+                    self.effect(Effect::Kube(e), terminal, app).await?;
+                }
+            }
+            if let Some((text, error)) = app.kube.flash.take() {
+                app.flash(text, error);
+            }
             if dirty {
                 app.now = chrono::Utc::now().timestamp();
                 terminal.draw(|f| view::draw(f, app))?;
@@ -292,6 +318,15 @@ impl Runtime {
                 }
                 if self.stats.containers_seen && self.stats.data_frame.is_none() {
                     self.stats.data_frame = Some(self.stats.started.elapsed());
+                }
+                if self.stats.kube_frame.is_none() && app.tab == Tab::Kube && app.kube.top_table().is_some_and(|t| t.synced && t.total > 0) {
+                    self.stats.kube_frame = Some(self.stats.started.elapsed());
+                }
+                if let Some(at) = self.stats.key_at.take() {
+                    let d = at.elapsed();
+                    self.stats.keys += 1;
+                    self.stats.key_total += d;
+                    self.stats.key_max = self.stats.key_max.max(d);
                 }
                 dirty = false;
                 ages_at = tokio::time::Instant::now() + AGES_EVERY;
@@ -304,6 +339,7 @@ impl Runtime {
                             app.status = None;
                         }
                         dirty = true;
+                        self.stats.key_at = Some(Instant::now());
                         app.key(k)
                     }
                     Some(Event::Mouse(m)) => {
@@ -365,21 +401,6 @@ impl Runtime {
                 if self.effect(e, terminal, app).await? {
                     return Ok(());
                 }
-            }
-            // What the Kubernetes view asked for on its own (informers for
-            // a new view, a container picked).
-            loop {
-                let more = app.kube.take_effects();
-                if more.is_empty() {
-                    break;
-                }
-                dirty = true;
-                for e in more {
-                    self.effect(Effect::Kube(e), terminal, app).await?;
-                }
-            }
-            if let Some((text, error)) = app.kube.flash.take() {
-                app.flash(text, error);
             }
             // A new status line shows for 8 s.
             if app.status != last_status {

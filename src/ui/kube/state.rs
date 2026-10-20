@@ -201,6 +201,8 @@ pub struct Scope {
     pub labels: Option<(String, LabelSelector)>,
     pub fields: Option<String>,
     pub owner_uid: Option<String>,
+    /// Just this object (a jump to an owner or a node).
+    pub name: Option<String>,
     pub title: Option<String>,
 }
 
@@ -850,7 +852,22 @@ impl KubeUi {
                     let added = lines.len();
                     for text in lines {
                         let ts_len = ts_prefix(&text);
-                        l.lines.push_back(LogLine { src: src as u16, text, ts_len });
+                        // Streams interleave by time (their first lines come
+                        // as one batch each): a line older than the end goes
+                        // where it belongs among the last few thousand.
+                        let mut at = l.lines.len();
+                        if ts_len > 0 {
+                            let ts = &text[..ts_len as usize];
+                            let floor = at.saturating_sub(5000);
+                            while at > floor {
+                                let prev = &l.lines[at - 1];
+                                if prev.ts_len == 0 || prev.text[..prev.ts_len as usize] <= *ts {
+                                    break;
+                                }
+                                at -= 1;
+                            }
+                        }
+                        l.lines.insert(at, LogLine { src: src as u16, text, ts_len });
                     }
                     while l.lines.len() > l.cap {
                         l.lines.pop_front();
@@ -1917,12 +1934,12 @@ impl KubeUi {
                 let cols = self.top_table().map(table_columns).unwrap_or_default();
                 match r.cell(&cols, "Node").filter(|n| !n.is_empty() && *n != "<none>") {
                     Some(node) => {
-                        let node = node.to_string();
-                        self.command(Cmd::Resource { name: "nodes".into(), ns: None, filter: String::new() });
-                        if let Some(t) = self.top_table_mut() {
-                            t.filter = Filter::parse(&format!("^{}$", regex::escape(&node)), Mode::Regex);
+                        if let Some(nodes) = self.catalog.find("nodes").cloned() {
+                            let mut t2 = TableView::new(nodes, None);
+                            t2.scope.name = Some(node.to_string());
+                            t2.scope.title = Some(format!("node of {}", obj.name));
+                            self.push(View::Table(t2));
                         }
-                        self.refilter();
                     }
                     None => self.say("not scheduled on a node yet", true),
                 }
@@ -1936,7 +1953,8 @@ impl KubeUi {
                             Some(ores) => {
                                 let mut t2 = TableView::new(ores, if obj.ns.is_empty() { None } else { Some(obj.ns.clone()) });
                                 t2.fixed_ns = true;
-                                t2.filter = Filter::parse(&format!("^{}$", regex::escape(&owner.name)), Mode::Regex);
+                                t2.scope.name = Some(owner.name.clone());
+                                t2.scope.title = Some(format!("owner of {}", obj.name));
                                 self.push(View::Table(t2));
                             }
                             None => self.say(format!("owner {}/{} is of an unknown type", owner.kind, owner.name), true),
@@ -2487,6 +2505,7 @@ fn recompute(t: &mut TableView, snap: Option<Arc<Snapshot>>, ext: &[(String, Arc
         .iter()
         .filter(|r| t.scope.labels.as_ref().is_none_or(|(_, s)| s.matches(&r.labels)))
         .filter(|r| owner.as_ref().is_none_or(|u| r.owners.iter().any(|o| o.uid == *u)))
+        .filter(|r| t.scope.name.as_ref().is_none_or(|n| r.name == *n))
         .filter(|r| !t.faults || matches!(r.health, Health::Warn | Health::Bad))
         .filter_map(|r| t.filter.matches(r).map(|s| (s, r.clone())))
         .collect();
@@ -2525,7 +2544,10 @@ fn recompute(t: &mut TableView, snap: Option<Arc<Snapshot>>, ext: &[(String, Arc
     }
     t.cols = cols;
     // The selection follows its row.
-    let sel = t.sel_key.as_ref().and_then(|k| t.rows.iter().position(|r| r.key() == *k));
+    let sel = t.sel_key.as_ref().and_then(|k| {
+        let (ns, name) = k.split_once('/').unwrap_or(("", k));
+        t.rows.iter().position(|r| r.ns == ns && r.name == name)
+    });
     match sel {
         Some(i) => t.sel = i,
         None => {
@@ -2533,8 +2555,10 @@ fn recompute(t: &mut TableView, snap: Option<Arc<Snapshot>>, ext: &[(String, Arc
             t.sel_key = t.rows.get(t.sel).map(|r| r.key());
         }
     }
-    let keys: BTreeSet<String> = t.rows.iter().map(|r| r.key()).collect();
-    t.marks.retain(|m| keys.contains(m));
+    if !t.marks.is_empty() {
+        let keys: BTreeSet<String> = t.rows.iter().map(|r| r.key()).collect();
+        t.marks.retain(|m| keys.contains(m));
+    }
 }
 
 /// The help text for the view on top.
