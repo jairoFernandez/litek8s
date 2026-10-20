@@ -236,6 +236,47 @@ struct Cli {
     command: Command,
 }
 
+/// `litek8s apiserver`'s observability flags (docs/observability.md).
+#[derive(Debug, clap::Args)]
+struct ObsArgs {
+    #[arg(long, help = "Do not collect metrics, search logs or evaluate alerts")]
+    no_observability: bool,
+    #[arg(long, default_value = "10s:6h,1m:7d,10m:90d", help = "Metric tiers, <resolution>:<retention>,...: the first is the sampling interval; each later tier keeps a downsampled copy")]
+    obs_retention: String,
+    #[arg(long, default_value = "24Mi", help = "Memory the metrics store may use for series and head chunks (new series beyond it are refused)")]
+    obs_memory: String,
+    #[arg(long, default_value = "7d", value_parser = parse_duration, help = "How long logs of removed containers are kept on each node")]
+    obs_log_retention: Duration,
+    #[arg(long, default_value = "512Mi", help = "Most disk the log archive of removed containers may use on each node")]
+    obs_log_max_size: String,
+    #[arg(long, help = "Do not evaluate the built-in alert rules (CrashLoopBackOff, OOMKilled, NotReady nodes, full disks, ...)")]
+    no_builtin_alerts: bool,
+    #[arg(long, help = "Also serve the Prometheus HTTP API at the root of this address (e.g. 0.0.0.0:9090); it is always under /prometheus on the API port")]
+    prometheus_listen: Option<std::net::SocketAddr>,
+}
+
+impl ObsArgs {
+    fn config(&self) -> Result<Option<crate::obs::server::ObsConfig>> {
+        if self.no_observability {
+            return Ok(None);
+        }
+        let bytes = |s: &str, what: &str| -> Result<u64> {
+            crate::kube::quantity::parse_units(s).filter(|b| *b > 0).map(|b| b as u64).with_context(|| format!("{what}: not a size: {s:?} (e.g. 24Mi)"))
+        };
+        let tiers = crate::obs::tsdb::parse_tiers(&self.obs_retention).context("--obs-retention")?;
+        Ok(Some(crate::obs::server::ObsConfig {
+            dir: None,
+            interval: tiers[0].resolution,
+            tiers,
+            memory_budget: bytes(&self.obs_memory, "--obs-memory")?,
+            log_retention: self.obs_log_retention,
+            log_max_bytes: bytes(&self.obs_log_max_size, "--obs-log-max-size")?,
+            builtin_alerts: !self.no_builtin_alerts,
+            eval_interval: Duration::from_secs(30),
+        }))
+    }
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
     #[command(
@@ -336,6 +377,8 @@ enum Command {
         no_wireguard: bool,
         #[arg(long, help = "Also serve the Docker Engine API on this Unix socket (crun runtime; published ports bind on 127.0.0.1)")]
         docker_socket: Option<PathBuf>,
+        #[command(flatten)]
+        obs: ObsArgs,
     },
     #[command(
         about = "A local Kubernetes cluster for development (like kind/k3d), without Docker",
@@ -1172,6 +1215,7 @@ pub async fn run() -> Result<()> {
             wireguard_port,
             no_wireguard,
             docker_socket,
+            obs,
         } => {
             let docker = match &docker_socket {
                 Some(path) => {
@@ -1216,6 +1260,8 @@ pub async fn run() -> Result<()> {
                 disk_root: None,
                 node_port_offset: 0,
                 docker,
+                prometheus_listen: obs.prometheus_listen,
+                obs: obs.config()?,
             })
             .await
         }

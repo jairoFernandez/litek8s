@@ -108,6 +108,11 @@ pub struct ApiServerConfig {
     pub disk_root: Option<PathBuf>,
     /// Serve the Docker API with the local node's crun runtime.
     pub docker: Option<crate::docker::Settings>,
+    /// Built-in metrics, logs and alerts (`None`: off). Its data goes to
+    /// `<data_dir>/obs` unless the config names a directory.
+    pub obs: Option<crate::obs::server::ObsConfig>,
+    /// Also serve the Prometheus HTTP API at the root of this address.
+    pub prometheus_listen: Option<SocketAddr>,
 }
 
 /// Loads an image archive into the local node (`litek8s dev load`).
@@ -160,6 +165,8 @@ pub struct ApiState {
     /// event needs its CRD and schema, and some are megabytes when parsed
     /// (Argo CD's Application): share one copy per CRD resourceVersion.
     crd_cache: std::sync::Mutex<HashMap<String, CachedCrd>>,
+    /// Metrics, log search and alerts, when on (crate::obs).
+    pub(crate) obs: std::sync::OnceLock<Arc<crate::obs::server::Obs>>,
 }
 
 struct CachedCrd {
@@ -200,6 +207,7 @@ impl ApiState {
             image_loader: std::sync::OnceLock::new(),
             request_metrics: Default::default(),
             crd_cache: Default::default(),
+            obs: std::sync::OnceLock::new(),
         };
         state.bootstrap()?;
         Ok(state)
@@ -396,6 +404,28 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
         tokio::spawn(serve_listener(state.clone(), l));
     }
     super::metrics::spawn_memory_trim();
+    if let Some(mut obs) = config.obs.take() {
+        if obs.dir.is_none() {
+            obs.dir = config.data_dir.as_ref().map(|d| d.join("obs"));
+        }
+        match crate::obs::server::Obs::open(obs) {
+            Ok(obs) => {
+                let obs = Arc::new(obs);
+                let _ = state.obs.set(obs.clone());
+                tokio::spawn(crate::obs::server::run(state.clone(), obs.clone()));
+                if let Some(addr) = config.prometheus_listen {
+                    match TcpListener::bind(addr).await {
+                        Ok(l) => {
+                            eprintln!("apiserver: Prometheus API on http://{addr}");
+                            tokio::spawn(crate::obs::api::serve_prometheus(obs, l));
+                        }
+                        Err(e) => eprintln!("apiserver: cannot serve the Prometheus API on {addr}: {e}"),
+                    }
+                }
+            }
+            Err(e) => eprintln!("apiserver: observability disabled: {e:#}"),
+        }
+    }
     tokio::spawn(super::aggregator::run(state.clone()));
     tokio::spawn(expire_events(state.clone()));
 
@@ -923,6 +953,9 @@ async fn handle(state: Arc<ApiState>, mut req: Request<Incoming>) -> Response<Bo
         headers: parts.headers.clone(),
         upgrade: std::sync::Mutex::new(upgrade),
     };
+    if let Some(resp) = crate::obs::api::route(&state, &req.method, &path, &req.raw_query, &req.body, &req.content_type).await {
+        return resp;
+    }
     let resp = match route(&state, &path, &req).await {
         Ok(resp) => resp,
         Err(error) => error.into_response(),
@@ -3624,7 +3657,7 @@ impl ApiState {
     }
 
     /// `/metrics`
-    fn render_metrics(&self) -> String {
+    pub(crate) fn render_metrics(&self) -> String {
         let mut out = String::new();
         self.metrics.render(&mut out);
         out.push_str(&self.request_metrics.render());
