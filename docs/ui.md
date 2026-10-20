@@ -545,11 +545,12 @@ a colored prefix, interleaved by time:
 
 ```
 ┌ logs deploy/default/web (all pods)  [follow]  4 streams ─────────────────────┐
-│mtcrn/ticker tick 45 from web-8567f99496-mtcrn                                │
-│lkzkl/ticker tick 45 from web-8567f99496-lkzkl                                │
-│lkzkl/ticker ERROR something odd 45                                           │
-│lkzkl/nginx  10.42.0.1 - - "GET / HTTP/1.1" 200 615                           │
+│mtcrn/ticker ERROR something odd 3000                                         │
+│r7hnq/ticker tick 2776 from web-8567f99496-r7hnq                              │
+│mtcrn/ticker tick 3001 from web-8567f99496-mtcrn                              │
+│r7hnq/ticker tick 2777 from web-8567f99496-r7hnq                              │
 └──────────────────────────────────────────────────────────────────────────────┘
+ esc back  f follow  / filter  t time  w wrap  p previous  ^s save       ? help
 ```
 
 `f` pauses and follows again, `/` keeps the matching lines (highlighted;
@@ -574,7 +575,9 @@ connection counts.
 ┌ xray deployments(shop) ──────────────────────────────────────────────────────┐
 │▾ deploy api  0/2 ready                                                       │
 │  ▾ rs api-6df8b694fd  0/2 ready, revision 1                                  │
-│    ▾ pod api-6df8b694fd-ck8sd  CrashLoopBackOff 0/1, 2 restarts              │
+│    ▾ pod api-6df8b694fd-ck8sd  CrashLoopBackOff 0/1, 8 restarts              │
+│        container busybox  waiting (CrashLoopBackOff), not ready, busybox:1.36│
+│    ▾ pod api-6df8b694fd-x697f  CrashLoopBackOff 0/1, 8 restarts              │
 │        container busybox  waiting (CrashLoopBackOff), not ready, busybox:1.36│
 │▾ deploy cache  1/1 ready                                                     │
 │  ▾ rs cache-599d9956dc  1/1 ready, revision 1                                │
@@ -809,6 +812,10 @@ release binary:
 
 Most of it is the UI's own code (about 650 KiB of symbols); ratatui and
 crossterm are about 200 KiB.
+
+The Kubernetes view's cluster UI (src/ui/kube) adds 1.92 MiB more to the
+stripped macOS arm64 binary (33.41 MB on main c620693, 35.43 MB with it;
+40.37 → 42.76 MB as built), with no new dependency.
 
 ## Keys
 
