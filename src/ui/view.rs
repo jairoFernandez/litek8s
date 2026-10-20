@@ -8,7 +8,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Cell, Clear, HighlightSpacing, Paragraph, Row, Table, TableState, Wrap};
+use ratatui::widgets::{Cell, Clear, HighlightSpacing, Padding, Paragraph, Row, Table, TableState, Wrap};
 
 use super::app::{App, CRow, DevStatus, Field, InputKind, NewCluster, Overlay, RECLAIMS, SETTINGS, Setting, TABS, Tab};
 use super::model::{age, bytes};
@@ -982,12 +982,12 @@ fn new_cluster(f: &mut Frame, app: &App, t: &Theme, form: &NewCluster, area: Rec
     }
     lines.push(Line::raw(""));
     lines.push(Line::from(key_chips(t, &[("tab", "next field"), ("enter", "create"), ("esc", "cancel")], 64)));
-    let width = 66u16;
-    let inner = width.min(area.width.saturating_sub(2)).saturating_sub(2).max(1) as usize;
+    let width = 68u16;
+    let inner = width.min(area.width.saturating_sub(2)).saturating_sub(4).max(1) as usize;
     let rows: usize = lines.iter().map(|l| l.width().max(1).div_ceil(inner)).sum();
     let r = centered(area, width, rows as u16 + 2);
     f.render_widget(Clear, r);
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(t.dialog("New cluster", t.accent)), r);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(t.dialog("New cluster", t.accent).padding(Padding::horizontal(1))), r);
 }
 
 fn containers(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
@@ -1245,15 +1245,15 @@ pub fn centered(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 fn confirm(f: &mut Frame, t: &Theme, title: &str, lines: &[String], area: Rect) {
-    let width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(20).max(title.len() + 4).clamp(30, 74) as u16 + 4;
-    let inner = (width.min(area.width.saturating_sub(2)).saturating_sub(2)).max(1) as usize;
+    let width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(20).max(title.len() + 4).clamp(30, 74) as u16 + 6;
+    let inner = (width.min(area.width.saturating_sub(2)).saturating_sub(4)).max(1) as usize;
     let rows: usize = lines.iter().map(|l| l.chars().count().max(1).div_ceil(inner)).sum();
     let r = centered(area, width, rows as u16 + 4);
     f.render_widget(Clear, r);
     let mut text: Vec<Line> = lines.iter().map(|l| Line::raw(l.clone())).collect();
     text.push(Line::raw(""));
     text.push(Line::from(vec![Span::styled(" y ", t.chip), Span::raw(" yes   "), Span::styled(" n/esc ", t.chip), Span::raw(" no")]));
-    f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }).block(t.dialog(Line::from(vec![Span::styled("⚠ ", t.warn), Span::styled(title.to_string(), t.bold)]), t.warn)), r);
+    f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }).block(t.dialog(Line::from(vec![Span::styled("⚠ ", t.warn), Span::styled(title.to_string(), t.bold)]), t.warn).padding(Padding::horizontal(1))), r);
 }
 
 fn input(f: &mut Frame, t: &Theme, prompt: &str, value: &str, error: Option<&str>, kind: &InputKind, area: Rect) {
@@ -1264,7 +1264,7 @@ fn input(f: &mut Frame, t: &Theme, prompt: &str, value: &str, error: Option<&str
         f.render_widget(Paragraph::new(Line::from(vec![Span::styled(" / ", t.chip), Span::raw(" "), Span::raw(value.to_string()), Span::styled("█", t.accent.remove_modifier(Modifier::BOLD))])), r);
         return;
     }
-    let r = centered(area, 70, if error.is_some() { 7 } else { 6 });
+    let r = centered(area, 72, if error.is_some() { 7 } else { 6 });
     f.render_widget(Clear, r);
     let mut lines = vec![Line::from(vec![Span::styled("› ", t.accent), Span::styled(value.to_string(), t.bold), Span::styled("█", t.accent.remove_modifier(Modifier::BOLD))])];
     if let Some(e) = error {
@@ -1273,7 +1273,7 @@ fn input(f: &mut Frame, t: &Theme, prompt: &str, value: &str, error: Option<&str
     lines.push(Line::raw(""));
     let enter = if matches!(kind, InputKind::Setting(_)) { "save" } else { "ok" };
     lines.push(Line::from(key_chips(t, &[("enter", enter), ("esc", "cancel"), ("ctrl-u", "clear")], 66)));
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(t.dialog(prompt.to_string(), t.accent)), r);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(t.dialog(prompt.to_string(), t.accent).padding(Padding::horizontal(1))), r);
 }
 
 /// The help screen: per view, its keys (each line fits 76 columns).

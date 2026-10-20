@@ -587,12 +587,12 @@ fn confirm(f: &mut Frame, c: &Confirm, t: &Theme, area: Rect) {
     }
     text.push(Line::raw(""));
     text.push(Line::from(vec![Span::styled(" y ", t.chip), Span::raw(" yes   "), Span::styled(" n/esc ", t.chip), Span::raw(" no")]));
-    let width = text.iter().map(|l| l.width()).max().unwrap_or(20).max(c.title.len() + 4).clamp(30, 76) as u16 + 4;
-    let inner_w = width.min(area.width.saturating_sub(2)).saturating_sub(2).max(1) as usize;
+    let width = text.iter().map(|l| l.width()).max().unwrap_or(20).max(c.title.len() + 4).clamp(30, 76) as u16 + 6;
+    let inner_w = width.min(area.width.saturating_sub(2)).saturating_sub(4).max(1) as usize;
     let rows: usize = text.iter().map(|l| l.width().max(1).div_ceil(inner_w)).sum();
     let r = centered(area, width, rows as u16 + 2);
     f.render_widget(Clear, r);
-    f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }).block(t.dialog(Line::from(vec![Span::styled("⚠ ", t.warn), Span::styled(c.title.clone(), t.bold)]), t.warn)), r);
+    f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }).block(t.dialog(Line::from(vec![Span::styled("⚠ ", t.warn), Span::styled(c.title.clone(), t.bold)]), t.warn).padding(Padding::horizontal(1))), r);
 }
 
 fn input(f: &mut Frame, i: &Input, t: &Theme, area: Rect) {
@@ -605,9 +605,9 @@ fn input(f: &mut Frame, i: &Input, t: &Theme, area: Rect) {
     }
     lines.push(Line::raw(""));
     lines.push(Line::from(key_chips(t, &[("enter", "ok"), ("esc", "cancel"), ("ctrl-u", "clear")], 66)));
-    let r = centered(area, 70, lines.len() as u16 + 2);
+    let r = centered(area, 72, lines.len() as u16 + 2);
     f.render_widget(Clear, r);
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(t.dialog(i.prompt.clone(), t.accent)), r);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(t.dialog(i.prompt.clone(), t.accent).padding(Padding::horizontal(1))), r);
 }
 
 fn picker(f: &mut Frame, p: &Picker, t: &Theme, area: Rect) {
