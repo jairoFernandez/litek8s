@@ -137,20 +137,40 @@ unprivileged user namespaces).
 
 ## Multi-node and HA
 
-```bash
-# the server (pods run here too)
-litek8s apiserver --listen 0.0.0.0:6443 --data-dir /var/lib/litek8s/apiserver --node-ip 192.168.1.10
-#   prints: join nodes with: litek8s agent --join https://192.168.1.10:6443 --token K10<hash>::<secret>
+On Linux servers (systemd, root), one command per machine, like k3s's
+installer:
 
-# every other machine (Linux, root, crun installed)
+```bash
+# the server (pods run here too); prints the join command and the kubeconfig path
+curl -fsSL https://raw.githubusercontent.com/jairoFernandez/litek8s/main/install.sh | sh -s -- server
+
+# every other machine: the command the server printed
+curl -fsSL https://raw.githubusercontent.com/jairoFernandez/litek8s/main/install.sh | sh -s -- \
+  agent --join https://192.168.1.10:6443 --token K10<hash>::<secret>
+```
+
+This installs `/usr/local/bin/litek8s` (and `crun`/`iptables` from the
+package manager when missing), checks the machine (cgroup v2, kernel
+WireGuard, free ports) and runs `litek8s install server|agent`: a systemd
+unit (`litek8s-server` / `litek8s-agent`, `Restart=always`) with the token in
+`/etc/litek8s/*.env`, kubeconfig in `/etc/litek8s/kubeconfig.yaml`. Pods keep
+running across `systemctl restart` and upgrades, and come back after a
+reboot. Extra flags go to `litek8s apiserver` / `litek8s agent` (e.g.
+`--node-ip`); re-running replaces them. `sudo litek8s uninstall [--purge]`
+removes it all. Without systemd, run the same processes yourself:
+
+```bash
+litek8s apiserver --listen 0.0.0.0:6443 --data-dir /var/lib/litek8s/apiserver --node-ip 192.168.1.10
 litek8s agent --join https://192.168.1.10:6443 --token K10<hash>::<secret> --node-ip 192.168.1.21
 ```
 
 Every node gets a `/24` of `10.42.0.0/16`; Services and DNS work
 cluster-wide. A node that stops goes `NotReady` after 40 s and its pods are
 rescheduled after their `tolerationSeconds`; laptops that sleep can join
-with a longer `--node-grace-period`. Three servers with `--cluster-init` /
-`--server` make the control plane highly available ([docs/ha.md](docs/ha.md)).
+with a longer `--node-grace-period`. Three servers make the control plane
+highly available: `install.sh | sh -s -- server --cluster-init` on the first,
+`... server --server https://<first>:6443 --token <token>` on two more
+([docs/ha.md](docs/ha.md)).
 
 ```bash
 litek8s logs -l app=web --since 1h --grep ERROR

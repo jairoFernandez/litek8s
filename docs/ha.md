@@ -6,21 +6,41 @@ Measurements are in [bench/HA.md](../bench/HA.md).
 
 ## Running it
 
+On Linux machines with systemd, `install.sh` (or `litek8s install`, as root)
+sets each server up as the `litek8s-server` service and prints the commands
+for the others:
+
 ```bash
+INSTALL=https://raw.githubusercontent.com/jairoFernandez/litek8s/main/install.sh
+
 # The first server starts the cluster (a single server's objects move into it).
 # Servers reach each other on the API port and the Raft port (API port + 1).
-litek8s apiserver --data-dir /var/lib/litek8s/apiserver --listen 0.0.0.0:6443 \
-  --node-ip 192.168.1.10 --cluster-init
+curl -fsSL $INSTALL | sh -s -- server --cluster-init
 
-# Two more join it with the token the first prints (also in <data-dir>/join-token).
-litek8s apiserver --data-dir /var/lib/litek8s/apiserver --listen 0.0.0.0:6443 \
-  --node-ip 192.168.1.11 --server https://192.168.1.10:6443 --token K10...::...
+# Two more join it with the token the first prints (also in
+# /var/lib/litek8s/apiserver/join-token).
+curl -fsSL $INSTALL | sh -s -- server --server https://192.168.1.10:6443 --token K10...::...
 
 # Agents join any server and learn the others.
-litek8s agent --join https://192.168.1.10:6443 --token K10...::...
+curl -fsSL $INSTALL | sh -s -- agent --join https://192.168.1.10:6443 --token K10...::...
 
 litek8s server list --server http://192.168.1.10:6443
 litek8s server remove lk3 --server https://192.168.1.10:6443 --token K10...::...
+```
+
+`litek8s install server` fills in `--listen 0.0.0.0:6443 --data-dir
+/var/lib/litek8s/apiserver --node-dir /var/lib/litek8s/node-agent --runtime
+crun --kubeconfig /etc/litek8s/kubeconfig.yaml` and the detected `--node-ip`
+(pass `--node-ip` on machines with several addresses), keeps the token in
+`/etc/litek8s/server.env` (0600) rather than on the command line, checks
+that ports 6443/6444 are free and waits for `/readyz`. Without systemd, run
+the same thing by hand:
+
+```bash
+litek8s apiserver --data-dir /var/lib/litek8s/apiserver --listen 0.0.0.0:6443 \
+  --node-ip 192.168.1.10 --cluster-init
+LITEK8S_TOKEN=K10...::... litek8s apiserver --data-dir /var/lib/litek8s/apiserver --listen 0.0.0.0:6443 \
+  --node-ip 192.168.1.11 --server https://192.168.1.10:6443
 ```
 
 Flags are only needed the first time: a data directory that belongs to a

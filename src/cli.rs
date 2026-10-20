@@ -52,6 +52,8 @@ Kubernetes:
   agent          Run a node agent that joins a litek8s API server
   server         List or remove the API servers of a highly available control plane
   lb             A TCP load balancer in front of the API servers of an HA control plane
+  install        Run litek8s on this Linux server as a systemd service (server or agent)
+  uninstall      Stop and remove the litek8s systemd service and its pods
 
 Observability (built into the API server):
   logs           Search and follow pod logs, including containers that are gone
@@ -130,6 +132,35 @@ heartbeats stop is marked Unknown after --node-monitor-grace-period and its
 pods are evicted after their tolerationSeconds (default 300 s, see
 --default-unreachable-toleration-seconds).";
 
+const INSTALL_AFTER_HELP: &str = "\
+Examples (as root, on a Linux server with systemd):
+  litek8s install server
+  litek8s install agent --join https://192.168.1.10:6443 --token K10...::...
+  litek8s install server --cluster-init                 first of 3 HA servers
+  litek8s install server --server https://192.168.1.10:6443 --token K10...::...
+  litek8s install --skip-checks server --runtime docker --node-ip 192.168.1.10
+
+Writes /etc/systemd/system/litek8s-server.service (or litek8s-agent.service)
+running /usr/local/bin/litek8s (copied there if needed), enables and starts
+it, and waits until the server answers /readyz or the node is Ready. The
+token goes to /etc/litek8s/<server|agent>.env (0600), never into the unit.
+Defaults a server gets unless given: --listen 0.0.0.0:6443 --data-dir
+/var/lib/litek8s/apiserver --node-dir /var/lib/litek8s/node-agent --runtime
+crun --node-ip <detected> --kubeconfig /etc/litek8s/kubeconfig.yaml (an agent:
+--node-dir, --runtime, --node-ip). Re-running replaces the flags and restarts
+the service; pods keep running across restarts.
+
+Straight from a release: curl -fsSL https://raw.githubusercontent.com/jairoFernandez/litek8s/main/install.sh | sh -s -- server";
+
+const UNINSTALL_AFTER_HELP: &str = "\
+Examples:
+  sudo litek8s uninstall
+  sudo litek8s uninstall --purge
+
+Stops and removes litek8s-server.service / litek8s-agent.service, kills every
+pod and removes the pod network (litek8s0, litek8s-wg, LITEK8S-* iptables
+chains). The data directories stay unless --purge; /usr/local/bin/litek8s stays.";
+
 const SERVER_AFTER_HELP: &str = "\
 Examples:
   litek8s server list --server http://192.168.1.10:6443
@@ -185,7 +216,7 @@ Pods reach pods on other nodes over WireGuard (UDP --wireguard-port must be
 reachable from the other nodes, or this node must reach theirs).";
 
 /// `40s`, `5m`, `1h`, or plain seconds.
-fn parse_duration(raw: &str) -> Result<Duration, String> {
+pub(crate) fn parse_duration(raw: &str) -> Result<Duration, String> {
     let raw = raw.trim();
     let (number, unit) = raw.split_at(raw.find(|c: char| !c.is_ascii_digit()).unwrap_or(raw.len()));
     let n: u64 = number.parse().map_err(|_| format!("invalid duration {raw:?} (use e.g. 40s, 5m, 1h)"))?;
@@ -497,7 +528,7 @@ enum Command {
         cluster_cidr: String,
         #[arg(long, default_value_t = 24, help = "Prefix length of each node's pod CIDR")]
         node_cidr_mask_size: u8,
-        #[arg(long, help = "Join secret (or a whole token) instead of the stored or a generated one")]
+        #[arg(long, env = "LITEK8S_TOKEN", hide_env_values = true, help = "Join secret (or a whole token) instead of the stored or a generated one")]
         token: Option<String>,
         #[arg(long, default_value = "40s", value_parser = parse_duration, help = "Mark a node Unknown when it has not heartbeated for this long (e.g. 40s, 5m)")]
         node_monitor_grace_period: Duration,
@@ -519,6 +550,28 @@ enum Command {
         raft_port: Option<u16>,
         #[command(flatten)]
         obs: ObsArgs,
+    },
+    #[command(
+        about = "Run litek8s on this Linux server as a systemd service (server or agent)",
+        help_template = HELP_TEMPLATE,
+        after_help = INSTALL_AFTER_HELP
+    )]
+    Install {
+        #[arg(long, help = "Do not check for crun, cgroup v2, WireGuard and free ports first")]
+        skip_checks: bool,
+        #[arg(long, default_value = "3m", value_parser = parse_duration, help = "How long to wait for the server to be ready or the node to join")]
+        timeout: Duration,
+        #[command(subcommand)]
+        role: InstallRole,
+    },
+    #[command(
+        about = "Stop and remove the litek8s systemd service and its pods",
+        help_template = HELP_TEMPLATE,
+        after_help = UNINSTALL_AFTER_HELP
+    )]
+    Uninstall {
+        #[arg(long, help = "Also delete the data directories (the cluster's objects, images, volumes) and /etc/litek8s")]
+        purge: bool,
     },
     #[command(
         about = "Local Kubernetes clusters for development (like kind/k3d), no Docker needed",
@@ -1269,6 +1322,61 @@ enum InfraCommand {
 }
 
 #[derive(Debug, Subcommand)]
+enum InstallRole {
+    #[command(about = "Install litek8s-server.service: `litek8s apiserver` with these flags (see `litek8s apiserver --help`)")]
+    Server {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_name = "APISERVER FLAGS")]
+        args: Vec<String>,
+    },
+    #[command(about = "Install litek8s-agent.service: `litek8s agent --join URL --token T` with these flags (see `litek8s agent --help`)")]
+    Agent {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, value_name = "AGENT FLAGS")]
+        args: Vec<String>,
+    },
+}
+
+/// Parse the flags `litek8s install` writes into a unit as the service will
+/// parse them, so a typo fails the install instead of the service.
+pub(crate) fn parse_service_args(role: crate::install::Role, args: &[String]) -> Result<crate::install::ServiceArgs> {
+    use crate::install::ServiceArgs;
+    let sub = role.subcommand();
+    let argv = ["litek8s", sub].into_iter().map(String::from).chain(args.iter().cloned());
+    let cli = Cli::try_parse_from(argv).map_err(|e| anyhow!("invalid flags for `litek8s {sub}`:\n{}", e.render()))?;
+    let crun = |r: crate::kube::agent::RuntimeChoice| !matches!(r, crate::kube::agent::RuntimeChoice::Docker);
+    Ok(match cli.command {
+        Command::Apiserver { listen, data_dir, kubeconfig, no_node, node_name, node_dir, runtime, node_ip, advertise_address, no_wireguard, cluster_init, server, raft_port, .. } => {
+            ensure!(data_dir.is_some(), "a server installed as a service needs --data-dir");
+            ServiceArgs {
+                listen: Some(listen),
+                raft_port,
+                ha: cluster_init || server.is_some(),
+                data_dir,
+                node_dir,
+                kubeconfig,
+                run_node: !no_node,
+                node_name,
+                node_ip,
+                advertise_address,
+                crun: crun(runtime),
+                wireguard: !no_wireguard,
+                join: None,
+            }
+        }
+        Command::Agent { join: Some(join), node_name, node_ip, node_dir, runtime, no_wireguard, .. } => ServiceArgs {
+            node_dir,
+            run_node: true,
+            node_name,
+            node_ip,
+            crun: crun(runtime),
+            wireguard: !no_wireguard,
+            join: Some(join),
+            ..Default::default()
+        },
+        _ => bail!("`litek8s install agent` needs --join"),
+    })
+}
+
+#[derive(Debug, Subcommand)]
 enum ServerCommand {
     #[command(about = "List the API servers, the leader and how far behind each is")]
     List {
@@ -1519,6 +1627,14 @@ pub async fn run() -> Result<()> {
             })
             .await
         }
+        Command::Install { skip_checks, timeout, role } => {
+            let (role, args) = match role {
+                InstallRole::Server { args } => (crate::install::Role::Server, args),
+                InstallRole::Agent { args } => (crate::install::Role::Agent, args),
+            };
+            crate::install::install(crate::install::InstallOptions { role, args, skip_checks, timeout }).await
+        }
+        Command::Uninstall { purge } => crate::install::uninstall(purge),
         Command::Dev { command } => crate::dev::run(command).await,
         Command::Server { command } => match command {
             ServerCommand::List { server } => crate::kube::ha::lb::list(&server).await,

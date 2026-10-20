@@ -13,6 +13,7 @@ pub mod docker;
 #[cfg(feature = "llm")]
 pub mod gguf;
 pub mod infra;
+pub mod install;
 pub mod kube;
 #[cfg(feature = "llm")]
 pub mod kv_cache;

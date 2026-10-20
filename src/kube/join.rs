@@ -531,6 +531,13 @@ impl Client {
         tokio::time::timeout(std::time::Duration::from_secs(5), probe).await.ok().and_then(|r| r.ok()).unwrap_or(false)
     }
 
+    /// GET `path` from the server in use, as this node.
+    pub async fn get(&mut self, path: &str) -> Result<(u16, Vec<u8>)> {
+        self.ensure_tls().await?;
+        let io = self.dial(self.tls.as_ref()).await?;
+        request(io, &self.authority, "GET", path, &self.credentials(), Vec::new()).await
+    }
+
     pub fn server_host(&self) -> &str {
         self.authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(&self.authority).trim_matches(['[', ']'])
     }
