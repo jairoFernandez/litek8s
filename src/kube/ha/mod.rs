@@ -76,6 +76,8 @@ pub struct Options {
     pub name: String,
     /// `host:port` the other servers reach this one's API at.
     pub advertise: String,
+    /// `host:port` they reach its Raft listener at.
+    pub advertise_raft: String,
     /// Start a new cluster (the first server), moving a single server's
     /// objects into it.
     pub cluster_init: bool,
@@ -87,6 +89,7 @@ pub struct Cluster {
     pub id: u64,
     pub name: String,
     pub addr: String,
+    raft_addr: String,
     pub raft: Raft<TypeConfig>,
     pub peers: Arc<Peers>,
     /// Where Raft and its connections run.
@@ -125,6 +128,8 @@ struct MemberRequest {
     id: u64,
     name: String,
     addr: String,
+    #[serde(default)]
+    raft: String,
 }
 
 /// One server, as `litek8s server list` shows it.
@@ -232,14 +237,17 @@ impl tracing::Subscriber for RaftLog {
 }
 
 fn raft_config() -> Result<Config> {
+    // A follower calls an election after the leader's lease (the max
+    // election timeout) plus a random election timeout without a
+    // heartbeat: a dead leader is replaced within ~1.5-2 s. openraft also
+    // gives each AppendEntries one heartbeat interval: slow disks or a
+    // lossy network (Wi-Fi) want more, e.g. LITEK8S_RAFT_HEARTBEAT_MS=300.
+    let heartbeat: u64 = std::env::var("LITEK8S_RAFT_HEARTBEAT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(100).max(20);
     let config = Config {
         cluster_name: "litek8s".into(),
-        // A follower calls an election after the leader's lease (the max
-        // election timeout) plus a random election timeout without a
-        // heartbeat: a dead leader is replaced within ~1-2 s.
-        heartbeat_interval: 100,
-        election_timeout_min: 500,
-        election_timeout_max: 1000,
+        heartbeat_interval: heartbeat,
+        election_timeout_min: heartbeat * 5,
+        election_timeout_max: heartbeat * 10,
         // A snapshot every 20k entries; keep some log after it so a
         // follower that was briefly away catches up from the log.
         snapshot_policy: SnapshotPolicy::LogsSinceLast(20_000),
@@ -314,7 +322,7 @@ impl Cluster {
             .await
             .context("raft runtime")?
             .context("failed to start raft")?;
-        let me = ServerNode { name: opts.name.clone(), addr: opts.advertise.clone() };
+        let me = ServerNode { name: opts.name.clone(), addr: opts.advertise.clone(), raft: opts.advertise_raft.clone() };
         if fresh && opts.cluster_init {
             raft.initialize(BTreeMap::from([(id, me.clone())])).await.context("failed to initialize the cluster")?;
             raft.wait(Some(Duration::from_secs(30)))
@@ -352,6 +360,7 @@ impl Cluster {
             id,
             name: opts.name.clone(),
             addr: opts.advertise.clone(),
+            raft_addr: opts.advertise_raft.clone(),
             raft,
             peers,
             runtime: handle,
@@ -391,7 +400,7 @@ impl Cluster {
             return Ok(());
         }
         let addr = authority(server);
-        let req = MemberRequest { id: self.id, name: self.name.clone(), addr: self.addr.clone() };
+        let req = MemberRequest { id: self.id, name: self.name.clone(), addr: self.addr.clone(), raft: self.raft_addr.clone() };
         let mut delay = Duration::from_secs(1);
         loop {
             match self.peers.call_json::<Value>(&addr, Method::POST, "/members", &req, Duration::from_secs(900)).await {
@@ -464,6 +473,10 @@ impl Cluster {
 
     pub fn leader_id(&self) -> Option<u64> {
         self.raft.metrics().borrow().current_leader
+    }
+
+    fn raft_addr_of(&self, id: u64) -> Option<String> {
+        self.raft.metrics().borrow().membership_config.membership().get_node(&id).map(|n| n.raft_addr())
     }
 
     fn addr_of(&self, id: u64) -> Option<String> {
@@ -554,7 +567,7 @@ impl Cluster {
             if leader_only {
                 return Err(StoreError::Unavailable("this server is not the leader".into()));
             }
-            let Some(addr) = leader.and_then(|l| self.addr_of(l)) else {
+            let Some(addr) = leader.and_then(|l| self.raft_addr_of(l)) else {
                 // No leader (an election): wait for one.
                 let mut m = self.raft.metrics();
                 let _ = tokio::time::timeout(Duration::from_millis(200).min(remaining), m.changed()).await;
@@ -594,7 +607,7 @@ impl Cluster {
                     return Ok(read.map(|l| l.index).unwrap_or(0));
                 }
                 Some(l) => {
-                    let addr = self.addr_of(l).ok_or("unknown leader address")?;
+                    let addr = self.raft_addr_of(l).ok_or("unknown leader address")?;
                     let v: Value = self
                         .peers
                         .call_json_on(net::Lane::Raft, &addr, Method::POST, "/readindex", &json!({}), READ_TIMEOUT)
@@ -675,7 +688,7 @@ impl Cluster {
             self.raft.change_membership(ChangeMembers::RemoveVoters(stale.clone()), false).await?;
         }
         eprintln!("apiserver: adding server {} ({}) as a learner", req.name, req.addr);
-        self.raft.add_learner(req.id, ServerNode { name: req.name.clone(), addr: req.addr.clone() }, true).await?;
+        self.raft.add_learner(req.id, ServerNode { name: req.name.clone(), addr: req.addr.clone(), raft: req.raft.clone() }, true).await?;
         self.raft.change_membership(ChangeMembers::AddVoterIds(BTreeSet::from([req.id])), false).await?;
         eprintln!("apiserver: server {} is a voter", req.name);
         Ok(())
@@ -976,8 +989,12 @@ pub async fn serve(state: &Arc<ApiState>, mut req: Request<Incoming>) -> Respons
                 Err(r) => return r,
             };
             let blocked = req["blocked"].as_bool().unwrap_or(true);
+            let membership = cluster.raft.metrics().borrow().membership_config.membership().clone();
             for addr in req["addrs"].as_array().into_iter().flatten().filter_map(Value::as_str) {
                 cluster.peers.set_blocked(addr, blocked);
+                for (_, node) in membership.nodes().filter(|(_, n)| n.addr == addr) {
+                    cluster.peers.set_blocked(&node.raft_addr(), blocked);
+                }
             }
             json_reply(StatusCode::OK, &json!({}))
         }

@@ -104,6 +104,10 @@ pub struct ApiServerConfig {
     /// Join the HA cluster of this server (`https://host:port`); needs the
     /// cluster's token.
     pub join_server: Option<String>,
+    /// HA: the port of the Raft listener (default: the API port + 1).
+    pub raft_port: Option<u16>,
+    /// HA: serve Raft on this already-bound listener (tests).
+    pub raft_listener: Option<std::net::TcpListener>,
 }
 
 /// Loads an image archive into the local node (`litek8s dev load`).
@@ -419,14 +423,25 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
     if ha_mode {
         let dir = config.data_dir.clone().unwrap_or_default();
         let advertise = config.advertise_address.clone().unwrap_or_else(|| node_ip.clone());
+        let (adv_host, adv_port) = match advertise.rsplit_once(':') {
+            Some((h, p)) if !advertise.starts_with('[') && advertise.matches(':').count() == 1 => (h.to_string(), p.parse().unwrap_or(addr.port())),
+            _ => (advertise.clone(), addr.port()),
+        };
+        // Raft has a listener of its own (by default the API port + 1),
+        // served on the Raft runtime: heartbeats never wait for API work.
+        let raft_listener = match config.raft_listener.take() {
+            Some(l) => l,
+            None => {
+                let raft_addr = SocketAddr::new(addr.ip(), config.raft_port.unwrap_or(addr.port().wrapping_add(1)));
+                std::net::TcpListener::bind(raft_addr).with_context(|| format!("failed to bind the raft listener on {raft_addr}"))?
+            }
+        };
+        let raft_port = raft_listener.local_addr()?.port();
         let opts = super::ha::Options {
             data_dir: dir,
             name: node_name.clone(),
-            advertise: if advertise.contains(':') && !advertise.starts_with('[') && advertise.matches(':').count() == 1 {
-                advertise
-            } else {
-                format!("{advertise}:{}", addr.port())
-            },
+            advertise: format!("{adv_host}:{adv_port}"),
+            advertise_raft: format!("{adv_host}:{raft_port}"),
             cluster_init: config.cluster_init,
             join: config.join_server.clone(),
         };
@@ -434,8 +449,9 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
         let cluster = super::ha::Cluster::start(&opts, state.store_arc(), &ca, state.join_secret()).await?;
         state.store.set_replicator(cluster.clone());
         let _ = state.ha.set(cluster.clone());
-        // The other servers reach our Raft endpoints through the API port:
-        // serve before asking to join.
+        raft_listener.set_nonblocking(true)?;
+        cluster.runtime().spawn(serve_raft_listener(state.clone(), raft_listener));
+        // Serve before asking to join: the leader adds us through the API.
         serving = Some(tokio::spawn(serve_listener(state.clone(), main_listener.take().unwrap())));
         if let Some(server) = &opts.join {
             cluster.join(server).await?;
@@ -736,18 +752,6 @@ async fn serve_listener_filtered(state: Arc<ApiState>, listener: TcpListener, lo
             // with 0x16, an HTTP request with a method name.
             let mut first = [0u8; 1];
             let is_tls = matches!(stream.peek(&mut first).await, Ok(1)) && first[0] == 0x16;
-            // HA: another server's Raft connection is served on the Raft
-            // runtime, apart from API work.
-            if is_tls {
-                if let Some(cluster) = state.ha() {
-                    if super::tls::peek_alpn(&stream, super::tls::RAFT_ALPN).await == Some(true) {
-                        if let Ok(std_stream) = stream.into_std() {
-                            cluster.runtime().spawn(serve_raft_connection(state.clone(), std_stream));
-                        }
-                        return;
-                    }
-                }
-            }
             let service_state = state.clone();
             let service = service_fn(move |req| {
                 let state = service_state.clone();
@@ -780,16 +784,23 @@ async fn serve_listener_filtered(state: Arc<ApiState>, listener: TcpListener, lo
     }
 }
 
-/// One Raft connection from another server (on the Raft runtime).
-async fn serve_raft_connection(state: Arc<ApiState>, stream: std::net::TcpStream) {
-    let Ok(stream) = tokio::net::TcpStream::from_std(stream) else { return };
-    let Some(tls) = state.tls() else { return };
-    let Ok(tls_stream) = tls.accept_raft(stream).await else { return };
-    let service = service_fn(move |req| {
+/// Accept other servers' Raft connections (on the Raft runtime).
+async fn serve_raft_listener(state: Arc<ApiState>, listener: std::net::TcpListener) {
+    let Ok(listener) = TcpListener::from_std(listener) else { return };
+    loop {
+        let Ok((stream, _)) = listener.accept().await else { continue };
+        let _ = stream.set_nodelay(true);
         let state = state.clone();
-        async move { Ok::<_, Infallible>(super::ha::serve(&state, req).await) }
-    });
-    let _ = http1::Builder::new().serve_connection(TokioIo::new(tls_stream), service).await;
+        tokio::spawn(async move {
+            let Some(tls) = state.tls() else { return };
+            let Ok(tls_stream) = tls.accept_raft(stream).await else { return };
+            let service = service_fn(move |req| {
+                let state = state.clone();
+                async move { Ok::<_, Infallible>(super::ha::serve(&state, req).await) }
+            });
+            let _ = http1::Builder::new().serve_connection(TokioIo::new(tls_stream), service).await;
+        });
+    }
 }
 
 pub fn write_kubeconfig(path: &Path, server: &str) -> Result<()> {

@@ -118,6 +118,8 @@ impl Peers {
         self.blocked.read().unwrap().contains(addr)
     }
 
+    /// `addr` is the address to dial: a server's API address (Api lane) or
+    /// its Raft address (Raft lane).
     async fn connect(&self, addr: &str, lane: Lane) -> Result<SendRequest<ClientBody>> {
         let dialed = match (lane, self.raft_runtime.get()) {
             (Lane::Raft, Some(rt)) => {
@@ -168,12 +170,40 @@ impl Peers {
     /// One request with a small body, answered with a small body; reuses
     /// pooled connections.
     pub async fn call(&self, addr: &str, method: Method, path: &str, payload: Bytes, timeout: Duration) -> Result<(StatusCode, Bytes)> {
-        self.call_on(Lane::Api, addr, method, path, payload, timeout).await
+        self.call_api(addr, method, path, payload, timeout).await
     }
 
-    pub async fn call_on(&self, lane: Lane, addr: &str, method: Method, path: &str, payload: Bytes, timeout: Duration) -> Result<(StatusCode, Bytes)> {
-        let (parts, bytes) = self.send_on(lane, addr, timeout, || self.build(addr, method.clone(), path, &[], body(payload.clone()))).await?;
-        Ok((parts.status, bytes))
+    fn call_api<'a>(&'a self, addr: &'a str, method: Method, path: &'a str, payload: Bytes, timeout: Duration) -> impl Future<Output = Result<(StatusCode, Bytes)>> + 'a {
+        async move {
+            let (parts, bytes) = self.send_on(Lane::Api, addr, timeout, || self.build(addr, method.clone(), path, &[], body(payload.clone()))).await?;
+            Ok((parts.status, bytes))
+        }
+    }
+
+    /// A request on `lane`. Raft requests run on the Raft runtime and are
+    /// not cancelled when the caller gives up (openraft times RPCs out after
+    /// one heartbeat): the connection then finishes the exchange and goes
+    /// back to the pool instead of being torn down and dialed again.
+    pub async fn call_on(self: &Arc<Self>, lane: Lane, addr: &str, method: Method, path: &str, payload: Bytes, timeout: Duration) -> Result<(StatusCode, Bytes)> {
+        if lane == Lane::Api {
+            return self.call_api(addr, method, path, payload, timeout).await;
+        }
+        let (me, addr_owned, path) = (self.clone(), addr.to_string(), path.to_string());
+        let task = async move {
+            let (parts, bytes) = me
+                .send_on(Lane::Raft, &addr_owned, Duration::from_secs(30), || me.build(&addr_owned, method.clone(), &path, &[], body(payload.clone())))
+                .await?;
+            Ok::<_, anyhow::Error>((parts.status, bytes))
+        };
+        let handle = match self.raft_runtime.get() {
+            Some(rt) => rt.spawn(task),
+            None => tokio::spawn(task),
+        };
+        match tokio::time::timeout(timeout, handle).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(e)) => Err(anyhow::anyhow!("request to {addr} failed: {e}")),
+            Err(_) => Err(anyhow::anyhow!("request to {addr} timed out")),
+        }
     }
 
     /// Send the request `make` builds on a pooled connection (again on a
@@ -212,15 +242,13 @@ impl Peers {
 
     /// A JSON request to a peer's `server.litek8s.dev` endpoint.
     pub async fn call_json<T: DeserializeOwned>(&self, addr: &str, method: Method, path: &str, payload: &impl Serialize, timeout: Duration) -> Result<T> {
-        self.call_json_on(Lane::Api, addr, method, path, payload, timeout).await
+        let (status, bytes) = self.call_api(addr, method, &format!("{PREFIX}{path}"), serde_json::to_vec(payload)?.into(), timeout).await?;
+        json_answer(addr, status, &bytes)
     }
 
-    pub async fn call_json_on<T: DeserializeOwned>(&self, lane: Lane, addr: &str, method: Method, path: &str, payload: &impl Serialize, timeout: Duration) -> Result<T> {
+    pub async fn call_json_on<T: DeserializeOwned>(self: &Arc<Self>, lane: Lane, addr: &str, method: Method, path: &str, payload: &impl Serialize, timeout: Duration) -> Result<T> {
         let (status, bytes) = self.call_on(lane, addr, method, &format!("{PREFIX}{path}"), serde_json::to_vec(payload)?.into(), timeout).await?;
-        if !status.is_success() {
-            bail!("{addr} answered {status}: {}", String::from_utf8_lossy(&bytes).trim());
-        }
-        serde_json::from_slice(&bytes).with_context(|| format!("invalid answer from {addr}"))
+        json_answer(addr, status, &bytes)
     }
 
     /// A request on a connection of its own, its answer streamed (logs,
@@ -237,6 +265,13 @@ impl Peers {
     pub fn request(&self, addr: &str, method: Method, path: &str, extra: &[(&str, String)], body: ClientBody) -> Result<Request<ClientBody>> {
         self.build(addr, method, path, extra, body)
     }
+}
+
+fn json_answer<T: DeserializeOwned>(addr: &str, status: StatusCode, bytes: &[u8]) -> Result<T> {
+    if !status.is_success() {
+        bail!("{addr} answered {status}: {}", String::from_utf8_lossy(bytes).trim());
+    }
+    serde_json::from_slice(bytes).with_context(|| format!("invalid answer from {addr}"))
 }
 
 /// A TLS connection to a peer, ready for HTTP/1.1 requests.
@@ -270,6 +305,7 @@ pub struct Network {
 pub struct Conn {
     peers: Arc<Peers>,
     target: u64,
+    /// The peer's Raft address.
     addr: String,
 }
 
@@ -277,7 +313,7 @@ impl RaftNetworkFactory<TypeConfig> for Network {
     type Network = Conn;
 
     async fn new_client(&mut self, target: u64, node: &ServerNode) -> Conn {
-        Conn { peers: self.peers.clone(), target, addr: node.addr.clone() }
+        Conn { peers: self.peers.clone(), target, addr: node.raft_addr() }
     }
 }
 

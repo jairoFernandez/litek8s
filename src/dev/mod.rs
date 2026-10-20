@@ -722,6 +722,8 @@ async fn inner_apiserver(data_dir: PathBuf) -> Result<()> {
         docker,
         cluster_init: false,
         join_server: None,
+        raft_port: None,
+        raft_listener: None,
     })
     .await
 }

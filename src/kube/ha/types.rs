@@ -10,8 +10,23 @@ use crate::kube::store::{Mutation, StoreError};
 pub struct ServerNode {
     /// Its name (the hostname or `--node-name`), for `litek8s server list`.
     pub name: String,
-    /// `host:port` of its API: Raft RPCs and forwarded requests go there.
+    /// `host:port` of its API: forwarded requests go there.
     pub addr: String,
+    /// `host:port` of its Raft listener (default: the API port + 1).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub raft: String,
+}
+
+impl ServerNode {
+    pub fn raft_addr(&self) -> String {
+        if !self.raft.is_empty() {
+            return self.raft.clone();
+        }
+        match self.addr.rsplit_once(':').and_then(|(h, p)| Some((h, p.parse::<u16>().ok()?))) {
+            Some((host, port)) => format!("{host}:{}", port.wrapping_add(1)),
+            None => self.addr.clone(),
+        }
+    }
 }
 
 /// One log entry's payload: a store mutation, tagged so a retried

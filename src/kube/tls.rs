@@ -58,8 +58,7 @@ pub struct ServerTls {
     ca_pem: String,
 }
 
-/// The ALPN protocol HA servers use for Raft connections: they are served
-/// apart from API requests (see `server.rs`).
+/// The ALPN protocol of HA servers' Raft connections (their own listener).
 pub const RAFT_ALPN: &[u8] = b"litek8s-raft";
 
 impl ServerTls {
@@ -182,32 +181,6 @@ fn generate() -> Result<Stored> {
 
 /// Whether a DER certificate carries an authority key identifier extension
 /// (OID 2.5.29.35).
-/// Whether the TLS ClientHello waiting on `stream` asks for ALPN `proto`,
-/// read without consuming it (the connection is then accepted as usual).
-/// `None` when no complete ClientHello arrives in time.
-pub async fn peek_alpn(stream: &tokio::net::TcpStream, proto: &[u8]) -> Option<bool> {
-    let mut buf = vec![0u8; 16 * 1024];
-    for _ in 0..50 {
-        let n = stream.peek(&mut buf).await.ok()?;
-        if n == 0 {
-            return None;
-        }
-        let mut acceptor = rustls::server::Acceptor::default();
-        let mut slice = &buf[..n];
-        while !slice.is_empty() {
-            if acceptor.read_tls(&mut slice).is_err() {
-                return None;
-            }
-        }
-        match acceptor.accept() {
-            Ok(Some(accepted)) => return Some(accepted.client_hello().alpn().is_some_and(|mut p| p.any(|p| p == proto))),
-            Ok(None) if n < buf.len() => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
-            _ => return None,
-        }
-    }
-    None
-}
-
 fn has_authority_key_identifier(der: &[u8]) -> bool {
     der.windows(5).any(|w| w == [0x06, 0x03, 0x55, 0x1d, 0x23])
 }

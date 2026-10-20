@@ -17,6 +17,8 @@
 # L2 segment shared by every VM started with one (UDP datagrams to a small
 # switch on loopback, bench/lanhub.py), so the VMs of a multi-node cluster
 # reach each other directly. `bench/vm.sh lanhub-stop` stops the switch.
+# BENCH_LAN_MCAST=1 (Linux hosts) uses a multicast group on loopback as the
+# segment instead: the kernel forwards, which keeps up with bursts.
 #
 # To benchmark real machines instead (e.g. fresh EC2 t4g.micro from
 # infra/terraform), export BENCH_HOST_<name>=user@host[:port] (and BENCH_KEY if
@@ -163,9 +165,16 @@ boot() {
   read -r mem cpus lan_ip <"$dir/shape"
   if [[ -n "$lan_ip" ]]; then
     local hub="${BENCH_LAN_PORT:-47700}"
-    ensure_lanhub "$hub"
-    lan=(-netdev "dgram,id=n1,local.type=inet,local.host=127.0.0.1,local.port=$((hub + ${lan_ip##*.})),remote.type=inet,remote.host=127.0.0.1,remote.port=$hub"
-         -device "virtio-net-pci,netdev=n1,mac=$(lan_mac "$lan_ip")")
+    if [[ -n "${BENCH_LAN_MCAST:-}" ]]; then
+      # Linux: one multicast group on loopback is the segment; the kernel
+      # forwards, no userspace switch to saturate.
+      lan=(-netdev "socket,id=n1,mcast=230.77.0.1:$hub,localaddr=127.0.0.1"
+           -device "virtio-net-pci,netdev=n1,mac=$(lan_mac "$lan_ip")")
+    else
+      ensure_lanhub "$hub"
+      lan=(-netdev "dgram,id=n1,local.type=inet,local.host=127.0.0.1,local.port=$((hub + ${lan_ip##*.})),remote.type=inet,remote.host=127.0.0.1,remote.port=$hub"
+           -device "virtio-net-pci,netdev=n1,mac=$(lan_mac "$lan_ip")")
+    fi
   fi
   local machine=()
   if [[ "$VM_ARCH" == arm64 ]]; then

@@ -353,6 +353,8 @@ enum Command {
         cluster_init: bool,
         #[arg(long, value_name = "URL", requires_all = ["data_dir", "token"], conflicts_with = "cluster_init", help = "Join the control plane of this server as another server, e.g. https://192.168.1.10:6443 (needs --token)")]
         server: Option<String>,
+        #[arg(long, help = "HA: port of the Raft listener between servers (default: the --listen port + 1)")]
+        raft_port: Option<u16>,
     },
     #[command(
         about = "A local Kubernetes cluster for development (like kind/k3d), without Docker",
@@ -1259,6 +1261,7 @@ pub async fn run() -> Result<()> {
             docker_socket,
             cluster_init,
             server,
+            raft_port,
         } => {
             let docker = match &docker_socket {
                 Some(path) => {
@@ -1302,6 +1305,8 @@ pub async fn run() -> Result<()> {
                 docker,
                 cluster_init,
                 join_server: server,
+                raft_port,
+                raft_listener: None,
             })
             .await
         }

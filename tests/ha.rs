@@ -16,6 +16,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 struct Server {
     name: String,
     addr: String,
+    raft_port: u16,
     dir: PathBuf,
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     thread: Option<std::thread::JoinHandle<()>>,
@@ -23,8 +24,14 @@ struct Server {
 
 impl Server {
     fn start(name: &str, dir: &Path, port: u16, init: bool, join: Option<(&str, &str)>) -> Self {
+        Self::start_with(name, dir, port, 0, init, join)
+    }
+
+    fn start_with(name: &str, dir: &Path, port: u16, raft_port: u16, init: bool, join: Option<(&str, &str)>) -> Self {
         let listener = std::net::TcpListener::bind(("127.0.0.1", port)).expect("bind");
+        let raft_listener = std::net::TcpListener::bind(("127.0.0.1", raft_port)).expect("bind raft");
         let addr = listener.local_addr().unwrap().to_string();
+        let raft_port = raft_listener.local_addr().unwrap().port();
         let config = ApiServerConfig {
             listen: addr.parse().unwrap(),
             data_dir: Some(dir.to_path_buf()),
@@ -46,6 +53,8 @@ impl Server {
             docker: None,
             cluster_init: init,
             join_server: join.map(|(u, _)| u.to_string()),
+            raft_port: None,
+            raft_listener: Some(raft_listener),
         };
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let label = name.to_string();
@@ -59,7 +68,7 @@ impl Server {
             });
             rt.shutdown_background();
         });
-        Self { name: name.to_string(), addr, dir: dir.to_path_buf(), stop: Some(stop), thread: Some(thread) }
+        Self { name: name.to_string(), addr, raft_port, dir: dir.to_path_buf(), stop: Some(stop), thread: Some(thread) }
     }
 
     fn port(&self) -> u16 {
@@ -322,7 +331,8 @@ async fn failover_keeps_acknowledged_writes_and_watches_resume() {
     let dir = servers_[victim].dir.clone();
     let port = servers_[victim].port();
     let name = servers_[victim].name.clone();
-    servers_[victim] = Server::start(&name, &dir, port, false, None);
+    let raft_port = servers_[victim].raft_port;
+    servers_[victim] = Server::start_with(&name, &dir, port, raft_port, false, None);
     let back = servers_[victim].addr.clone();
     eventually("the restarted server catches up", Duration::from_secs(20), || async {
         let Ok((200, list)) = http(&back, "GET", base, None, T).await else { return false };
@@ -393,10 +403,10 @@ async fn linearizable_under_leader_kills_and_partitions() {
         if let Some(leader) = leader_name(&addrs[(round + 2) % 3]).await {
             let li = servers_.iter().position(|s| s.name == leader).unwrap();
             eprintln!("nemesis: killing leader {leader}");
-            let (dir, port, name) = (servers_[li].dir.clone(), servers_[li].port(), servers_[li].name.clone());
+            let (dir, port, name, raft_port) = (servers_[li].dir.clone(), servers_[li].port(), servers_[li].name.clone(), servers_[li].raft_port);
             servers_[li].kill();
             tokio::time::sleep(Duration::from_secs(2)).await;
-            servers_[li] = Server::start(&name, &dir, port, false, None);
+            servers_[li] = Server::start_with(&name, &dir, port, raft_port, false, None);
             eprintln!("nemesis: restarted {name}");
         }
     }

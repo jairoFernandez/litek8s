@@ -8,6 +8,7 @@ Measurements are in [bench/HA.md](../bench/HA.md).
 
 ```bash
 # The first server starts the cluster (a single server's objects move into it).
+# Servers reach each other on the API port and the Raft port (API port + 1).
 litek8s apiserver --data-dir /var/lib/litek8s/apiserver --listen 0.0.0.0:6443 \
   --node-ip 192.168.1.10 --cluster-init
 
@@ -122,15 +123,26 @@ lease endpoint reconciler does).
   are relayed to the server the pod's node is connected to (the node's Lease
   names it); webhooks and aggregated API servers on such nodes are reached
   through a server-to-server tunnel to that node's agent connection.
-- **Transport.** Servers talk HTTPS on the API port, pinned to the cluster
-  CA and authenticated with the join secret (the token). A joining server
+- **Transport.** Servers talk HTTPS pinned to the cluster CA and
+  authenticated with the join secret (the token): Raft (RPCs, proposals,
+  read indexes) on a listener of its own, the API port + 1 by default
+  (`--raft-port`), forwarded requests on the API port. Raft, its
+  connections and its listener run on two threads of their own, so a burst
+  of API work on a small server never delays heartbeats; a Raft request
+  openraft stopped waiting for still completes in the background so its
+  connection is reused rather than dialed again. A joining server
   fetches the CA (checked against the token's hash), the serving certificate
   and the service account key from the server it joins. As in k3s by
   default, the agent token is the server token: anyone holding it can join
   either.
 - **Timers.** Heartbeats every 100 ms; a follower calls an election after
   the leader lease (1 s) plus a random 0.5–1 s without one, so a dead leader
-  is replaced in about 1.5–2 s (bench/HA.md has measurements).
+  is replaced in about 1.5–2 s (bench/HA.md has measurements). openraft
+  0.9 also gives every AppendEntries one heartbeat interval to complete
+  (requests are capped at 512 KiB so big objects go a few at a time). On
+  slow disks or a lossy network (Wi-Fi) raise it on every server:
+  `LITEK8S_RAFT_HEARTBEAT_MS=300` (elections scale with it: 1.5–3 s timeout,
+  ~5 s failover).
 
 ## Consistency model
 
