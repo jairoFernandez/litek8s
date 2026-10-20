@@ -12,3 +12,7 @@ state.json
 .claude/settings.local.json
 .claude/scheduled_tasks.lock
 compat/.work/
+
+# Release archives (dev/release/package.sh)
+dist/
+__pycache__/

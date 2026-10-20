@@ -1,0 +1,24 @@
+litek8s
+Copyright 2026 Jairo Fernandez
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It includes or is derived from the following third-party work, also under
+the Apache License, Version 2.0:
+
+- Kubernetes protobuf schemas (proto/k8s.io/), unmodified copies of the
+  generated.proto files of kubernetes/api, kubernetes/apimachinery,
+  kubernetes/apiextensions-apiserver and kubernetes/kube-aggregator, v0.33.0.
+  Copyright The Kubernetes Authors. See proto/README.md and proto/LICENSE.
+
+- The CEL static cost estimator in src/kube/cel/cost.rs is a port of cel-go's
+  checker/cost.go (https://github.com/google/cel-go), Copyright Google LLC,
+  combined with the size estimator and library call costs of Kubernetes'
+  k8s.io/apiserver CEL libraries, Copyright The Kubernetes Authors.
+
+Release archives for macOS also contain the dev VM's guest (vm/Image,
+vm/root.img, vm/initrd.gz): unmodified Alpine Linux binary packages (the
+linux-virt kernel, busybox, crun, iptables, iproute2, e2fsprogs and their
+libraries) under their own licenses, mostly GPL-2.0. vm/PACKAGES.txt lists
+every package with its version, license and the Alpine aports commit it was
+built from; see THIRD-PARTY.md for where their source code is.

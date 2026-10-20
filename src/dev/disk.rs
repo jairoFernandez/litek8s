@@ -230,7 +230,7 @@ pub fn litek8s_files(dev_home: &Path) -> u64 {
     };
     let mut total = std::env::current_exe().ok().and_then(|e| e.canonicalize().ok()).map(|e| alloc(&e)).unwrap_or(0);
     if cfg!(target_os = "macos") {
-        let assets = std::env::var_os("LITEK8S_DEV_VM_ASSETS").map(PathBuf::from).unwrap_or_else(|| dev_home.parent().unwrap_or(dev_home).join("vm"));
+        let assets = super::vm_assets_dir(dev_home);
         total += ["Image", "initramfs.gz", "initrd.gz", "root.img"].iter().map(|f| alloc(&assets.join(f))).sum::<u64>();
         total += alloc(&dev_home.join("vm-state").join("litek8s-vm"));
     }

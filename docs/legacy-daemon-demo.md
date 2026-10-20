@@ -1,13 +1,12 @@
 # litek8s Demo Guide
 
-`litek8s` is a small Docker-backed orchestrator demo. The idea is simple: one local control plane, familiar `kubectl`-style commands, a reduced `Deployment` manifest, and enough observability to show scheduling, limits, restarts, and a remote node.
+The legacy `litek8s serve` daemon (see [legacy-daemon.md](legacy-daemon.md)) is a small Docker-backed orchestrator. The idea is simple: one local control plane, familiar `kubectl`-style commands, a reduced `Deployment` manifest, and enough observability to show scheduling, limits, restarts, and a remote node.
 
 ## 1. Start the control plane
 
 Run the local daemon in one terminal:
 
 ```bash
-cd "/Users/civojairo/Documents/New project/litek8s-demo"
 cargo run -- serve
 ```
 
@@ -18,7 +17,6 @@ This process is the local control loop. It stores desired state, reconciles depl
 In another terminal, bootstrap and register `server77`:
 
 ```bash
-cd "/Users/civojairo/Documents/New project/litek8s-demo"
 cargo run -- node add server77 --ssh server77 --install --label role=edge --label zone=lab
 cargo run -- get nodes
 ```
@@ -42,7 +40,6 @@ Expected result:
 Apply the local workloads first:
 
 ```bash
-cd "/Users/civojairo/Documents/New project/litek8s-demo"
 cargo run -- apply -f examples/nginx.yaml
 cargo run -- apply -f examples/http-echo.yaml
 cargo run -- apply -f examples/cpu-burn.yaml
@@ -53,7 +50,6 @@ cargo run -- apply -f examples/oom-demo.yaml
 Then apply the remote workloads:
 
 ```bash
-cd "/Users/civojairo/Documents/New project/litek8s-demo"
 cargo run -- apply -f examples/http-echo-server77.yaml
 cargo run -- apply -f examples/http-echo-edge.yaml
 ```
@@ -73,7 +69,6 @@ What each workload demonstrates:
 Check the current state:
 
 ```bash
-cd "/Users/civojairo/Documents/New project/litek8s-demo"
 cargo run -- get deployments
 cargo run -- get nodes
 ```
@@ -81,7 +76,6 @@ cargo run -- get nodes
 Open the live view:
 
 ```bash
-cd "/Users/civojairo/Documents/New project/litek8s-demo"
 target/debug/litek8s top --watch --interval-secs 1
 target/debug/litek8s tree --watch --interval-secs 1
 ```
@@ -97,7 +91,6 @@ What to look for:
 Watch the control-plane history:
 
 ```bash
-cd "/Users/civojairo/Documents/New project/litek8s-demo"
 cargo run -- events --watch
 cargo run -- events --deployment echo-edge
 cargo run -- events --node server77 --watch
@@ -111,7 +104,6 @@ Use `tree` when you want topology; use `events` when you want timeline.
 Remote placement by selector:
 
 ```bash
-cd "/Users/civojairo/Documents/New project/litek8s-demo"
 cargo run -- describe deployment echo-edge
 cargo run -- describe node server77
 ```
@@ -125,7 +117,6 @@ Expected points:
 Controlled scheduling:
 
 ```bash
-cd "/Users/civojairo/Documents/New project/litek8s-demo"
 cargo run -- node cordon server77
 cargo run -- get nodes
 cargo run -- node uncordon server77
@@ -140,7 +131,6 @@ Expected points:
 OOM and backoff behavior:
 
 ```bash
-cd "/Users/civojairo/Documents/New project/litek8s-demo"
 cargo run -- describe deployment oom-demo
 ```
 
@@ -153,7 +143,6 @@ Expected points:
 Logs:
 
 ```bash
-cd "/Users/civojairo/Documents/New project/litek8s-demo"
 cargo run -- logs logstorm --tail 20
 ```
 
@@ -169,7 +158,6 @@ If `server77` exposes the remote ports to a reachable interface, you can also te
 Local proxy access:
 
 ```bash
-cd "/Users/civojairo/Documents/New project/litek8s-demo"
 cargo run -- proxy echo-demo --listen 127.0.0.1:9000
 ```
 
@@ -182,7 +170,6 @@ curl http://127.0.0.1:9000
 For the remote edge deployment:
 
 ```bash
-cd "/Users/civojairo/Documents/New project/litek8s-demo"
 cargo run -- proxy echo-edge --listen 127.0.0.1:9002
 ```
 
@@ -202,7 +189,6 @@ This proxy is intentionally simple:
 Daemon-managed service:
 
 ```bash
-cd "/Users/civojairo/Documents/New project/litek8s-demo"
 cargo run -- service add echo-svc --deployment echo-demo --listen 127.0.0.1:9100
 cargo run -- get services
 cargo run -- describe service echo-svc
@@ -217,7 +203,6 @@ curl http://127.0.0.1:9100
 For the remote edge deployment:
 
 ```bash
-cd "/Users/civojairo/Documents/New project/litek8s-demo"
 cargo run -- service add edge-svc --deployment echo-edge --listen 127.0.0.1:9102
 cargo run -- describe service edge-svc
 curl http://127.0.0.1:9102
@@ -234,7 +219,6 @@ This `service` layer is intentionally small:
 Declarative service YAML:
 
 ```bash
-cd "/Users/civojairo/Documents/New project/litek8s-demo"
 cargo run -- apply -f examples/http-echo-service.yaml
 cargo run -- get services
 cargo run -- describe service echo-svc
@@ -244,7 +228,6 @@ curl http://127.0.0.1:9100
 And for the remote edge deployment:
 
 ```bash
-cd "/Users/civojairo/Documents/New project/litek8s-demo"
 cargo run -- apply -f examples/http-echo-edge-service.yaml
 cargo run -- describe service edge-svc
 curl http://127.0.0.1:9102
@@ -291,7 +274,6 @@ If you want a short verbal flow while presenting:
 Delete the deployments when you are done:
 
 ```bash
-cd "/Users/civojairo/Documents/New project/litek8s-demo"
 cargo run -- delete deployment demo-nginx
 cargo run -- delete deployment echo-demo
 cargo run -- delete deployment cpu-burn

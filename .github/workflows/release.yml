@@ -1,0 +1,199 @@
+name: release
+
+# A `v*` tag builds the release archives and creates a DRAFT GitHub release
+# with them and SHA256SUMS; publishing it is a click in the GitHub UI.
+# Running it by hand (workflow_dispatch) builds the same archives as workflow
+# artifacts, without a release: a dry run before tagging.
+#
+#   litek8s-<tag>-linux-x86_64.tar.gz   static (musl), --no-default-features
+#   litek8s-<tag>-linux-aarch64.tar.gz  static (musl), --no-default-features
+#   litek8s-<tag>-darwin-arm64.tar.gz   ad-hoc signed with the Virtualization
+#                                       entitlement, plus the dev VM's guest
+#                                       (share/litek8s/vm), whose /init is the
+#                                       linux-aarch64 binary of the same run
+#
+# Layout and install: dev/release/package.sh, install.sh.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # Same image as dev/vm/build-guest-binary.sh.
+  RUST_MUSL_IMAGE: rust:1.90-alpine
+
+jobs:
+  version:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        name: Version (tag, or dev-<sha> for a dry run)
+        shell: bash
+        run: |
+          crate="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          if [[ "$GITHUB_REF_TYPE" == tag ]]; then
+            version="$GITHUB_REF_NAME"
+            # The tag must match Cargo.toml, so `litek8s --version` agrees.
+            if [[ "${version%%-*}" != "$crate" ]]; then
+              echo "::error::tag $version does not match Cargo.toml's version $crate"
+              exit 1
+            fi
+          else
+            version="dev-${GITHUB_SHA::12}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  linux:
+    needs: version
+    name: linux-${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      # In an Alpine container on the native runner: a static musl binary
+      # without cross toolchains (ring and zstd build C code).
+      - name: Build (static, musl)
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work \
+            -e CARGO_TARGET_DIR=/work/target/musl \
+            -e CARGO_PROFILE_RELEASE_STRIP=symbols \
+            "$RUST_MUSL_IMAGE" \
+            sh -c 'apk add -q musl-dev gcc g++ make perl >/dev/null && cargo build --release --locked --no-default-features'
+          sudo chown -R "$(id -u):$(id -g)" target
+
+      - name: Check the binary
+        run: |
+          bin=target/musl/release/litek8s
+          file "$bin"
+          file "$bin" | grep -Eq 'static(ally|-pie) linked' || { echo "::error::not a static binary"; exit 1; }
+          "$bin" --version
+          ls -l "$bin"
+
+      - name: Package
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          TARGET: linux-${{ matrix.arch }}
+        run: dev/release/package.sh "$VERSION" "$TARGET" target/musl/release/litek8s
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-linux-${{ matrix.arch }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+      # The macOS dev VM boots this binary as its PID 1.
+      - if: matrix.arch == 'aarch64'
+        uses: actions/upload-artifact@v4
+        with:
+          name: guest-binary
+          path: target/musl/release/litek8s
+          if-no-files-found: error
+
+  macos:
+    needs: [version, linux]
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+
+      - name: Build
+        env:
+          CARGO_PROFILE_RELEASE_STRIP: symbols
+        run: cargo build --release --locked --no-default-features
+
+      # The dev VM needs com.apple.security.virtualization. An ad-hoc
+      # signature carries it (the entitlement is not restricted, so no Apple
+      # developer certificate is involved), and `dev up` then runs this
+      # binary directly instead of making a signed copy.
+      - name: Sign (ad-hoc, with the Virtualization entitlement)
+        run: |
+          codesign --force --sign - --entitlements dev/release/entitlements.plist target/release/litek8s
+          entitlements="$(codesign -d --entitlements - target/release/litek8s 2>&1)"
+          echo "$entitlements"
+          grep -q com.apple.security.virtualization <<<"$entitlements"
+          codesign --verify --verbose target/release/litek8s
+          target/release/litek8s --version
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: guest-binary
+          path: guest
+
+      - name: Build the dev VM guest (Alpine kernel + root image + initrd)
+        run: |
+          chmod +x guest/litek8s
+          python3 dev/vm/build-guest.py --litek8s guest/litek8s --out vm
+          cat vm/PACKAGES.txt
+
+      - name: Package
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: dev/release/package.sh "$VERSION" darwin-arm64 target/release/litek8s --vm vm
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-darwin-arm64
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: [version, linux, macos]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum -- *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          prerelease=()
+          [[ "$VERSION" == *-* ]] && prerelease=(--prerelease)
+          sed "s/{{VERSION}}/$VERSION/g" dev/release/notes.md > "$RUNNER_TEMP/notes.md"
+          gh release create "$VERSION" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft --verify-tag "${prerelease[@]}" \
+            --title "litek8s $VERSION" \
+            --notes-file "$RUNNER_TEMP/notes.md"

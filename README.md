@@ -1,233 +1,145 @@
 # litek8s
 
-`litek8s` is a Docker-backed orchestrator demo written in Rust. It keeps the UX close to `kubectl` while staying intentionally small: one binary, a local daemon over a Unix socket, a strict reduced `Deployment` manifest, SSH-backed remote nodes, and a reconciler that recreates containers if they disappear.
-
-## Local Kubernetes for development
-
-`litek8s dev up` starts a single-node Kubernetes cluster (the real API, for
-kubectl and Helm) in about a second, rootless on Linux and in a small
-Virtualization.framework VM on macOS, and points kubectl at it (context
-`litek8s-dev`). See [docs/dev.md](docs/dev.md).
-
-The same cluster serves the Docker Engine API on `~/.litek8s/docker.sock`:
-`docker`, `docker compose`, Dev Containers and Testcontainers work against it
-(`export DOCKER_HOST=unix://$HOME/.litek8s/docker.sock`), next to (not
-instead of) an installed Docker or OrbStack. See [docs/docker.md](docs/docker.md).
-litek8s itself is developed on it, with no Docker or OrbStack needed:
-[docs/develop-without-docker.md](docs/develop-without-docker.md).
-
-`litek8s ui` is a terminal UI for all of it, what OrbStack's window is to
-OrbStack: the cluster's state and resources, containers by compose project
-with logs and shells, images, volumes, freeing space, settings and a light
-Kubernetes view; keyboard-driven, 80x24, works over SSH. See [docs/ui.md](docs/ui.md).
-
-For LLM agents, `litek8s mcp` is an MCP server with tools for dev clusters,
-objects, diagnosis of broken pods, logs, PromQL and alerts (it refuses
-clusters that are not litek8s), and `litek8s skill` prints an agent skill:
-`claude mcp add litek8s -- litek8s mcp`. See [docs/agents.md](docs/agents.md).
-
-## Commands
+**A lightweight Kubernetes in one binary**, for local development, home
+labs and the edge. It serves the real Kubernetes API, so `kubectl`, Helm
+and Argo CD work unchanged, but the whole control plane, scheduler,
+controllers, DNS, service proxy and node agent are one Rust process that
+idles at about 20 MiB.
 
 ```bash
-cargo run -- serve
-cargo run -- apply -f examples/nginx.yaml
-cargo run -- apply -f examples/http-echo-service.yaml
-cargo run -- get deployments
-cargo run -- describe deployment demo-nginx
-cargo run -- logs demo-nginx
-cargo run -- proxy echo-demo
-cargo run -- service add echo-svc --deployment echo-demo --listen 127.0.0.1:9100
-cargo run -- get services
-cargo run -- events
-cargo run -- events --deployment demo-nginx
-cargo run -- events --node server77 --watch
-cargo run -- top
-cargo run -- top --watch
-cargo run -- tree
-cargo run -- tree --watch
-cargo run -- node cordon server77
-cargo run -- node uncordon server77
-cargo run -- delete deployment demo-nginx
+litek8s dev up        # a local cluster: ~0.2 s on Linux, ~1.3 s on macOS
+kubectl get nodes     # context litek8s-dev, merged into ~/.kube/config
+litek8s ui            # terminal UI for the cluster, containers and images
 ```
 
-`top` shows a daemon summary first, then the managed deployments table.
-`events` shows the control-plane history: scheduling, starts, backoff, deletes, and node registration.
-`events` can also filter by deployment or node so noisy workloads do not drown the rest of the stream.
-`proxy` opens a local TCP listener and forwards into the deployment's published `hostPort`, using SSH tunneling automatically when the workload is on a remote node.
-`service add` creates a daemon-managed local listener with a stable address, so you do not need to keep a foreground `proxy` process open.
-The same service can also be declared as YAML with a small selector-based `Service` manifest and applied with `litek8s apply -f ...`.
-`tree` gives you a real relationship view from the control plane down to nodes, deployments, published ports, and services, so you do not have to reconstruct topology mentally from separate tables.
+> **Status: early preview (v0.x).** Built and tested by one person; expect
+> rough edges. There is no client authentication yet: keep the API on
+> localhost or a trusted network ([Limitations](#limitations)).
+> Feedback and issues are very welcome.
 
-## Local LLM mmap backend
+## Install
 
-Local Qwen inference has three interchangeable weight readers:
-
-- the default `resident` backend loads and transposes every projection as
-  `f64`;
-- `--mmap` keeps large tensors in their native SafeTensors dtype and streams
-  them directly from the read-only mapping;
-- `--gguf FILE` reads the mixed-quantized GGUF format used by Ollama directly
-  through mmap. Q4_K_M is a recipe mixing Q4_K, Q5_0, Q6_K, Q8_0 and F32
-  tensors; every supported block is dequantized inside the dot product.
+macOS (Apple silicon) and Linux (x86_64, aarch64):
 
 ```bash
-cargo run --release -- llm generate \
-  --model-dir /path/to/Qwen2.5-0.5B \
-  --mmap \
-  --max-new 1 \
-  "The capital of France is"
+curl -fsSL https://raw.githubusercontent.com/jairoFernandez/litek8s/main/install.sh | sh
 ```
 
-The same Ollama blob can be tested without copying or converting it:
+It downloads the latest release for your OS and architecture, checks its
+SHA-256, and installs `litek8s` to `~/.local/bin` (on macOS also the dev
+VM's guest kernel and root image to `~/.local/share/litek8s/vm`). Options:
+`LITEK8S_VERSION=v0.1.0`, `LITEK8S_INSTALL_DIR=/usr/local/bin`. Or
+download an archive from the [releases page](https://github.com/jairoFernandez/litek8s/releases)
+and check it against `SHA256SUMS`.
+
+On Linux, dev clusters run rootless and need `crun`, `uidmap`, `passt`
+(or `slirp4netns`), `iproute2` and `iptables`: `litek8s dev setup` checks
+everything and says what is missing ([docs/dev.md](docs/dev.md#what-it-needs)).
+macOS needs nothing else: no Docker Desktop, no Lima, no sudo.
+
+From source: `cargo install --git https://github.com/jairoFernandez/litek8s`
+(Rust ≥ 1.90; macOS also needs the guest, see [docs/dev.md](docs/dev.md)).
+
+## Quickstart
 
 ```bash
-cargo run --release -- llm generate \
-  --model-dir /path/to/Qwen2.5-0.5B \
-  --gguf ~/.ollama/models/blobs/sha256-... \
-  --max-new 1 \
-  "The capital of France is"
+litek8s dev up
+kubectl create deployment web --image=nginx
+kubectl expose deployment web --type=NodePort --port 80
+curl localhost:$(kubectl get svc web -o jsonpath='{.spec.ports[0].nodePort}')
+
+litek8s ui                                   # browse it all
+export DOCKER_HOST=unix://$HOME/.litek8s/docker.sock
+docker run --rm hello-world                  # the same cluster speaks the Docker API
+
+litek8s dev up --name ci --nodes 3           # another cluster, three nodes
+litek8s dev down                             # stop; objects and images are kept
+litek8s dev delete                           # remove everything
 ```
 
-Incremental generation can place the KV cache on one or more disks:
+## Numbers
+
+Measured against k3s, kind and k3d with the scripts in this repository; the
+linked files have the setup, raw data and caveats.
+
+| | litek8s | reference | source |
+|---|---|---|---|
+| Whole orchestrator, 5 nginx pods (PSS, 1 GiB arm64 VM) | **24.6 MiB** | k3s minimal: 603 MiB | [bench/RESULTS.md](bench/RESULTS.md#the-kubernetes-path-on-crun-without-docker-2026-10-17) |
+| Argo CD + one synced app, orchestrator memory | **90 MiB** | k3s minimal: 900 MiB | [bench/RESULTS.md](bench/RESULTS.md#argo-cd-on-k3s-and-on-litek8s-2026-10-19-x86_64kvm) |
+| `dev up` → node Ready, Linux / macOS | **0.17 s / 1.28 s** | kind 31.6 s / 34.3 s, k3d 11.1 s / 10.4 s | [bench/RESULTS.md](bench/RESULTS.md#local-dev-cluster-litek8s-dev-vs-kind-and-k3d-2026-10-18) |
+| Dev cluster idle memory, Linux | **47 MiB** | kind 526 MiB, k3d 398 MiB | same |
+| Metrics, logs and alerts, added memory | **+1.8 MiB** | kube-prometheus-stack + Loki: 1,371 MiB | [bench/RESULTS.md](bench/RESULTS.md#observability-built-in-vs-kube-prometheus-stack--loki-2026-10-20-x86_64kvm) |
+| Compatibility corpus (kubectl, CRDs, workloads, networking, 47 Helm charts) | **119/119** | k3s: 119/119 | [compat/RESULTS.md](compat/RESULTS.md#without-docker-2026-10-19-119-cases) |
+| Kubernetes v1.33 conformance (419 specs) | **413/419** | k3s: 416/419 | [compat/CONFORMANCE.md](compat/CONFORMANCE.md) |
+
+The 6 conformance failures: 5 are macOS-only (TCP DNS on port 53, a
+hostPort binding) and pass on Linux; 1 was a watch fixed since. A 3-server
+HA control plane stays linearizable under leader kills and partitions
+([bench/HA.md](bench/HA.md)); a 3-node cluster ran 21 h under churn with no
+leak ([bench/SOAK.md](bench/SOAK.md)).
+
+## What's in the binary
+
+- **Dev clusters** (`litek8s dev`): kind/k3d/minikube without Docker. As
+  many clusters as you like, each with as many nodes, in one rootless
+  sandbox (Linux) or one small Virtualization.framework VM (macOS) that
+  grows its memory on demand. NodePorts on `localhost`, your home directory mounted
+  at the same path, `litek8s dev load` for local images. [docs/dev.md](docs/dev.md)
+- **Docker Engine API** on `~/.litek8s/docker.sock`: `docker`,
+  `docker compose`, `docker build`, Dev Containers and Testcontainers run
+  on the dev cluster, next to (not instead of) Docker or OrbStack.
+  [docs/docker.md](docs/docker.md)
+- **Terminal UI** (`litek8s ui`): cluster state, a k9s-style Kubernetes
+  view, containers by compose project with logs and shells, images,
+  volumes, disk cleanup; keyboard-driven, works over SSH. [docs/ui.md](docs/ui.md)
+- **Built-in observability**: an embedded time-series store with a
+  Prometheus-compatible API (Grafana works), log search across every pod
+  and node, alert rules to a webhook, ntfy or Telegram; `kubectl top`.
+  [docs/observability.md](docs/observability.md)
+- **Real servers and nodes**: `litek8s apiserver` on a box, more machines
+  join with `litek8s agent --join ... --token ...` (k3s-style token that
+  pins the CA), pods talk across nodes over a WireGuard mesh litek8s sets
+  up itself. Pods run on crun directly: no containerd, no pause containers.
+  [Multi-node](#multi-node-and-ha)
+- **HA control plane**: 3 or 5 API servers share the store through Raft;
+  no etcd. [docs/ha.md](docs/ha.md)
+- **For LLM agents**: `litek8s mcp` is an MCP server (dev clusters, objects,
+  pod diagnosis, logs, PromQL, alerts) with guardrails, and `litek8s skill`
+  installs an agent skill: `claude mcp add litek8s -- litek8s mcp`.
+  [docs/agents.md](docs/agents.md)
+- **CRDs done properly**: OpenAPI schema validation, CEL rules type-checked
+  and cost-estimated, ratcheting, server-side apply with managedFields.
+  [docs/crds.md](docs/crds.md)
+
+## Platforms
+
+| | dev clusters | server / node (`apiserver`, `agent`) | release binary |
+|---|---|---|---|
+| **macOS, Apple silicon** (13+) | yes, in a VM (Virtualization.framework) | for development only (Docker runtime) | `darwin-arm64`, VM guest included |
+| **Linux x86_64 / aarch64, rootless** | yes, user-namespace sandbox (kernel ≥ 5.11, cgroup v2) | – | `linux-x86_64`, `linux-aarch64` (static) |
+| **Linux, root with crun** | yes | yes: the intended server and node setup | same |
+| macOS Intel, Windows | no (WSL2 untested) | no | – |
+
+Tested on Ubuntu 24.04 (arm64 and x86_64) and recent macOS on Apple
+silicon. Ubuntu ≥ 23.10 needs `sudo litek8s dev setup` once (AppArmor and
+unprivileged user namespaces).
+
+## Multi-node and HA
 
 ```bash
-cargo run --release -- llm generate \
-  --model-dir /path/to/Qwen2.5-0.5B \
-  --gguf ~/.ollama/models/blobs/sha256-... \
-  --kv-cache-dir /fast-disk/litek8s-kv,/large-disk/litek8s-kv \
-  --kv-max-tokens 32768 \
-  --kv-buffer-mb 16 \
-  --max-new 4 \
-  "The capital of France is"
-```
-
-This mode performs one batched prompt prefill and then processes only the new
-token at each decode step. It creates one grow-on-demand F16 K/V file per
-transformer layer, distributes the files round-robin across the supplied
-directories, and accesses them through writable mmap. Files grow in 64-token
-groups, avoiding full-capacity allocation on filesystems such as APFS. Only the
-configured tile buffer and the current attention scores need additional
-resident memory. Cache files are removed automatically; pass
-`--keep-kv-cache` to retain them for inspection or reuse by external tooling.
-
-For Qwen2.5-0.5B, disk KV storage costs 12 KiB per cached token across all 24
-layers. A 32,768-token limit therefore has 384 MiB of maximum capacity, while
-the initial mapped allocation is only 1.5 MiB across 24 layers. The CLI reports
-both bytes containing live rows and the current mapped file lengths.
-
-The mmap backend loads only requested embedding rows, decodes each projection
-weight once per input batch, reuses it across the batch rows, and computes tied
-embedding logits without materializing the vocabulary matrix. The original
-backend remains the default so both paths can be compared.
-
-Measured on Qwen2.5-0.5B for one generated token:
-
-| backend | wall | maximum RSS | output |
-|:---|---:|---:|:---|
-| resident `f64` | 90.31 s | 4,750.7 MB | `Paris` |
-| native mmap | 4.86 s | 1,071.4 MB | `Paris` |
-
-RSS includes pages from the 942 MiB checkpoint mapping. The mapped backend is
-exact at the checkpoint dtype. The GGUF backend instead accepts the model's
-Q4_K_M quantization error in exchange for its smaller working set.
-
-An alternating, page-cache-warm comparison isolates the two mmap readers:
-
-| mmap backend | file size | wall (1 token) | maximum RSS | output |
-|:---|---:|---:|---:|:---|
-| SafeTensors BF16 | 988,097,824 B | 2.86 s | 1,073.5 MB | `Paris` |
-| Ollama GGUF Q4_K_M | 397,807,936 B | 2.35 s | 476.3 MB | `Paris` |
-
-The quantized file is 2.484x smaller, reduces measured RSS by about 55.6%, and
-is about 1.22x faster in the current scalar CPU kernel. GGUF startup alone is
-about 0.40 s versus 0.20 s for SafeTensors.
-
-With the same GGUF, prompt, warm page cache, and four generated tokens, the disk
-KV path produced the same `Paris. It is` output in 4.31 s versus 10.18 s for
-full-prefix recomputation, a 2.36x speedup. It used 0.10 MiB of KV rows for the
-eight positions actually processed. These timings describe the current scalar
-CPU implementation; longer contexts trade additional disk I/O for bounded,
-evictable memory instead of keeping the whole KV history in anonymous RAM.
-
-Measured with `/usr/bin/time -l` on macOS, both modes peak at about 454 MiB of
-RSS — dominated by the file-backed, evictable pages of the ~379 MiB mmapped
-GGUF — while the anonymous "peak memory footprint" is 82 MiB for the disk KV
-path versus 84 MiB for recomputation. At only eight cached positions the KV
-difference is negligible; the disk path's advantage grows with context length,
-since its resident KV state stays bounded by the tile buffer rather than the
-full history.
-
-## Firepack
-
-If you want a busier demo, these examples are designed to run together:
-
-- [`examples/nginx.yaml`](examples/nginx.yaml): small web server on `localhost:8089`
-- [`examples/http-echo.yaml`](examples/http-echo.yaml): tiny HTTP responder on `localhost:8090`
-- [`examples/cpu-burn.yaml`](examples/cpu-burn.yaml): synthetic CPU pressure
-- [`examples/logstorm.yaml`](examples/logstorm.yaml): noisy container for `logs`
-- [`examples/oom-demo.yaml`](examples/oom-demo.yaml): intentional crash loop to exercise backoff
-
-```bash
-cargo run -- apply -f examples/nginx.yaml
-cargo run -- apply -f examples/http-echo.yaml
-cargo run -- apply -f examples/cpu-burn.yaml
-cargo run -- apply -f examples/logstorm.yaml
-cargo run -- apply -f examples/oom-demo.yaml
-
-target/debug/litek8s top --watch --interval-secs 1
-target/debug/litek8s tree --watch --interval-secs 1
-target/debug/litek8s logs logstorm --tail 20
-target/debug/litek8s describe deployment oom-demo
-target/debug/litek8s proxy echo-demo --listen 127.0.0.1:9000
-target/debug/litek8s apply -f examples/http-echo-service.yaml
-target/debug/litek8s apply -f examples/http-echo-edge-service.yaml
-```
-
-To clean up:
-
-```bash
-cargo run -- delete deployment demo-nginx
-cargo run -- delete deployment echo-demo
-cargo run -- delete deployment cpu-burn
-cargo run -- delete deployment logstorm
-cargo run -- delete deployment oom-demo
-```
-
-## Kubernetes API server: a multi-node cluster
-
-`litek8s apiserver` serves the real Kubernetes API (kubectl and Helm work
-unchanged) and runs the controllers, the scheduler, cluster DNS and a node
-agent in one process. More machines join as nodes with the command it prints:
-
-```bash
-# on the server (pods run here too)
+# the server (pods run here too)
 litek8s apiserver --listen 0.0.0.0:6443 --data-dir /var/lib/litek8s/apiserver --node-ip 192.168.1.10
-#   apiserver: join nodes with: litek8s agent --join https://192.168.1.10:6443 --token K10<hash>::<secret>
+#   prints: join nodes with: litek8s agent --join https://192.168.1.10:6443 --token K10<hash>::<secret>
 
-# on every other machine (Linux, as root, with crun installed)
+# every other machine (Linux, root, crun installed)
 litek8s agent --join https://192.168.1.10:6443 --token K10<hash>::<secret> --node-ip 192.168.1.21
-litek8s agent --join https://home.example:6443 --token ... --node-grace-period 15m   # a laptop that sleeps
 ```
 
-- The token (also in `<data-dir>/join-token`) pins the cluster CA, so the
-  agent checks it talks to the right server; each node also keeps a node
-  password, so nobody else with the token can take over its name.
-- Every node gets a `/24` of `--cluster-cidr` (10.42.0.0/16). Pods of all
-  nodes share one network over a WireGuard mesh (kernel WireGuard, UDP
-  51820, configured by litek8s itself — no `wg` tool needed); Services and
-  DNS work cluster-wide and pods see each other's real addresses.
-- Agents hold one connection to the server (no inbound port on nodes) and
-  renew their Lease every 10 s. A node that stops is `NotReady` after
-  `--node-monitor-grace-period` (40 s); its pods are evicted after their
-  `tolerationSeconds` (default 300 s, `--default-unreachable-toleration-seconds`)
-  and rescheduled. A node that comes back sooner keeps its pods.
-
-Metrics, logs and alerts are built in, instead of kube-prometheus-stack and
-Loki: every node samples its containers and machine into an embedded
-time-series store with a Prometheus-compatible API (Grafana data source:
-`http://<server>:6443/prometheus`), log search runs across every pod and
-node, and built-in and custom alert rules notify a webhook, ntfy or
-Telegram. See [docs/observability.md](docs/observability.md).
+Every node gets a `/24` of `10.42.0.0/16`; Services and DNS work
+cluster-wide. A node that stops goes `NotReady` after 40 s and its pods are
+rescheduled after their `tolerationSeconds`; laptops that sleep can join
+with a longer `--node-grace-period`. Three servers with `--cluster-init` /
+`--server` make the control plane highly available ([docs/ha.md](docs/ha.md)).
 
 ```bash
 litek8s logs -l app=web --since 1h --grep ERROR
@@ -235,80 +147,52 @@ litek8s query 'topk(5, sum by (pod) (rate(container_cpu_usage_seconds_total[5m])
 litek8s alerts
 ```
 
-`bench/cluster.sh up 3` builds a 3-node cluster of local VMs for testing,
-`compat/run.sh --tiers M1` checks cross-node behaviour, and `bench/soak.sh`
-runs it for a day with churn (results in `bench/SOAK.md`).
+## Limitations
 
-## Remote node demo
+Honest list; more in [skills/litek8s/references/differences.md](skills/litek8s/references/differences.md).
 
-`litek8s` can also place a deployment on another machine over `ssh`. The simplest path is `node add --install`, which detects the remote platform, builds a compatible binary, copies it over SSH, and registers the node.
+- **No client authentication or RBAC enforcement.** Every API client is
+  admin. Dev clusters listen on `127.0.0.1` only; on a server, put the API
+  behind a firewall or VPN and do not expose port 6443 (or the Raft port,
+  6444) to untrusted networks. Node join and HA peers are authenticated by
+  the join token.
+- One person's project, weeks old: APIs, flags and on-disk formats may
+  change between 0.x releases without migration.
+- Not every kubelet behavior: no `Unhealthy`/`BackOff` events, a memory
+  `emptyDir` is one tmpfs per container mount; ValidatingAdmissionPolicy
+  and webhook `matchConditions` are accepted but not enforced.
+- Metrics cover containers, nodes and cluster state; application
+  `/metrics` endpoints are not scraped (point a Prometheus at them).
+- The macOS VM never returns memory to macOS once touched (a
+  Virtualization.framework limit); litek8s keeps the guest small instead
+  ([docs/dev.md](docs/dev.md#memory-on-macos)).
+- macOS servers use Docker for pods and are meant for development; run
+  real servers and nodes on Linux.
+- Release binaries are built without the experimental `llm` feature
+  ([docs/llm.md](docs/llm.md)).
 
-1. Register the node in the local control plane:
+## Documentation
 
-```bash
-cargo run -- node add server77 --ssh server77 --install --label role=edge --label zone=lab
-cargo run -- get nodes
-cargo run -- node cordon server77
-cargo run -- node uncordon server77
-```
+[docs/dev.md](docs/dev.md) dev clusters ·
+[docs/docker.md](docs/docker.md) Docker API ·
+[docs/ui.md](docs/ui.md) terminal UI ·
+[docs/observability.md](docs/observability.md) metrics, logs, alerts ·
+[docs/ha.md](docs/ha.md) HA control plane ·
+[docs/crds.md](docs/crds.md) CRDs ·
+[docs/agents.md](docs/agents.md) MCP and agents ·
+[compat/README.md](compat/README.md) compatibility corpus ·
+[CONTRIBUTING.md](CONTRIBUTING.md) building and testing ·
+[SECURITY.md](SECURITY.md) reporting vulnerabilities
 
-If you already copied the correct binary manually, `--install` is optional.
+## The legacy daemon
 
-2. Apply manifests that target that node:
+litek8s began as a small Docker-backed orchestrator with its own reduced
+manifest format (`apiVersion: litek8s.dev/v1alpha1`), a daemon over a
+Unix socket (`litek8s serve`) and SSH-backed remote nodes. It is still in
+the binary but no longer the focus; see
+[docs/legacy-daemon.md](docs/legacy-daemon.md).
 
-```bash
-cargo run -- apply -f examples/http-echo-server77.yaml
-cargo run -- apply -f examples/http-echo-edge.yaml
-cargo run -- apply -f examples/http-echo-edge-service.yaml
-cargo run -- get deployments
-cargo run -- describe deployment echo-server77
-cargo run -- describe deployment echo-edge
-cargo run -- get services
-cargo run -- describe service edge-svc
-cargo run -- tree --watch
-cargo run -- events --node server77 --watch
-cargo run -- events --deployment echo-edge
-cargo run -- proxy echo-edge --listen 127.0.0.1:9002
-cargo run -- top --watch
-```
+## License
 
-The remote examples cover both scheduling paths:
-
-- `examples/http-echo-server77.yaml` uses `spec.template.spec.nodeName: server77`
-- `examples/http-echo-edge.yaml` uses `spec.template.spec.nodeSelector.role=edge`
-
-`get` / `describe` / `top` now show a `NODE` column so you can see where each deployment is running, and `events` lets you watch the scheduler and reconciler decisions in real time.
-`get nodes` and `describe node` also show whether a node is `Schedulable` or `Cordoned`, which makes it easy to demo controlled placement.
-`tree` is the quickest way to show the actual cluster shape: which deployment lives on which node, and which service currently points at which deployment.
-`proxy` is useful when the remote node is only reachable over SSH or when you want one stable local URL during the demo.
-`service` is the next step up: the daemon owns the listener, keeps it alive across CLI exits, and forwards each connection to the deployment's current node and published port.
-The declarative subset is intentionally small: `kind: Service`, `spec.selector`, and one TCP entry in `spec.ports`. The daemon resolves the selector to exactly one deployment in v1; built-in load balancing is not implemented yet. The older `deploymentName` + `listenAddr` + `targetPort` shape still works for compatibility.
-
-## Manifest shape
-
-The supported manifest is deliberately narrow:
-
-- `apiVersion: litek8s.dev/v1alpha1`
-- `kind: Deployment`
-- `spec.replicas: 1`
-- exactly one container
-- `restartPolicy: Always`
-- optional `nodeName` and `nodeSelector` in `spec.template.spec`
-- optional `metadata.labels` for service selection
-- optional `command`, `args`, `env`, `ports`, and `resources.limits`
-- supported limits are `cpu` and `memory` with k8s-style strings such as `500m` and `128Mi`
-
-The supported `Service` subset is also deliberately narrow:
-
-- `apiVersion: litek8s.dev/v1alpha1`
-- `kind: Service`
-- `spec.selector` must match exactly one deployment
-- `spec.ports` must contain exactly one TCP port
-- `spec.ports[0].port` becomes the local listener port on `127.0.0.1`
-- optional `spec.ports[0].targetPort` overrides the deployment's published container port
-
-## Notes
-
-- The daemon uses the local Docker socket directly and supports Linux plus macOS setups such as OrbStack and Docker Desktop.
-- Remote nodes are reached over `ssh` and execute the same `litek8s` agent binary against their local Docker daemon.
-- No overlay networking, kube-proxy, load balancing, volumes, secrets, or rollouts are included in v1.
+Apache-2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE). Third-party
+components: [THIRD-PARTY.md](THIRD-PARTY.md).

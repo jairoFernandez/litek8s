@@ -188,8 +188,25 @@ pub fn dev_home() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("LITEK8S_DEV_HOME") {
         return Ok(PathBuf::from(dir));
     }
-    let dirs = directories::ProjectDirs::from("dev", "civojairo", "litek8s").context("failed to resolve a data directory")?;
-    Ok(dirs.data_local_dir().join("dev"))
+    Ok(crate::config::data_dir()?.join("dev"))
+}
+
+/// The macOS dev VM's kernel and root filesystem: `$LITEK8S_DEV_VM_ASSETS`,
+/// else `<prefix>/share/litek8s/vm` beside an installed `<prefix>/bin/litek8s`
+/// (how the release archives and install.sh lay them out, so the guest
+/// matches the binary), else `vm/` next to the dev data directory (where
+/// dev/vm/build.sh puts a guest built from source). An installation, not
+/// cluster data, so `dev reset` keeps it.
+pub(crate) fn vm_assets_dir(home: &Path) -> PathBuf {
+    if let Some(dir) = std::env::var_os("LITEK8S_DEV_VM_ASSETS") {
+        return PathBuf::from(dir);
+    }
+    let installed = std::env::current_exe()
+        .and_then(|e| e.canonicalize())
+        .ok()
+        .and_then(|e| Some(e.parent()?.parent()?.join("share/litek8s/vm")))
+        .filter(|d| d.join("Image").is_file());
+    installed.unwrap_or_else(|| home.parent().unwrap_or(home).join("vm"))
 }
 
 pub(crate) fn state_path(home: &Path) -> PathBuf {

@@ -5,6 +5,9 @@
 //! whose estimate exceeds its budget, so the numbers matter: an unbounded
 //! list iterated twice or a `string(int)` concatenated in a
 //! messageExpression is rejected, a bounded one is not.
+//!
+//! cel-go is Copyright Google LLC and the Kubernetes CEL libraries Copyright
+//! The Kubernetes Authors, both under the Apache License 2.0 (see NOTICE).
 
 use std::collections::HashMap;
 

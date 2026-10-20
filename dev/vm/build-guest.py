@@ -12,8 +12,10 @@ build-guest-binary.sh), which runs the cluster as PID 1.
     dev/vm/build-guest.py --litek8s target/guest-musl-arm64/release/litek8s --out <dir>
 
 writes <dir>/Image, <dir>/root.img and <dir>/initrd.gz (what `litek8s dev
-up` boots; it looks in ~/Library/Application Support/dev.civojairo.litek8s/vm/
-or $LITEK8S_DEV_VM_ASSETS). The root filesystem is a read-only romfs image
+up` boots; it looks in $LITEK8S_DEV_VM_ASSETS, then <prefix>/share/litek8s/vm
+next to an installed <prefix>/bin/litek8s, then ~/Library/Application
+Support/dev.litek8s/vm/), and <dir>/PACKAGES.txt (every Alpine package in
+it, with version, license and the aports commit of its source). The root filesystem is a read-only romfs image
 the VM attaches as a disk, so the guest reads only the parts it runs and its
 kernel can drop them again (an initramfs stays in RAM, whole, for good: ~55
 MiB, which macOS charged the VM for all along); initrd.gz only loads the
@@ -362,6 +364,15 @@ def main():
             unpack_apk(apk, kdir, lambda n: True)
             continue
         unpack_apk(apk, root, lambda n: not n.startswith(("usr/share/man", "usr/share/doc", "usr/include", "usr/share/bash-completion", "usr/share/zsh")))
+    # What the guest is made of. The release archives ship these (mostly
+    # GPL) binaries, so each one's source must be findable: the aports
+    # commit and directory that build it.
+    with open(os.path.join(out, "PACKAGES.txt"), "w") as f:
+        f.write(f"# Alpine {args.release} {arch} packages in this guest: name version license source\n")
+        for name in names:
+            p = pkgs[name]
+            f.write(f"{name} {p['V']} {p.get('L', '?')} "
+                    f"https://gitlab.alpinelinux.org/alpine/aports/-/tree/{p.get('c', '?')}/{p['repo']}/{p.get('o', name)}\n")
     # Kernel and modules.
     open(os.path.join(out, "Image"), "wb").write(unzboot(os.path.join(kdir, "boot", "vmlinuz-virt")))
     moddir = os.path.join(kdir, "lib", "modules")

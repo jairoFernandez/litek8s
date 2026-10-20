@@ -22,7 +22,8 @@ LK="${LITEK8S:-$PWD/target/release/litek8s}"
 KIND_IMAGE="${KIND_IMAGE:-kindest/node:v1.34.0}"
 K3S_IMAGE="${K3S_IMAGE:-rancher/k3s:v1.33.4-k3s1}"
 ARCHIVE="${ARCHIVE:-/tmp/litek8s-bench-nginx-alpine.tar}"
-HOME_DEV="$HOME/Library/Application Support/dev.civojairo.litek8s/dev"
+HOME_DEV="$HOME/Library/Application Support/dev.litek8s/dev"
+[[ -d "$HOME_DEV" || ! -d "$HOME/Library/Application Support/dev.civojairo.litek8s/dev" ]] || HOME_DEV="$HOME/Library/Application Support/dev.civojairo.litek8s/dev"
 now() { python3 -c 'import time;print(time.time())'; }
 [[ -f "$ARCHIVE" ]] || { docker pull -q nginx:alpine >/dev/null; docker save --platform linux/arm64 nginx:alpine -o "$ARCHIVE"; }
 

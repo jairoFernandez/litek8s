@@ -24,7 +24,7 @@ spec:
         provider: civo
 
     - name: laptop
-      ssh: jairo@cloudflared-tunnel
+      ssh: me@cloudflared-tunnel
       vpnIp: 10.42.0.3
       labels:
         role: dev

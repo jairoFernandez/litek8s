@@ -10,7 +10,7 @@
 set -euo pipefail
 
 KEY=~/.ssh/id_ed25519
-COORDINATOR=ubuntu@54.165.57.182       # node-big-0 public IP (where the model lives)
+COORDINATOR="${COORDINATOR:-ubuntu@203.0.113.10}"   # node-big-0 public IP, where the model lives (placeholder: set yours)
 PEERS=10.42.1.13,10.42.1.19            # ARM peers' private IPs
 MODEL_DIR='~/qwen05'                    # model dir on the coordinator (quoted: expands there, not here)
 

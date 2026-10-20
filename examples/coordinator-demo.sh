@@ -10,7 +10,7 @@
 set -euo pipefail
 
 KEY=~/.ssh/id_ed25519
-COORDINATOR=ubuntu@3.90.0.157          # public IP we SSH into
+COORDINATOR="${COORDINATOR:-ubuntu@203.0.113.10}"   # public IP we SSH into (placeholder: set yours)
 PEERS='["10.42.1.135","10.42.1.184","10.42.1.99","10.42.1.133","10.42.1.216"]'  # private IPs of the workers
 
 # A 60x64 . 64x64 matmul (small, so the demo is fast; the point is the LAN
