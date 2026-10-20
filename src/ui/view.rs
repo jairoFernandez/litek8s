@@ -11,7 +11,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Cell, Clear, HighlightSpacing, Padding, Paragraph, Row, Table, TableState, Wrap};
 
 use super::app::{App, CRow, DevStatus, Field, InputKind, NewCluster, Overlay, RECLAIMS, SETTINGS, Setting, TABS, Tab};
-use super::model::{age, bytes};
+use super::model::{age, bytes, ibytes};
 use super::theme::{Health, Theme};
 
 /// Terminals at least this tall get the boxed header.
@@ -1070,19 +1070,24 @@ fn containers(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
         .map(|r| match r {
             CRow::Group { name, count, running, collapsed } => {
                 let h = if running == count { Health::Ok } else if running == 0 { Health::Done } else { Health::Warn };
-                Row::new(vec![
+                let (budget, cpu) = project_cells(t, app.projects.get(&name));
+                let cells = vec![
                     Cell::from(Span::styled(format!("{} {name}", if collapsed { "▸" } else { "▾" }), t.accent)),
                     Cell::from(Span::styled(format!("{} {running}/{count} up", h.glyph()), t.health(h))),
-                    Cell::from(Span::styled("compose project", t.dim)),
-                    Cell::from(""),
-                ])
+                    Cell::from(budget),
+                    Cell::from(cpu),
+                ];
+                Row::new(cells)
             }
             CRow::Item(i) => {
                 let c = &app.containers[i];
-                let h = Health::of_container(&c.state, &c.status);
+                // The OOM killer stopped it: say so instead of `exited`.
+                let oom = !c.running() && app.oom_killed.contains(&c.id);
+                let h = if oom { Health::Bad } else { Health::of_container(&c.state, &c.status) };
                 let name = if c.project.is_some() { format!("  {}", c.service.as_deref().unwrap_or(&c.name)) } else { c.name.clone() };
                 let base = row_style(t, h);
-                let mut cells = vec![Cell::from(Span::styled(name, base)), Cell::from(t.status(h, &c.state)), Cell::from(Span::styled(c.image.clone(), if h == Health::Ok { Style::new() } else { t.dim })), Cell::from(c.ports.clone())];
+                let state = if oom { Span::styled(format!("{} OOMKilled", h.glyph()), t.health(h).add_modifier(Modifier::BOLD)) } else { t.status(h, &c.state) };
+                let mut cells = vec![Cell::from(Span::styled(name, base)), Cell::from(state), Cell::from(Span::styled(c.image.clone(), if h == Health::Ok { Style::new() } else { t.dim })), Cell::from(c.ports.clone())];
                 if wide {
                     cells.insert(3, Cell::from(Span::styled(c.status.clone(), t.dim)));
                 }
@@ -1097,6 +1102,34 @@ fn containers(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     };
     let running = app.containers.iter().filter(|c| c.running()).count();
     render_table(f, app, t, area, "Containers", format!("{running}/{} running", app.containers.len()), header, rows, widths, "No containers. `docker run` against the litek8s socket and they show up here.");
+}
+
+/// A compose project's row: its memory against the budget (a meter like
+/// Home's) and its CPUs, with the OOM kills it has seen.
+fn project_cells(t: &Theme, p: Option<&super::model::ProjectUse>) -> (Line<'static>, Line<'static>) {
+    let Some(p) = p else { return (Line::from(Span::styled("compose project", t.dim)), Line::default()) };
+    let mem = match (p.memory, p.memory_max) {
+        (Some(m), Some(max)) => Line::from(meter_spans(t, m as f64 / max.max(1) as f64, &format!("{}/{}", ibytes(m), ibytes(max)), None, 6)),
+        (Some(m), None) => Line::from(vec![Span::styled("mem ", t.dim), Span::raw(ibytes(m)), Span::styled(" · no budget", t.dim)]),
+        _ => Line::from(Span::styled("compose project", t.dim)),
+    };
+    let mut cpu = Vec::new();
+    match (p.cpu_rate, p.cpus) {
+        (Some(r), Some(c)) => {
+            cpu.push(Span::styled("cpu ", t.dim));
+            cpu.push(Span::styled(format!("{r:.1}/{c}"), t.level(r / c.max(0.01))));
+        }
+        (None, Some(c)) => cpu.push(Span::styled(format!("cpu max {c}"), t.dim)),
+        (Some(r), None) => cpu.push(Span::styled(format!("cpu {r:.1}"), t.dim)),
+        (None, None) => {}
+    }
+    if p.oom_kills > 0 {
+        if !cpu.is_empty() {
+            cpu.push(Span::raw(" "));
+        }
+        cpu.push(Span::styled(format!("✗ {} OOM", p.oom_kills), t.bad.add_modifier(Modifier::BOLD)));
+    }
+    (mem, Line::from(cpu))
 }
 
 /// `web-1`, `web-1 +2`: who uses an image or volume, in little space.

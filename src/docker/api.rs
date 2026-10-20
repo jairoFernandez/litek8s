@@ -221,6 +221,16 @@ async fn dispatch(engine: &Arc<Engine>, method: Method, s: &[&str], req: Request
         (Method::GET, ["plugins"]) => Ok(json_resp(200, &json!([]))),
         (Method::GET, ["litek8s", "v1", "ports"]) => Ok(ports_watch(engine, qbool(&q, "watch"))),
         (Method::GET, ["litek8s", "v1", "binds"]) => Ok(binds_watch(engine)),
+        // Compose project budgets and container defaults (docker::budget).
+        (Method::GET, ["litek8s", "v1", "docker", "settings"]) => Ok(json_resp(200, &json!(*engine.settings.read().unwrap()))),
+        (Method::PUT, ["litek8s", "v1", "docker", "settings"]) => {
+            let body = body_json(req).await?;
+            let settings: super::budget::DockerSettings = serde_json::from_value(body).map_err(|e| ApiError::bad_request(format!("docker settings: {e}")))?;
+            let applied = engine.set_settings(settings).map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
+            let applied: Vec<Value> = applied.into_iter().map(|(p, b)| json!({"Name": p, "Budget": b})).collect();
+            Ok(json_resp(200, &json!({"Applied": applied})))
+        }
+        (Method::GET, ["litek8s", "v1", "docker", "projects"]) => Ok(json_resp(200, &engine.project_usage())),
         (Method::POST, ["litek8s", "v1", "fsevents"]) => {
             let body = body_json(req).await?;
             let paths: Vec<String> = body.as_array().into_iter().flatten().filter_map(|p| p.as_str().map(str::to_string)).collect();
@@ -727,7 +737,7 @@ fn top(engine: &Engine, id: &str) -> ApiResult<Value> {
     if !rec.state.running() {
         return Err(ApiError::conflict(format!("container {} is not running", rec.id)));
     }
-    let procs = std::fs::read_to_string(format!("/sys/fs/cgroup/litek8s/docker/{}/cgroup.procs", rec.id)).unwrap_or_default();
+    let procs = std::fs::read_to_string(engine.cgroup_dir(&rec).join("cgroup.procs")).unwrap_or_default();
     let mut rows = Vec::new();
     for pid in procs.split_whitespace() {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
@@ -744,20 +754,34 @@ fn stats(engine: &Arc<Engine>, id: &str, q: &HashMap<String, String>) -> ApiResu
     let stream = q.get("stream").is_none_or(|v| v != "0" && v != "false") && !qbool(q, "one-shot");
     let id = ctr.id.clone();
     let name = ctr.record().name;
-    let sample = move |id: &str| -> (u64, u64, u64, u64) {
-        let dir = format!("/sys/fs/cgroup/litek8s/docker/{id}");
-        let cpu = std::fs::read_to_string(format!("{dir}/cpu.stat")).unwrap_or_default().lines().find_map(|l| l.strip_prefix("usage_usec ")?.trim().parse::<u64>().ok()).unwrap_or(0) * 1000;
-        let mem = std::fs::read_to_string(format!("{dir}/memory.current")).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0);
-        let limit = std::fs::read_to_string(format!("{dir}/memory.max")).ok().and_then(|s| s.trim().parse().ok()).unwrap_or_else(|| {
+    let engine = engine.clone();
+    let rec_of = ctr.clone();
+    // The limit is the smallest on the way up: the container's own, its
+    // compose project's budget, the cluster's; else the machine's memory.
+    let sample = move || -> (u64, u64, u64, u64, Value) {
+        let dir = engine.cgroup_dir(&rec_of.record());
+        let root = std::path::Path::new("/sys/fs/cgroup");
+        let read = |f: &str| std::fs::read_to_string(dir.join(f)).ok().and_then(|s| s.trim().parse::<u64>().ok());
+        let cpu = std::fs::read_to_string(dir.join("cpu.stat")).unwrap_or_default().lines().find_map(|l| l.strip_prefix("usage_usec ")?.trim().parse::<u64>().ok()).unwrap_or(0) * 1000;
+        let mem = read("memory.current").unwrap_or(0);
+        let limit = super::budget::effective_limit(root, &dir, "memory.max").unwrap_or_else(|| {
             std::fs::read_to_string("/proc/meminfo").unwrap_or_default().lines().find_map(|l| l.strip_prefix("MemTotal:")?.trim().trim_end_matches("kB").trim().parse::<u64>().ok()).unwrap_or(0) * 1024
         });
         let system = std::fs::read_to_string("/proc/stat").unwrap_or_default().lines().next().map(|l| l.split_whitespace().skip(1).filter_map(|n| n.parse::<u64>().ok()).sum::<u64>() * 10_000_000).unwrap_or(0);
-        (cpu, system, mem, limit)
+        let mut pids = json!({});
+        if let Some(n) = read("pids.current") {
+            pids["current"] = json!(n);
+            if let Some(l) = super::budget::effective_limit(root, &dir, "pids.max") {
+                pids["limit"] = json!(l);
+            }
+        }
+        (cpu, system, mem, limit, pids)
     };
     let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
     let s = futures_util::stream::unfold((None::<(u64, u64)>, true), move |(prev, first)| {
         let id = id.clone();
         let name = name.clone();
+        let sample = sample.clone();
         async move {
             if !first {
                 if !stream {
@@ -765,14 +789,14 @@ fn stats(engine: &Arc<Engine>, id: &str, q: &HashMap<String, String>) -> ApiResu
                 }
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
-            let (cpu, system, mem, limit) = sample(&id);
+            let (cpu, system, mem, limit, pids) = sample();
             let (pcpu, psys) = prev.unwrap_or((0, 0));
             let v = json!({
                 "read": super::model::now_rfc3339(),
                 "preread": super::model::ZERO_TIME,
                 "id": id,
                 "name": format!("/{name}"),
-                "pids_stats": {},
+                "pids_stats": pids,
                 "cpu_stats": {"cpu_usage": {"total_usage": cpu}, "system_cpu_usage": system, "online_cpus": cpus},
                 "precpu_stats": {"cpu_usage": {"total_usage": pcpu}, "system_cpu_usage": psys, "online_cpus": cpus},
                 "memory_stats": {"usage": mem, "limit": limit, "stats": {}},

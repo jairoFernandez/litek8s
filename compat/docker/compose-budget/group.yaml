@@ -1,0 +1,13 @@
+# The same with `oom-group`: when the project hits its budget, every
+# container of it is killed, like a server that ran out of memory.
+name: lk-budget-group
+services:
+  hog:
+    image: alpine:3.20
+    labels:
+      dev.litek8s.project.memory: 256Mi
+      dev.litek8s.project.oom-group: "true"
+    command: ["sh", "-c", "sleep 2; exec tail /dev/zero"]
+  steady:
+    image: alpine:3.20
+    command: ["sleep", "100000"]

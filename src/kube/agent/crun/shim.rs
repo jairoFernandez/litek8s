@@ -717,11 +717,13 @@ mod linux {
 
     fn finish(o: &Opts, status: Option<i32>) -> i64 {
         let finished_at = logs::now();
-        let oom = o
-            .cgroup
-            .as_ref()
-            .and_then(|cg| std::fs::read_to_string(cg.join("memory.events")).ok())
-            .is_some_and(|ev| ev.lines().any(|l| l.strip_prefix("oom_kill ").is_some_and(|n| n.trim() != "0")));
+        let events = o.cgroup.as_ref().and_then(|cg| std::fs::read_to_string(cg.join("memory.events")).ok()).unwrap_or_default();
+        let counted = |key: &str| events.lines().any(|l| l.strip_prefix(key).is_some_and(|n| n.trim() != "0"));
+        // Killed by the OOM killer; `oom` counts the container reaching its
+        // own limit (else an ancestor's: a compose project's budget, the
+        // node's memory).
+        let oom = counted("oom_kill ");
+        let oom_local = oom && counted("oom ");
         let _ = crun(o).arg("delete").arg("-f").arg(&o.id).stdout(Stdio::null()).stderr(Stdio::null()).status();
         super::super::sys::unmount(&o.bundle.join("rootfs"));
         if !o.keep_rootfs {
@@ -734,7 +736,7 @@ mod linux {
             Some(st) if libc::WIFSIGNALED(st) => 128 + libc::WTERMSIG(st) as i64,
             _ => 255,
         };
-        let record = serde_json::json!({"exitCode": exit_code, "finishedAt": finished_at, "oomKilled": oom});
+        let record = serde_json::json!({"exitCode": exit_code, "finishedAt": finished_at, "oomKilled": oom, "oomLocal": oom_local});
         let path = o.bundle.join("exit.json");
         let tmp = o.bundle.join("exit.json.tmp");
         if std::fs::write(&tmp, record.to_string()).is_ok() {

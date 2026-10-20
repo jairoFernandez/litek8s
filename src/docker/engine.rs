@@ -19,6 +19,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use tokio::sync::{broadcast, watch};
 
+use super::budget::{self, Budget, DockerSettings};
 use super::error::{ApiError, ApiResult};
 use super::images;
 use super::model::{Endpoint, Health, HealthLog, MountPoint, Network, Record, State, Volume, ZERO_TIME, now_rfc3339, random_name, valid_name};
@@ -102,6 +103,9 @@ pub struct Engine {
     pub socket_aliases: Vec<String>,
     pub internal_socket: PathBuf,
     pub execs: Mutex<HashMap<String, Arc<super::exec::ExecInst>>>,
+    /// Project budgets and container defaults (`<root>/settings.json`, set
+    /// by `litek8s dev up` from `~/.litek8s/config.yaml`).
+    pub settings: RwLock<DockerSettings>,
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Option<T> {
@@ -352,6 +356,7 @@ impl Engine {
             socket_aliases: opts.socket_aliases,
             internal_socket: opts.internal_socket,
             execs: Mutex::new(HashMap::new()),
+            settings: RwLock::new(read_json(&root.join("settings.json")).unwrap_or_default()),
             root,
         });
         std::fs::create_dir_all(&engine.crun_root)?;
@@ -387,8 +392,93 @@ impl Engine {
         Path::new(RUN_DIR).join(format!("{}.attach", &id[..16]))
     }
 
-    fn cgroup(&self, id: &str) -> String {
-        format!("/litek8s/docker/{id}")
+    /// The container's cgroup (`cgroupsPath`): in its compose project's
+    /// cgroup when it has one.
+    fn cgroup(&self, rec: &Record) -> String {
+        budget::container_cgroup(budget::project_of(&rec.config["Labels"]), &rec.id)
+    }
+
+    /// The container's cgroup directory (a container started by an older
+    /// litek8s still runs at `litek8s/docker/<id>`).
+    pub fn cgroup_dir(&self, rec: &Record) -> PathBuf {
+        let dir = Path::new(CGROUP_ROOT).join(self.cgroup(rec).trim_start_matches('/'));
+        let legacy = Path::new(CGROUP_ROOT).join(budget::DOCKER_CGROUP).join(&rec.id);
+        if !dir.exists() && legacy.exists() { legacy } else { dir }
+    }
+
+    // -----------------------------------------------------------------
+    // Project budgets
+
+    /// A project's budget from the settings and its containers' labels.
+    pub fn project_budget(&self, project: &str) -> Budget {
+        let recs: Vec<Record> = self.list().iter().map(|c| c.record()).filter(|r| budget::project_of(&r.config["Labels"]) == Some(project)).collect();
+        let labels: Vec<&Value> = recs.iter().map(|r| &r.config["Labels"]).collect();
+        self.settings.read().unwrap().project_budget(project, &labels)
+    }
+
+    /// Create a project's cgroup and set its budget (before one of its
+    /// containers starts, and when the settings change).
+    fn apply_project(&self, project: &str) -> Result<Budget> {
+        let b = self.project_budget(project);
+        budget::apply_project(Path::new(CGROUP_ROOT), project, &b)?;
+        Ok(b)
+    }
+
+    /// Projects that have containers, sorted.
+    pub fn projects(&self) -> Vec<String> {
+        let mut out: Vec<String> = self.list().iter().filter_map(|c| budget::project_of(&c.record().config["Labels"]).map(str::to_string)).collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// Replace the settings (`PUT /litek8s/v1/docker/settings`) and apply
+    /// them to the projects whose cgroups exist.
+    pub fn set_settings(&self, settings: DockerSettings) -> Result<Vec<(String, Budget)>> {
+        let problems = settings.problems();
+        if !problems.is_empty() {
+            bail!("{}", problems.join("; "));
+        }
+        write_json(&self.root.join("settings.json"), &settings)?;
+        *self.settings.write().unwrap() = settings;
+        let mut applied = Vec::new();
+        for p in self.projects() {
+            if Path::new(CGROUP_ROOT).join(budget::project_cgroup(&p)).exists() {
+                applied.push((p.clone(), self.apply_project(&p)?));
+            }
+        }
+        Ok(applied)
+    }
+
+    /// Projects with their budget and what their cgroup uses.
+    pub fn project_usage(&self) -> Value {
+        let recs: Vec<Record> = self.list().iter().map(|c| c.record()).collect();
+        let projects: Vec<Value> = self
+            .projects()
+            .into_iter()
+            .map(|p| {
+                let members: Vec<&Record> = recs.iter().filter(|r| budget::project_of(&r.config["Labels"]) == Some(p.as_str())).collect();
+                let usage = budget::read_usage(&Path::new(CGROUP_ROOT).join(budget::project_cgroup(&p)));
+                json!({
+                    "Name": p,
+                    "Budget": self.project_budget(&p),
+                    "Usage": usage,
+                    "Containers": members.len(),
+                    "Running": members.iter().filter(|r| r.state.running()).count(),
+                })
+            })
+            .collect();
+        let oom: Vec<&str> = recs.iter().filter(|r| r.state.oom_killed).map(|r| r.id.as_str()).collect();
+        json!({"Projects": projects, "OOMKilled": oom, "Defaults": self.settings.read().unwrap().defaults})
+    }
+
+    /// Drop a project's cgroup once none of its containers is left.
+    fn forget_project(&self, project: Option<&str>) {
+        if let Some(p) = project {
+            if !self.projects().iter().any(|q| q == p) {
+                budget::remove_project(Path::new(CGROUP_ROOT), p);
+            }
+        }
     }
 
     // -----------------------------------------------------------------
@@ -967,6 +1057,10 @@ impl Engine {
         if image_ref.is_empty() {
             return Err(ApiError::bad_request("config cannot be empty in order to create a container"));
         }
+        let (_, problems) = budget::label_budget(&[&body["Labels"]]);
+        if !problems.is_empty() {
+            return Err(ApiError::bad_request(problems.join("; ")));
+        }
         let info = images::resolve(&self.images, &image_ref).ok_or_else(|| ApiError::not_found(format!("No such image: {image_ref}")))?;
         if let Some(p) = platform.as_deref().and_then(cimage::parse_platform) {
             let cfg = self.images.config_blob(&info.entry.config).unwrap_or(Value::Null);
@@ -1225,6 +1319,11 @@ impl Engine {
         if let Some(shares) = h["CpuShares"].as_i64().filter(|s| *s > 0) {
             spec.cpu_request_milli = Some(shares * 1000 / 1024);
         }
+        // Limits for a container that sets none (docker.defaults).
+        let defaults = self.settings.read().unwrap().defaults;
+        let (memory, nano_cpus, pids) = budget::container_defaults(defaults.as_ref(), spec.memory_limit, spec.nano_cpus, h["PidsLimit"].as_i64().filter(|p| *p > 0));
+        spec.memory_limit = memory;
+        spec.nano_cpus = nano_cpus;
         for g in strings(&h["GroupAdd"]) {
             if let Ok(gid) = g.parse::<u32>() {
                 spec.supplemental_groups.push(gid);
@@ -1261,7 +1360,7 @@ impl Engine {
             etc_files,
             shm: None,
             mounts,
-            cgroups_path: self.cgroup(&rec.id),
+            cgroups_path: self.cgroup(rec),
         };
         let mut config = cspec::config(&params)?;
         // What the pod-oriented bundle does not cover.
@@ -1299,7 +1398,7 @@ impl Engine {
         if let Some(sysctls) = h["Sysctls"].as_object().filter(|m| !m.is_empty()) {
             config["linux"]["sysctl"] = Value::Object(sysctls.clone());
         }
-        if let Some(pids) = h["PidsLimit"].as_i64().filter(|p| *p > 0) {
+        if let Some(pids) = pids {
             config["linux"]["resources"]["pids"] = json!({"limit": pids});
         }
         if let Some(m) = h["MemoryReservation"].as_i64().filter(|m| *m > 0) {
@@ -1609,6 +1708,9 @@ impl Engine {
                 }
             }
             std::fs::write(dir.join("config.json"), serde_json::to_vec(&config)?)?;
+            if let Some(project) = budget::project_of(&rec.config["Labels"]) {
+                self.apply_project(project).with_context(|| format!("compose project {project}'s budget"))?;
+            }
             // Published ports bind before the process starts, so a port that
             // is taken fails the start (as with Docker).
             let ports = self.publish_ports(ctr)?;
@@ -1625,7 +1727,7 @@ impl Engine {
                 .arg("--shim-cgroup")
                 .arg(Path::new(CGROUP_ROOT).join("litek8s/shims"))
                 .arg("--cgroup")
-                .arg(Path::new(CGROUP_ROOT).join(self.cgroup(&rec.id).trim_start_matches('/')))
+                .arg(Path::new(CGROUP_ROOT).join(self.cgroup(&rec).trim_start_matches('/')))
                 .arg("--keep-rootfs")
                 .arg("--attach")
                 .arg(self.attach_socket(&rec.id))
@@ -1744,6 +1846,9 @@ impl Engine {
             finished_at: String,
             #[serde(default)]
             oom_killed: bool,
+            /// The container hit its own memory limit (not an ancestor's).
+            #[serde(default)]
+            oom_local: bool,
         }
         let exit: Option<ExitRecord> = read_json(&dir.join("exit.json"));
         if let Some(h) = ctr.rt.lock().unwrap().health_task.take() {
@@ -1752,10 +1857,10 @@ impl Engine {
         self.unpublish(ctr);
         self.network_down(ctr);
         sys::unmount(&dir.join("rootfs"));
-        let _ = std::fs::remove_dir(Path::new(CGROUP_ROOT).join(self.cgroup(&ctr.id).trim_start_matches('/')));
-        let (code, finished, oom) = match exit {
-            Some(e) => (e.exit_code, e.finished_at, e.oom_killed),
-            None => (255, now_rfc3339(), false),
+        let _ = std::fs::remove_dir(self.cgroup_dir(&ctr.record()));
+        let (code, finished, oom, oom_local) = match exit {
+            Some(e) => (e.exit_code, e.finished_at, e.oom_killed, e.oom_local),
+            None => (255, now_rfc3339(), false, false),
         };
         let rec_before = ctr.record();
         let (policy, max) = rec_before.restart_policy();
@@ -1795,7 +1900,21 @@ impl Engine {
         self.refresh_published();
         let rec = ctr.record();
         if oom {
-            self.emit_container(&rec, "oom", &[]);
+            // Which limit it hit: its own, its compose project's budget, or
+            // the machine's (the VM or sandbox).
+            let project = budget::project_of(&rec.config["Labels"]);
+            let project_hit = project.and_then(|p| budget::read_usage(&Path::new(CGROUP_ROOT).join(budget::project_cgroup(p)))).is_some_and(|u| u.oom_events > 0);
+            let (scope, why) = match project {
+                _ if oom_local => ("container", "its memory limit".to_string()),
+                Some(p) if project_hit => ("project", format!("compose project {p}'s budget ({})", self.project_budget(p).summary())),
+                _ => ("system", "the machine's memory".to_string()),
+            };
+            eprintln!("docker: container {} ({}) was OOM-killed: out of {why}", rec.name, &rec.id[..12]);
+            let mut extra = vec![("litek8s.oom", scope.to_string())];
+            if let Some(m) = project.filter(|_| scope == "project").and_then(|p| self.project_budget(p).memory) {
+                extra.push(("litek8s.project.memory", m.display()));
+            }
+            self.emit_container(&rec, "oom", &extra);
         }
         self.emit_container(&rec, "die", &[("exitCode", code.to_string())]);
         if removing {
@@ -1975,7 +2094,7 @@ impl Engine {
         let dir = self.container_dir(&ctr.id);
         sys::unmount(&dir.join("rootfs"));
         let _ = tokio::process::Command::new(&self.crun).arg("--root").arg(&self.crun_root).args(["delete", "-f", &ctr.id]).output().await;
-        let _ = std::fs::remove_dir(Path::new(CGROUP_ROOT).join(self.cgroup(&ctr.id).trim_start_matches('/')));
+        let _ = std::fs::remove_dir(self.cgroup_dir(&rec));
         let _ = std::fs::remove_file(self.attach_socket(&ctr.id));
         let removed = tokio::task::spawn_blocking({
             let dir = dir.clone();
@@ -1988,6 +2107,7 @@ impl Engine {
             }
         }
         self.containers.write().unwrap().remove(&ctr.id);
+        self.forget_project(budget::project_of(&rec.config["Labels"]));
         if volumes {
             for m in rec.mounts.iter().filter(|m| m.anonymous) {
                 if let Some(n) = &m.name {

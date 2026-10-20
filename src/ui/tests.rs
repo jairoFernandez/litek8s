@@ -138,6 +138,31 @@ fn containers_group_by_compose_project() {
 }
 
 #[test]
+fn project_budgets_and_oom_kills_show() {
+    let mut app = sample_app();
+    app.key(key('3'));
+    let t0 = std::time::Instant::now();
+    let worker = format!("{:0<64}", "shop-worker-1");
+    let shop = |cpu_usec: u64| ProjectUse { name: "shop".into(), memory: Some(192 << 20), memory_max: Some(256 << 20), cpu_usec, cpus: Some(2.0), oom_kills: 1, ..Default::default() };
+    app.apply(Msg::Projects { at: t0, projects: vec![shop(1_000_000)], oom_killed: vec![worker.clone()] });
+    // Half a CPU over the next 2 s.
+    app.apply(Msg::Projects { at: t0 + std::time::Duration::from_secs(2), projects: vec![shop(2_000_000)], oom_killed: vec![worker] });
+    assert_eq!(app.projects["shop"].cpu_rate, Some(0.5));
+    let s = render(&app, 120, 24);
+    assert!(s.contains("192Mi/256Mi"), "{s}");
+    assert!(s.contains("75%"), "{s}");
+    assert!(s.contains("cpu 0.5/2"), "{s}");
+    assert!(s.contains("cpu 0.5/2 ✗ 1 OOM"), "{s}");
+    assert!(s.contains("OOMKilled"), "{s}");
+    // At 80 columns the meter and the state still fit.
+    let s = render(&app, 80, 24);
+    assert!(s.contains("192Mi/256Mi") && s.contains("OOMKilled") && s.contains("✗ 1 OOM"), "{s}");
+    // The engine's oom event: a clear status line.
+    app.apply(Msg::Oom { name: "shop-worker-1".into(), project: Some("shop".into()), scope: "project".into(), memory: "256Mi".into() });
+    assert_eq!(app.status, Some(("shop-worker-1 was OOM-killed: compose project shop hit its 256Mi budget".into(), true)));
+}
+
+#[test]
 fn destructive_actions_ask_first() {
     let mut app = sample_app();
     app.key(key('3'));

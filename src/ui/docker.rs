@@ -2,6 +2,7 @@
 //! from the engine's event stream (no polling), actions, and logs.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail};
@@ -14,9 +15,19 @@ use super::app::{ContainerOp, Msg};
 use super::client::{Endpoint, Lines, enc};
 use super::model;
 
+/// While the Containers view is shown, compose projects' use against their
+/// budgets is sampled every 2 s (litek8s's Docker API only).
+#[derive(Clone, Default)]
+pub struct Budgets {
+    pub visible: Arc<AtomicBool>,
+    pub wake: Arc<Notify>,
+}
+
+const BUDGET_EVERY: Duration = Duration::from_secs(2);
+
 /// Lists everything, then re-lists after engine events; `refresh` forces
 /// a re-list.
-pub fn spawn(ep: Endpoint, tx: UnboundedSender<Msg>, refresh: Arc<Notify>) -> tokio::task::JoinHandle<()> {
+pub fn spawn(ep: Endpoint, tx: UnboundedSender<Msg>, refresh: Arc<Notify>, budgets: Budgets) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut backoff = Duration::from_secs(1);
         loop {
@@ -57,8 +68,12 @@ pub fn spawn(ep: Endpoint, tx: UnboundedSender<Msg>, refresh: Arc<Notify>) -> to
             let mut list_at: Option<Instant> = None;
             let mut sizes_at: Option<Instant> = None;
             let mut last_sizes = Instant::now();
+            // Engines without budgets (Docker, OrbStack) are not asked again.
+            let mut has_budgets = project_use(&ep, &tx).await;
+            let mut budget_at = Instant::now() + BUDGET_EVERY;
             loop {
-                let next = [list_at, sizes_at].into_iter().flatten().min();
+                let sample = has_budgets && budgets.visible.load(Ordering::Relaxed);
+                let next = [list_at, sizes_at, sample.then_some(budget_at)].into_iter().flatten().min();
                 tokio::select! {
                     line = lines.next() => match line {
                         Some(l) => {
@@ -66,6 +81,11 @@ pub fn spawn(ep: Endpoint, tx: UnboundedSender<Msg>, refresh: Arc<Notify>) -> to
                             list_at.get_or_insert(soon);
                             if let Ok(ev) = serde_json::from_slice::<Value>(&l) {
                                 let a = ev["Action"].as_str().unwrap_or_default();
+                                if a == "oom" {
+                                    let attrs = &ev["Actor"]["Attributes"];
+                                    let s = |k: &str| attrs[k].as_str().unwrap_or_default().to_string();
+                                    let _ = tx.send(Msg::Oom { name: s("name"), project: attrs["com.docker.compose.project"].as_str().map(str::to_string), scope: s("litek8s.oom"), memory: s("litek8s.project.memory") });
+                                }
                                 if matches!(a, "destroy" | "delete" | "create" | "die" | "pull" | "tag" | "untag" | "prune" | "load" | "import" | "mount" | "unmount") {
                                     sizes_at.get_or_insert(soon.max(last_sizes + Duration::from_secs(2)));
                                 }
@@ -86,6 +106,13 @@ pub fn spawn(ep: Endpoint, tx: UnboundedSender<Msg>, refresh: Arc<Notify>) -> to
                             last_sizes = now;
                             sizes(&ep, &tx).await;
                         }
+                        if sample && budget_at <= now {
+                            budget_at = now + BUDGET_EVERY;
+                            has_budgets = project_use(&ep, &tx).await;
+                        }
+                    }
+                    _ = budgets.wake.notified() => {
+                        budget_at = Instant::now();
                     }
                     _ = refresh.notified() => {
                         let _ = list_all(&ep, &tx, true).await;
@@ -97,9 +124,22 @@ pub fn spawn(ep: Endpoint, tx: UnboundedSender<Msg>, refresh: Arc<Notify>) -> to
     })
 }
 
+/// Compose projects' use and budgets; false when the engine has none.
+async fn project_use(ep: &Endpoint, tx: &UnboundedSender<Msg>) -> bool {
+    match ep.json(Method::GET, "/litek8s/v1/docker/projects", None).await {
+        Ok(v) => {
+            let (projects, oom_killed) = model::projects(&v);
+            let _ = tx.send(Msg::Projects { at: Instant::now(), projects, oom_killed });
+            true
+        }
+        Err(_) => false,
+    }
+}
+
 async fn list_all(ep: &Endpoint, tx: &UnboundedSender<Msg>, with_sizes: bool) -> Result<()> {
     let containers = ep.json(Method::GET, "/containers/json?all=1", None).await?;
     let _ = tx.send(Msg::Containers(model::containers(&containers)));
+    project_use(ep, tx).await;
     let images = ep.json(Method::GET, "/images/json", None).await?;
     let _ = tx.send(Msg::Images(model::images(&images)));
     let volumes = ep.json(Method::GET, "/volumes", None).await?;

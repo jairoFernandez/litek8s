@@ -55,8 +55,12 @@ pub fn node(root: &Path) -> Option<Split> {
             }
         } else if name == "docker" || name == "build" {
             for (id, p) in children(&path) {
-                if let Some(u) = usage_usec(&p) {
-                    cgroups.push((format!("{name}/{id}"), u));
+                // Compose projects: docker/projects/<project>/<id>.
+                let inner = if name == "docker" && id == "projects" { children(&p).into_iter().flat_map(|(_, d)| children(&d)).collect() } else { vec![(id, p)] };
+                for (id, p) in inner {
+                    if let Some(u) = usage_usec(&p) {
+                        cgroups.push((format!("{name}/{id}"), u));
+                    }
                 }
             }
         }
@@ -235,11 +239,16 @@ mod tests {
         cg(&n.join("litek8s/pod_a_b"), 300);
         cg(&n.join("litek8s/docker/abc"), 100);
         cg(&n.join("litek8s/shims"), 50);
+        // A compose project's containers, each counted once.
+        cg(&n.join("litek8s/docker/projects/shop"), 150);
+        cg(&n.join("litek8s/docker/projects/shop/def"), 100);
+        cg(&n.join("litek8s/docker/projects/shop/ghi"), 50);
         let s = node(&n).unwrap();
-        assert_eq!(s.litek8s_usec, 600);
-        assert_eq!(s.containers_usec(), 400);
+        assert_eq!(s.litek8s_usec, 450);
+        assert_eq!(s.containers_usec(), 550);
+        assert!(s.cgroups.iter().any(|(id, u)| id == "docker/def" && *u == 100));
         cg(&d.path().join("cells/ci/1"), 200);
-        assert_eq!(cluster(&d.path().join("cells/ci")).unwrap().litek8s_usec, 800);
+        assert_eq!(cluster(&d.path().join("cells/ci")).unwrap().litek8s_usec, 650);
     }
 
     #[test]

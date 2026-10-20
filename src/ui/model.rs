@@ -62,6 +62,49 @@ pub fn containers(list: &Value) -> Vec<Container> {
     out
 }
 
+/// A compose project's budget and use, from litek8s's Docker API
+/// (`/litek8s/v1/docker/projects`; other engines have no such thing).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ProjectUse {
+    pub name: String,
+    /// Bytes in use and the budget (`None`: no memory budget).
+    pub memory: Option<u64>,
+    pub memory_max: Option<u64>,
+    /// CPU time so far (µs) and the budget in CPUs.
+    pub cpu_usec: u64,
+    pub cpus: Option<f64>,
+    /// CPUs in use, from this sample and the one before.
+    pub cpu_rate: Option<f64>,
+    /// Processes the OOM killer took in the project.
+    pub oom_kills: u64,
+    pub oom_group: bool,
+}
+
+/// The projects and the containers the OOM killer stopped.
+pub fn projects(v: &Value) -> (Vec<ProjectUse>, Vec<String>) {
+    let list = v["Projects"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|p| {
+            let u = &p["Usage"];
+            let b = &p["Budget"];
+            ProjectUse {
+                name: p["Name"].as_str().unwrap_or_default().to_string(),
+                memory: u["Memory"].as_u64(),
+                memory_max: u["MemoryMax"].as_u64(),
+                cpu_usec: u["CpuUsec"].as_u64().unwrap_or(0),
+                cpus: u["Cpus"].as_f64(),
+                cpu_rate: None,
+                oom_kills: u["OomKills"].as_u64().unwrap_or(0),
+                oom_group: b["oom_group"].as_bool().unwrap_or(false),
+            }
+        })
+        .collect();
+    let oom = v["OOMKilled"].as_array().into_iter().flatten().filter_map(|i| i.as_str().map(str::to_string)).collect();
+    (list, oom)
+}
+
 /// `0.0.0.0:8080->80/tcp, 5432/tcp` (published first, deduplicated across
 /// IPv4/IPv6).
 fn ports(list: &Value) -> String {
@@ -377,10 +420,36 @@ pub fn bytes(n: u64) -> String {
     if u == 0 { format!("{n} B") } else if v >= 100.0 { format!("{v:.0} {}", UNITS[u]) } else { format!("{v:.1} {}", UNITS[u]) }
 }
 
+/// `115Mi`, `1.5Gi`: binary units, as budgets are written.
+pub fn ibytes(n: u64) -> String {
+    if n >= 1 << 30 {
+        let g = n as f64 / (1u64 << 30) as f64;
+        if g.fract() == 0.0 { format!("{g:.0}Gi") } else { format!("{g:.1}Gi") }
+    } else if n >= 1 << 20 {
+        format!("{}Mi", (n + (1 << 19)) >> 20)
+    } else {
+        format!("{}Ki", (n + 512) >> 10)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn reads_project_budgets() {
+        let v = json!({"Projects": [{"Name": "shop", "Budget": {"memory": "256Mi", "oom_group": true}, "Usage": {"Memory": 120_586_240u64, "MemoryMax": 268_435_456u64, "CpuUsec": 1500, "Cpus": 2.0, "OomKills": 1}, "Containers": 2, "Running": 1}, {"Name": "free", "Budget": {}, "Usage": null}], "OOMKilled": ["abc"]});
+        let (p, oom) = projects(&v);
+        assert_eq!(oom, vec!["abc".to_string()]);
+        assert_eq!((p[0].memory, p[0].memory_max, p[0].cpus, p[0].oom_kills, p[0].oom_group), (Some(120_586_240), Some(256 << 20), Some(2.0), 1, true));
+        assert_eq!((p[1].memory, p[1].memory_max), (None, None));
+        assert_eq!(ibytes(256 << 20), "256Mi");
+        assert_eq!(ibytes(120_586_240), "115Mi");
+        assert_eq!(ibytes(3 << 29), "1.5Gi");
+        assert_eq!(ibytes(2 << 30), "2Gi");
+        assert_eq!(ibytes(488 << 10), "488Ki");
+    }
 
     #[test]
     fn parses_containers_like_docker_ps() {

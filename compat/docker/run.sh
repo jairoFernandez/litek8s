@@ -225,6 +225,34 @@ case_compose_build() {
   return $rc
 }
 
+case_compose_budget() {
+  # litek8s only: a compose project's memory budget (docs/docker.md).
+  if [[ "$(docker info --format '{{.OperatingSystem}}')" != litek8s ]]; then echo "skipped: not litek8s"; return 0; fi
+  local d="$HERE/compose-budget" since; since=$(date +%s)
+  local inspect='{{.State.Status}} {{.State.ExitCode}} {{.State.OOMKilled}}'
+  docker compose -f "$d/calm.yaml" up -d 2>&1 | tail -1 &&
+  docker compose -f "$d/budget.yaml" up -d 2>&1 | tail -1 &&
+  docker compose -f "$d/group.yaml" up -d 2>&1 | tail -1 &&
+  # The project's budget is every container's ceiling (docker stats).
+  docker stats --no-stream --format '{{.MemUsage}}' lk-budget-steady-1 | grep -q '/ 256MiB' &&
+  for _ in $(seq 1 60); do [[ "$(docker inspect -f '{{.State.Status}}' lk-budget-hog-1)" == exited ]] && break; sleep 0.5; done &&
+  for _ in $(seq 1 60); do [[ "$(docker inspect -f '{{.State.Status}}' lk-budget-group-steady-1)" == exited ]] && break; sleep 0.5; done &&
+  # The hog alone is killed in its project...
+  eq "exited 137 true" "$(docker inspect -f "$inspect" lk-budget-hog-1)" &&
+  eq "running 0 false" "$(docker inspect -f "$inspect" lk-budget-steady-1)" &&
+  # ...the whole project with oom-group...
+  eq "exited 137 true" "$(docker inspect -f "$inspect" lk-budget-group-hog-1)" &&
+  eq "exited 137 true" "$(docker inspect -f "$inspect" lk-budget-group-steady-1)" &&
+  # ...and other projects never notice.
+  eq "running 0 false" "$(docker inspect -f "$inspect" lk-budget-calm-idle-1)" &&
+  # An oom event says it was the project's budget.
+  docker events --since "$since" --until "$(date +%s)" --filter event=oom --filter label=com.docker.compose.project=lk-budget \
+    --format '{{.Actor.Attributes.name}} {{index .Actor.Attributes "litek8s.oom"}} {{index .Actor.Attributes "litek8s.project.memory"}}' | grep -qx 'lk-budget-hog-1 project 256Mi'
+  local rc=$?
+  for f in budget group calm; do docker compose -f "$d/$f.yaml" down -t 1 >/dev/null 2>&1; done
+  return $rc
+}
+
 # --- Testcontainers and Dev Containers -------------------------------------
 
 case_testcontainers() {
@@ -250,7 +278,7 @@ case_devcontainer() {
   return $rc
 }
 
-ALL=(run_attach tty detach_logs_exec publish_all cp_archive networks_volumes bind_mount restart_policy healthcheck images events build_classic compose_basic compose_build testcontainers devcontainer)
+ALL=(run_attach tty detach_logs_exec publish_all cp_archive networks_volumes bind_mount restart_policy healthcheck images events build_classic compose_basic compose_build compose_budget testcontainers devcontainer)
 CASES=("${@:-${ALL[@]}}")
 docker version --format 'server: {{.Server.Version}} ({{.Server.Os}}/{{.Server.Arch}})' || exit 1
 docker pull -q alpine:3.20 >/dev/null && docker pull -q nginx:alpine >/dev/null

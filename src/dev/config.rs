@@ -8,15 +8,23 @@
 //!   - /Users/me        # (default: $HOME)
 //! port: 6443           # API server port on localhost
 //! publish: localhost   # where published ports and NodePorts listen: localhost | all
+//! docker:              # Docker API resource budgets (see docker::budget)
+//!   projects:
+//!     myapp: {memory: 2Gi, cpus: 2}
+//!   default_project: {memory: 4Gi}
+//!   defaults: {memory: 1Gi, cpus: 1}
 //! ```
 //!
 //! The file is read when the cluster starts: changing it while the cluster
-//! runs takes effect on the next `dev up`.
+//! runs takes effect on the next `dev up` (which, for a running cluster,
+//! sends the `docker:` section to its Docker API at once).
 
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
+
+use crate::docker::budget::DockerSettings;
 
 /// Where published container ports and NodePorts are reachable.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +82,8 @@ pub struct DevConfig {
     pub port: Option<u16>,
     #[serde(skip_serializing_if = "is_default_publish")]
     pub publish: Publish,
+    #[serde(skip_serializing_if = "DockerSettings::is_empty")]
+    pub docker: DockerSettings,
 }
 
 fn is_default_publish(p: &Publish) -> bool {
@@ -91,6 +101,7 @@ pub fn path() -> PathBuf {
 
 const HEADER: &str = "# litek8s dev settings, read by `litek8s dev up` (its flags win).\n\
 # cpus, memory (MiB) and shares are for the macOS VM; publish: localhost | all.\n\
+# docker: project budgets and container defaults (see docs/docker.md).\n\
 # Changes apply on the next `litek8s dev up`.\n";
 
 impl DevConfig {
@@ -187,6 +198,7 @@ impl DevConfig {
         if self.shares.len() > 8 {
             out.push("at most 8 shared directories".into());
         }
+        out.extend(self.docker.problems());
         out
     }
 
@@ -244,7 +256,9 @@ mod tests {
         let dir = tempfile::tempdir_in(&base).unwrap();
         let share = dir.path().join("src");
         std::fs::create_dir(&share).unwrap();
-        let c = DevConfig { cpus: Some(1), memory: Some(2048), shares: vec![share.clone()], port: Some(7443), publish: Publish::All };
+        let docker = DevConfig::parse("docker:\n  projects:\n    shop: {memory: 2Gi, cpus: 1.5}\n  defaults: {memory: 1Gi}\n").unwrap().docker;
+        assert_eq!(docker.projects["shop"].memory, Some(crate::docker::budget::Memory(2 << 30)));
+        let c = DevConfig { cpus: Some(1), memory: Some(2048), shares: vec![share.clone()], port: Some(7443), publish: Publish::All, docker };
         let path = dir.path().join("config.yaml");
         c.save_to(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -263,6 +277,8 @@ mod tests {
         assert!(DevConfig::parse("port: 80\n").unwrap_err().to_string().contains("1024 or above"));
         assert!(DevConfig::parse("publish: everywhere\n").is_err());
         assert!(DevConfig::parse("cpu: 2\n").unwrap_err().to_string().contains("unknown field"));
+        assert!(DevConfig::parse("docker: {projects: {Shop: {memory: 1Gi}}}\n").unwrap_err().to_string().contains("compose project name"));
+        assert!(DevConfig::parse("docker: {defaults: {memory: 2}}\n").unwrap_err().to_string().contains("6Mi minimum"));
         assert!(DevConfig::parse("shares: [relative/dir]\n").unwrap_err().to_string().contains("absolute"));
         let nested = format!("shares: [{}, {}]\n", dir.path().display(), share.display());
         assert!(DevConfig::parse(&nested).unwrap_err().to_string().contains("overlap"));

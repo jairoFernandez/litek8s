@@ -1,0 +1,16 @@
+# A compose project capped at 256Mi as a whole (on litek8s, a label on any
+# service sets the project's budget): `hog` grows until the OOM killer,
+# scoped to the project, stops it; `steady` in the same project and the
+# other projects keep running.
+name: lk-budget
+services:
+  hog:
+    image: alpine:3.20
+    labels:
+      dev.litek8s.project.memory: 256Mi
+    # tail keeps /dev/zero in memory waiting for a newline: it never stops
+    # growing.
+    command: ["sh", "-c", "sleep 2; exec tail /dev/zero"]
+  steady:
+    image: alpine:3.20
+    command: ["sleep", "100000"]
