@@ -347,6 +347,8 @@ fn flusher(rx: mpsc::Receiver<Job>, inner: Arc<Mutex<Inner>>) {
         while let Ok(more) = rx.try_recv() {
             jobs.push(more);
         }
+        let started = std::time::Instant::now();
+        let count = jobs.len();
         let mut touched: Vec<Arc<File>> = Vec::new();
         let mut written: Vec<(u64, u64)> = Vec::new();
         let mut waiting: Vec<Done> = Vec::new();
@@ -417,6 +419,10 @@ fn flusher(rx: mpsc::Receiver<Job>, inner: Arc<Mutex<Inner>>) {
                     guard.pending.remove(&index);
                 }
             }
+        }
+        let took = started.elapsed();
+        if took > std::time::Duration::from_millis(500) {
+            eprintln!("apiserver: raft log: slow flush ({count} jobs) took {took:?}");
         }
         for done in waiting {
             let r = match &result {

@@ -373,13 +373,12 @@ impl Store {
 
     /// Every object in a namespace (`""`: cluster-scoped ones), any resource.
     pub fn objects_in_namespace(&self, namespace: &str) -> Vec<(ObjectKey, Value)> {
-        let inner = self.inner.lock().unwrap();
-        inner
-            .objects
-            .iter()
-            .filter(|(k, _)| k.namespace == namespace)
-            .map(|(k, v)| (k.clone(), v.value()))
-            .collect()
+        // Copy the bytes out, parse outside the lock.
+        let found: Vec<(ObjectKey, Arc<[u8]>)> = {
+            let inner = self.inner.lock().unwrap();
+            inner.objects.iter().filter(|(k, _)| k.namespace == namespace).map(|(k, v)| (k.clone(), v.json.clone())).collect()
+        };
+        found.into_iter().map(|(k, j)| (k, serde_json::from_slice(&j).unwrap_or(Value::Null))).collect()
     }
 
     pub fn keys_of_resource(&self, group: &str, resource: &str) -> Vec<ObjectKey> {

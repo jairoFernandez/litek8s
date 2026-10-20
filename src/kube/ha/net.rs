@@ -192,10 +192,17 @@ impl Peers {
     /// one heartbeat): the connection then finishes the exchange and goes
     /// back to the pool instead of being torn down and dialed again.
     pub async fn call_on(self: &Arc<Self>, lane: Lane, addr: &str, method: Method, path: &str, payload: Bytes, timeout: Duration) -> Result<(StatusCode, Bytes)> {
+        self.call_raft(lane, addr, "", method, path, payload, timeout).await
+    }
+
+    /// [`call_on`](Self::call_on) counting against the in-flight slots of
+    /// `class` (heartbeats get their own: requests stuck on a slow peer
+    /// must not keep the heartbeats that stop its elections from going out).
+    pub async fn call_raft(self: &Arc<Self>, lane: Lane, addr: &str, class: &str, method: Method, path: &str, payload: Bytes, timeout: Duration) -> Result<(StatusCode, Bytes)> {
         if lane == Lane::Api {
             return self.call_api(addr, method, path, payload, timeout).await;
         }
-        let slots = self.raft_inflight.lock().unwrap().entry(addr.to_string()).or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(RAFT_INFLIGHT))).clone();
+        let slots = self.raft_inflight.lock().unwrap().entry(format!("{addr}#{class}")).or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(RAFT_INFLIGHT))).clone();
         let deadline = tokio::time::Instant::now() + timeout;
         let Ok(Ok(permit)) = tokio::time::timeout_at(deadline, slots.acquire_owned()).await else {
             bail!("request to {addr} timed out (too many in flight)");
@@ -344,9 +351,13 @@ impl Conn {
     }
 
     async fn send_rpc<Resp: DeserializeOwned, E: std::error::Error + DeserializeOwned>(&self, path: &str, bytes: Vec<u8>, option: &RPCOption) -> Result<Resp, RpcErr<E>> {
+        self.send_rpc_as(path, path, bytes, option).await
+    }
+
+    async fn send_rpc_as<Resp: DeserializeOwned, E: std::error::Error + DeserializeOwned>(&self, path: &str, class: &str, bytes: Vec<u8>, option: &RPCOption) -> Result<Resp, RpcErr<E>> {
         let (status, body) = self
             .peers
-            .call_on(Lane::Raft, &self.addr, Method::POST, &format!("{PREFIX}/raft/{path}"), bytes.into(), option.hard_ttl())
+            .call_raft(Lane::Raft, &self.addr, class, Method::POST, &format!("{PREFIX}/raft/{path}"), bytes.into(), option.hard_ttl())
             .await
             .map_err(|e| {
                 let io = std::io::Error::other(format!("{e:#}"));
@@ -370,7 +381,8 @@ impl RaftNetwork<TypeConfig> for Conn {
             let fit = (rpc.entries.len() * MAX_APPEND_BYTES / bytes.len()).max(1);
             return Err(RPCError::PayloadTooLarge(openraft::error::PayloadTooLarge::new_entries_hint(fit as u64)));
         }
-        self.send_rpc("append", bytes, &option).await
+        let class = if rpc.entries.is_empty() { "heartbeat" } else { "append" };
+        self.send_rpc_as("append", class, bytes, &option).await
     }
 
     async fn vote(&mut self, rpc: VoteRequest<u64>, option: RPCOption) -> Result<VoteResponse<u64>, RpcErr> {

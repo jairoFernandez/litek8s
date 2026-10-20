@@ -847,11 +847,17 @@ pub async fn serve(state: &Arc<ApiState>, mut req: Request<Incoming>) -> Respons
                 Ok(b) => b,
                 Err(r) => return r,
             };
-            let rpc = match parse(&bytes) {
+            let rpc: openraft::raft::AppendEntriesRequest<TypeConfig> = match parse(&bytes) {
                 Ok(r) => r,
                 Err(r) => return r,
             };
+            let entries = rpc.entries.len();
+            let started = std::time::Instant::now();
             let result = cluster.raft.append_entries(rpc).await;
+            let took = started.elapsed();
+            if took > Duration::from_millis(500) {
+                eprintln!("apiserver: raft: slow append ({entries} entries, {} bytes) took {took:?}", bytes.len());
+            }
             if result.as_ref().is_ok_and(|r| r.is_success()) {
                 cluster.leader_contact.store((cluster.started.elapsed().as_millis() as u64).max(1), Ordering::Relaxed);
             }
