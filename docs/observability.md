@@ -105,8 +105,8 @@ it leaves instant queries at once instead of lingering for 5 minutes.
   `litek8s dev` cluster) sets the series limit (two thirds of the budget at
   ~900 bytes a series: 18 000 series by default); new series beyond it are
   refused and counted (`litek8s_tsdb_series_refused_total`, and the
-  built-in alert `Litek8sMetricsSeriesRefused`). A query loads at most 2
-  million samples. Series whose data has left every tier are dropped from
+  built-in alert `Litek8sMetricsSeriesRefused`). A query loads at most 1
+  million samples (16 MB while it runs). Series whose data has left every tier are dropped from
   the index (and `series.log` is compacted).
 
 Flags of `litek8s apiserver`:

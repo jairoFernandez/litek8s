@@ -89,7 +89,7 @@ impl Default for Config {
             tiers: default_tiers(),
             max_series: 30_000,
             checkpoint: Duration::from_secs(20 * 60),
-            max_query_samples: 2_000_000,
+            max_query_samples: 1_000_000,
         }
     }
 }
@@ -1160,27 +1160,33 @@ impl Inner {
 
     fn downsample_into(&mut self, ti: usize, src: &SealedBlock) -> Result<()> {
         let res = self.tiers[ti].res;
+        // A sealed block is sorted by series: one series at a time, so
+        // memory stays at one series' window whatever the block's size.
         let (file, refs) = src.all()?;
-        let mut by_id: BTreeMap<u32, Vec<(i64, f64)>> = BTreeMap::new();
-        for r in &refs {
-            if let Ok(chunk) = block::read_chunk(&file, r) {
-                gorilla::decode(&chunk, by_id.entry(r.id).or_default());
+        let mut i = 0;
+        while i < refs.len() {
+            let id = refs[i].id;
+            let mut samples: Vec<(i64, f64)> = Vec::new();
+            while i < refs.len() && refs[i].id == id {
+                if let Ok(chunk) = block::read_chunk(&file, &refs[i]) {
+                    gorilla::decode(&chunk, &mut samples);
+                }
+                i += 1;
             }
-        }
-        for (id, mut samples) in by_id {
             let counter = self.series.get(id as usize).and_then(|s| s.as_ref()).is_some_and(|s| s.counter);
             samples.sort_by_key(|s| s.0);
             samples.dedup_by_key(|s| s.0);
             let points = downsample(&samples, res, counter);
+            drop(samples);
             // One chunk per destination window (a source window never
             // spans two: windows are multiples of each other).
-            let mut i = 0;
-            while i < points.len() {
+            let mut j = 0;
+            while j < points.len() {
                 let mut enc = Encoder::new();
-                let start = self.tiers[ti].window_start(points[i].0);
-                while i < points.len() && self.tiers[ti].window_start(points[i].0) == start && enc.count() < u16::MAX {
-                    enc.push(points[i].0, points[i].1);
-                    i += 1;
+                let start = self.tiers[ti].window_start(points[j].0);
+                while j < points.len() && self.tiers[ti].window_start(points[j].0) == start && enc.count() < u16::MAX {
+                    enc.push(points[j].0, points[j].1);
+                    j += 1;
                 }
                 let tier = &mut self.tiers[ti];
                 if tier.sealed.iter().any(|b| b.start == start) {
@@ -1533,6 +1539,7 @@ mod memory {
         }
         let ids: Vec<(String, u32)> = series.iter().map(|(src, l)| (src.clone(), db.series_id(l.clone()).unwrap())).collect();
         let before = rss();
+        let before_now = crate::kube::metrics::rss_bytes();
         let t0 = now_ms() / 10_000 * 10_000 - 6 * 3600 * 1000;
         let hours = 6;
         let mut values: HashMap<u32, f64> = HashMap::new();
@@ -1542,9 +1549,14 @@ mod memory {
             let mut by_src: BTreeMap<&str, Vec<(u32, f64)>> = BTreeMap::new();
             for (k, (src, id)) in ids.iter().enumerate() {
                 let v = values.entry(*id).or_insert(0.0);
-                // Counters grow, a third of the series are steady gauges.
-                if k % 3 != 0 {
-                    *v += (k % 7) as f64 * 0.37 + 1.0;
+                // A third steady gauges (states, limits, sizes), a third
+                // integer counters (bytes, packets, restarts), a third CPU
+                // seconds (fractional, jittery).
+                match k % 3 {
+                    0 if step % 90 == 0 => *v = (k * 4096 + step as usize) as f64,
+                    0 => {}
+                    1 => *v += ((k % 7) * 1500 + (step as usize % 3) * 64) as f64,
+                    _ => *v += 0.000_123 * ((k + step as usize) % 11) as f64 + 0.01,
                 }
                 by_src.entry(src.as_str()).or_default().push((*id, *v));
             }
@@ -1559,13 +1571,14 @@ mod memory {
         let st = db.stats();
         let samples = st.samples_appended;
         println!(
-            "series {} samples {} in {:.1}s ({:.0}/s); store's estimate: heads {} KiB + index {} KiB; peak RSS growth {} KiB; disk {} KiB = {:.2} bytes/sample",
+            "series {} samples {} in {:.1}s ({:.0}/s); store's estimate: heads {} KiB + index {} KiB; RSS now +{} KiB, peak +{} KiB; disk {} KiB = {:.2} bytes/sample",
             st.series,
             samples,
             start.elapsed().as_secs_f64(),
             samples as f64 / start.elapsed().as_secs_f64(),
             st.head_bytes / 1024,
             st.index_bytes / 1024,
+            crate::kube::metrics::rss_bytes().saturating_sub(before_now) / 1024,
             rss().saturating_sub(before) / 1024,
             st.disk_bytes / 1024,
             st.disk_bytes as f64 / samples as f64
