@@ -21,10 +21,26 @@ const HELP_TEMPLATE: &str = "\
 
 {all-args}{after-help}";
 
+// model and llm exist only with the llm feature.
+#[cfg(feature = "llm")]
+macro_rules! llm_help_lines {
+    () => {
+        "  model          Inspect and distribute model weights (safetensors)
+  llm            Generate text with a local LLM (safetensors model dir)
+"
+    };
+}
+#[cfg(not(feature = "llm"))]
+macro_rules! llm_help_lines {
+    () => {
+        ""
+    };
+}
+
 /// `litek8s` with no arguments: commands grouped by what they talk to.
 /// Every visible subcommand is listed with its `about` (checked by
 /// `main_help_lists_every_command`).
-const MAIN_HELP_TEMPLATE: &str = "\
+const MAIN_HELP_TEMPLATE: &str = concat!("\
 {before-help}{name} {version}
 {about-with-newline}
 {usage-heading} {usage}
@@ -62,13 +78,11 @@ Legacy daemon (litek8s.dev/v1alpha1 manifests, started with `litek8s serve`):
 Distributed compute (experimental):
   tensor         Run distributed tensor (matrix) compute across the cluster nodes
   pipeline       Run a feed-forward layer pipeline sharded across the cluster
-  model          Inspect and distribute model weights (safetensors)
-  llm            Generate text with a local LLM (safetensors model dir)
-
+", llm_help_lines!(), "
   help           Print this message or the help of the given subcommand(s)
 
 Options:
-{options}{after-help}";
+{options}{after-help}");
 
 const MAIN_AFTER_HELP: &str = "\
 Quickstart:
