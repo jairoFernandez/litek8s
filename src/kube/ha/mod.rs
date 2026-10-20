@@ -17,8 +17,9 @@
 //! - Reads are served from the local store. A get/list/watch with
 //!   `resourceVersion=""` (the default, "most recent") first passes a read
 //!   barrier: the leader confirms it still leads (a heartbeat round) and
-//!   names its commit index, and the local store waits until it has applied
-//!   that far: a linearizable read, as kube-apiserver's quorum reads on etcd.
+//!   names its last log index, and the local store waits until it has
+//!   applied that far: a linearizable read, as kube-apiserver's quorum reads
+//!   on etcd.
 //! - Controllers, the scheduler, node lifecycle and other singletons run
 //!   only on the leader ([`Cluster::run_while_leader`]); their writes are
 //!   never forwarded, so a deposed leader's controllers cannot write.
@@ -601,28 +602,50 @@ impl Cluster {
         if self.wait_applied(index, READ_TIMEOUT).await { Ok(()) } else { Err("timed out catching up with the leader".into()) }
     }
 
+    /// Ask the leader (or be it) for the read index. Through an election
+    /// (a dead leader, a quorum check that timed out) it keeps trying until
+    /// the read barrier's deadline instead of failing the read.
     async fn read_index(&self) -> Result<u64, String> {
+        let deadline = tokio::time::Instant::now() + READ_TIMEOUT - Duration::from_millis(500);
+        let mut last_error = String::from("no leader");
         loop {
-            match self.leader_id() {
-                Some(l) if l == self.id => {
-                    let (read, _) = self.raft.get_read_log_id().await.map_err(|e| e.to_string())?;
-                    return Ok(read.map(|l| l.index).unwrap_or(0));
-                }
-                Some(l) => {
-                    let addr = self.raft_addr_of(l).ok_or("unknown leader address")?;
-                    let v: Value = self
+            let attempt = match self.leader_id() {
+                Some(l) if l == self.id => self.leader_read_index().await,
+                Some(l) => match self.raft_addr_of(l) {
+                    Some(addr) => self
                         .peers
-                        .call_json_on(net::Lane::Raft, &addr, Method::POST, "/readindex", &json!({}), READ_TIMEOUT)
+                        .call_json_on::<Value>(net::Lane::Raft, &addr, Method::POST, "/readindex", &json!({}), Duration::from_secs(3))
                         .await
-                        .map_err(|e| format!("{e:#}"))?;
-                    return v["index"].as_u64().ok_or_else(|| format!("leader answered {v}"));
-                }
-                None => {
-                    let mut m = self.raft.metrics();
-                    let _ = tokio::time::timeout(Duration::from_millis(200), m.changed()).await;
-                }
+                        .map_err(|e| format!("{e:#}"))
+                        .and_then(|v| v["index"].as_u64().ok_or_else(|| format!("leader answered {v}"))),
+                    None => Err("unknown leader address".into()),
+                },
+                None => Err("no leader".into()),
+            };
+            match attempt {
+                Ok(index) => return Ok(index),
+                Err(e) => last_error = e,
             }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(last_error);
+            }
+            let mut m = self.raft.metrics();
+            let _ = tokio::time::timeout(Duration::from_millis(200), m.changed()).await;
         }
+    }
+
+    /// The read index on the leader: what openraft confirms with a
+    /// heartbeat round, and at least the leader's last log index as the read
+    /// arrived. openraft's own (the larger of the commit index and its term's
+    /// first entry) is not enough after a restart: a leader that comes back
+    /// before anyone else is elected resumes its term, with the commit index
+    /// it last saved, and would serve reads missing writes it acknowledged.
+    /// Every committed entry is in a leader's log, so waiting for its last
+    /// one to apply covers them (at the price of waiting for writes in flight).
+    async fn leader_read_index(&self) -> Result<u64, String> {
+        let last = self.raft.metrics().borrow().last_log_index.unwrap_or(0);
+        let (read, _) = self.raft.get_read_log_id().await.map_err(|e| e.to_string())?;
+        Ok(read.map(|l| l.index).unwrap_or(0).max(last))
     }
 
     /// Run the future `make` returns while this server leads, with leader-only
@@ -639,7 +662,7 @@ impl Cluster {
                 return;
             }
             // Apply everything earlier terms committed before acting on it.
-            if let Err(e) = self.raft.ensure_linearizable().await {
+            if let Err(e) = self.read_barrier().await {
                 eprintln!("apiserver: leader could not confirm its term: {e}");
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 continue;
@@ -902,9 +925,9 @@ pub async fn serve(state: &Arc<ApiState>, mut req: Request<Incoming>) -> Respons
             if !cluster.is_leader() {
                 return not_leader(&cluster);
             }
-            match cluster.raft.get_read_log_id().await {
-                Ok((read, _)) => json_reply(StatusCode::OK, &json!({"index": read.map(|l| l.index).unwrap_or(0)})),
-                Err(e) => error(StatusCode::SERVICE_UNAVAILABLE, e.to_string()),
+            match cluster.leader_read_index().await {
+                Ok(index) => json_reply(StatusCode::OK, &json!({"index": index})),
+                Err(e) => error(StatusCode::SERVICE_UNAVAILABLE, e),
             }
         }
         (Method::POST, "/bootstrap") => {

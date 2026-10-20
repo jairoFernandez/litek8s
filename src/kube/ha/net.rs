@@ -35,6 +35,8 @@ pub const FORWARDED_HEADER: &str = "x-litek8s-forwarded";
 /// The Raft log index a forwarded write's answer reflects: the forwarding
 /// server waits until it has applied that far before answering.
 pub const APPLIED_HEADER: &str = "x-litek8s-applied";
+/// Which server answered a request (and, through forwarding, the chain).
+pub const SERVED_BY_HEADER: &str = "x-litek8s-served-by";
 
 /// The request never reached the peer (it could not be connected to, or
 /// the connection closed before the request went out): safe to retry

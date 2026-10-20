@@ -47,6 +47,9 @@ pub struct Op {
     pub call: u64,
     /// `u64::MAX` when the outcome is unknown.
     pub ret: u64,
+    /// The server asked, and what answered (`x-litek8s-served-by`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub via: String,
 }
 
 type State = Option<i64>;
@@ -234,6 +237,11 @@ pub const NOT_SENT: &str = "not sent: ";
 
 /// One HTTP/1.1 request on a fresh connection, with a deadline.
 pub async fn http(addr: &str, method: &str, path: &str, body: Option<&Value>, timeout: Duration) -> Result<(u16, Value), String> {
+    http_via(addr, method, path, body, timeout).await.map(|(code, value, _)| (code, value))
+}
+
+/// [`http`], also returning the `x-litek8s-served-by` header.
+pub async fn http_via(addr: &str, method: &str, path: &str, body: Option<&Value>, timeout: Duration) -> Result<(u16, Value, String), String> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let run = async {
         let mut stream = tokio::net::TcpStream::connect(addr).await.map_err(|e| format!("{NOT_SENT}{e}"))?;
@@ -248,8 +256,12 @@ pub async fn http(addr: &str, method: &str, path: &str, body: Option<&Value>, ti
         let text = String::from_utf8_lossy(&raw);
         let (head, body) = text.split_once("\r\n\r\n").ok_or("malformed response")?;
         let status: u16 = head.split(' ').nth(1).and_then(|s| s.parse().ok()).ok_or("no status")?;
+        let via = head
+            .lines()
+            .find_map(|l| l.to_ascii_lowercase().starts_with("x-litek8s-served-by:").then(|| l.split_once(':').map(|(_, v)| v.trim().to_string()).unwrap_or_default()))
+            .unwrap_or_default();
         let body = if head.to_ascii_lowercase().contains("transfer-encoding: chunked") { dechunk(body) } else { body.to_string() };
-        Ok((status, serde_json::from_str(&body).unwrap_or(Value::String(body))))
+        Ok((status, serde_json::from_str(&body).unwrap_or(Value::String(body)), via))
     };
     tokio::time::timeout(timeout, run).await.map_err(|_| "timed out".to_string())?
 }
@@ -315,11 +327,13 @@ pub async fn run(w: Workload) -> Vec<Op> {
                 };
                 let call = start.elapsed().as_nanos() as u64;
                 let result = match input {
-                    Input::Read => http(server, "GET", &format!("{base}/{name}"), None, w.timeout).await,
-                    Input::Create(v) => http(server, "POST", &base, Some(&cm(&name, v)), w.timeout).await,
-                    Input::Write(v) => http(server, "PUT", &format!("{base}/{name}"), Some(&cm(&name, v)), w.timeout).await,
-                    Input::Delete => http(server, "DELETE", &format!("{base}/{name}"), None, w.timeout).await,
+                    Input::Read => http_via(server, "GET", &format!("{base}/{name}"), None, w.timeout).await,
+                    Input::Create(v) => http_via(server, "POST", &base, Some(&cm(&name, v)), w.timeout).await,
+                    Input::Write(v) => http_via(server, "PUT", &format!("{base}/{name}"), Some(&cm(&name, v)), w.timeout).await,
+                    Input::Delete => http_via(server, "DELETE", &format!("{base}/{name}"), None, w.timeout).await,
                 };
+                let via = format!("{server} -> {}", result.as_ref().map(|r| r.2.clone()).unwrap_or_default());
+                let result = result.map(|(code, value, _)| (code, value));
                 let ret = start.elapsed().as_nanos() as u64;
                 // Never reached a server, or refused before doing anything:
                 // no effect, nothing learned.
@@ -338,7 +352,7 @@ pub async fn run(w: Workload) -> Vec<Op> {
                     _ => Output::Unknown,
                 };
                 let ret = if output == Output::Unknown { u64::MAX } else { ret };
-                ops.push(Op { client, key, input, output, call, ret });
+                ops.push(Op { client, key, input, output, call, ret, via });
                 if output == Output::Unknown {
                     // Back off a little while the cluster recovers.
                     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -455,7 +469,7 @@ mod tests {
                 eprintln!("key {key}: {e}; first operations left out:");
                 for o in left.iter().take(12) {
                     let ret = if o.ret == u64::MAX { "inf".to_string() } else { format!("{:.1}", o.ret as f64 / 1e6) };
-                    eprintln!("{:>9.1} {:>9} c{} {:?} -> {:?}", o.call as f64 / 1e6, ret, o.client, o.input, o.output);
+                    eprintln!("{:>9.1} {:>9} c{} {:?} -> {:?} [{}]", o.call as f64 / 1e6, ret, o.client, o.input, o.output, o.via);
                 }
             }
             match None::<Vec<Op>> {
@@ -464,7 +478,7 @@ mod tests {
                     eprintln!("key {key}: the first {} operations do not linearize; the last ones:", prefix.len());
                     for o in prefix.iter().rev().take(30).rev() {
                         let ret = if o.ret == u64::MAX { "inf".to_string() } else { format!("{:.1}", o.ret as f64 / 1e6) };
-                        eprintln!("{:>9.1} {:>9} c{} {:?} -> {:?}", o.call as f64 / 1e6, ret, o.client, o.input, o.output);
+                        eprintln!("{:>9.1} {:>9} c{} {:?} -> {:?} [{}]", o.call as f64 / 1e6, ret, o.client, o.input, o.output, o.via);
                     }
                 }
             }
@@ -472,7 +486,7 @@ mod tests {
     }
 
     fn op(key: u32, input: Input, output: Output, call: u64, ret: u64) -> Op {
-        Op { client: 0, key, input, output, call, ret }
+        Op { client: 0, key, input, output, call, ret, via: String::new() }
     }
 
     #[test]

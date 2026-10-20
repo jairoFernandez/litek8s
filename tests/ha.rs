@@ -28,8 +28,18 @@ impl Server {
     }
 
     fn start_with(name: &str, dir: &Path, port: u16, raft_port: u16, init: bool, join: Option<(&str, &str)>) -> Self {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", port)).expect("bind");
-        let raft_listener = std::net::TcpListener::bind(("127.0.0.1", raft_port)).expect("bind raft");
+        // A killed server's sockets close as its runtime winds down.
+        let bind = |p: u16| {
+            for _ in 0..100 {
+                if let Ok(l) = std::net::TcpListener::bind(("127.0.0.1", p)) {
+                    return l;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            panic!("cannot bind 127.0.0.1:{p}")
+        };
+        let listener = bind(port);
+        let raft_listener = bind(raft_port);
         let addr = listener.local_addr().unwrap().to_string();
         let raft_port = raft_listener.local_addr().unwrap().port();
         let config = ApiServerConfig {
@@ -357,11 +367,13 @@ async fn linearizable_under_leader_kills_and_partitions() {
     let token = std::fs::read_to_string(root.path().join("s1/join-token")).unwrap();
     let secret = token.rsplit("::").next().unwrap().to_string();
 
+    let t0 = Instant::now();
+    let at = move || format!("{:.0} ms", t0.elapsed().as_secs_f64() * 1e3);
     let workload = tokio::spawn(lincheck::run(lincheck::Workload {
         servers: addrs.clone(),
         clients: 6,
         keys: 4,
-        duration: Duration::from_secs(20),
+        duration: Duration::from_secs(26),
         timeout: Duration::from_secs(5),
         namespace: "default".into(),
     }));
@@ -389,29 +401,38 @@ async fn linearizable_under_leader_kills_and_partitions() {
         let Some(leader) = leader_name(&addrs[(round + 1) % 3]).await else { continue };
         let li = servers_.iter().position(|s| s.name == leader).unwrap();
         let others: Vec<String> = addrs.iter().filter(|a| **a != addrs[li]).cloned().collect();
-        eprintln!("nemesis: partitioning leader {leader}");
+        eprintln!("{} nemesis: partitioning leader {leader}", at());
         partition(addrs[li].clone(), others.clone(), true).await;
         for o in &others {
             partition(o.clone(), vec![addrs[li].clone()], true).await;
         }
         tokio::time::sleep(Duration::from_secs(4)).await;
         let majority_leader = leader_name(&others[0]).await;
-        eprintln!("nemesis: the majority side's leader is {majority_leader:?}");
+        eprintln!("{} nemesis: the majority side's leader is {majority_leader:?}", at());
         assert!(majority_leader.is_some_and(|l| l != leader), "the majority did not elect a new leader");
         partition(addrs[li].clone(), others.clone(), false).await;
         for o in &others {
             partition(o.clone(), vec![addrs[li].clone()], false).await;
         }
-        eprintln!("nemesis: healed");
+        eprintln!("{} nemesis: healed", at());
         tokio::time::sleep(Duration::from_secs(1)).await;
         if let Some(leader) = leader_name(&addrs[(round + 2) % 3]).await {
             let li = servers_.iter().position(|s| s.name == leader).unwrap();
-            eprintln!("nemesis: killing leader {leader}");
+            eprintln!("{} nemesis: killing leader {leader}", at());
             let (dir, port, name, raft_port) = (servers_[li].dir.clone(), servers_[li].port(), servers_[li].name.clone(), servers_[li].raft_port);
             servers_[li].kill();
             tokio::time::sleep(Duration::from_secs(2)).await;
             servers_[li] = Server::start_with(&name, &dir, port, raft_port, false, None);
-            eprintln!("nemesis: restarted {name}");
+            eprintln!("{} nemesis: restarted {name}", at());
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        // A leader killed and back at once takes its leadership back.
+        if let Some(leader) = leader_name(&addrs[round % 3]).await {
+            let li = servers_.iter().position(|s| s.name == leader).unwrap();
+            let (dir, port, name, raft_port) = (servers_[li].dir.clone(), servers_[li].port(), servers_[li].name.clone(), servers_[li].raft_port);
+            servers_[li].kill();
+            servers_[li] = Server::start_with(&name, &dir, port, raft_port, false, None);
+            eprintln!("{} nemesis: killed and restarted leader {name} at once", at());
         }
     }
     let history = workload.await.unwrap();
@@ -452,5 +473,48 @@ async fn big_objects_replicate() {
         assert_eq!(code, 200);
         let n = list["items"].as_array().unwrap().iter().filter(|o| o["metadata"]["name"].as_str().unwrap().starts_with("big-")).count();
         assert_eq!(n, 12, "on {a}");
+    }
+}
+
+/// A leader killed and restarted before the others elect a new one takes
+/// its leadership back (openraft keeps its vote). Its reads must still
+/// include every write it acknowledged before dying.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn restarted_leader_serves_fresh_reads() {
+    let root = tempfile::tempdir().unwrap();
+    let mut servers_ = cluster(root.path()).await;
+    let base = "/api/v1/namespaces/default/configmaps";
+    for round in 0..3 {
+        let leader = leader_name(&servers_[0].addr).await.expect("a leader");
+        let li = servers_.iter().position(|s| s.name == leader).unwrap();
+        let addr = servers_[li].addr.clone();
+        let names: Vec<String> = (0..30).map(|i| format!("r{round}-{i}")).collect();
+        for n in &names {
+            let (code, _) = http(&addr, "POST", base, Some(&cm(n, json!({}))), T).await.unwrap();
+            assert_eq!(code, 201);
+        }
+        // Back at once: sooner than any election.
+        let (dir, port, name, raft_port) = (servers_[li].dir.clone(), servers_[li].port(), servers_[li].name.clone(), servers_[li].raft_port);
+        servers_[li].kill();
+        servers_[li] = Server::start_with(&name, &dir, port, raft_port, false, None);
+        eventually("the restarted server answers", T, || async { http(&addr, "GET", "/version", None, Duration::from_secs(1)).await.is_ok() }).await;
+        eprintln!("round {round}: restarted {name}; leader now {:?}", leader_name(&addr).await);
+        let mut errors = 0;
+        for n in &names {
+            // An error (no leader yet) is fine and retried; an answer must not be stale.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                match http(&addr, "GET", &format!("{base}/{n}"), None, T).await {
+                    Ok((200, _)) => break,
+                    Ok((code, _)) if code < 500 => panic!("{n}: a fresh read answered {code} on the restarted server (round {round})"),
+                    _ if Instant::now() < deadline => {
+                        errors += 1;
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    other => panic!("{n}: no answer: {other:?}"),
+                }
+            }
+        }
+        eprintln!("round {round}: {errors} retried reads");
     }
 }

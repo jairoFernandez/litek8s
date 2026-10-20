@@ -1128,10 +1128,17 @@ async fn handle(state: Arc<ApiState>, mut req: Request<Incoming>) -> Response<Bo
         Ok(resp) => resp,
         Err(error) => error.into_response(),
     };
-    // A write another server forwarded: tell it how far to catch up.
-    if parts.headers.contains_key(super::ha::net::FORWARDED_HEADER) {
-        if let Some(cluster) = state.ha() {
+    if let Some(cluster) = state.ha() {
+        // A write another server forwarded: tell it how far to catch up.
+        if parts.headers.contains_key(super::ha::net::FORWARDED_HEADER) {
             resp.headers_mut().insert(super::ha::net::APPLIED_HEADER, HeaderValue::from(cluster.last_applied()));
+        }
+        // Which server answered (debugging histories): name, role, applied.
+        if !resp.headers().contains_key(super::ha::net::SERVED_BY_HEADER) {
+            let role = if cluster.is_leader() { "leader" } else { "follower" };
+            if let Ok(v) = HeaderValue::from_str(&format!("{} {role} {}", cluster.name, cluster.last_applied())) {
+                resp.headers_mut().insert(super::ha::net::SERVED_BY_HEADER, v);
+            }
         }
     }
     let code = resp.status().as_u16();
