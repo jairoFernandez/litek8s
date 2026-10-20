@@ -1,0 +1,60 @@
+# The same workload on both systems: three idle web servers and two log
+# generators (10 lines/s each, one in ten an ERROR on stderr).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bench
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: bench
+spec:
+  replicas: 3
+  selector:
+    matchLabels: {app: web}
+  template:
+    metadata:
+      labels: {app: web}
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 200m, memory: 64Mi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: loggen
+  namespace: bench
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app: loggen}
+  template:
+    metadata:
+      labels: {app: loggen}
+    spec:
+      containers:
+        - name: loggen
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              i=0
+              while true; do
+                i=$((i+1))
+                if [ $((i % 10)) -eq 0 ]; then
+                  echo "$(date -u +%FT%TZ) level=error msg=\"request failed\" id=$i ERROR upstream timeout after 3000ms path=/api/orders/$((i % 97))" >&2
+                else
+                  echo "$(date -u +%FT%TZ) level=info msg=\"request served\" id=$i status=200 bytes=$((i * 37 % 9000)) path=/api/items/$((i % 211)) latency_ms=$((i % 53))"
+                fi
+                sleep 0.1
+              done
+          resources:
+            requests: {cpu: 10m, memory: 8Mi}
+            limits: {cpu: 200m, memory: 32Mi}

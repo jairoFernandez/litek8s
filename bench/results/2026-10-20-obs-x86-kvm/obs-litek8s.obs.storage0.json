@@ -1,0 +1,1 @@
+{"metrics_bytes": 266240, "metrics_parts": {"raw": 53248, "60s": 4096, "600s": 4096, "wal.log": 139264, "series.log": 61440}, "log_archive_bytes": 0, "container_log_files_bytes": 7773673}

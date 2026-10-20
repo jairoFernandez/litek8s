@@ -22,6 +22,7 @@ pub mod manifest;
 pub mod matrix;
 pub mod model;
 pub mod node;
+pub mod obs;
 pub mod protocol;
 pub mod proxy;
 pub mod reconciler;

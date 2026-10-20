@@ -1,0 +1,7 @@
+bench         loggen-75b67c8d7-62wdb                    1/1   Running   0     10m
+bench         loggen-75b67c8d7-mc5tq                    1/1   Running   0     10m
+bench         web-64975f8f8-877f2                       1/1   Running   0     10m
+bench         web-64975f8f8-djqnz                       1/1   Running   0     10m
+bench         web-64975f8f8-v7wr6                       1/1   Running   0     10m
+kube-system   coredns-7cfb7bc9c7-dnd8w                  1/1   Running   0     10m
+kube-system   local-path-provisioner-77b9867795-dxxm9   1/1   Running   0     10m

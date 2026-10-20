@@ -612,6 +612,25 @@ impl Theme {
         merge(out)
     }
 
+    /// The same with gaps (no sample then) as spaces.
+    pub fn sparkline_gaps(&self, values: &[Option<f64>], max: f64, width: usize) -> Vec<Span<'static>> {
+        let shown = &values[values.len().saturating_sub(width)..];
+        let mut out = Vec::new();
+        if shown.len() < width {
+            out.push(Span::raw(" ".repeat(width - shown.len())));
+        }
+        for v in shown {
+            match v {
+                None => out.push(Span::raw(" ")),
+                Some(v) => {
+                    let r = if max > 0.0 { (v / max).clamp(0.0, 1.0) } else { 0.0 };
+                    out.push(Span::styled(SPARKS[(r * 7.0).round() as usize], self.level(r)));
+                }
+            }
+        }
+        merge(out)
+    }
+
     /// A bar graph `height` rows tall of the last `width` values against
     /// `max` (eighths at the top of each column), colored by height like a
     /// meter: btop's history graphs, in block characters.

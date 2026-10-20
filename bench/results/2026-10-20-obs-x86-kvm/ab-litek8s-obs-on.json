@@ -1,0 +1,1 @@
+{"flags": "--obs-retention 10s:6h,1m:7d,10m:90d", "apiserver_pss_mib": [31.9, 32.0], "runtime_pss_mib": [9.5, 9.5], "used_mib": [359, 350], "cpu_pct_one_core": {"control-plane": 0.042, "node-agent": 0.001, "os/other": 0.001, "runtime": 0.048, "workload": 2.214}, "guest_busy_pct": 1.155, "window_s": 900.0}

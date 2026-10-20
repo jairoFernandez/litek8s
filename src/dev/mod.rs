@@ -1240,6 +1240,10 @@ async fn inner_apiserver(o: InnerOptions) -> Result<()> {
         disk_root: Some(o.data_dir.clone()),
         node_port_offset: o.node_port_offset,
         docker,
+        // Metrics, logs and alerts for `litek8s ui`, on a smaller budget
+        // than a server's: a dev cluster should stay nearly free.
+        obs: Some(crate::obs::server::ObsConfig { memory_budget: 8 << 20, ..Default::default() }),
+        prometheus_listen: None,
     })
     .await
 }

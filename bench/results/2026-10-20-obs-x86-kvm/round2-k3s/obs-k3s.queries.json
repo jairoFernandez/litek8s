@@ -1,0 +1,111 @@
+{
+ "instant": {
+  "cpu by namespace": {
+   "median_ms": 0.44,
+   "p90_ms": 0.5,
+   "runs": 20,
+   "series": 3
+  },
+  "top 5 pods by memory": {
+   "median_ms": 0.4,
+   "p90_ms": 0.42,
+   "runs": 20,
+   "series": 5
+  },
+  "pods by phase": {
+   "median_ms": 0.46,
+   "p90_ms": 0.54,
+   "runs": 20,
+   "series": 5
+  },
+  "restarts in 1h": {
+   "median_ms": 0.43,
+   "p90_ms": 0.47,
+   "runs": 20,
+   "series": 14
+  },
+  "node memory available": {
+   "median_ms": 0.45,
+   "p90_ms": 0.51,
+   "runs": 20,
+   "series": 1
+  },
+  "node cpu busy": {
+   "median_ms": 0.41,
+   "p90_ms": 0.48,
+   "runs": 20,
+   "series": 1
+  },
+  "cpu vs requests": {
+   "median_ms": 0.41,
+   "p90_ms": 0.49,
+   "runs": 20,
+   "series": 5
+  }
+ },
+ "range_1h": {
+  "cpu by namespace": {
+   "median_ms": 0.91,
+   "p90_ms": 1.02,
+   "runs": 20,
+   "series": 3,
+   "points": 501
+  },
+  "top 5 pods by memory": {
+   "median_ms": 0.74,
+   "p90_ms": 0.79,
+   "runs": 20,
+   "series": 9,
+   "points": 842
+  },
+  "pods by phase": {
+   "median_ms": 0.85,
+   "p90_ms": 0.96,
+   "runs": 20,
+   "series": 5,
+   "points": 830
+  },
+  "restarts in 1h": {
+   "median_ms": 1.0,
+   "p90_ms": 1.72,
+   "runs": 20,
+   "series": 14,
+   "points": 2294
+  },
+  "node memory available": {
+   "median_ms": 0.42,
+   "p90_ms": 0.47,
+   "runs": 20,
+   "series": 1,
+   "points": 167
+  },
+  "node cpu busy": {
+   "median_ms": 0.69,
+   "p90_ms": 0.71,
+   "runs": 20,
+   "series": 1,
+   "points": 165
+  },
+  "cpu vs requests": {
+   "median_ms": 0.75,
+   "p90_ms": 0.83,
+   "runs": 20,
+   "series": 5,
+   "points": 830
+  }
+ },
+ "logs": {
+  "errors of app=loggen, 1h": {
+   "median_ms": 29.27,
+   "p90_ms": 39.0,
+   "runs": 20,
+   "lines": 1000
+  },
+  "'timeout' in every pod, 15m": {
+   "median_ms": 15.16,
+   "p90_ms": 20.22,
+   "runs": 20,
+   "lines": 1000
+  }
+ }
+}

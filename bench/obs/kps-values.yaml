@@ -1,0 +1,15 @@
+# kube-prometheus-stack with its defaults (Prometheus, Alertmanager, the
+# operator, kube-state-metrics, node-exporter, the default rules), except
+# Grafana: litek8s ships no Grafana either; both are queried by an external
+# one. k3s runs no separate controller-manager/scheduler/etcd/kube-proxy
+# endpoints to scrape: those jobs are off so failing targets cost nothing.
+grafana:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeEtcd:
+  enabled: false
+kubeProxy:
+  enabled: false

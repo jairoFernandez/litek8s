@@ -1,0 +1,125 @@
+{
+ "server_version": "v1.36.5+k3s1",
+ "k3s_version": "k3s version v1.36.5+k3s1 (3dd98cc5)",
+ "crun_version": "",
+ "charts": "[{\"name\":\"alloy\",\"namespace\":\"monitoring\",\"revision\":\"1\",\"updated\":\"2026-10-20 02:44:19.205376324 +0000 UTC\",\"status\":\"deployed\",\"chart\":\"alloy-1.14.0\",\"app_version\":\"v1.21.0\"},{\"name\":\"kube-prometheus-stack\",\"namespace\":\"monitoring\",\"revision\":\"1\",\"updated\":\"2026-10-20 02:42:12.114660942 +0000 UTC\",\"status\":\"deployed\",\"chart\":\"kube-prometheus-stack-92.10.1\",\"app_version\":\"v0.94.1\"},{\"name\":\"loki\",\"namespace\":\"monitoring\",\"revision\":\"1\",\"updated\":\"2026-10-20 02:42:45.151817771 +0000 UTC\",\"status\":\"deployed\",\"chart\":\"loki-7.3.0\",\"app_version\":\"3.6.12\"}]",
+ "pods": [
+  {
+   "ns": "bench",
+   "name": "loggen-75b67c8d7-62wdb",
+   "images": [
+    "busybox:1.36"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "bench",
+   "name": "loggen-75b67c8d7-mc5tq",
+   "images": [
+    "busybox:1.36"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "bench",
+   "name": "web-64975f8f8-877f2",
+   "images": [
+    "nginx:alpine"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "bench",
+   "name": "web-64975f8f8-djqnz",
+   "images": [
+    "nginx:alpine"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "bench",
+   "name": "web-64975f8f8-v7wr6",
+   "images": [
+    "nginx:alpine"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "kube-system",
+   "name": "coredns-7cfb7bc9c7-dnd8w",
+   "images": [
+    "rancher/mirrored-coredns-coredns:1.14.7"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "kube-system",
+   "name": "local-path-provisioner-77b9867795-dxxm9",
+   "images": [
+    "rancher/local-path-provisioner:v0.0.37"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "monitoring",
+   "name": "alertmanager-kube-prometheus-stack-alertmanager-0",
+   "images": [
+    "quay.io/prometheus/alertmanager:v0.34.1",
+    "quay.io/prometheus-operator/prometheus-config-reloader:v0.94.1"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "monitoring",
+   "name": "alloy-5gqpz",
+   "images": [
+    "docker.io/grafana/alloy:v1.21.0",
+    "quay.io/prometheus-operator/prometheus-config-reloader:v0.94.0@sha256:142a1f11df8dd165f00375b0b1826aecb9c9adeb05c39855893138d7c7575ff7"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "monitoring",
+   "name": "kube-prometheus-stack-kube-state-metrics-687686d88b-crj5s",
+   "images": [
+    "registry.k8s.io/kube-state-metrics/kube-state-metrics:v2.20.0"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "monitoring",
+   "name": "kube-prometheus-stack-operator-55b46c59dd-mw7wb",
+   "images": [
+    "quay.io/prometheus-operator/prometheus-operator:v0.94.1"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "monitoring",
+   "name": "kube-prometheus-stack-prometheus-node-exporter-7dnrb",
+   "images": [
+    "quay.io/prometheus/node-exporter:v1.12.1-distroless"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "monitoring",
+   "name": "loki-0",
+   "images": [
+    "docker.io/grafana/loki:3.6.11",
+    "docker.io/kiwigrid/k8s-sidecar:2.5.0"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "monitoring",
+   "name": "prometheus-kube-prometheus-stack-prometheus-0",
+   "images": [
+    "quay.io/prometheus/prometheus:v3.15.0-distroless",
+    "quay.io/prometheus-operator/prometheus-config-reloader:v0.94.1"
+   ],
+   "restarts": 0
+  }
+ ],
+ "mem_total_kib": 2977660
+}
