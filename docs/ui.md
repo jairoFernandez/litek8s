@@ -92,19 +92,19 @@ containers by state, the breakdown `b` picks, where the tools point:
 
 ```
  litek8s  1 Home  2 Clust  3 Ctrs  4 Imgs  5 Vols  6 Space  7 Kube  8 Set
-╭─ ● ui-design · macOS VM · up 4m 27s ───────────────────────────── resources ─╮
-│ cpu    █▊░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   6% of 4 CPUs · 23% of one           │
-│ memory ███▒▒░░░░░░░░░░░░░░░░░░░░░░░░░░   5% 0.2 GiB in use · VM limit 4.0 GiB│
-│ disk   ▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0% 269 MB used · 55.4 GB free       │
+╭─ ● ui-design · macOS VM · up 26m 31s ──────────────────────────── resources ─╮
+│ cpu    ██▍░░░░░░░░░░░░░░░░░░░░░░░░░░░   8% of 4 CPUs · 31% of one            │
+│ memory ██▒▒░░░░░░░░░░░░░░░░░░░░░░░░░░   6% 0.2 GiB in use · VM limit 4.0 GiB │
+│ disk   ▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   1% 293 MB used · 48.4 GB free        │
 │ pods   ● 6 running   ◐ 1 pending   ✕ 1 crashloop   ○ 1 completed             │
-│ ctrs   ● 1/2 running   ○ 1 exited   images 2 · 53.8 MB                       │
+│ ctrs   ● 2/3 running   ○ 1 exited   images 3 · 62.3 MB                       │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-╭─ Memory · 452 MB (what macOS charges; VM ceiling 1.0/4.0 GiB)  b: next ──────╮
-│ litek8s (ui-design)  ▎             9.6 MB  API server, controllers, node ag… │
-│ pods & containers    ▍            14.7 MB                                    │
-│ Linux kernel + base  █████▏        212 MB  fixed cost: kernel, page tables   │
-│ cache                ███▋          149 MB  reclaimable                       │
-│ freed, still charged █▋           66.9 MB  macOS keeps it until the VM rest… │
+╭─ Memory · 474 MB (what macOS charges; VM ceiling 1.0/4.0 GiB)  b: next ──────╮
+│ litek8s (ui-design)  ▎            11.0 MB  API server, controllers, node ag… │
+│ pods & containers    ▍            14.9 MB                                    │
+│ Linux kernel + base  ████▉         211 MB  fixed cost: kernel, page tables   │
+│ cache                ███▉          167 MB  reclaimable                       │
+│ freed, still charged █▋           70.3 MB  macOS keeps it until the VM rest… │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─ connections · your tools point at ──────────────────────────────────────────╮
 │ API     http://127.0.0.1:59023      ✗ docker context   default               │
@@ -121,37 +121,37 @@ memory side by side with their history (one column per sample, 2 s apart,
 for as long as Home has been on screen), disk and the workloads under them:
 
 ```
-╭─ litek8s ─────────────────────────────────────────────────────────────────────── ● ui-design · macOS VM · up 4m 22s ─╮
+╭─ litek8s ────────────────────────────────────────────────────────────────────── ● ui-design · macOS VM · up 26m 23s ─╮
 │  1 Home  2 Clusters  3 Containers  4 Images  5 Volumes  6 Free space  7 Kubernetes  8 Settings                       │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ cpu · the VM process ───────────────────────────────────╮╭─ memory · what macOS charges; VM ceiling 1.0/4.0 GiB ────╮
-│          ▅█▄▁▅▄▂▃▃▁▃      ▁ ▄  ▂▁▁▁ ▁▃▃▂▁ ▆              ││                                                          │
-│         ▂███████████▄▅▄▅▅▅███████████████▇██             ││                                                          │
-│ ▁ ▃▅▃▄ ▄████████████████████████████████████             ││                                                          │
-│ ████████████████████████████████████████████▂▁▁ ▃▅▃▃▃▁▂▃ ││                                                          │
+│           █▆▄▆▄▄▂▄  ▁▃  ▃▄▄  ▂ ▄▆ ▁        ▃             ││                                                          │
+│          ▇████████▃▂███▄████▅████▄█▄▁█▇▆▃▅▆█             ││                                                          │
+│ ▂▁▁▁ ▂ ▁▂███████████████████████████████████▇            ││                                                          │
+│ █████████████████████████████████████████████▂▃▃▂▄▂▁▁▃▃▂ ││                                                          │
 │ ████████████████████████████████████████████████████████ ││                                                          │
 │ ████████████████████████████████████████████████████████ ││ ▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃ │
-│ █▊░░░░░░░░░░░░░░░░░░░░░░░░░░   6% of 4 CPUs · 25% of one ││ ███▒▒░░░░░░░░░░░░   5% 0.2 GiB in use · VM limit 4.0 GiB │
-│ litek8s (ui-design) ▏          0.1%  API server, contro… ││ litek8s (ui-design) ▏        9.7 MB  API server, contro… │
-│ pods & containers   █████▉    24.7%                      ││ pods & containers   ▎       14.7 MB                      │
-│   pod default/burn… ██         8.5%                      ││ Linux kernel + base ██▊      207 MB  fixed cost: kernel… │
-│   pod default/burn… ██         8.4%                      ││ cache               ██       149 MB  reclaimable         │
-│   pod default/burn… █▉         7.8%                      ││ freed, still charg… ▉       69.1 MB  macOS keeps it unt… │
+│ █▉░░░░░░░░░░░░░░░░░░░░░░░░░░   7% of 4 CPUs · 27% of one ││ █▒░░░░░░░░░░░░░░░   6% 0.2 GiB in use · VM limit 4.0 GiB │
+│ litek8s (ui-design)            0.0%  API server, contro… ││ litek8s (ui-design) ▏       11.1 MB  API server, contro… │
+│ pods & containers   █████▉    26.0%                      ││ pods & containers   ▎       14.9 MB                      │
+│   pod default/burn… ██         8.8%                      ││ Linux kernel + base ██▊      212 MB  fixed cost: kernel… │
+│   pod default/burn… ██         8.6%                      ││ cache               ██▏      167 MB  reclaimable         │
+│   pod default/burn… ██         8.6%                      ││ freed, still charg… ▉       67.6 MB  macOS keeps it unt… │
 │ guest kernel & oth…            0.0%  interrupts, networ… ││                                                          │
-│ VM overhead         ▏          0.8%  virtual devices, v… ││                                                          │
+│ VM overhead         ▏          0.5%  virtual devices, v… ││                                                          │
 ╰──────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
 ╭─ disk · litek8s and its VM disk ─────────────────────────╮╭─ workloads ──────────────────────────────────────────────╮
-│ ▏░░░░░░░░░░░░░░░░░░░░░░░   0% 269 MB used · 55.4 GB free ││ pods        ● 6 running   ◐ 1 pending   ✕ 1 crashloop    │
-│ litek8s itself      ████     178 MB  binary, VM kernel … ││             ○ 1 completed                                │
-│ cluster ui-design   █▍      61.4 MB                      ││ containers  ● 1/2 running   ○ 1 exited                   │
-│   images            █▎      58.4 MB  layers shared by p… ││ images      2 · 53.8 MB                                  │
-│   container layers  ▏        782 kB  what containers wr… ││ volumes     0 · 0 B                                      │
+│ ▏░░░░░░░░░░░░░░░░░░░░░░░   1% 293 MB used · 48.4 GB free ││ pods        ● 6 running   ◐ 1 pending   ✕ 1 crashloop    │
+│ litek8s itself      ███▋     179 MB  binary, VM kernel … ││             ○ 1 completed                                │
+│ cluster ui-design   █▌      73.9 MB                      ││ containers  ● 2/3 running   ○ 1 exited                   │
+│   images            █▌      70.2 MB  8.5 MB reclaimable… ││ images      3 · 62.3 MB                                  │
+│   container layers  ▏        807 kB  what containers wr… ││ volumes     0 · 0 B                                      │
 │   volumes           ▏        328 kB  Docker volumes, em… ││                                                          │
 │   logs              ▏       28.7 kB  pods and container… ││                                                          │
-│   objects           ▏        823 kB  Kubernetes objects… ││                                                          │
-│   other             ▏        1.0 MB  metadata, IP alloc… ││                                                          │
-│ rest of the VM disk ▏        2.1 MB  other clusters, fi… ││                                                          │
-│ deleted in the VM   ▋       26.7 MB  kept by disk.img (… ││                                                          │
+│   objects           ▏        1.4 MB  Kubernetes objects… ││                                                          │
+│   other             ▏        1.1 MB  metadata, IP alloc… ││                                                          │
+│ rest of the VM disk ▏        2.2 MB  other clusters, fi… ││                                                          │
+│ deleted in the VM   ▊       38.3 MB  kept by disk.img (… ││                                                          │
 ```
 
 **Terminals.** Nothing needs a Nerd Font: only box-drawing and block
@@ -213,19 +213,19 @@ Home:
 
 ```
  litek8s  1 Home  2 Clust  3 Ctrs  4 Imgs  5 Vols  6 Space  7 Kube  8 Set
-╭─ ● ui-design · macOS VM · up 4m 27s ───────────────────────────── resources ─╮
-│ cpu    █▊░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   6% of 4 CPUs · 23% of one           │
-│ memory ███▒▒░░░░░░░░░░░░░░░░░░░░░░░░░░   5% 0.2 GiB in use · VM limit 4.0 GiB│
-│ disk   ▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0% 269 MB used · 55.4 GB free       │
+╭─ ● ui-design · macOS VM · up 26m 31s ──────────────────────────── resources ─╮
+│ cpu    ██▍░░░░░░░░░░░░░░░░░░░░░░░░░░░   8% of 4 CPUs · 31% of one            │
+│ memory ██▒▒░░░░░░░░░░░░░░░░░░░░░░░░░░   6% 0.2 GiB in use · VM limit 4.0 GiB │
+│ disk   ▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   1% 293 MB used · 48.4 GB free        │
 │ pods   ● 6 running   ◐ 1 pending   ✕ 1 crashloop   ○ 1 completed             │
-│ ctrs   ● 1/2 running   ○ 1 exited   images 2 · 53.8 MB                       │
+│ ctrs   ● 2/3 running   ○ 1 exited   images 3 · 62.3 MB                       │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-╭─ Memory · 452 MB (what macOS charges; VM ceiling 1.0/4.0 GiB)  b: next ──────╮
-│ litek8s (ui-design)  ▎             9.6 MB  API server, controllers, node ag… │
-│ pods & containers    ▍            14.7 MB                                    │
-│ Linux kernel + base  █████▏        212 MB  fixed cost: kernel, page tables   │
-│ cache                ███▋          149 MB  reclaimable                       │
-│ freed, still charged █▋           66.9 MB  macOS keeps it until the VM rest… │
+╭─ Memory · 474 MB (what macOS charges; VM ceiling 1.0/4.0 GiB)  b: next ──────╮
+│ litek8s (ui-design)  ▎            11.0 MB  API server, controllers, node ag… │
+│ pods & containers    ▍            14.9 MB                                    │
+│ Linux kernel + base  ████▉         211 MB  fixed cost: kernel, page tables   │
+│ cache                ███▉          167 MB  reclaimable                       │
+│ freed, still charged █▋           70.3 MB  macOS keeps it until the VM rest… │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ╭─ connections · your tools point at ──────────────────────────────────────────╮
 │ API     http://127.0.0.1:59023      ✗ docker context   default               │
@@ -379,11 +379,11 @@ memory limit set in Settings, against the limit:
 
 ```
  litek8s  1 Home  2 Clust  3 Ctrs  4 Imgs  5 Vols  6 Space  7 Kube  8 Set  ● dev
-╭─ ● dev · rootless sandbox · up 6h 58m ─────────────────────────── resources ─╮
-│ cpu    ▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0% of 16 CPUs · 7% of one      │
-│ memory ▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0% 157 MB of 33.6 GB           │
-│ disk   ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0% 137 MB used · 1.5 TB free   │
-│ pods   ● 4 running   ◐ 1 pending   ✕ 1 crashloop   ○ 1 completed             │
+╭─ ● dev · rootless sandbox · up 7h 51m ─────────────────────────── resources ─╮
+│ cpu    ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0% of 16 CPUs · 0% of one             │
+│ memory ▍░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0% 0.1 GiB in use · host RAM 31.3 GiB │
+│ disk   ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0% 137 MB used · 1.5 TB free          │
+│ pods   ● 0 running                                                           │
 │ ctrs   ● 1/1 running   images 3 · 122 MB                                     │
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ```
