@@ -92,7 +92,7 @@ and after: one column, the header a single line, the meters, pods and
 containers by state, the breakdown `b` picks, where the tools point:
 
 ```
- litek8s  1 Home  2 Clust  3 Ctrs  4 Imgs  5 Vols  6 Space  7 Kube  8 Set
+ litek8s  1 Home 2 Clust 3 Ctrs 4 Imgs 5 Vols 6 Space 7 Kube 8 Set 9 Obs
 ╭─ ● ui-design · macOS VM · up 26m 31s ──────────────────────────── resources ─╮
 │ cpu    ██▍░░░░░░░░░░░░░░░░░░░░░░░░░░░   8% of 4 CPUs · 31% of one            │
 │ memory ██▒▒░░░░░░░░░░░░░░░░░░░░░░░░░░   6% 0.2 GiB in use · VM limit 4.0 GiB │
@@ -123,7 +123,7 @@ for as long as Home has been on screen), disk and the workloads under them:
 
 ```
 ╭─ litek8s ────────────────────────────────────────────────────────────────────── ● ui-design · macOS VM · up 26m 23s ─╮
-│  1 Home  2 Clusters  3 Containers  4 Images  5 Volumes  6 Free space  7 Kubernetes  8 Settings                       │
+│  1 Home  2 Clusters  3 Containers  4 Images  5 Volumes  6 Free space  7 Kubernetes  8 Settings  9 Observe            │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ cpu · the VM process ───────────────────────────────────╮╭─ memory · what macOS charges; VM ceiling 1.0/4.0 GiB ────╮
 │           █▆▄▆▄▄▂▄  ▁▃  ▃▄▄  ▂ ▄▆ ▁        ▃             ││                                                          │
@@ -213,7 +213,7 @@ shown here as a default install has them (`~/.litek8s`, `~/.kube/config`,
 Home:
 
 ```
- litek8s  1 Home  2 Clust  3 Ctrs  4 Imgs  5 Vols  6 Space  7 Kube  8 Set
+ litek8s  1 Home 2 Clust 3 Ctrs 4 Imgs 5 Vols 6 Space 7 Kube 8 Set 9 Obs
 ╭─ ● ui-design · macOS VM · up 26m 31s ──────────────────────────── resources ─╮
 │ cpu    ██▍░░░░░░░░░░░░░░░░░░░░░░░░░░░   8% of 4 CPUs · 31% of one            │
 │ memory ██▒▒░░░░░░░░░░░░░░░░░░░░░░░░░░   6% 0.2 GiB in use · VM limit 4.0 GiB │
@@ -379,7 +379,7 @@ machine (here omarchy's 16 CPUs and 33.6 GB, over SSH) or, with a CPU or
 memory limit set in Settings, against the limit:
 
 ```
- litek8s  1 Home  2 Clust  3 Ctrs  4 Imgs  5 Vols  6 Space  7 Kube  8 Set  ● dev
+ litek8s  1 Home 2 Clust 3 Ctrs 4 Imgs 5 Vols 6 Space 7 Kube 8 Set 9 Obs  ● dev
 ╭─ ● dev · rootless sandbox · up 7h 51m ─────────────────────────── resources ─╮
 │ cpu    ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0% of 16 CPUs · 0% of one             │
 │ memory ▍░░░░░░░░░░░░░░░░░░░░░░░░░░░░   0% 0.1 GiB in use · host RAM 31.3 GiB │
@@ -393,7 +393,7 @@ Containers, with a compose project (a worker that exited with 3) and a
 confirmation:
 
 ```
- litek8s  1 Home  2 Clust  3 Ctrs  4 Imgs  5 Vols  6 Space  7 Kube  8 Set
+ litek8s 1 Home 2 Clust  3 Ctrs 4 Imgs 5 Vols 6 Space 7 Kube 8 Set 9 Obs
 ╭─ Containers ─────────────────────────────────────────────────── 3/5 running ─╮
 │ NAME                    STATE       IMAGE                   PORTS            │
 │ api                     ● running   nginx:1.27-alpine       18080->80/tcp    │
@@ -437,7 +437,7 @@ come back. It is `docker exec -it` over the Docker API, so it needs no
 Images:
 
 ```
- litek8s  1 Home  2 Clust  3 Ctrs  4 Imgs  5 Vols  6 Space  7 Kube  8 Set
+ litek8s 1 Home 2 Clust 3 Ctrs  4 Imgs 5 Vols 6 Space 7 Kube 8 Set 9 Obs
 ╭─ Images ─────────────────────────────────────────────────────── 3 · 93.3 MB ─╮
 │ IMAGE                           SIZE     AGE   USED BY                       │
 │▌busybox:1.36                      4.1 MB 1250d scratch +7                    │
@@ -450,7 +450,7 @@ Images:
 Free space, and what `p` asks before it frees anything:
 
 ```
- litek8s  1 Home  2 Clust  3 Ctrs  4 Imgs  5 Vols  6 Space  7 Kube  8 Set
+ litek8s 1 Home 2 Clust 3 Ctrs 4 Imgs 5 Vols  6 Space 7 Kube 8 Set 9 Obs
 ╭─ Reclaimable space ───────────────────────────────────────────── 0 B in all ─╮
 │     WHAT                                        ITEMS  SIZE                  │
 │▌[✓] Stopped containers                               2       0 B             │
@@ -461,7 +461,7 @@ Free space, and what `p` asks before it frees anything:
 ╰────────────────╭─ ⚠ Free space? ───────────────────────────╮─────────────────╯
  Selected  0 B   │ Stopped containers: 2 (0 B)               │
                  │ About 0 B freed. This cannot be undone.   │
- litek8s data  31│                                           │d/env/devhome
+ litek8s data  31│                                           │s.litek8s/dev
  disk free    47.│  y  yes    n/esc  no                      │
                  ╰───────────────────────────────────────────╯
  Docker and Kubernetes share one image store: images no container or pod
@@ -475,7 +475,7 @@ Kubernetes, all namespaces (`0`); `ctrl-z` would keep the crashing and
 pending ones:
 
 ```
- litek8s  1 Home  2 Clust  3 Ctrs  4 Imgs  5 Vols  6 Space  7 Kube  8 Set
+ litek8s 1 Home 2 Clust 3 Ctrs 4 Imgs 5 Vols 6 Space  7 Kube 8 Set 9 Obs
  ⎈ litek8s-ui-design  ns all  │ pods
 ╭─ pods(all) [9] ──────────────────────────────────────────────────────────────╮
 │   NAMESPACE NAME                   READY STATUS           RESTARTS AGE       │
@@ -526,7 +526,7 @@ sandbox's size and what it uses, and the other contexts of your kubeconfig
 and a stopped one:
 
 ```
- litek8s  1 Home  2 Clust  3 Ctrs  4 Imgs  5 Vols  6 Space  7 Kube  8 Set  ● dev
+ litek8s 1 Home  2 Clust 3 Ctrs 4 Imgs 5 Vols 6 Space 7 Kube 8 Set 9 Obs  ● dev
 ╭─ Local clusters ──────────────── shared VM: 4 CPUs, 4.3 GB max, 412 MB used ─╮
 │ NAME           STATE       API              NODES MEMORY    AGE  CONTEXT     │
 │▌› dev          ● up        127.0.0.1:6443   1     27.2 MB   8m   litek8s-dev │
@@ -595,23 +595,23 @@ View 9, on the cluster's built-in metrics, logs and alerts
 ([observability.md](observability.md)):
 
 ```
- litek8s  1 Home 2 Clust 3 Ctrs 4 Imgs 5 Vols 6 Space 7 Kube 8 Settings 9 Obs
-┌ Alerts · 3 firing, 0 pending ────────────────────────────────────────────────┐
-│● firing  NodeFilesystemAlmostFull 7m     Node obs-smoke has 4.853% disk left…│
-│● firing  KubePodCrashLooping      6m     default/crasher-778d767f48-4zrkx (b…│
-│● firing  KubePodRestartLoop       5m     default/crasher-778d767f48-4zrkx (b…│
-└──────────────────────────────────────────────────────────────────────────────┘
-┌ Pods by CPU, last 30 min ────────────────────────────────────────────────────┐
-│NAMESPACE    POD           CPU                      MEMORY                    │
-│shop         db-0            800m ▅▅▅ ▅▆▆▆▆▆▇▇▇▇███  60.0 MB ▂▂▂ ▃▃▃▃▃▃▃▃▃▃▃▄▄│
-│default      web-7d9-abc     100m ▁▁▁ ▂▂▂▂▂▂▂▂▂▂▂▂▂   160 MB ▅▅▅ ▅▆▆▆▆▆▇▇▇▇███│
+ litek8s 1 Home 2 Clust 3 Ctrs 4 Imgs 5 Vols 6 Space 7 Kube 8 Set  9 Obs  ● dev
+╭─ Alerts ────────────────────────────────────────────── 3 firing · 0 pending ─╮
+│ ✕ firing  NodeFilesystemAlmostFull 7m     Node obs-smoke has 4.853% disk lef…│
+│ ◐ firing  KubePodCrashLooping      6m     default/crasher-778d767f48-4zrkx (…│
+│ ◐ firing  KubePodRestartLoop       5m     default/crasher-778d767f48-4zrkx (…│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Pods by CPU ────────────────────────────────────────────────── last 30 min ─╮
+│ NAMESPACE    POD          CPU                      MEMORY                    │
+│▌shop         db-0           800m ▅▅▅ ▅▆▆▆▆▆▇▇▇▇███  60.0 MB ▂▂▂ ▃▃▃▃▃▃▃▃▃▃▃▄▄│
+│ default      web-7d9-abc    100m ▁▁▁ ▂▂▂▂▂▂▂▂▂▂▂▂▂   160 MB ▅▅▅ ▅▆▆▆▆▆▇▇▇▇███│
 │                                                                              │
-└──────────────────────────────────────────────────────────────────────────────┘
- l logs  L search logs  s sort  a/A ack  n namespace                     ? help
+╰──────────────────────────────────────────────────────────────────────────────╯
+  l  logs   L  search logs   s  sort   a/A  ack   n  namespace          ?  help
 ```
 
-- **Alerts** first: firing (red when critical), pending, acknowledged
-  (dim); `a` acknowledges the selected pod's alerts, `A` all of them (each
+- **Alerts** first: `✕` firing and critical, `◐` firing, `○` pending or
+  acknowledged (dim); `a` acknowledges the selected pod's alerts, `A` all of them (each
   silenced until it resolves; asks first).
 - **Pods** by CPU (cores, `m` = millicores) or memory (working set; `s`
   switches), top consumers first, with a sparkline per pod over the last 30
