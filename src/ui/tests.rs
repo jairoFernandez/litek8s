@@ -590,6 +590,159 @@ fn home_explains_cpu_and_disk_with_b() {
     assert!(s.contains("─ cpu · the VM process") && s.contains("─ disk · litek8s and its VM disk") && s.contains("deleted in the VM"), "{s}");
 }
 
+fn render_buf(app: &App, w: u16, h: u16) -> ratatui::buffer::Buffer {
+    let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+    t.draw(|f| view::draw(f, app)).unwrap();
+    t.backend().buffer().clone()
+}
+
+fn theme(preset: super::theme::Preset, depth: super::theme::Depth, ascii: bool, bg: Option<super::theme::Bg>) -> super::theme::Theme {
+    super::theme::Theme::build(preset, super::theme::Term { depth, ascii, bg }, super::theme::Background::Auto)
+}
+
+/// Every view, with and without an overlay, at sizes from small to large:
+/// nothing panics, every line is the full width, the tabs and help fit.
+#[test]
+fn every_view_renders_at_many_sizes() {
+    let mut app = sample_app();
+    for (w, h) in [(60, 18), (80, 24), (100, 30), (120, 40), (200, 60)] {
+        for (i, _) in TABS.iter().enumerate() {
+            app.key(key(char::from(b'1' + i as u8)));
+            for overlay in [false, true] {
+                if overlay {
+                    app.key(key('?'));
+                }
+                let s = render(&app, w, h);
+                assert!(s.lines().all(|l| l.chars().count() == w as usize), "{w}x{h}:\n{s}");
+                let tabs = if h >= 30 { 1 } else { 0 };
+                assert!(s.lines().nth(tabs).unwrap().contains(&format!("{} ", i + 1)), "{w}x{h}:\n{s}");
+                assert!(s.lines().last().unwrap().contains("help"), "{w}x{h}:\n{s}");
+                if overlay {
+                    app.key(key('x'));
+                }
+            }
+        }
+    }
+}
+
+/// Home: one column on small terminals, CPU and memory side by side with
+/// their history on wide and tall ones; sparklines go before anything else.
+#[test]
+fn home_collapses_on_small_terminals() {
+    let mut app = sample_app();
+    for i in 0..30 {
+        let mut home = app.home.clone();
+        home.cpu_pct = Some(10.0 + i as f64);
+        app.apply(Msg::Home(Box::new(home)));
+    }
+    assert_eq!(app.history.len(), 31);
+    let wide = render(&app, 120, 40);
+    assert!(wide.contains("─ cpu ") && wide.contains("─ memory ") && wide.contains("─ workloads "), "{wide}");
+    // The graph: block columns rising to the right.
+    assert!(wide.contains("▁") || wide.contains("▂"), "{wide}");
+    let narrow = render(&app, 80, 24);
+    assert!(narrow.contains("─ resources ─") && !narrow.contains("─ workloads "), "{narrow}");
+    assert!(!narrow.contains('▁') && !narrow.contains('▂'), "no sparkline at 80 columns:\n{narrow}");
+    // A bit wider, the sparklines come back in the single column.
+    let mid = render(&app, 96, 30);
+    assert!(mid.contains("─ resources ─") && (mid.contains('▆') || mid.contains('█')), "{mid}");
+}
+
+/// The history is kept only while Home is on screen (no gaps of a
+/// minute between 2 s samples), bounded, and dropped with the cluster.
+#[test]
+fn history_only_while_home_shows() {
+    let mut app = sample_app();
+    assert_eq!(app.history.len(), 1);
+    app.key(key('3'));
+    app.apply(Msg::Home(Box::new(app.home.clone())));
+    assert_eq!(app.history.len(), 1);
+    app.key(key('1'));
+    for _ in 0..HISTORY + 10 {
+        app.apply(Msg::Home(Box::new(app.home.clone())));
+    }
+    assert_eq!(app.history.len(), HISTORY);
+    let (cpu, mem) = *app.history.back().unwrap();
+    assert!((cpu - 0.03).abs() < 1e-6 && (mem - 0.279).abs() < 1e-3, "{cpu} {mem}");
+    let mut down = app.home.clone();
+    down.status = DevStatus::Down;
+    app.apply(Msg::Home(Box::new(down)));
+    assert!(app.history.is_empty());
+}
+
+/// 24-bit, 256 and 16 colors, none (NO_COLOR or `mono`): each frame uses
+/// only the colors its terminal can show.
+#[test]
+fn color_depths_use_only_what_the_terminal_has() {
+    use super::theme::{Bg, Depth, Preset};
+    use ratatui::style::Color;
+    let mut app = sample_app();
+    for (preset, depth, bg) in [
+        (Preset::Default, Depth::True, Some(Bg::Rgb(0x1e, 0x1e, 0x2e))),
+        (Preset::Default, Depth::True, Some(Bg::Rgb(0xff, 0xff, 0xff))),
+        (Preset::Default, Depth::True, None),
+        (Preset::Default, Depth::X256, Some(Bg::Dark)),
+        (Preset::Default, Depth::X16, None),
+        (Preset::HighContrast, Depth::True, None),
+        (Preset::Mono, Depth::True, None),
+        (Preset::Default, Depth::None, None),
+    ] {
+        app.kube.theme = theme(preset, depth, false, bg);
+        for tab in ['1', '3', '6', '7'] {
+            app.key(key(tab));
+            let buf = render_buf(&app, 120, 40);
+            let colors: Vec<Color> = buf.content.iter().flat_map(|c| [c.fg, c.bg]).filter(|c| *c != Color::Reset).collect();
+            let ok = |c: &Color| match (preset, depth) {
+                (Preset::Mono, _) | (_, Depth::None) => false,
+                (Preset::HighContrast, _) | (_, Depth::X16) => !matches!(c, Color::Rgb(..) | Color::Indexed(_)),
+                (_, Depth::X256) => !matches!(c, Color::Rgb(..)),
+                _ => true,
+            };
+            assert!(colors.iter().all(ok), "{preset:?} {depth:?} tab {tab}: {:?}", colors.iter().find(|c| !ok(c)));
+            if depth == Depth::True && preset == Preset::Default {
+                assert!(colors.iter().any(|c| matches!(c, Color::Rgb(..))));
+            }
+        }
+    }
+}
+
+/// `ascii: true`: nothing but ASCII on screen, the layout unchanged.
+#[test]
+fn ascii_mode_draws_only_ascii() {
+    let mut app = sample_app();
+    let plain = render(&app, 120, 40);
+    app.kube.theme = theme(super::theme::Preset::Default, super::theme::Depth::X256, true, None);
+    for (i, _) in TABS.iter().enumerate() {
+        app.key(key(char::from(b'1' + i as u8)));
+        for size in [(80, 24), (120, 40)] {
+            let s = render(&app, size.0, size.1);
+            assert!(s.is_ascii(), "{}", s.chars().filter(|c| !c.is_ascii()).collect::<String>());
+        }
+    }
+    app.key(key('1'));
+    let ascii = render(&app, 120, 40);
+    assert_eq!(ascii.lines().count(), plain.lines().count());
+    assert!(ascii.starts_with("+- litek8s -"), "{ascii}");
+}
+
+/// Status glyphs and their colors are the same everywhere: Home's chips,
+/// the containers' states, the Kubernetes rows.
+#[test]
+fn statuses_look_the_same_everywhere() {
+    use super::theme::{Bg, Depth, Preset};
+    let mut app = sample_app();
+    app.kube.theme = theme(Preset::Default, Depth::True, false, Some(Bg::Dark));
+    let t = *app.theme();
+    let find = |buf: &ratatui::buffer::Buffer, glyph: &str| buf.content.iter().find(|c| c.symbol() == glyph).map(|c| c.fg);
+    let home = render_buf(&app, 80, 24);
+    assert_eq!(find(&home, "●"), Some(t.ok.fg.unwrap()));
+    assert_eq!(find(&home, "○"), Some(t.done.fg.unwrap()));
+    app.key(key('3'));
+    let ctrs = render_buf(&app, 80, 24);
+    assert_eq!(find(&ctrs, "●"), Some(t.ok.fg.unwrap()));
+    assert_eq!(find(&ctrs, "○"), Some(t.done.fg.unwrap()));
+}
+
 /// `cargo test --lib ui::tests::print_screens -- --ignored --nocapture`:
 /// every view at 80x24 and 120x40, to look at.
 #[test]
