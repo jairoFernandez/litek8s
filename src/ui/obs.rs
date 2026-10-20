@@ -35,7 +35,7 @@ pub fn spawn(tx: UnboundedSender<Msg>, visible: Arc<AtomicBool>, wake: Arc<Notif
             }
             let endpoint = ep.lock().unwrap().clone();
             let sample = match endpoint {
-                Some(ep) => sample(&ep).await.unwrap_or_else(|e| ObsSample { error: Some(format!("{e:#}")), ..Default::default() }),
+                Some(ep) => sample(&ep).await.unwrap_or_else(|e| ObsSample { error: Some(explain(format!("{e:#}"))), ..Default::default() }),
                 None => ObsSample { error: Some("the cluster is not running".into()), ..Default::default() },
             };
             if tx.send(Msg::Obs(Box::new(sample))).is_err() {
@@ -47,6 +47,16 @@ pub fn spawn(tx: UnboundedSender<Msg>, visible: Arc<AtomicBool>, wake: Arc<Notif
             }
         }
     })
+}
+
+/// A server without the Prometheus API answers 404: one started before
+/// observability existed (a dev VM still on an older guest).
+fn explain(e: String) -> String {
+    if e.contains("could not find the requested resource") {
+        "this cluster's API server has no metrics API: it predates observability; restart the cluster on the new binary (litek8s dev down --all && litek8s dev up)".into()
+    } else {
+        e
+    }
 }
 
 async fn range(ep: &Endpoint, query: &str, now: i64) -> Result<Vec<(BTreeMap<String, String>, Vec<(i64, f64)>)>> {
