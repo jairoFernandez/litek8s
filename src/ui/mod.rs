@@ -11,7 +11,7 @@ pub mod app;
 pub(crate) mod client;
 mod clusters;
 mod ctx;
-mod docker;
+pub(crate) mod docker;
 mod exec;
 mod home;
 mod kube;
@@ -20,6 +20,8 @@ mod obs;
 /// The API server a kubeconfig context (or the local dev cluster) names,
 /// for the CLI (`litek8s logs`, `alerts`, `query`).
 pub(crate) use kube::resolve as resolve_kube;
+// What `litek8s mcp` reuses of the Kubernetes view.
+pub(crate) use kube::{auth as kube_auth, ops as kube_ops, resources as kube_resources, state as kube_state};
 pub mod theme;
 pub mod model;
 pub mod view;

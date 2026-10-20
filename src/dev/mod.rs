@@ -87,10 +87,15 @@ pub enum DevCommand {
     Status {
         #[arg(long, default_value = cluster::DEFAULT)]
         name: String,
+        #[arg(short = 'o', long, value_parser = ["text", "json"], default_value = "text", help = "Output format")]
+        output: String,
     },
     /// List the local clusters
     #[command(alias = "ls")]
-    List,
+    List {
+        #[arg(short = 'o', long, value_parser = ["text", "json"], default_value = "text", help = "Output format")]
+        output: String,
+    },
     /// Stop a cluster and delete its objects, images, volumes and kube context (same as `delete`)
     Reset {
         #[arg(long, default_value = cluster::DEFAULT)]
@@ -327,8 +332,10 @@ pub async fn run(command: DevCommand) -> Result<()> {
         DevCommand::Down { all: true, .. } => down_all().await,
         DevCommand::Down { name, node: Some(node), .. } => node_up_down(&cluster::Cluster::new(&name)?, &node, false).await,
         DevCommand::Down { name, .. } => down(&cluster::Cluster::new(&name)?).await,
-        DevCommand::Status { name } => status(&cluster::Cluster::new(&name)?).await,
-        DevCommand::List => list().await,
+        DevCommand::Status { name, output } if output == "json" => print_json(&status_json(&cluster::Cluster::new(&name)?).await?),
+        DevCommand::Status { name, .. } => status(&cluster::Cluster::new(&name)?).await,
+        DevCommand::List { output } if output == "json" => print_json(&list_json().await),
+        DevCommand::List { .. } => list().await,
         DevCommand::Reset { name } | DevCommand::Delete { name } => delete(&cluster::Cluster::new(&name)?).await,
         DevCommand::Load { name, images } => load(&cluster::Cluster::new(&name)?, images).await,
         DevCommand::Setup => setup(),
@@ -851,6 +858,76 @@ async fn status(cluster: &cluster::Cluster) -> Result<()> {
     out!("  data:     {data}");
     let _ = std::io::stdout().write_all(text.as_bytes());
     Ok(())
+}
+
+fn print_json(v: &Value) -> Result<()> {
+    use std::io::Write as _;
+    // A closed pipe (`| head`) is not an error.
+    let _ = writeln!(std::io::stdout(), "{}", serde_json::to_string_pretty(v)?);
+    Ok(())
+}
+
+/// `dev status -o json`: what `dev status` prints, for scripts and agents.
+pub async fn status_json(cluster: &cluster::Cluster) -> Result<Value> {
+    let home = dev_home()?;
+    let chome = cluster.home(&home);
+    let mut v = serde_json::json!({
+        "name": cluster.name,
+        "context": cluster.context(),
+        "exists": cluster.exists(&home),
+        "running": false,
+        "docker_socket": cluster.docker_socket(),
+    });
+    let Some(state) = running(&chome) else { return Ok(v) };
+    v["running"] = true.into();
+    v["mode"] = state.mode.clone().into();
+    v["pid"] = state.pid.into();
+    v["uptime_seconds"] = (now_ms().saturating_sub(state.started_unix_ms) / 1000).into();
+    v["server"] = server(state.port).into();
+    if let Some(s) = &state.docker_socket {
+        v["docker_socket"] = serde_json::json!(s);
+    }
+    if let Some(ip) = &state.vm_ip {
+        v["vm_ip"] = ip.clone().into();
+    }
+    v["nodes"] = state.nodes.unwrap_or(1).into();
+    if let Ok((_, body)) = http(state.port, hyper::Method::GET, "/api/v1/pods", None).await {
+        if let Ok(list) = serde_json::from_slice::<Value>(&body) {
+            let pods = list["items"].as_array().cloned().unwrap_or_default();
+            let running = pods.iter().filter(|p| p.pointer("/status/phase").and_then(Value::as_str) == Some("Running")).count();
+            v["nodes_ready"] = nodes_ready(state.port).await.into();
+            v["pods_running"] = running.into();
+            v["pods_total"] = pods.len().into();
+        }
+    }
+    let mem = stats().await.into_iter().find(|s| s.name == cluster.name).map(|s| s.memory_bytes).or_else(|| memory_bytes(&state));
+    if let Some(m) = mem {
+        v["memory_bytes"] = m.into();
+    }
+    v["data_dir"] = if cfg!(target_os = "macos") { serde_json::json!(cluster.guest_data_dir()) } else { serde_json::json!(cluster.data_dir(&home)) };
+    Ok(v)
+}
+
+/// `dev list -o json`.
+pub async fn list_json() -> Value {
+    let rows: Vec<Value> = clusters()
+        .await
+        .into_iter()
+        .map(|c| {
+            serde_json::json!({
+                "name": c.name,
+                "context": c.context,
+                "running": c.running.is_some(),
+                "server": c.running.as_ref().map(|s| server(s.port)),
+                "nodes": c.nodes,
+                "memory_bytes": c.memory,
+                "created_unix_ms": c.created_unix_ms,
+                "docker_socket": c.docker_socket,
+            })
+        })
+        .collect();
+    let env = env_state().map(|e| serde_json::json!({"mode": e.mode, "pid": e.pid, "cpus": e.cpus, "memory_mib": e.memory_mib, "memory_bytes": env_memory(&e)}));
+    serde_json::json!({"clusters": rows, "environment": env})
 }
 
 /// One row of `dev list` and of the UI's Clusters view.

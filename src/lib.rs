@@ -20,6 +20,7 @@ pub mod kv_cache;
 pub mod llm;
 pub mod manifest;
 pub mod matrix;
+pub mod mcp;
 pub mod model;
 pub mod node;
 pub mod obs;

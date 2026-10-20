@@ -49,8 +49,10 @@ pub struct LogsArgs {
     pub node: Option<String>,
     #[arg(long, help = "Leave out logs of containers that are gone")]
     pub live_only: bool,
-    #[arg(long, help = "Print JSON lines")]
+    #[arg(long, help = "Print JSON lines (same as -o json)")]
     pub json: bool,
+    #[arg(short = 'o', long, value_parser = ["text", "json"], help = "Output format: json prints one JSON object per line")]
+    pub output: Option<String>,
     #[arg(long, help = "kubeconfig context")]
     pub context: Option<String>,
     /// Legacy daemon: how many lines.
@@ -137,9 +139,10 @@ pub async fn logs(a: LogsArgs) -> Result<()> {
     let tty = std::io::stdout().is_terminal();
     let mut colors = BTreeMap::new();
     let mut lines = Lines::new(resp.into_body());
+    let json_out = a.json || a.output.as_deref() == Some("json");
     while let Some(line) = lines.next().await {
         if let Ok(v) = serde_json::from_slice::<Value>(&line) {
-            print_line(&v, a.json, &mut colors, tty);
+            print_line(&v, json_out, &mut colors, tty);
         }
     }
     Ok(())
@@ -182,6 +185,8 @@ pub struct AlertsArgs {
     pub command: Option<AlertsCommand>,
     #[arg(long, global = true, help = "kubeconfig context")]
     pub context: Option<String>,
+    #[arg(short = 'o', long, global = true, value_parser = ["text", "json"], help = "Output format")]
+    pub output: Option<String>,
 }
 
 fn target(labels: &Value) -> String {
@@ -198,7 +203,7 @@ fn ago(ms: i64) -> String {
     }
 }
 
-fn silence_object(matchers: Vec<Value>, ends_ms: i64, comment: &str, until_resolved: bool) -> Value {
+pub(crate) fn silence_object(matchers: Vec<Value>, ends_ms: i64, comment: &str, until_resolved: bool) -> Value {
     let mut meta = json!({"generateName": "silence-"});
     if until_resolved {
         meta["annotations"] = json!({crate::obs::alerts::UNTIL_RESOLVED: "true"});
@@ -218,7 +223,7 @@ fn silence_object(matchers: Vec<Value>, ends_ms: i64, comment: &str, until_resol
     })
 }
 
-fn parse_matcher(m: &str) -> Result<Value> {
+pub(crate) fn parse_matcher(m: &str) -> Result<Value> {
     for (op, re, eq) in [("=~", true, true), ("!~", true, false), ("!=", false, false), ("=", false, true)] {
         if let Some((name, value)) = m.split_once(op) {
             return Ok(json!({"name": name.trim(), "value": value.trim().trim_matches('"'), "isRegex": re, "isEqual": eq}));
@@ -227,14 +232,20 @@ fn parse_matcher(m: &str) -> Result<Value> {
     bail!("bad matcher {m:?}: use name=value, name!=value, name=~regex or name!~regex")
 }
 
-const SILENCES: &str = "/apis/observability.litek8s.dev/v1/silences";
+pub(crate) const SILENCES: &str = "/apis/observability.litek8s.dev/v1/silences";
 
 pub async fn alerts(a: AlertsArgs) -> Result<()> {
     let ep = endpoint(a.context.as_deref())?;
+    let json_out = a.output.as_deref() == Some("json");
     match a.command.unwrap_or(AlertsCommand::List { all: false, json: false }) {
         AlertsCommand::List { all, json } => {
-            let v = ep.json(Method::GET, "/litek8s/v1/alerts", None).await?;
-            if json {
+            let mut v = ep.json(Method::GET, "/litek8s/v1/alerts", None).await?;
+            if json || json_out {
+                if !all {
+                    if let Some(rows) = v["alerts"].as_array_mut() {
+                        rows.retain(|r| r["state"] != "resolved");
+                    }
+                }
                 println!("{}", serde_json::to_string_pretty(&v)?);
                 return Ok(());
             }
@@ -275,6 +286,10 @@ pub async fn alerts(a: AlertsArgs) -> Result<()> {
             let d = crate::obs::tsdb::parse_duration(&duration)?;
             let obj = silence_object(ms, crate::obs::tsdb::now_ms() + d.as_millis() as i64, &comment, false);
             let created = ep.json(Method::POST, SILENCES, Some(&obj)).await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&created)?);
+                return Ok(());
+            }
             println!("silence {} created (until {})", created["metadata"]["name"].as_str().unwrap_or_default(), created["spec"]["endsAt"].as_str().unwrap_or_default());
         }
         AlertsCommand::Ack { id, comment } => {
@@ -284,21 +299,37 @@ pub async fn alerts(a: AlertsArgs) -> Result<()> {
             if targets.is_empty() {
                 bail!("no active alert with fingerprint or name {id:?} (see `litek8s alerts`)");
             }
+            let mut out = Vec::new();
             for t in targets {
                 let ms: Vec<Value> = t["labels"].as_object().into_iter().flatten().map(|(k, v)| json!({"name": k, "value": v, "isRegex": false, "isEqual": true})).collect();
                 // Until it resolves (the silence goes away then), at most a week.
                 let obj = silence_object(ms, crate::obs::tsdb::now_ms() + 7 * 86_400_000, &comment, true);
                 let created = ep.json(Method::POST, SILENCES, Some(&obj)).await?;
+                if json_out {
+                    out.push(created);
+                    continue;
+                }
                 println!("acknowledged {} {} (silence {})", t["labels"]["alertname"].as_str().unwrap_or_default(), target(&t["labels"]), created["metadata"]["name"].as_str().unwrap_or_default());
+            }
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&out)?);
             }
         }
         AlertsCommand::Unsilence { name } => {
-            ep.json(Method::DELETE, &format!("{SILENCES}/{}", enc(&name)), None).await?;
+            let deleted = ep.json(Method::DELETE, &format!("{SILENCES}/{}", enc(&name)), None).await?;
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&deleted)?);
+                return Ok(());
+            }
             println!("silence {name} deleted");
         }
         AlertsCommand::Silences => {
             let v = ep.json(Method::GET, SILENCES, None).await?;
             let items = v["items"].as_array().cloned().unwrap_or_default();
+            if json_out {
+                println!("{}", serde_json::to_string_pretty(&items)?);
+                return Ok(());
+            }
             if items.is_empty() {
                 println!("No silences.");
             }
@@ -332,8 +363,10 @@ pub struct QueryArgs {
     pub range: Option<String>,
     #[arg(long, default_value = "1m", help = "Step of a range query")]
     pub step: String,
-    #[arg(long)]
+    #[arg(long, help = "Print the result as JSON (same as -o json)")]
     pub json: bool,
+    #[arg(short = 'o', long, value_parser = ["text", "json"], help = "Output format: json prints the Prometheus API's data object")]
+    pub output: Option<String>,
     #[arg(long, help = "kubeconfig context")]
     pub context: Option<String>,
 }
@@ -354,7 +387,7 @@ pub async fn query(a: QueryArgs) -> Result<()> {
     if v["status"] != "success" {
         bail!("{}", v["error"].as_str().unwrap_or("query failed"));
     }
-    if a.json {
+    if a.json || a.output.as_deref() == Some("json") {
         println!("{}", serde_json::to_string_pretty(&v["data"])?);
         return Ok(());
     }
