@@ -11,7 +11,7 @@ litek8s ui --cluster ci     # starting on the local cluster `ci`
 ssh -t box litek8s ui       # another machine's, in your terminal
 ```
 
-Eight views, `1`-`8` (or `tab`) to switch, `?` for the keys of each:
+Nine views, `1`-`9` (or `tab`) to switch, `?` for the keys of each:
 
 | view | what it gives you |
 |---|---|
@@ -23,6 +23,7 @@ Eight views, `1`-`8` (or `tab`) to switch, `?` for the keys of each:
 | **6 Free space** | what can be reclaimed: stopped containers, dangling images, build cache, unused images, unused volumes; select with `space`, `p` frees it |
 | **7 Kubernetes** | a cluster UI for any cluster or context (litek8s, k3s, EKS, GKE, …), k9s-style: `:` any resource (CRDs too), `/` filters and selectors, describe, YAML, edit with a server dry run and a diff, logs of pods and whole workloads, shells, port-forwards, xray trees; see [Kubernetes](#kubernetes-a-cluster-ui) |
 | **8 Settings** | CPUs, memory, shared directories, API port, where published ports listen; switch the docker and kubectl contexts to litek8s and back; edit the settings file in `$EDITOR` |
+| **9 Observe** | the cluster's alerts and its pods by CPU or memory with sparklines of the last 30 minutes, from the API server's built-in metrics; every log of a pod (gone containers included), a regex search of every pod's logs, acknowledge alerts; see [Observe](#observe) and [observability.md](observability.md) |
 
 Everything that deletes or stops asks first, and says what goes: removing a
 compose project lists its containers, deleting a cluster says it deletes
@@ -39,10 +40,10 @@ shown here as a default install has them (`~/.litek8s`, `~/.kube/config`,
 Home:
 
 ```
- litek8s  1 Home 2 Clusters 3 Ctrs 4 Images 5 Vols 6 Space 7 Kube 8 Settings
+ litek8s  1 Home 2 Clust 3 Ctrs 4 Imgs 5 Vols 6 Space 7 Kube 8 Settings 9 Obs
 ┌ Cluster dev ─────────────────────────┐┌ Resources ───────────────────────────┐
 │● up  macOS VM, up 22m 50s            ││CPU             1% of 4 CPUs          │
-│API      http://127.0.0.1:6443        ││Memory ████    466 MB / 4.1 GB        │
+│API      http://127.0.0.1:6443        ││Memory ████  466 MB of 4.1 GB VM limit│
 │Docker   ~/.litek8s/docker.sock       ││Disk      269 MB used, 131 GB free    │
 │Engine   API 27.5.1 (aarch64)         ││Ctrs   3/3 running   Pods 4/4         │
 │VM IP    192.168.64.21                ││Images 4  (200 MB)                    │
@@ -56,6 +57,14 @@ Home:
 
  u up  d down  R delete  b breakdown  2 clusters                         ? help
 ```
+
+The memory gauge reads *used of limit*: on the Mac the total is the VM's
+`--memory` (`dev up --memory`, Settings), the most the VM may ever use, not
+memory set aside: macOS gives the VM pages only as the guest touches them
+(and the VM's dynamic ceiling keeps the guest below it while it does not
+need more); on Linux it is the sandbox's limit when one is set, else the
+machine's RAM. The memory breakdown repeats
+it as its last line ("VM limit (--memory) … a ceiling, not reserved").
 
 Under it, Home explains its figures: what the Resources box's memory, CPU
 and disk are made of, one box at a time on 80x24 (`b` shows the next; a
@@ -194,7 +203,7 @@ On Linux the mode is `rootless sandbox`; with a CPU or memory limit set
 Containers, with a compose project and a confirmation:
 
 ```
- litek8s  1 Home 2 Clusters 3 Ctrs 4 Images 5 Vols 6 Space 7 Kube 8 Settings
+ litek8s  1 Home 2 Clust 3 Ctrs 4 Imgs 5 Vols 6 Space 7 Kube 8 Settings 9 Obs
 ┌ Containers (3/3 running) ────────────────────────────────────────────────────┐
 │NAME                      STATE     IMAGE                   PORTS             │
 │▾ shop                    3/3 up    compose project                           │
@@ -278,7 +287,7 @@ containers and unused images on the Mac:
 Kubernetes, all namespaces (`0`), `ctrl-z` would keep the two crashing pods:
 
 ```
- litek8s  1 Home 2 Clusters 3 Ctrs 4 Images 5 Vols 6 Space 7 Kube 8 Settings
+ litek8s  1 Home 2 Clust 3 Ctrs 4 Imgs 5 Vols 6 Space 7 Kube 8 Settings 9 Obs
  ⎈ litek8s-ui-test  ns all  │ pods
 ┌ pods(all) [6] ───────────────────────────────────────────────────────────────┐
 │ NAMESPACE NAME                   READY STATUS           RESTARTS AGE         │
@@ -323,7 +332,7 @@ sandbox's size and what it uses, and the other contexts of your kubeconfig
 and a stopped one:
 
 ```
- litek8s  1 Home 2 Clusters 3 Ctrs 4 Images 5 Vols 6 Space 7 Kube 8 Settings
+ litek8s  1 Home 2 Clust 3 Ctrs 4 Imgs 5 Vols 6 Space 7 Kube 8 Settings 9 Obs
 ┌ Local clusters · shared VM: 4 CPUs, 4.3 GB max, 412 MB used ─────────────────┐
 │NAME           STATE     API              NODES MEMORY    AGE  CONTEXT        │
 │● dev          up        127.0.0.1:6443   1     27.2 MB   8m   litek8s-dev    │
@@ -384,6 +393,43 @@ local cluster comes back.
 While a cluster or its engine is down, Home says so instead of counting
 nothing: `Ctrs –`, `Pods –`, `Images – (engine not running)`, not `0/0` and
 `0 (0 B)`.
+
+## Observe
+
+View 9, on the cluster's built-in metrics, logs and alerts
+([observability.md](observability.md)):
+
+```
+ litek8s  1 Home 2 Clust 3 Ctrs 4 Imgs 5 Vols 6 Space 7 Kube 8 Settings 9 Obs
+┌ Alerts · 3 firing, 0 pending ────────────────────────────────────────────────┐
+│● firing  NodeFilesystemAlmostFull 7m     Node obs-smoke has 4.853% disk left…│
+│● firing  KubePodCrashLooping      6m     default/crasher-778d767f48-4zrkx (b…│
+│● firing  KubePodRestartLoop       5m     default/crasher-778d767f48-4zrkx (b…│
+└──────────────────────────────────────────────────────────────────────────────┘
+┌ Pods by CPU, last 30 min ────────────────────────────────────────────────────┐
+│NAMESPACE    POD           CPU                      MEMORY                    │
+│shop         db-0            800m ▅▅▅ ▅▆▆▆▆▆▇▇▇▇███  60.0 MB ▂▂▂ ▃▃▃▃▃▃▃▃▃▃▃▄▄│
+│default      web-7d9-abc     100m ▁▁▁ ▂▂▂▂▂▂▂▂▂▂▂▂▂   160 MB ▅▅▅ ▅▆▆▆▆▆▇▇▇▇███│
+│                                                                              │
+└──────────────────────────────────────────────────────────────────────────────┘
+ l logs  L search logs  s sort  a/A ack  n namespace                     ? help
+```
+
+- **Alerts** first: firing (red when critical), pending, acknowledged
+  (dim); `a` acknowledges the selected pod's alerts, `A` all of them (each
+  silenced until it resolves; asks first).
+- **Pods** by CPU (cores, `m` = millicores) or memory (working set; `s`
+  switches), top consumers first, with a sparkline per pod over the last 30
+  minutes (one cell per ~2 minutes; a gap where there was no sample).
+  `n` cycles namespaces, `/` filters.
+- **Logs**: `l` opens every log of the selected pod over the last hour,
+  following, including containers that restarted or are gone; `L` asks
+  for a regex and searches every pod's logs (of the namespace shown) over
+  the last hour, then follows.
+
+It reads `/prometheus/api/v1/query_range` (two queries) and
+`/litek8s/v1/alerts` every 10 s while the view is on screen, and nothing
+otherwise; against an API server with `--no-observability` it says so.
 
 ## Settings: `~/.litek8s/config.yaml`
 
@@ -825,7 +871,7 @@ stripped macOS arm64 binary (33.41 MB on main c620693, 35.43 MB with it;
 
 | where | keys |
 |---|---|
-| everywhere | `1`-`8`/`tab`/`shift-tab` views, `↑↓`/`jk`/`PgUp`/`PgDn`/`g`/`G` move, `/` filter the list (`esc` clears), `ctrl-r` refresh, `?` help, `q` or `ctrl-c` quit |
+| everywhere | `1`-`9`/`tab`/`shift-tab` views, `↑↓`/`jk`/`PgUp`/`PgDn`/`g`/`G` move, `/` filter the list (`esc` clears), `ctrl-r` refresh, `?` help, `q` or `ctrl-c` quit |
 | Home | `u` up, `d` down (asks), `R` delete the cluster (asks), `b` the next breakdown (memory, CPU, disk) |
 | Clusters | `n` new (`tab` between name and nodes), `u` up, `d` down (asks), `D`/`del` delete (asks), `enter` show it (a local cluster: every view, then asks about `kubectl`/`docker`; another context: the Kubernetes view) |
 | Containers | `l`/`enter` logs, `s` shell, `u` start, `x` stop (asks), `r` restart (asks), `d`/`del` remove (asks), `space` fold a project |
@@ -833,6 +879,7 @@ stripped macOS arm64 binary (33.41 MB on main c620693, 35.43 MB with it;
 | Free space | `space` select a category, `p`/`enter` free the selected (asks) |
 | Kubernetes | see [its keys](#kubernetes-keys); `?` there lists the ones of what is shown |
 | Settings | `enter` edit, `del` back to the default, `space` toggle / switch a context |
+| Observe | `l`/`enter` the pod's logs, `L` search every pod's logs, `s` sort by CPU/memory, `n`/`N` namespace, `a` acknowledge the pod's alerts, `A` all (asks) |
 | logs | `f` follow, `w` wrap, `c` clear, `esc` back |
 
 `--mouse` turns on clicks (tabs, rows) and the wheel; it is off by default

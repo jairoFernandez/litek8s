@@ -32,8 +32,14 @@ pub const PROTOCOL_VERSION: &str = "litek8s-agent/v1";
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Message {
     // ---- agent → server
-    /// First message: the Node object to register (labels, capacity, ...).
-    Hello { node: Value },
+    /// First message: the Node object to register (labels, capacity, ...),
+    /// and what this agent can do beyond the base protocol (`metrics`,
+    /// `logs`): the server only uses those with agents that announce them.
+    Hello {
+        node: Value,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        features: Vec<String>,
+    },
     PodStatus { namespace: String, name: String, uid: String, status: Value },
     /// A pod marked for graceful deletion has stopped on this node: the
     /// server may now remove the object.
@@ -44,6 +50,14 @@ pub enum Message {
     /// Sent every few seconds: renews the node's Lease. The server answers
     /// each with `HeartbeatAck`, so both ends notice a dead connection.
     Heartbeat,
+    /// A batch of samples (see `crate::obs::node`): series not sent on this
+    /// connection before come with their labels, then only by id.
+    Metrics {
+        ts: i64,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        series: Vec<(u32, Vec<(String, String)>)>,
+        values: Vec<(u32, f64)>,
+    },
     /// A stream finished; for exec, with the command's exit code.
     StreamDone {
         stream: u32,
@@ -62,6 +76,10 @@ pub enum Message {
         /// Cluster DNS answers on port 53 at `api_host`.
         #[serde(default)]
         cluster_dns: bool,
+        /// Observability is on: send metrics this often, keep the log
+        /// archive this way. Absent: send none.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        obs: Option<crate::obs::ObsSettings>,
     },
     HeartbeatAck,
     /// The other nodes of the pod overlay (all of them, each time).
@@ -117,6 +135,9 @@ pub enum Message {
         limit_bytes: Option<i64>,
     },
     PortForward { stream: u32, pod_uid: String, port: u16 },
+    /// Search this node's container logs; matching lines come back as JSON
+    /// lines on the stream (`crate::obs::logs`).
+    LogQuery { stream: u32, query: crate::obs::logs::LogQuery },
     Resize { stream: u32, width: u16, height: u16 },
     /// The client went away: stop the stream.
     Cancel { stream: u32 },

@@ -202,7 +202,13 @@ impl<R: PodRuntime> Agent<R> {
                     return Err(format!("persistentvolumeclaim \"{claim}\" is not bound"));
                 }
                 let pv_obj = self.lookup("persistentvolumes", "", pv).await?;
-                match pv_obj.as_ref().and_then(|p| p.pointer("/spec/hostPath/path")).and_then(Value::as_str) {
+                let capacity = pv_obj.as_ref().and_then(|p| p.pointer("/spec/capacity/storage")).and_then(Value::as_str).and_then(crate::kube::quantity::parse_units);
+                let host_path = pv_obj.as_ref().and_then(|p| p.pointer("/spec/hostPath/path")).and_then(Value::as_str);
+                let data = host_path.map(std::path::PathBuf::from).or_else(|| self.runtime().volume_path(&pv_volume_name(pv)));
+                if let Some(path) = data {
+                    self.track_claim(uid, crate::obs::node::ClaimRef { namespace: ns.to_string(), claim: claim.to_string(), path, capacity: capacity.map(|c| c as u64) });
+                }
+                match host_path {
                     Some(path) => Prepared::HostPath(path.to_string()),
                     None => {
                         let v = pv_volume_name(pv);

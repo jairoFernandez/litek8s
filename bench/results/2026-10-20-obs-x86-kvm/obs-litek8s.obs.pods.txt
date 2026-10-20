@@ -1,0 +1,5 @@
+bench   loggen-5bbc7c8c49-2fslw   1/1   Running   0     26m
+bench   loggen-5bbc7c8c49-ddn75   1/1   Running   0     26m
+bench   web-6cff74df77-h6vwf      1/1   Running   0     26m
+bench   web-6cff74df77-nktrb      1/1   Running   0     26m
+bench   web-6cff74df77-vs7r8      1/1   Running   0     26m

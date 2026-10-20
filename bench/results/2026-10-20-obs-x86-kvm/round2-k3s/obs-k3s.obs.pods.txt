@@ -1,0 +1,14 @@
+bench         loggen-75b67c8d7-4tmlt                                      1/1   Running   0     7m56s
+bench         loggen-75b67c8d7-8lcsj                                      1/1   Running   0     7m56s
+bench         web-64975f8f8-h9bgp                                         1/1   Running   0     7m56s
+bench         web-64975f8f8-jjmff                                         1/1   Running   0     7m56s
+bench         web-64975f8f8-pps6d                                         1/1   Running   0     7m56s
+kube-system   coredns-7cfb7bc9c7-n49dp                                    1/1   Running   0     7m56s
+kube-system   local-path-provisioner-77b9867795-44fv8                     1/1   Running   0     7m56s
+monitoring    alertmanager-kube-prometheus-stack-alertmanager-0           2/2   Running   0     92s
+monitoring    alloy-g5qff                                                 2/2   Running   0     22s
+monitoring    kube-prometheus-stack-kube-state-metrics-687686d88b-gjhx9   1/1   Running   0     96s
+monitoring    kube-prometheus-stack-operator-55b46c59dd-lnm7v             1/1   Running   0     96s
+monitoring    kube-prometheus-stack-prometheus-node-exporter-sclrb        1/1   Running   0     96s
+monitoring    loki-0                                                      2/2   Running   0     74s
+monitoring    prometheus-kube-prometheus-stack-prometheus-0               2/2   Running   0     93s

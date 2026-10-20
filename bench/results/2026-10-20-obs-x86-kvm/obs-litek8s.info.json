@@ -1,0 +1,49 @@
+{
+ "server_version": "v1.33.0+litek8s",
+ "k3s_version": "",
+ "crun_version": "crun version 1.14.1",
+ "charts": "[]",
+ "pods": [
+  {
+   "ns": "bench",
+   "name": "loggen-5bbc7c8c49-2fslw",
+   "images": [
+    "busybox:1.36"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "bench",
+   "name": "loggen-5bbc7c8c49-ddn75",
+   "images": [
+    "busybox:1.36"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "bench",
+   "name": "web-6cff74df77-h6vwf",
+   "images": [
+    "nginx:alpine"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "bench",
+   "name": "web-6cff74df77-nktrb",
+   "images": [
+    "nginx:alpine"
+   ],
+   "restarts": 0
+  },
+  {
+   "ns": "bench",
+   "name": "web-6cff74df77-vs7r8",
+   "images": [
+    "nginx:alpine"
+   ],
+   "restarts": 0
+  }
+ ],
+ "mem_total_kib": 2977660
+}

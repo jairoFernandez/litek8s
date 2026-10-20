@@ -217,6 +217,19 @@ litek8s agent --join https://home.example:6443 --token ... --node-grace-period 1
   `tolerationSeconds` (default 300 s, `--default-unreachable-toleration-seconds`)
   and rescheduled. A node that comes back sooner keeps its pods.
 
+Metrics, logs and alerts are built in, instead of kube-prometheus-stack and
+Loki: every node samples its containers and machine into an embedded
+time-series store with a Prometheus-compatible API (Grafana data source:
+`http://<server>:6443/prometheus`), log search runs across every pod and
+node, and built-in and custom alert rules notify a webhook, ntfy or
+Telegram. See [docs/observability.md](docs/observability.md).
+
+```bash
+litek8s logs -l app=web --since 1h --grep ERROR
+litek8s query 'topk(5, sum by (pod) (rate(container_cpu_usage_seconds_total[5m])))'
+litek8s alerts
+```
+
 `bench/cluster.sh up 3` builds a 3-node cluster of local VMs for testing,
 `compat/run.sh --tiers M1` checks cross-node behaviour, and `bench/soak.sh`
 runs it for a day with churn (results in `bench/SOAK.md`).

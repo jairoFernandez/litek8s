@@ -2,7 +2,8 @@
 # Reproducible litek8s vs k3s footprint benchmark on a small Linux node.
 #
 #   bench/run.sh [phase...]      phases: litek8s rpc k3s k3s-minimal kube kube-crun
-#                                        argocd-k3s argocd-litek8s   (default: litek8s rpc k3s k3s-minimal)
+#                                        argocd-k3s argocd-litek8s obs-k3s obs-litek8s
+#                                        (default: litek8s rpc k3s k3s-minimal)
 #
 # Each system gets a fresh throwaway VM from bench/vm.sh (Ubuntu 24.04 arm64,
 # 2 vCPU, 1 GiB RAM, no swap: an AWS t4g.micro shape). The `rpc` phase reuses
@@ -16,6 +17,8 @@
 #              amd64 under KVM, see vm.sh) NODE_ADDR/NODE_SSH_PORT (rpc on real hosts)
 #              LITEK8S_COMMIT=<id> (recorded when the checkout has no .git)
 #              argocd phases: ARGO_VM_MEM=2048 ARGO_VM_CPUS=2 ARGO_RUNS=3 ARGO_CHART_VERSION=10.10.5
+#              obs phases: OBS_VM_MEM=3072 OBS_VM_CPUS=2 OBS_WARMUP_SECS=900 OBS_WINDOW_SECS=3600
+#              OBS_QUERY_RUNS=20 KPS_CHART_VERSION LOKI_CHART_VERSION ALLOY_CHART_VERSION (default: latest)
 # Real hosts instead of local VMs: see the BENCH_HOST_<name> note in bench/vm.sh
 # (names: lk, lknode, k3s, k3smin).
 set -euo pipefail
@@ -35,12 +38,17 @@ OUT="${OUT:-$HERE/results/$(date -u +%Y%m%dT%H%M%SZ)}"
 IMAGE="nginx:alpine"
 LK_SOCK=/run/litek8s/daemon.sock
 PORT_LK=2291 PORT_K3S=2292 PORT_K3SMIN=2293 PORT_NODE=2294 PORT_KUBE=2295 PORT_KUBECRUN=2296
-PORT_ARGOK3S=2297 PORT_ARGOLK=2298
+PORT_ARGOK3S=2297 PORT_ARGOLK=2298 PORT_OBSK3S=2299 PORT_OBSLK=2300
 GUEST_ARCH="${LITEK8S_ARCH:-$([[ "$(uname -m)" == x86_64 ]] && echo amd64 || echo arm64)}"
 ARGO_VM_MEM="${ARGO_VM_MEM:-2048}"
 ARGO_VM_CPUS="${ARGO_VM_CPUS:-2}"
 ARGO_RUNS="${ARGO_RUNS:-3}"
 ARGO_CHART_VERSION="${ARGO_CHART_VERSION:-10.10.5}"
+OBS_VM_MEM="${OBS_VM_MEM:-3072}"
+OBS_VM_CPUS="${OBS_VM_CPUS:-2}"
+OBS_WARMUP_SECS="${OBS_WARMUP_SECS:-900}"
+OBS_WINDOW_SECS="${OBS_WINDOW_SECS:-3600}"
+OBS_QUERY_RUNS="${OBS_QUERY_RUNS:-20}"
 HELM_VERSION="${HELM_VERSION:-v3.19.0}"
 KUBECTL_VERSION="${KUBECTL_VERSION:-v1.34.1}"
 KUBE_URL=http://127.0.0.1:6443
@@ -669,6 +677,135 @@ PY' | save "$tag.info.json"
   [[ -n "${KEEP_VMS:-}" ]] || "$VM" down "$vm"
 }
 
+# ------------------------------------------------------------------ observability
+
+# litek8s's built-in metrics, log search and alerts against k3s minimal +
+# kube-prometheus-stack + Loki (single binary, filesystem) + Alloy, on
+# identical VMs running the same workload (bench/obs/workload.yaml).
+#   phase_obs k3s | litek8s
+# Each VM first runs the workload without any observability (the
+# baseline), then with it: warm-up, a measured window (memory at both ends,
+# CPU over it, store growth on disk, samples ingested), then common queries.
+
+obs_charts() { # -> dir with the three charts (pulled once, versions recorded)
+  local dir="$HERE/.work/obs" helm=helm
+  mkdir -p "$dir"
+  command -v helm >/dev/null || helm="$(argo_tools)/$GUEST_ARCH/helm"
+  local H=(env HELM_CACHE_HOME="$dir/helm/cache" HELM_CONFIG_HOME="$dir/helm/config" HELM_DATA_HOME="$dir/helm/data" "$helm")
+  [[ -n "$(ls "$dir"/kube-prometheus-stack-*.tgz 2>/dev/null)" ]] || "${H[@]}" pull kube-prometheus-stack --repo https://prometheus-community.github.io/helm-charts ${KPS_CHART_VERSION:+--version "$KPS_CHART_VERSION"} -d "$dir" >&2
+  [[ -n "$(ls "$dir"/loki-*.tgz 2>/dev/null)" ]] || "${H[@]}" pull loki --repo https://grafana.github.io/helm-charts ${LOKI_CHART_VERSION:+--version "$LOKI_CHART_VERSION"} -d "$dir" >&2
+  [[ -n "$(ls "$dir"/alloy-*.tgz 2>/dev/null)" ]] || "${H[@]}" pull alloy --repo https://grafana.github.io/helm-charts ${ALLOY_CHART_VERSION:+--version "$ALLOY_CHART_VERSION"} -d "$dir" >&2
+  echo "$dir"
+}
+
+obs_window() { # vm tag system label
+  local vm="$1" tag="$2" sys="$3" label="$4" K="export KUBECONFIG=$5;"
+  rroot "$vm" "$K obs.py storage $sys" | save "$tag.$label.storage0.json"
+  [[ "$label" == noobs ]] || rroot "$vm" "$K obs.py tsdb $sys" | save "$tag.$label.tsdb0.json"
+  rroot "$vm" "probe.py mem" | save "$tag.$label.mem0.json"
+  host_snap | save "$tag.$label.host0.json"
+  local secs="$OBS_WINDOW_SECS"; [[ "$label" == noobs ]] && secs="$IDLE_SECS"
+  log "$tag: measuring $label for ${secs}s"
+  rroot "$vm" "probe.py cpu $secs" | save "$tag.$label.cpu.json"
+  host_snap | save "$tag.$label.host1.json"
+  rroot "$vm" "probe.py mem" | save "$tag.$label.mem1.json"
+  [[ "$label" == noobs ]] || rroot "$vm" "$K obs.py tsdb $sys" | save "$tag.$label.tsdb1.json"
+  rroot "$vm" "$K obs.py storage $sys" | save "$tag.$label.storage1.json"
+}
+
+phase_obs() {
+  local sys="$1" vm port tag kc
+  local VM_MEM="$OBS_VM_MEM" VM_CPUS="$OBS_VM_CPUS"
+  if [[ "$sys" == k3s ]]; then vm=obsk3s port="$PORT_OBSK3S" kc=/etc/rancher/k3s/k3s.yaml
+  else vm=obslk port="$PORT_OBSLK" kc=/root/litek8s.kubeconfig; fi
+  tag="obs-$sys"
+  local tools charts; tools="$(argo_tools)"; charts="$(obs_charts)"
+  host_snap | save "$tag.host.start.json"
+  local bin=""; [[ "$sys" == litek8s ]] && bin="$(linux_binary)"
+  log "$tag: preparing VM (${VM_MEM} MiB, ${VM_CPUS} vCPU)"
+  vm_prepare "$vm" "$port"
+  local a="$GUEST_ARCH"
+  "$VM" scp "$vm" "$tools/$a/helm" /tmp/helm
+  "$VM" scp "$vm" "$tools/$a/kubectl" /tmp/kubectl
+  "$VM" scp "$vm" "$HERE/node/obs.py" /tmp/obs.py
+  rroot "$vm" 'install -m 755 /tmp/helm /tmp/kubectl /tmp/obs.py /usr/local/bin/ && mkdir -p /root/obs'
+  for f in workload.yaml kps-values.yaml loki-values.yaml alloy-values.yaml; do "$VM" scp "$vm" "$HERE/obs/$f" "/tmp/$f"; done
+  for f in "$charts"/*.tgz; do "$VM" scp "$vm" "$f" "/tmp/$(basename "$f")"; done
+  rroot "$vm" 'mv /tmp/*.yaml /tmp/*.tgz /root/obs/'
+  local K="export KUBECONFIG=$kc; cd /root/obs;"
+  local disk0; disk0="$(disk_used_kib "$vm")"
+
+  if [[ "$sys" == k3s ]]; then
+    log "$tag: installing k3s ${K3S_VERSION:-stable} (minimal, with local-path storage for Loki)"
+    rroot "$vm" "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='$K3S_VERSION' sh -s - --disable=traefik,servicelb,metrics-server >/dev/null"
+  else
+    log "$tag: installing crun + litek8s apiserver (observability off for the baseline)"
+    rroot "$vm" 'export DEBIAN_FRONTEND=noninteractive
+      for i in 1 2 3 4 5; do apt-get update -qq && break; sleep 10; done
+      apt-get install -y -qq crun iptables >/dev/null'
+    "$VM" scp "$vm" "$bin" /tmp/litek8s
+    rroot "$vm" 'install -m 755 /tmp/litek8s /usr/local/bin/litek8s && rm /tmp/litek8s
+      mkdir -p /var/lib/litek8s
+      systemd-run --unit=litek8s --quiet /usr/local/bin/litek8s apiserver --listen 127.0.0.1:6443         --data-dir /var/lib/litek8s/apiserver --kubeconfig /root/litek8s.kubeconfig --runtime crun --no-observability
+      for i in $(seq 1 100); do curl -sf '"$KUBE_URL"'/readyz >/dev/null && break; sleep 0.1; done'
+  fi
+  local wait_pods='sleep 5; kubectl wait --for=condition=Ready pod -A --all --field-selector=status.phase!=Succeeded --timeout=600s >/dev/null; kubectl get pods -A --no-headers'
+  rroot "$vm" "$K"'for i in $(seq 1 120); do kubectl get nodes 2>/dev/null | grep -q " Ready" && break; sleep 2; done
+    kubectl apply -f workload.yaml >/dev/null; '"$wait_pods" >"$OUT/$tag.noobs.pods.txt"
+  log "$tag: workload only: settle ${SETTLE_SECS}s"
+  sleep "$SETTLE_SECS"
+  obs_window "$vm" "$tag" "$sys" noobs "$kc"
+
+  local disk1; disk1="$(disk_used_kib "$vm")"
+  if [[ "$sys" == k3s ]]; then
+    log "$tag: helm install kube-prometheus-stack, loki, alloy"
+    local t0; t0=$(date +%s)
+    rroot "$vm" "$K"'kubectl create namespace monitoring >/dev/null
+      helm install kube-prometheus-stack kube-prometheus-stack-*.tgz -n monitoring -f kps-values.yaml --wait --timeout 15m >/dev/null
+      helm install loki loki-*.tgz -n monitoring -f loki-values.yaml --wait --timeout 15m >/dev/null
+      helm install alloy alloy-*.tgz -n monitoring -f alloy-values.yaml --wait --timeout 10m >/dev/null; '"$wait_pods" >"$OUT/$tag.obs.pods.txt"
+    printf '{"install_secs": %s}\n' "$(( $(date +%s) - t0 ))" | save "$tag.install.json"
+  else
+    log "$tag: restarting the API server with observability on (pods keep running)"
+    local t0; t0=$(date +%s)
+    rroot "$vm" 'systemctl stop litek8s; sleep 1
+      systemd-run --unit=litek8s --quiet /usr/local/bin/litek8s apiserver --listen 127.0.0.1:6443         --data-dir /var/lib/litek8s/apiserver --kubeconfig /root/litek8s.kubeconfig --runtime crun
+      for i in $(seq 1 100); do curl -sf '"$KUBE_URL"'/readyz >/dev/null && break; sleep 0.1; done'
+    rroot "$vm" "$K $wait_pods" >"$OUT/$tag.obs.pods.txt"
+    printf '{"install_secs": %s}\n' "$(( $(date +%s) - t0 ))" | save "$tag.install.json"
+  fi
+  local disk2; disk2="$(disk_used_kib "$vm")"
+  printf '{"base_kib": %s, "with_workload_kib": %s, "with_observability_kib": %s}\n' "$disk0" "$disk1" "$disk2" | save "$tag.disk.json"
+
+  log "$tag: warm-up ${OBS_WARMUP_SECS}s"
+  sleep "$OBS_WARMUP_SECS"
+  obs_window "$vm" "$tag" "$sys" obs "$kc"
+  if [[ "$sys" == k3s ]]; then
+    # Loki keeps recent chunks in memory: flush them to count their size.
+    rroot "$vm" "$K obs.py loki-flush; sleep 30; obs.py storage k3s" | save "$tag.obs.storage-flushed.json"
+  fi
+  log "$tag: query latency ($OBS_QUERY_RUNS runs each)"
+  rroot "$vm" "$K obs.py queries $sys $OBS_QUERY_RUNS" | save "$tag.queries.json"
+  rroot "$vm" "$K"' python3 - <<'"'PY'"'
+import json, subprocess
+run = lambda *a: subprocess.run(a, capture_output=True, text=True).stdout.strip()
+pods = json.loads(run("kubectl", "get", "pods", "-A", "-o", "json"))["items"]
+print(json.dumps({
+  "server_version": json.loads(run("kubectl", "version", "-o", "json")).get("serverVersion", {}).get("gitVersion"),
+  "k3s_version": run("sh", "-c", "k3s --version 2>/dev/null | head -1"),
+  "crun_version": run("sh", "-c", "crun --version 2>/dev/null | head -1"),
+  "charts": run("sh", "-c", "helm list -A -o json 2>/dev/null"),
+  "pods": [{"ns": p["metadata"]["namespace"], "name": p["metadata"]["name"],
+            "images": [c["image"] for c in p["spec"]["containers"]],
+            "restarts": sum(c.get("restartCount", 0) for c in p.get("status", {}).get("containerStatuses", []))} for p in pods],
+  "mem_total_kib": int(open("/proc/meminfo").read().split()[1]),
+}, indent=1))
+PY' | save "$tag.info.json"
+  rroot "$vm" "dmesg | grep -iE 'out of memory|oom-kill|killed process' || true" | save "$tag.oom.txt"
+  host_snap | save "$tag.host.end.json"
+  [[ -n "${KEEP_VMS:-}" ]] || "$VM" down "$vm"
+}
+
 # ------------------------------------------------------------------ main
 
 {
@@ -691,6 +828,8 @@ for p in "${PHASES[@]}"; do
     kube-crun) phase_kube crun ;;
     argocd-k3s) phase_argocd k3s ;;
     argocd-litek8s) phase_argocd litek8s ;;
+    obs-k3s) phase_obs k3s ;;
+    obs-litek8s) phase_obs litek8s ;;
     *) echo "unknown phase $p" >&2; exit 2 ;;
   esac
 done

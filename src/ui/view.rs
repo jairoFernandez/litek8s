@@ -36,6 +36,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             Tab::Space => space(f, app, body),
             Tab::Kube => super::kube::draw::draw(f, app, body),
             Tab::Settings => settings(f, app, body),
+            Tab::Observe => observe(f, app, body),
         }
     }
     hints(f, app, bottom);
@@ -50,7 +51,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 }
 
 fn tabs(f: &mut Frame, app: &App, area: Rect) {
-    // Eight views fit 80 columns with short names and single spaces.
+    // Nine views fit 80 columns with short names and single spaces.
     let narrow = area.width < 110;
     let gap = if narrow { 1 } else { 2 };
     let mut spans = vec![Span::styled(" litek8s ", Style::new().fg(Color::Black).bg(ACCENT).add_modifier(Modifier::BOLD)), Span::raw(" ")];
@@ -58,6 +59,9 @@ fn tabs(f: &mut Frame, app: &App, area: Rect) {
     let mut hit = Vec::new();
     for (i, t) in TABS.iter().enumerate() {
         let title = match (*t, narrow) {
+            (Tab::Clusters, true) => "Clust",
+            (Tab::Images, true) => "Imgs",
+            (Tab::Observe, true) => "Obs",
             (Tab::Containers, true) => "Ctrs",
             (Tab::Volumes, true) => "Vols",
             (Tab::Space, true) => "Space",
@@ -96,6 +100,7 @@ fn hints(f: &mut Frame, app: &App, area: Rect) {
                     &kube_keys
                 }
                 Tab::Settings => &[("enter", "edit"), ("del", "default"), ("space", "toggle")],
+                Tab::Observe => &[("l", "logs"), ("L", "search logs"), ("s", "sort"), ("a/A", "ack"), ("n", "namespace")],
             }
         };
         let mut spans = vec![Span::raw(" ")];
@@ -276,8 +281,18 @@ fn home(f: &mut Frame, app: &App, area: Rect) {
     let cpu_ratio = h.cpu_pct.map(|p| p / 100.0 / cpus.unwrap_or(1.0));
     gauge(f, rows[0], "CPU", cpu_ratio, cpu_text);
     let mem_ratio = h.mem_used.zip(mem_total).map(|(u, t)| u as f64 / t.max(1) as f64);
+    // The total is a ceiling, not memory set aside: the macOS VM's
+    // --memory (macOS gives it pages as the guest uses them), the Linux
+    // sandbox's limit, or the machine's RAM.
+    let ceiling = if h.mode == "vm" || (limits.is_none() && cfg!(target_os = "macos")) {
+        "VM limit"
+    } else if limits.and_then(|s| s.memory_mib).is_some() {
+        "limit"
+    } else {
+        "total"
+    };
     let mem_text = match (h.mem_used, mem_total) {
-        (Some(u), Some(t)) => format!("{} / {}", bytes(u), bytes(t)),
+        (Some(u), Some(t)) => format!("{} of {} {ceiling}", bytes(u), bytes(t)),
         (Some(u), None) => bytes(u),
         (None, Some(t)) => format!("- / {}", bytes(t)),
         _ => "-".into(),
@@ -358,11 +373,13 @@ struct Explain {
 fn explain_boxes(app: &App) -> Vec<Explain> {
     let mut out = Vec::new();
     if let Some(m) = &app.home.memory {
-        out.push(Explain {
-            kind: 0,
-            title: format!("Memory · {} ({})", bytes(m.total), m.what),
-            lines: m.lines.iter().map(|l| (l.label.clone(), bytes(l.bytes), l.note.to_string(), false)).collect(),
-        });
+        let mut lines: Vec<(String, String, String, bool)> = m.lines.iter().map(|l| (l.label.clone(), bytes(l.bytes), l.note.to_string(), false)).collect();
+        if app.home.mode == "vm" {
+            if let Some(limit) = app.home.running.as_ref().and_then(|s| s.memory_mib).map(|m| m << 20).or(app.vm_memory) {
+                lines.push(("VM limit (--memory)".into(), bytes(limit), "a ceiling, not reserved: used as needed".into(), false));
+            }
+        }
+        out.push(Explain { kind: 0, title: format!("Memory · {} ({})", bytes(m.total), m.what), lines });
     }
     if let Some(c) = &app.cpu {
         let share = if c.cpus > 0.0 { format!(" = {:.0}% of {:.0} CPUs", c.total_pct / c.cpus, c.cpus) } else { String::new() };
@@ -730,6 +747,105 @@ fn space(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), info.inner(ratatui::layout::Margin { horizontal: 1, vertical: 0 }));
 }
 
+/// ▁▂▃▄▅▆▇█ for the values (gaps as spaces), scaled to `max`.
+fn sparkline(values: &[Option<f64>], max: f64) -> String {
+    const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+    values
+        .iter()
+        .map(|v| match v {
+            None => ' ',
+            Some(_) if max <= 0.0 => BARS[0],
+            Some(v) => BARS[((v / max) * 7.0).round().clamp(0.0, 7.0) as usize],
+        })
+        .collect()
+}
+
+fn cpu_text(cores: f64) -> String {
+    match cores * 1000.0 {
+        m if m >= 1000.0 => format!("{cores:.2}"),
+        m if m >= 10.0 || m == 0.0 => format!("{m:.0}m"),
+        m => format!("{m:.1}m"),
+    }
+}
+
+fn observe(f: &mut Frame, app: &App, area: Rect) {
+    let o = &app.obs;
+    if let Some(e) = &o.error {
+        if o.pods.is_empty() && o.alerts.is_empty() {
+            return unavailable(f, area, "Observe", e, "Metrics, logs and alerts come from the API server (litek8s apiserver, on by default).");
+        }
+    }
+    let shown = o.alerts.len().min(5);
+    let alert_rows = if o.alerts.is_empty() { 3 } else { shown as u16 + 2 };
+    let [top, rest] = Layout::vertical([Constraint::Length(alert_rows), Constraint::Min(3)]).areas(area);
+    let firing = o.alerts.iter().filter(|a| a.state == "firing").count();
+    let title = if o.alerts.is_empty() {
+        "Alerts".to_string()
+    } else {
+        format!("Alerts · {firing} firing, {} pending{}", o.alerts.len() - firing, if o.alerts.len() > shown { format!(" ({} more: litek8s alerts)", o.alerts.len() - shown) } else { String::new() })
+    };
+    let w = top.width.saturating_sub(2) as usize;
+    let lines: Vec<Line> = if o.alerts.is_empty() {
+        vec![Line::styled("No alerts. Built-in rules watch crash loops, OOM kills, node health, full disks and volumes.", DIM)]
+    } else {
+        o.alerts
+            .iter()
+            .take(shown)
+            .map(|a| {
+                let (mark, style) = match (a.state.as_str(), a.silenced) {
+                    (_, true) => ("◌ acked  ", DIM),
+                    ("firing", _) if a.severity == "critical" => ("● firing ", BAD),
+                    ("firing", _) => ("● firing ", WARN),
+                    _ => ("◌ pending", DIM),
+                };
+                let since = age(app.now, a.since);
+                let head = format!("{mark} {:<24} {:<6} ", trunc(&a.name, 24), since);
+                let rest = w.saturating_sub(head.chars().count());
+                let detail = if a.summary.is_empty() { a.target.clone() } else { a.summary.clone() };
+                Line::from(vec![Span::styled(head, style), Span::raw(trunc(&detail, rest))])
+            })
+            .collect()
+    };
+    f.render_widget(Paragraph::new(lines).block(block(&title)), top);
+
+    let idx = app.visible_obs_pods();
+    let spark_w = 17usize;
+    let cpu_max = idx.iter().flat_map(|i| o.pods[*i].cpu.iter().flatten()).fold(0.0f64, |a, b| a.max(*b));
+    let mem_max = idx.iter().flat_map(|i| o.pods[*i].mem.iter().flatten()).fold(0.0f64, |a, b| a.max(*b));
+    let tail = |v: &[Option<f64>]| v[v.len().saturating_sub(spark_w)..].to_vec();
+    let rows: Vec<Row> = idx
+        .iter()
+        .map(|i| {
+            let p = &o.pods[*i];
+            // A pod gone during the window: dim, no current figures.
+            let live = p.live();
+            let (cpu, mem) = if live { (cpu_text(p.cpu_now()), bytes(p.mem_now() as u64)) } else { ("gone".into(), "-".into()) };
+            let figure = |on: bool| if !live { DIM } else if on { BOLD } else { Style::new() };
+            Row::new(vec![
+                Cell::from(p.namespace.clone()),
+                Cell::from(p.name.clone()),
+                Cell::from(Span::styled(format!("{cpu:>6}"), figure(!app.obs_by_mem))),
+                Cell::from(Span::styled(sparkline(&tail(&p.cpu), cpu_max), Style::new().fg(Color::Cyan))),
+                Cell::from(Span::styled(format!("{mem:>8}"), figure(app.obs_by_mem))),
+                Cell::from(Span::styled(sparkline(&tail(&p.mem), mem_max), Style::new().fg(Color::Magenta))),
+            ])
+            .style(if live { Style::new() } else { DIM })
+        })
+        .collect();
+    let ns = app.obs_namespace.as_deref().map(|n| format!(" · {n}")).unwrap_or_default();
+    let by = if app.obs_by_mem { "memory" } else { "CPU" };
+    render_table(
+        f,
+        app,
+        rest,
+        &format!("Pods by {by}, last 30 min{ns}"),
+        vec!["NAMESPACE", "POD", "CPU", "", "MEMORY", ""],
+        rows,
+        vec![Constraint::Length(12), Constraint::Fill(1), Constraint::Length(6), Constraint::Length(spark_w as u16), Constraint::Length(8), Constraint::Length(spark_w as u16)],
+        "No pod metrics yet (the first samples arrive within 10 s).",
+    );
+}
+
 fn settings(f: &mut Frame, app: &App, area: Rect) {
     let restart = app.restart_needed();
     let notes = 3 + if restart.is_empty() { 0 } else { 1 } + if app.config_error.is_some() { 1 } else { 0 };
@@ -850,7 +966,7 @@ fn input(f: &mut Frame, prompt: &str, value: &str, error: Option<&str>, kind: &I
 
 /// The help screen: per view, its keys (each line fits 76 columns).
 pub const HELP: &[(&str, &[(&str, &str)])] = &[
-    ("Everywhere", &[("1-8 tab", "views"), ("↑↓ jk", "move"), ("/", "filter"), ("ctrl-r", "refresh"), ("q", "quit")]),
+    ("Everywhere", &[("1-9 tab", "views"), ("↑↓ jk", "move"), ("/", "filter"), ("ctrl-r", "refresh"), ("q", "quit")]),
     ("Home", &[("u", "start"), ("d", "stop (asks)"), ("R", "delete (asks)"), ("b", "memory/CPU/disk")]),
     ("Clusters", &[("n", "new"), ("u", "start"), ("d", "stop"), ("D", "delete (asks)"), ("enter", "show / use it")]),
     ("Containers", &[("l", "logs"), ("s", "shell"), ("u x r", "start stop restart"), ("d", "remove"), ("space", "fold")]),
@@ -859,6 +975,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
     ("Free space", &[("space", "select a category"), ("p", "free the selected (asks)")]),
     ("Kubernetes", &[(":", "resources, ctx, ns"), ("/", "filter"), ("d y e", "describe yaml edit"), ("?", "all")]),
     ("Settings", &[("enter", "edit"), ("del", "default"), ("space", "toggle / switch context")]),
+    ("Observe", &[("l", "logs"), ("L", "search logs"), ("s", "sort"), ("a A", "ack pod/all")]),
     ("Logs", &[("f", "follow"), ("w", "wrap"), ("PgUp PgDn", "scroll"), ("g G", "top/end"), ("esc", "back")]),
 ];
 

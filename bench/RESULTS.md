@@ -563,6 +563,108 @@ Earlier dry runs on the Mac (arm64 guests under HVF, 2 vCPU / 2 GiB, short
 windows; the example apps' amd64-only image ran under qemu-user there) gave
 the same picture: k3s-server 681 MiB with Argo CD, litek8s 72 MiB.
 
+## Observability: built in vs kube-prometheus-stack + Loki (2026-10-20, x86_64/KVM)
+
+What does it cost to see a small cluster's metrics and logs and get alerts?
+The usual answer on k3s is kube-prometheus-stack (Prometheus, Alertmanager,
+the operator, kube-state-metrics, node-exporter) plus Loki and a log
+shipper; litek8s has it built in ([docs/observability.md](../docs/observability.md)).
+
+**Setup.** `bench/run.sh obs-k3s obs-litek8s`, both at once on omarchy (AMD
+Ryzen 7 5800X, 16 threads; qemu + KVM in a Docker container given
+`/dev/kvm`). Each system gets a fresh Ubuntu 24.04 amd64 guest of **2 vCPU /
+3 GiB**, no swap, and the same workload ([`obs/workload.yaml`](obs/workload.yaml):
+three idle nginx pods and two log generators writing 10 lines/s each, one in
+ten an ERROR on stderr). k3s v1.36.5+k3s1 minimal
+(`--disable=traefik,servicelb,metrics-server`; local-path kept for Loki's
+volume) with **kube-prometheus-stack 92.10.1** (chart defaults: Prometheus
+with a 30 s scrape interval and 10 d retention, Alertmanager, operator,
+kube-state-metrics, node-exporter, the default rules; Grafana off, since
+litek8s has none either, and the controller-manager/scheduler/etcd/proxy
+jobs off, which k3s does not expose), **Loki 7.3.0** (3.6.12, single binary,
+filesystem storage, no caches or gateway: [`obs/loki-values.yaml`](obs/loki-values.yaml)) and
+**Alloy 1.14.0** tailing `/var/log/pods` ([`obs/alloy-values.yaml`](obs/alloy-values.yaml)),
+against `litek8s apiserver --runtime crun` (crun 1.14.1) at `215253f` with
+its defaults (10 s sampling, tiers 10s:6h,1m:7d,10m:90d). Each guest first
+runs the workload alone (5 min measured after 60 s), then with
+observability: 15 min warm-up, a 60 min measured window (memory at both
+ends, CPU over it, store growth on disk, samples ingested), then 20 runs
+of each query. The host was otherwise lightly loaded (about 10 % of its
+CPU busy during the window, all VMs included). A second k3s round (10 min
+warm-up, 30 min window, after fixing the disk probe) and an A/B of litek8s
+(two identical 2 vCPU / 2 GiB guests, observability on vs
+`--no-observability`, same uptime, 20 min settle, 15 min window) complete
+it. Raw data: [`results/2026-10-20-obs-x86-kvm/`](results/2026-10-20-obs-x86-kvm/)
+(`report.md` per round, `ab-litek8s-obs-{on,off}.json`).
+
+| | k3s + kube-prometheus-stack + Loki + Alloy | **litek8s, built in** |
+|---|---|---|
+| Memory observability adds (PSS) | **1,371 MiB** (round 2: 1,406) | **+1.8 MiB** (A/B: 32.0 vs 30.2 MiB API server) |
+| … its own pods | 1,057 MiB (Prometheus, Loki, Alloy, operator, KSM, node-exporter, Alertmanager) | – (in the API server and node agent) |
+| … orchestrator growth (k3s-server serving scrapes and watches, containerd) | +314 MiB (round 2: +386) | (included above) |
+| Guest memory in use, workload alone → with observability | 842 → 1,739 MiB of 2,960 | 338 → 350 MiB (A/B) |
+| CPU observability adds, % of one vCPU | **4.2 %** (round 2: 4.1 %) | **0.03 %** (A/B: 0.042 vs 0.010 % API server) |
+| Installed (images; binary) | 2.1 GiB of images | 0 (+2.1 MiB of stripped binary) |
+| Series kept | 69,672 (round 2: kubelet/cAdvisor 37.2 k, apiserver 27.0 k, node-exporter 1.1 k, KSM 1.2 k, the stack itself 3.0 k) | 342 |
+| Samples ingested / s | 2,349 (30 s scrape) | 34.1 (10 s sampling) |
+| Metrics on disk | WAL +45–50 MiB/h; blocks ≈ 0.26–0.41 GB/day at Prometheus's 1–2 bytes/sample¹ → **2.0–4.1 GB** for its default 10 days | 1.60 bytes/sample measured; **≈ 10 MB for 90 days** of this workload² |
+| Logs on disk, beyond the CRI files both keep (18–19 MiB/h here) | Loki chunks +2.2 MiB/h (+ its WAL) → ≈ 52 MiB/day, 365 MiB at 7 days | **0** (search reads the CRI files; removed containers' logs kept up to 512 MiB/node) |
+| Metric query, instant (7 dashboard queries) | 0.3–0.5 ms | 0.2–0.4 ms |
+| Metric query, 1 h range at 15 s | 0.4–1.5 ms | 0.8–4.3 ms |
+| Log query: ERRORs of `app=loggen`, last hour, 1,000 lines | 49 ms (round 2: 29) | 33 ms; **27 ms** since `d1c22ac`³ |
+| Log query: "timeout" in every pod, last 15 min, 1,000 lines | 20 ms (round 2: 15) | 32 ms; **11 ms** since `d1c22ac`³ |
+| Restarts, OOM kills | 0, none | 0, none |
+
+¹ A 60 min window does not reach Prometheus's first block (it cuts one when
+its head spans 3 h); its head chunks on disk grew only 131 KiB in round 2
+while the WAL grew 22.6 MiB in 30 min, so the compressed size is estimated
+from the samples ingested and the 1–2 bytes per sample Prometheus documents.
+³ After the run, the agent bisects each log file to the first line of the
+query's time range (records are in time order) instead of reading it
+whole; re-measured on a fresh guest with the same workload, queried at the
+same uptime (91 min): [`obs-litek8s.queries-d1c22ac.json`](results/2026-10-20-obs-x86-kvm/obs-litek8s.queries-d1c22ac.json).
+² Measured: the raw tier grew 192 KiB in the hour (1.60 bytes/sample); the
+1-minute tier 45 KiB for its first downsampled hours (≈1.1 bytes/point).
+Steady state with the default tiers: 6 h raw ≈ 1.2 MB, 7 d at 1 min ≈ 3.8 MB,
+90 d at 10 min ≈ 4.9 MB.
+
+**Read:** on a small node, the usual stack is the biggest thing running:
+1.4 GiB of memory (more than k3s itself, nearly half the 3 GiB guest), 4 %
+of a vCPU and 2 GiB of images, before Grafana. litek8s's built-in metrics,
+logs and alerts cost under 2 MiB and a few hundredths of a percent of a
+vCPU, and take no extra disk for logs.
+
+**What is not equal.** The two do not collect the same thing, and the table
+should be read that way:
+
+- kube-prometheus-stack keeps **200× more series**: every cAdvisor and
+  kubelet metric (37 k), kube-apiserver's per-resource latency and size
+  histograms (27 k), per-CPU node metrics, and its own components'. litek8s
+  keeps a curated set (the [list](../docs/observability.md#what-is-collected)):
+  per-container CPU, memory (anon/cache/working set), I/O, OOM kills,
+  throttling, network per pod, node CPU/memory/filesystem/network/disk,
+  kube-state-metrics' main families, its own request metrics. That covers
+  the usual Kubernetes dashboard panels and the built-in alerts, not
+  everything Prometheus can answer. litek8s also samples 3× more often
+  (10 s vs 30 s).
+- Prometheus scrapes any application's `/metrics`; litek8s does not scrape
+  applications yet.
+- Loki indexes labels and stores compressed chunks that outlive the node's
+  CRI files and pod deletions for its retention; litek8s searches the CRI
+  files (rotated at 10 MiB per container) and keeps logs of removed
+  containers in a per-node archive (7 days, 512 MiB by default). Searching
+  days of a chatty cluster's logs is a file scan on every node (in
+  parallel), not an index lookup.
+- litek8s's range queries are slower (0.8–4.3 ms vs 0.4–1.5 ms) but far
+  below what a dashboard notices; its instant queries are as fast.
+- Disk: Prometheus at its default 10 days is gigabytes because of the
+  series count; litek8s downsamples (1 min after 6 h, 10 min after 7 days),
+  so old data answers at a coarser resolution.
+
+**Rerun:** `LITEK8S_BIN=<linux binary> bench/run.sh obs-k3s obs-litek8s`
+(`OBS_WARMUP_SECS`, `OBS_WINDOW_SECS`, `OBS_QUERY_RUNS`, `OBS_VM_MEM`), then
+`python3 bench/obs_report.py bench/results/<timestamp>`.
+
 ## Remote node over SSH (litek8s only)
 
 Control plane in one guest, the node in a second guest of the same shape, reached through
@@ -682,6 +784,7 @@ bench/run.sh                        # all phases on fresh local VMs, ~55 min
 bench/run.sh litek8s rpc            # just litek8s single-node + remote-node phases
 bench/run.sh kube kube-crun         # the Kubernetes path on Docker and on crun
 bench/run.sh argocd-k3s argocd-litek8s   # Argo CD on both (ARGO_VM_MEM, ARGO_RUNS)
+bench/run.sh obs-k3s obs-litek8s     # observability: k3s + kube-prometheus-stack + Loki vs built in
 python3 bench/argocd_report.py bench/results/<run1> bench/results/<run2>   # pooled
 IDLE_SECS=60 SETTLE_SECS=10 bench/run.sh k3s-minimal   # quick look
 python3 bench/report.py bench/results/<timestamp>      # tables from raw JSON
