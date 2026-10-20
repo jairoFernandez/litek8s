@@ -7,7 +7,8 @@ use std::collections::{BTreeSet, VecDeque};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
-use super::model::{self, Container, Deployment, DiskUsage, Image, Pod, Volume};
+use super::kube::{KEffect, KMsg, KubeUi};
+use super::model::{self, Container, DiskUsage, Image, Pod, Volume};
 use crate::dev::config::{DevConfig, Publish};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,7 +110,6 @@ impl DevOp {
 #[derive(Debug, Clone, PartialEq)]
 pub enum LogSource {
     Container { id: String, name: String },
-    Pod { namespace: String, name: String, container: Option<String> },
 }
 
 /// What the runtime is asked to do.
@@ -130,11 +130,8 @@ pub enum Effect {
     UseContext(String),
     /// Point kubectl and docker at this local cluster.
     SwitchTools(String),
-    Scale { namespace: String, name: String, replicas: i64 },
-    RestartDeployment { namespace: String, name: String },
-    DeletePod { namespace: String, name: String },
-    PortForward { namespace: String, pod: String, local: u16, remote: u16 },
-    StopForwards,
+    /// The Kubernetes view's.
+    Kube(KEffect),
     SaveConfig(DevConfig),
     EditConfig,
     DockerContext(bool),
@@ -155,9 +152,9 @@ pub enum Msg {
     DockerInfo { version: String, cpus: Option<u64>, memory: Option<u64>, os: String },
     DockerDown(String),
     Pods(Vec<Pod>),
-    Deployments(Vec<Deployment>),
-    Namespaces(Vec<String>),
     KubeDown(String),
+    /// The Kubernetes view's.
+    Kube(KMsg),
     Home(Box<HomeSample>),
     LogLines(u64, Vec<String>),
     LogEnd(u64, Option<String>),
@@ -166,7 +163,6 @@ pub enum Msg {
     /// A line of output of a running `dev up/down/reset`.
     DevOutput(String),
     DevFinished(Result<String, String>),
-    Forwards(Vec<Forward>),
     Config(Result<DevConfig, String>),
     Clusters(Box<ClustersSample>),
 }
@@ -196,15 +192,6 @@ pub struct ClustersSample {
     pub env_memory: Option<u64>,
     pub env_cpus: Option<usize>,
     pub env_memory_mib: Option<u64>,
-}
-
-/// A running port-forward.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Forward {
-    pub local: u16,
-    pub namespace: String,
-    pub pod: String,
-    pub remote: u16,
 }
 
 /// The dev cluster as the supervisor's state file and API tell it.
@@ -273,8 +260,6 @@ pub struct HomeSample {
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputKind {
     Filter,
-    Scale { namespace: String, name: String },
-    PortForward { namespace: String, pod: String },
     Setting(Field),
 }
 
@@ -325,12 +310,6 @@ pub enum CRow {
     Item(usize),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KubeView {
-    Pods,
-    Deployments,
-}
-
 /// A reclaimable category of the free-space view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Reclaim {
@@ -378,13 +357,10 @@ pub struct App {
     pub collapsed: BTreeSet<String>,
 
     pub kube_error: Option<String>,
+    /// Every pod (Home counts them, names cgroups and images by them).
     pub pods: Vec<Pod>,
-    pub deployments: Vec<Deployment>,
-    pub namespaces: Vec<String>,
-    /// `None`: all namespaces.
-    pub namespace: Option<String>,
-    pub kube_view: KubeView,
-    pub forwards: Vec<Forward>,
+    /// The Kubernetes view: a cluster UI of its own (src/ui/kube).
+    pub kube: KubeUi,
 
     pub home: HomeSample,
     /// The local cluster the views show (its Docker socket and API).
@@ -440,11 +416,7 @@ impl App {
             collapsed: BTreeSet::new(),
             kube_error: None,
             pods: Vec::new(),
-            deployments: Vec::new(),
-            namespaces: Vec::new(),
-            namespace: None,
-            kube_view: KubeView::Pods,
-            forwards: Vec::new(),
+            kube: KubeUi::new(None),
             home: HomeSample::default(),
             cluster: crate::dev::cluster::DEFAULT.into(),
             context_override: None,
@@ -511,24 +483,6 @@ impl App {
         (0..self.volumes.len()).filter(|&i| self.matches(&[&self.volumes[i].name, self.volumes[i].project.as_deref().unwrap_or("")])).collect()
     }
 
-    pub fn visible_pods(&self) -> Vec<usize> {
-        (0..self.pods.len())
-            .filter(|&i| {
-                let p = &self.pods[i];
-                self.namespace.as_ref().is_none_or(|n| *n == p.namespace) && self.matches(&[&p.name, &p.status])
-            })
-            .collect()
-    }
-
-    pub fn visible_deployments(&self) -> Vec<usize> {
-        (0..self.deployments.len())
-            .filter(|&i| {
-                let d = &self.deployments[i];
-                self.namespace.as_ref().is_none_or(|n| *n == d.namespace) && self.matches(&[&d.name])
-            })
-            .collect()
-    }
-
     /// Bytes and items each free-space category would reclaim.
     pub fn reclaimable(&self, r: Reclaim) -> (u64, usize) {
         match r {
@@ -577,10 +531,7 @@ impl App {
             Tab::Images => self.visible_images().len(),
             Tab::Volumes => self.visible_volumes().len(),
             Tab::Space => RECLAIMS.len(),
-            Tab::Kube => match self.kube_view {
-                KubeView::Pods => self.visible_pods().len(),
-                KubeView::Deployments => self.visible_deployments().len(),
-            },
+            Tab::Kube => 0,
             Tab::Settings => SETTINGS.len(),
         }
     }
@@ -627,14 +578,6 @@ impl App {
 
     pub fn selected_volume(&self) -> Option<&Volume> {
         self.visible_volumes().get(self.sel()).map(|&i| &self.volumes[i])
-    }
-
-    pub fn selected_pod(&self) -> Option<&Pod> {
-        self.visible_pods().get(self.sel()).map(|&i| &self.pods[i])
-    }
-
-    pub fn selected_deployment(&self) -> Option<&Deployment> {
-        self.visible_deployments().get(self.sel()).map(|&i| &self.deployments[i])
     }
 
     /// Settings that differ from what the running cluster started with.
@@ -758,18 +701,17 @@ impl App {
                 self.pods = p;
                 self.relink();
             }
-            Msg::Deployments(d) => self.deployments = d,
-            Msg::Namespaces(n) => {
-                self.namespaces = n;
-                if self.namespace.as_ref().is_some_and(|ns| !self.namespaces.contains(ns)) {
-                    self.namespace = None;
-                }
-            }
             Msg::KubeDown(e) => {
                 self.kube_error = Some(e);
                 self.pods.clear();
-                self.deployments.clear();
                 self.relink();
+            }
+            Msg::Kube(m) => {
+                self.kube.now = self.now;
+                self.kube.apply(m);
+                if let Some((text, error)) = self.kube.flash.take() {
+                    self.flash(text, error);
+                }
             }
             Msg::Home(sample) => {
                 let mut sample = *sample;
@@ -837,7 +779,6 @@ impl App {
                     Err(e) => self.flash(e, true),
                 }
             }
-            Msg::Forwards(f) => self.forwards = f,
             Msg::Config(Ok(c)) => {
                 self.config = c;
                 self.config_error = None;
@@ -893,10 +834,6 @@ impl App {
     fn open_logs(&mut self, source: LogSource) -> Vec<Effect> {
         let title = match &source {
             LogSource::Container { name, .. } => format!("logs: {name}"),
-            LogSource::Pod { namespace, name, container } => match container {
-                Some(c) => format!("logs: {namespace}/{name} [{c}]"),
-                None => format!("logs: {namespace}/{name}"),
-            },
         };
         let id = self.next_log;
         self.next_log += 1;
@@ -974,6 +911,16 @@ impl App {
         }
         if self.logs.is_some() {
             return self.log_key(key);
+        }
+        if self.tab == Tab::Kube {
+            self.kube.now = self.now;
+            let handled = self.kube.key(key);
+            if let Some((text, error)) = self.kube.flash.take() {
+                self.flash(text, error);
+            }
+            if let Some(effects) = handled {
+                return effects;
+            }
         }
         match key.code {
             KeyCode::Char('q') => return vec![Effect::Quit],
@@ -1119,7 +1066,7 @@ impl App {
                 }
                 _ => {}
             },
-            Tab::Kube => return self.kube_key(code),
+            Tab::Kube => {}
             Tab::Settings => return self.settings_key(code),
         }
         Vec::new()
@@ -1316,77 +1263,6 @@ impl App {
         Vec::new()
     }
 
-    fn kube_key(&mut self, code: KeyCode) -> Vec<Effect> {
-        match code {
-            KeyCode::Char('p') => self.kube_view = KubeView::Pods,
-            KeyCode::Char('D') => self.kube_view = KubeView::Deployments,
-            KeyCode::Left | KeyCode::Right | KeyCode::Char('v') => {
-                self.kube_view = if self.kube_view == KubeView::Pods { KubeView::Deployments } else { KubeView::Pods };
-                self.clamp();
-            }
-            KeyCode::Char('n') | KeyCode::Char('N') => {
-                // Cycle: all → each namespace → all.
-                let mut all: Vec<Option<String>> = vec![None];
-                all.extend(self.namespaces.iter().cloned().map(Some));
-                let pos = all.iter().position(|n| *n == self.namespace).unwrap_or(0);
-                let next = if code == KeyCode::Char('n') { (pos + 1) % all.len() } else { (pos + all.len() - 1) % all.len() };
-                self.namespace = all[next].clone();
-                self.clamp();
-            }
-            KeyCode::Char('a') => {
-                self.namespace = None;
-                self.clamp();
-            }
-            KeyCode::Char('X') if !self.forwards.is_empty() => return vec![Effect::StopForwards],
-            _ => {}
-        }
-        match self.kube_view {
-            KubeView::Pods => {
-                let Some(p) = self.selected_pod().cloned() else { return Vec::new() };
-                match code {
-                    KeyCode::Enter | KeyCode::Char('l') => {
-                        let container = (p.containers.len() > 1).then(|| p.containers[0].clone());
-                        return self.open_logs(LogSource::Pod { namespace: p.namespace, name: p.name, container });
-                    }
-                    KeyCode::Char('f') => {
-                        let port = p.ports.first().copied().unwrap_or(8080);
-                        let local = if port < 1024 { port as u32 + 8000 } else { port as u32 };
-                        self.input(format!("port-forward {}/{} (local:pod)", p.namespace, p.name), format!("{local}:{port}"), InputKind::PortForward { namespace: p.namespace, pod: p.name });
-                    }
-                    KeyCode::Char('d') | KeyCode::Delete => {
-                        let mut lines = vec![format!("{}/{} ({})", p.namespace, p.name, p.status)];
-                        if let Some(o) = &p.owner {
-                            lines.push(format!("Owned by {o}: a new pod replaces it."));
-                        }
-                        self.confirm("Delete pod?", lines, Effect::DeletePod { namespace: p.namespace, name: p.name });
-                    }
-                    _ => {}
-                }
-            }
-            KubeView::Deployments => {
-                let Some(d) = self.selected_deployment().cloned() else { return Vec::new() };
-                match code {
-                    KeyCode::Char('s') | KeyCode::Char('S') => self.input(format!("scale {}/{} to", d.namespace, d.name), d.desired.to_string(), InputKind::Scale { namespace: d.namespace, name: d.name }),
-                    KeyCode::Char('r') => self.confirm(
-                        format!("Restart {}/{}?", d.namespace, d.name),
-                        vec!["A rollout replaces its pods one by one.".into()],
-                        Effect::RestartDeployment { namespace: d.namespace, name: d.name },
-                    ),
-                    KeyCode::Enter | KeyCode::Char('l') => {
-                        // The logs of its first pod.
-                        let pod = self.pods.iter().find(|p| p.namespace == d.namespace && !d.selector.is_empty() && p.owner.as_ref().is_some_and(|o| o.starts_with(&format!("{}-", d.name))));
-                        if let Some(p) = pod.cloned() {
-                            return self.open_logs(LogSource::Pod { namespace: p.namespace, name: p.name, container: None });
-                        }
-                        self.flash(format!("{} has no pods", d.name), true);
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Vec::new()
-    }
-
     fn settings_key(&mut self, code: KeyCode) -> Vec<Effect> {
         let row = SETTINGS[self.sel().min(SETTINGS.len() - 1)];
         match (code, row) {
@@ -1420,20 +1296,6 @@ impl App {
         };
         match &kind {
             InputKind::Filter => Vec::new(),
-            InputKind::Scale { namespace, name } => match value.trim().parse::<i64>() {
-                Ok(n) if (0..=1000).contains(&n) => vec![Effect::Scale { namespace: namespace.clone(), name: name.clone(), replicas: n }],
-                _ => fail(self, "replicas: a number from 0 to 1000".into()),
-            },
-            InputKind::PortForward { namespace, pod } => {
-                let parsed = match value.trim().split_once(':') {
-                    Some((l, r)) => l.trim().parse::<u16>().ok().zip(r.trim().parse::<u16>().ok()),
-                    None => value.trim().parse::<u16>().ok().map(|p| (p, p)),
-                };
-                match parsed {
-                    Some((local, remote)) if local > 0 && remote > 0 => vec![Effect::PortForward { namespace: namespace.clone(), pod: pod.clone(), local, remote }],
-                    _ => fail(self, "local:pod, e.g. 8080:80".into()),
-                }
-            }
             InputKind::Setting(f) => match self.with_setting(*f, &value) {
                 Ok(c) => vec![Effect::SaveConfig(c)],
                 Err(e) => fail(self, e),
@@ -1446,6 +1308,9 @@ impl App {
     pub fn mouse(&mut self, ev: MouseEvent) -> Vec<Effect> {
         if self.overlay != Overlay::None {
             return Vec::new();
+        }
+        if self.tab == Tab::Kube && self.logs.is_none() && ev.row > 0 {
+            return self.kube.mouse(ev, self.list_top.get());
         }
         match ev.kind {
             MouseEventKind::ScrollDown => {

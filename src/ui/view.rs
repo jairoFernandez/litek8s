@@ -7,7 +7,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Block, Cell, Clear, Gauge, Paragraph, Row, Table, TableState, Wrap};
 
-use super::app::{App, CRow, DevStatus, Field, InputKind, KubeView, NewCluster, Overlay, RECLAIMS, SETTINGS, Setting, TABS, Tab};
+use super::app::{App, CRow, DevStatus, Field, InputKind, NewCluster, Overlay, RECLAIMS, SETTINGS, Setting, TABS, Tab};
 use super::model::{age, bytes};
 
 const ACCENT: Color = Color::Cyan;
@@ -34,7 +34,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             Tab::Images => images(f, app, body),
             Tab::Volumes => volumes(f, app, body),
             Tab::Space => space(f, app, body),
-            Tab::Kube => kube(f, app, body),
+            Tab::Kube => super::kube::draw::draw(f, app, body),
             Tab::Settings => settings(f, app, body),
         }
     }
@@ -81,6 +81,7 @@ fn hints(f: &mut Frame, app: &App, area: Rect) {
     let line = if let Some((text, error)) = app.status.as_ref().filter(|_| !boxed) {
         Line::from(Span::styled(format!(" {text}"), if *error { BAD } else { OK }))
     } else {
+        let kube_keys;
         let keys: &[(&str, &str)] = if app.logs.is_some() {
             &[("esc", "back"), ("f", "follow"), ("w", "wrap"), ("↑↓", "scroll"), ("g/G", "top/end")]
         } else {
@@ -90,10 +91,10 @@ fn hints(f: &mut Frame, app: &App, area: Rect) {
                 Tab::Containers => &[("l", "logs"), ("s", "shell"), ("u", "start"), ("x", "stop"), ("r", "restart"), ("d", "remove"), ("/", "filter")],
                 Tab::Images | Tab::Volumes => &[("d", "remove"), ("/", "filter"), ("6", "free space")],
                 Tab::Space => &[("space", "select"), ("p", "free selected")],
-                Tab::Kube => match app.kube_view {
-                    KubeView::Pods => &[("l", "logs"), ("f", "forward"), ("d", "delete"), ("n", "namespace"), ("v", "deployments")],
-                    KubeView::Deployments => &[("s", "scale"), ("r", "restart"), ("l", "logs"), ("n", "namespace"), ("v", "pods")],
-                },
+                Tab::Kube => {
+                    kube_keys = super::kube::draw::hints(app);
+                    &kube_keys
+                }
                 Tab::Settings => &[("enter", "edit"), ("del", "default"), ("space", "toggle")],
             }
         };
@@ -729,84 +730,6 @@ fn space(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), info.inner(ratatui::layout::Margin { horizontal: 1, vertical: 0 }));
 }
 
-fn kube(f: &mut Frame, app: &App, area: Rect) {
-    if let Some(e) = &app.kube_error {
-        let hint = match &app.context_override {
-            Some(c) => format!("Context {c} from the kubeconfig (2: enter on a local cluster to go back)."),
-            None => "Start the cluster (1, then u), or pick another one in 2 Clusters.".to_string(),
-        };
-        return unavailable(f, area, "Kubernetes", e, &hint);
-    }
-    let [head, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(area);
-    let ns = app.namespace.clone().unwrap_or_else(|| "all".into());
-    let tab = |name: &str, on: bool| if on { Span::styled(format!("[{name}]"), Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)) } else { Span::styled(format!(" {name} "), DIM) };
-    let mut spans = vec![
-        Span::styled(" namespace ", DIM),
-        Span::styled(ns.clone(), BOLD),
-        Span::raw("   "),
-        tab("Pods", app.kube_view == KubeView::Pods),
-        tab("Deployments", app.kube_view == KubeView::Deployments),
-    ];
-    for (i, fwd) in app.forwards.iter().enumerate() {
-        let gone = !app.pods.iter().any(|p| p.namespace == fwd.namespace && p.name == fwd.pod);
-        let text = format!("{}{}→{}:{}{}", if i == 0 { "   ⇄ " } else { ", " }, fwd.local, fwd.pod, fwd.remote, if gone { " (pod gone)" } else { "" });
-        spans.push(Span::styled(text, if gone { WARN } else { OK }));
-    }
-    f.render_widget(Paragraph::new(Line::from(spans)), head);
-    let all = app.namespace.is_none();
-    let ctx = if app.kube_context.is_empty() { String::new() } else { format!(" — {}", app.kube_context) };
-    match app.kube_view {
-        KubeView::Pods => {
-            let rows: Vec<Row> = app
-                .visible_pods()
-                .into_iter()
-                .map(|i| {
-                    let p = &app.pods[i];
-                    let style = match p.status.as_str() {
-                        "Running" | "Completed" | "Succeeded" => OK,
-                        "Pending" | "ContainerCreating" | "Terminating" | "PodInitializing" => WARN,
-                        _ => BAD,
-                    };
-                    let name = if all { format!("{}/{}", p.namespace, p.name) } else { p.name.clone() };
-                    Row::new(vec![Cell::from(name), Cell::from(p.ready.clone()), Cell::from(Span::styled(p.status.clone(), style)), Cell::from(p.restarts.to_string()), Cell::from(age(app.now, p.created))])
-                })
-                .collect();
-            render_table(
-                f,
-                app,
-                body,
-                &format!("Pods{ctx}"),
-                vec!["NAME", "READY", "STATUS", "RESTARTS", "AGE"],
-                rows,
-                vec![Constraint::Fill(1), Constraint::Length(6), Constraint::Length(18), Constraint::Length(8), Constraint::Length(5)],
-                "No pods here. k9s gives the full Kubernetes picture (see ?).",
-            );
-        }
-        KubeView::Deployments => {
-            let rows: Vec<Row> = app
-                .visible_deployments()
-                .into_iter()
-                .map(|i| {
-                    let d = &app.deployments[i];
-                    let style = if d.ready >= d.desired { OK } else { WARN };
-                    let name = if all { format!("{}/{}", d.namespace, d.name) } else { d.name.clone() };
-                    Row::new(vec![Cell::from(name), Cell::from(Span::styled(format!("{}/{}", d.ready, d.desired), style)), Cell::from(d.updated.to_string()), Cell::from(d.available.to_string()), Cell::from(age(app.now, d.created))])
-                })
-                .collect();
-            render_table(
-                f,
-                app,
-                body,
-                &format!("Deployments{ctx}"),
-                vec!["NAME", "READY", "UP-TO-DATE", "AVAILABLE", "AGE"],
-                rows,
-                vec![Constraint::Fill(1), Constraint::Length(7), Constraint::Length(10), Constraint::Length(9), Constraint::Length(5)],
-                "No deployments here.",
-            );
-        }
-    }
-}
-
 fn settings(f: &mut Frame, app: &App, area: Rect) {
     let restart = app.restart_needed();
     let notes = 3 + if restart.is_empty() { 0 } else { 1 } + if app.config_error.is_some() { 1 } else { 0 };
@@ -934,13 +857,12 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
     ("Images", &[("d", "remove (asks)")]),
     ("Volumes", &[("d", "remove (asks)")]),
     ("Free space", &[("space", "select a category"), ("p", "free the selected (asks)")]),
-    ("Kubernetes", &[("v", "pods/deployments"), ("n", "namespace"), ("a", "all"), ("l", "logs"), ("f", "port-forward")]),
-    ("", &[("X", "stop forwards"), ("s", "scale"), ("r", "restart"), ("d", "delete pod")]),
+    ("Kubernetes", &[(":", "resources, ctx, ns"), ("/", "filter"), ("d y e", "describe yaml edit"), ("?", "all")]),
     ("Settings", &[("enter", "edit"), ("del", "default"), ("space", "toggle / switch context")]),
     ("Logs", &[("f", "follow"), ("w", "wrap"), ("PgUp PgDn", "scroll"), ("g G", "top/end"), ("esc", "back")]),
 ];
 
-fn help(f: &mut Frame, app: &App, area: Rect) {
+fn help(f: &mut Frame, _app: &App, area: Rect) {
     let r = centered(area, 78, HELP.len() as u16 + 9);
     f.render_widget(Clear, r);
     let mut lines = Vec::new();
@@ -952,11 +874,10 @@ fn help(f: &mut Frame, app: &App, area: Rect) {
         }
         lines.push(Line::from(row));
     }
-    let ctx = if app.kube_context.is_empty() { "litek8s-dev" } else { &app.kube_context };
     lines.push(Line::raw(""));
     lines.push(Line::styled("Home's breakdowns (b): litek8s = its own processes; pods & containers;", DIM));
     lines.push(Line::styled("kernel/VM = fixed cost; cache, reclaimable = can go (6 Free space for disk)", DIM));
-    lines.push(Line::from(vec![Span::styled("More Kubernetes: ", DIM), Span::styled(format!("k9s --context {ctx}"), BOLD), Span::styled(" (https://k9scli.io)", DIM)]));
+    lines.push(Line::from(vec![Span::styled("Kubernetes (7): any cluster or context (", DIM), Span::styled(":ctx", BOLD), Span::styled("); its ? lists every key.", DIM)]));
     lines.push(Line::styled("Destructive actions always ask. Mouse: litek8s ui --mouse. Docs: docs/ui.md", DIM));
     lines.push(Line::styled("Any key closes this.", DIM));
     f.render_widget(Paragraph::new(lines).block(Block::bordered().border_style(Style::new().fg(ACCENT)).title(Span::styled(" Keys ", BOLD))), r);

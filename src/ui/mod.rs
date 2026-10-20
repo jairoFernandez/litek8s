@@ -95,7 +95,9 @@ pub async fn run(args: UiArgs) -> Result<()> {
     let (tx, rx) = unbounded_channel();
     let mut app = App::new(docker_ep.display.clone(), kube_ep.display.clone(), kube_context);
     app.mouse = args.mouse;
-    app.namespace = args.namespace.clone();
+    // The context's own namespace unless -n says otherwise.
+    let start_ns = args.namespace.clone().or_else(|| kube::auth::load().ok().and_then(|c| c.namespace(&app.kube_context)));
+    app.kube = kube::KubeUi::new(start_ns.clone());
     app.cluster = cluster.name.clone();
     app.apply(Msg::Config(crate::dev::config::DevConfig::load().map_err(|e| format!("{e:#}"))));
 
@@ -115,8 +117,12 @@ pub async fn run(args: UiArgs) -> Result<()> {
         let _ = tx.send(Msg::KubeDown(DEV_DOWN.into()));
     }
 
+    if fixed.is_some() {
+        app.kube.reset(start_ns);
+    }
     let mut terminal = setup(args.mouse)?;
     let input = Input::new();
+    let kube_rt = kube::rt::Rt::new(kube_ep.clone(), tx.clone());
     let mut rt = Runtime {
         docker: docker_ep,
         docker_task,
@@ -131,13 +137,14 @@ pub async fn run(args: UiArgs) -> Result<()> {
         tx,
         refresh,
         wake_home,
-        forwards: kube::Forwards::default(),
+        kube_rt,
         log_task: None,
         input,
         stats: Stats { started, first_frame: None, data_frame: None, containers_seen: false, frames: 0 },
     };
+    rt.kube_rt.load_settings();
     let result = rt.event_loop(&mut terminal, &mut app, rx, &pace).await;
-    rt.forwards.stop_all();
+    rt.kube_rt.stop_all();
     if let Some(t) = rt.log_task.take() {
         t.abort();
     }
@@ -261,7 +268,7 @@ struct Runtime {
     tx: UnboundedSender<Msg>,
     refresh: Arc<Notify>,
     wake_home: Arc<Notify>,
-    forwards: kube::Forwards,
+    kube_rt: kube::rt::Rt,
     log_task: Option<tokio::task::JoinHandle<()>>,
     input: Input,
     stats: Stats,
@@ -359,6 +366,21 @@ impl Runtime {
                     return Ok(());
                 }
             }
+            // What the Kubernetes view asked for on its own (informers for
+            // a new view, a container picked).
+            loop {
+                let more = app.kube.take_effects();
+                if more.is_empty() {
+                    break;
+                }
+                dirty = true;
+                for e in more {
+                    self.effect(Effect::Kube(e), terminal, app).await?;
+                }
+            }
+            if let Some((text, error)) = app.kube.flash.take() {
+                app.flash(text, error);
+            }
             // A new status line shows for 8 s.
             if app.status != last_status {
                 last_status = app.status.clone();
@@ -378,6 +400,7 @@ impl Runtime {
             Msg::Home(_) => matches!(app.tab, Tab::Home | Tab::Space | Tab::Settings) && app.logs.is_none(),
             Msg::Clusters(_) => app.tab == Tab::Clusters && app.logs.is_none(),
             Msg::LogLines(..) | Msg::LogEnd(..) => app.logs.is_some(),
+            Msg::Kube(kube::KMsg::Data(..) | kube::KMsg::LogLines { .. } | kube::KMsg::Ext { .. } | kube::KMsg::Forwards(_)) => app.tab == Tab::Kube && app.logs.is_none(),
             _ => true,
         }
     }
@@ -385,7 +408,6 @@ impl Runtime {
     /// Carry out one effect; `true` to quit.
     async fn effect(&mut self, e: Effect, terminal: &mut Term, app: &mut App) -> Result<bool> {
         let docker = self.docker.clone();
-        let kube = self.kube.clone();
         let tx = self.tx.clone();
         let refresh = self.refresh.clone();
         let done = move |r: Result<String>| {
@@ -409,8 +431,11 @@ impl Runtime {
                     app.apply(Msg::KubeDown(format!("connecting to {ctx}…")));
                     self.kube = ep;
                     app.kube_endpoint = self.kube.display.clone();
+                    let ns = kube::auth::load().ok().and_then(|c| c.namespace(&ctx));
                     app.kube_context = ctx;
                     self.kube_watches = kube::spawn_watches(self.kube.clone(), self.tx.clone());
+                    self.kube_rt.reset(self.kube.clone());
+                    app.kube.reset(ns);
                 }
                 Err(e) => app.flash(format!("{e:#}"), true),
             },
@@ -473,7 +498,6 @@ impl Runtime {
                 let tx = self.tx.clone();
                 self.log_task = Some(match source {
                     LogSource::Container { id: cid, .. } => tokio::spawn(docker::logs(docker, cid, id, tx)),
-                    LogSource::Pod { namespace, name, container } => tokio::spawn(kube::logs(kube, namespace, name, container, id, tx)),
                 });
             }
             Effect::StopLogs => {
@@ -549,29 +573,7 @@ impl Runtime {
                 done(r);
             }
             Effect::Dev(op) => self.dev(op),
-            Effect::Scale { namespace, name, replicas } => {
-                tokio::spawn(async move { done(kube::scale(&kube, &namespace, &name, replicas).await) });
-            }
-            Effect::RestartDeployment { namespace, name } => {
-                tokio::spawn(async move { done(kube::restart(&kube, &namespace, &name).await) });
-            }
-            Effect::DeletePod { namespace, name } => {
-                tokio::spawn(async move { done(kube::delete_pod(&kube, &namespace, &name).await) });
-            }
-            Effect::PortForward { namespace, pod, local, remote } => {
-                let forwards = self.forwards.clone();
-                let tx = self.tx.clone();
-                tokio::spawn(async move {
-                    let r = forwards.start(kube, namespace, pod, local, remote).await;
-                    let _ = tx.send(Msg::Forwards(forwards.list()));
-                    done(r);
-                });
-            }
-            Effect::StopForwards => {
-                self.forwards.stop_all();
-                app.apply(Msg::Forwards(Vec::new()));
-                app.flash("port-forwards stopped", false);
-            }
+            Effect::Kube(e) => kube::rt::effect(self, e, terminal, app).await?,
         }
         Ok(false)
     }
@@ -622,6 +624,9 @@ impl Runtime {
                 self.kube = dev_endpoint(p);
                 app.kube_endpoint = self.kube.display.clone();
                 self.kube_watches = kube::spawn_watches(self.kube.clone(), self.tx.clone());
+                self.kube_rt.reset(self.kube.clone());
+                let ns = app.kube.namespace.clone();
+                app.kube.reset(ns);
             }
             None => app.apply(Msg::KubeDown(DEV_DOWN.into())),
         }

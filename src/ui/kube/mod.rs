@@ -1,19 +1,37 @@
 //! The Kubernetes side: which API server (a running local dev cluster, or a
-//! kubeconfig context), list+watch of pods, deployments and namespaces,
-//! logs, scale, restart, delete and port-forward.
+//! kubeconfig context), the pods Home counts, and the Kubernetes view: a
+//! cluster UI for any cluster (see `state` for keys, `rt` for what it does).
+
+pub mod auth;
+pub mod command;
+pub mod describe;
+pub mod draw;
+pub mod exec;
+pub mod filter;
+pub mod forward;
+pub mod informer;
+pub mod ops;
+pub mod resources;
+pub mod rt;
+pub mod state;
+pub mod table;
+pub mod uiconfig;
+pub mod yaml;
+
+pub use state::{KEffect, KMsg, KubeUi};
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use base64::Engine;
 use hyper::Method;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::app::{Forward, Msg};
+use super::app::Msg;
 use super::client::{Endpoint, Lines, enc};
 use super::model;
 
@@ -21,21 +39,19 @@ use super::model;
 /// local dev cluster if it runs; else the kubeconfig's `litek8s-dev`
 /// context, else its current one.
 pub fn resolve(context: Option<&str>) -> Result<(Endpoint, String)> {
-    let path = crate::dev::kubeconfig::default_path();
     if context.is_none() {
         if let Some(state) = crate::dev::running_state() {
             let ep = Endpoint::parse_http(&format!("http://127.0.0.1:{}", state.port), None)?;
             return Ok((ep, crate::dev::kubeconfig::CONTEXT.into()));
         }
     }
-    let doc = std::fs::read_to_string(&path).with_context(|| format!("no kubeconfig at {}", path.display()))?;
-    let cfg: serde_yaml::Value = serde_yaml::from_str(&doc).with_context(|| format!("{} is not valid YAML", path.display()))?;
+    let cfg = auth::load()?;
     let name = match context {
         Some(c) => c.to_string(),
-        None if named(&cfg, "contexts", crate::dev::kubeconfig::CONTEXT).is_some() => crate::dev::kubeconfig::CONTEXT.into(),
-        None => cfg["current-context"].as_str().unwrap_or_default().to_string(),
+        None if cfg.named("contexts", crate::dev::kubeconfig::CONTEXT).is_some() => crate::dev::kubeconfig::CONTEXT.into(),
+        None => cfg.current().unwrap_or_default(),
     };
-    Ok((endpoint_for(&cfg, &name, path.parent().unwrap_or(Path::new(".")))?, name))
+    Ok((endpoint_for(&cfg.doc, &name, Path::new("."))?, name))
 }
 
 fn named<'a>(cfg: &'a serde_yaml::Value, list: &str, name: &str) -> Option<&'a serde_yaml::Value> {
@@ -45,6 +61,7 @@ fn named<'a>(cfg: &'a serde_yaml::Value, list: &str, name: &str) -> Option<&'a s
 /// Inline `<key>-data` (base64) or the file `<key>` (relative to the
 /// kubeconfig's directory).
 fn data_or_file(entry: &serde_yaml::Value, key: &str, dir: &Path) -> Result<Option<Vec<u8>>> {
+    let dir = &entry["x-litek8s-dir"].as_str().map(std::path::PathBuf::from).unwrap_or_else(|| dir.to_path_buf());
     if let Some(d) = entry[format!("{key}-data").as_str()].as_str() {
         return Ok(Some(base64::engine::general_purpose::STANDARD.decode(d.trim()).with_context(|| format!("{key}-data is not base64"))?));
     }
@@ -59,13 +76,20 @@ pub fn endpoint_for(cfg: &serde_yaml::Value, context: &str, dir: &Path) -> Resul
     let ctx = named(cfg, "contexts", context).with_context(|| format!("no context {context:?} in the kubeconfig"))?;
     let cluster_name = ctx["context"]["cluster"].as_str().unwrap_or_default();
     let user_name = ctx["context"]["user"].as_str().unwrap_or_default();
-    let cluster = &named(cfg, "clusters", cluster_name).with_context(|| format!("no cluster {cluster_name:?} in the kubeconfig"))?["cluster"];
+    let cluster_entry = named(cfg, "clusters", cluster_name).with_context(|| format!("no cluster {cluster_name:?} in the kubeconfig"))?;
     let null = serde_yaml::Value::Null;
-    let user = named(cfg, "users", user_name).map(|u| &u["user"]).unwrap_or(&null);
-    let server = cluster["server"].as_str().context("the cluster has no server")?;
-    if !user["exec"].is_null() || !user["auth-provider"].is_null() {
-        bail!("context {context}: exec and auth-provider credentials are not supported (k9s or kubectl handle them)");
+    let user_entry = named(cfg, "users", user_name).unwrap_or(&null);
+    // Files named in an entry are relative to the kubeconfig that has it.
+    let mut cluster = cluster_entry["cluster"].clone();
+    let mut user = user_entry["user"].clone();
+    for (e, from) in [(&mut cluster, cluster_entry), (&mut user, user_entry)] {
+        if let (serde_yaml::Value::Mapping(m), Some(d)) = (e, from["x-litek8s-dir"].as_str()) {
+            m.insert("x-litek8s-dir".into(), d.into());
+        }
     }
+    let (cluster, user) = (&cluster, &user);
+    let server = cluster["server"].as_str().context("the cluster has no server")?;
+    let creds = auth::dynamic(user_entry, dir).with_context(|| format!("context {context}"))?;
     let tls = if server.starts_with("https://") {
         let insecure = cluster["insecure-skip-tls-verify"].as_bool().unwrap_or(false);
         let ca = data_or_file(cluster, "certificate-authority", dir)?;
@@ -76,9 +100,11 @@ pub fn endpoint_for(cfg: &serde_yaml::Value, context: &str, dir: &Path) -> Resul
         None
     };
     let mut ep = Endpoint::parse_http(server, tls)?;
+    ep.creds = creds;
+    let user_dir = user["x-litek8s-dir"].as_str().map(std::path::PathBuf::from).unwrap_or_else(|| dir.to_path_buf());
     let token = match (user["token"].as_str(), user["tokenFile"].as_str()) {
         (Some(t), _) => Some(t.to_string()),
-        (None, Some(f)) => Some(std::fs::read_to_string(dir.join(f))?.trim().to_string()),
+        (None, Some(f)) => Some(std::fs::read_to_string(user_dir.join(f))?.trim().to_string()),
         _ => None,
     };
     if let Some(t) = token {
@@ -144,48 +170,54 @@ impl rustls::client::danger::ServerCertVerifier for NoVerify {
     }
 }
 
-#[derive(Clone, Copy)]
-enum Kind {
-    Pods,
-    Deployments,
-    Namespaces,
-}
-
-impl Kind {
-    fn path(self) -> &'static str {
-        match self {
-            Kind::Pods => "/api/v1/pods",
-            Kind::Deployments => "/apis/apps/v1/deployments",
-            Kind::Namespaces => "/api/v1/namespaces",
-        }
-    }
-
-    fn msg(self, list: &Value) -> Msg {
-        match self {
-            Kind::Pods => Msg::Pods(model::pods(list)),
-            Kind::Deployments => Msg::Deployments(model::deployments(list)),
-            Kind::Namespaces => Msg::Namespaces(model::names(list)),
-        }
-    }
-}
-
-/// Keep the UI's pods, deployments and namespaces current: a list, then a
-/// watch from its resourceVersion; re-list when the watch ends.
+/// Keep the pods Home counts (and names cgroups and images by) current:
+/// a list, then a watch from its resourceVersion; re-list when the watch
+/// ends. Only what `model::pod` reads is kept of each pod.
 pub fn spawn_watches(ep: Endpoint, tx: UnboundedSender<Msg>) -> Vec<tokio::task::JoinHandle<()>> {
-    [Kind::Pods, Kind::Deployments, Kind::Namespaces].into_iter().map(|k| tokio::spawn(watch(ep.clone(), k, tx.clone()))).collect()
+    vec![tokio::spawn(watch_pods(ep, tx))]
 }
 
 fn key_of(o: &Value) -> String {
     format!("{}/{}", o.pointer("/metadata/namespace").and_then(Value::as_str).unwrap_or(""), o.pointer("/metadata/name").and_then(Value::as_str).unwrap_or(""))
 }
 
-async fn watch(ep: Endpoint, kind: Kind, tx: UnboundedSender<Msg>) {
+/// A pod with only the fields [`model::pod`] reads.
+pub fn slim_pod(p: &Value) -> Value {
+    let m = &p["metadata"];
+    let pick = |v: &Value, keys: &[&str]| -> Value {
+        let mut o = serde_json::Map::new();
+        for k in keys {
+            if let Some(x) = v.get(*k).filter(|x| !x.is_null()) {
+                o.insert(k.to_string(), x.clone());
+            }
+        }
+        Value::Object(o)
+    };
+    let containers: Vec<Value> = p.pointer("/spec/containers").and_then(Value::as_array).into_iter().flatten().map(|c| pick(c, &["name", "image", "ports"])).collect();
+    let statuses: Vec<Value> = p.pointer("/status/containerStatuses").and_then(Value::as_array).into_iter().flatten().map(|c| pick(c, &["ready", "restartCount", "imageID", "state"])).collect();
+    let owners: Vec<Value> = m["ownerReferences"].as_array().into_iter().flatten().take(1).map(|o| pick(o, &["name"])).collect();
+    let mut meta = pick(m, &["name", "namespace", "uid", "creationTimestamp", "deletionTimestamp"]);
+    meta["ownerReferences"] = json!(owners);
+    json!({
+        "metadata": meta,
+        "spec": {"containers": containers, "nodeName": p.pointer("/spec/nodeName")},
+        "status": {"phase": p.pointer("/status/phase"), "reason": p.pointer("/status/reason"), "containerStatuses": statuses},
+    })
+}
+
+async fn watch_pods(ep: Endpoint, tx: UnboundedSender<Msg>) {
+    const PATH: &str = "/api/v1/pods";
+    let msg = |items: &BTreeMap<String, Value>| Msg::Pods({
+        let mut v: Vec<model::Pod> = items.values().map(model::pod).collect();
+        v.sort_by(|a, b| a.namespace.cmp(&b.namespace).then_with(|| a.name.cmp(&b.name)));
+        v
+    });
     let mut backoff = Duration::from_secs(1);
     loop {
-        let list = match ep.json(Method::GET, kind.path(), None).await {
+        let list = match ep.json(Method::GET, PATH, None).await {
             Ok(l) => l,
             Err(e) => {
-                if matches!(kind, Kind::Pods) && tx.send(Msg::KubeDown(format!("{}: {e:#}", ep.display))).is_err() {
+                if tx.send(Msg::KubeDown(format!("{}: {e:#}", ep.display))).is_err() {
                     return;
                 }
                 tokio::time::sleep(backoff).await;
@@ -194,13 +226,13 @@ async fn watch(ep: Endpoint, kind: Kind, tx: UnboundedSender<Msg>) {
             }
         };
         backoff = Duration::from_secs(1);
-        let mut items: BTreeMap<String, Value> = list["items"].as_array().into_iter().flatten().map(|o| (key_of(o), o.clone())).collect();
-        let snapshot = |items: &BTreeMap<String, Value>| json!({"items": items.values().collect::<Vec<_>>()});
-        if tx.send(kind.msg(&snapshot(&items))).is_err() {
+        let rv = list.pointer("/metadata/resourceVersion").and_then(Value::as_str).unwrap_or("0").to_string();
+        let mut items: BTreeMap<String, Value> = list["items"].as_array().into_iter().flatten().map(|o| (key_of(o), slim_pod(o))).collect();
+        drop(list);
+        if tx.send(msg(&items)).is_err() {
             return;
         }
-        let rv = list.pointer("/metadata/resourceVersion").and_then(Value::as_str).unwrap_or("0").to_string();
-        let path = format!("{}?watch=1&allowWatchBookmarks=true&resourceVersion={}", kind.path(), enc(&rv));
+        let path = format!("{PATH}?watch=1&allowWatchBookmarks=true&resourceVersion={}", enc(&rv));
         let Ok(resp) = ep.send(Method::GET, &path, None, Vec::new()).await else {
             tokio::time::sleep(backoff).await;
             continue;
@@ -217,7 +249,7 @@ async fn watch(ep: Endpoint, kind: Kind, tx: UnboundedSender<Msg>) {
             match next {
                 Err(_) => {
                     dirty = false;
-                    if tx.send(kind.msg(&snapshot(&items))).is_err() {
+                    if tx.send(msg(&items)).is_err() {
                         return;
                     }
                 }
@@ -227,7 +259,7 @@ async fn watch(ep: Endpoint, kind: Kind, tx: UnboundedSender<Msg>) {
                     let obj = &ev["object"];
                     match ev["type"].as_str() {
                         Some("ADDED") | Some("MODIFIED") => {
-                            items.insert(key_of(obj), obj.clone());
+                            items.insert(key_of(obj), slim_pod(obj));
                             dirty = true;
                         }
                         Some("DELETED") => {
@@ -241,90 +273,8 @@ async fn watch(ep: Endpoint, kind: Kind, tx: UnboundedSender<Msg>) {
             }
         }
         if dirty {
-            let _ = tx.send(kind.msg(&snapshot(&items)));
+            let _ = tx.send(msg(&items));
         }
-    }
-}
-
-pub async fn scale(ep: &Endpoint, ns: &str, name: &str, replicas: i64) -> Result<String> {
-    let path = format!("/apis/apps/v1/namespaces/{ns}/deployments/{name}");
-    ep.json_typed(Method::PATCH, &path, "application/merge-patch+json", Some(&json!({"spec": {"replicas": replicas}}))).await?;
-    Ok(format!("{ns}/{name} scaled to {replicas}"))
-}
-
-pub async fn restart(ep: &Endpoint, ns: &str, name: &str) -> Result<String> {
-    let path = format!("/apis/apps/v1/namespaces/{ns}/deployments/{name}");
-    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    let patch = json!({"spec": {"template": {"metadata": {"annotations": {"kubectl.kubernetes.io/restartedAt": now}}}}});
-    ep.json_typed(Method::PATCH, &path, "application/merge-patch+json", Some(&patch)).await?;
-    Ok(format!("{ns}/{name} restarting"))
-}
-
-pub async fn delete_pod(ep: &Endpoint, ns: &str, name: &str) -> Result<String> {
-    ep.json(Method::DELETE, &format!("/api/v1/namespaces/{ns}/pods/{name}"), None).await?;
-    Ok(format!("pod {ns}/{name} deleted"))
-}
-
-/// Follow a pod's log; lines go out tagged with `id`.
-pub async fn logs(ep: Endpoint, ns: String, name: String, container: Option<String>, id: u64, tx: UnboundedSender<Msg>) {
-    let mut path = format!("/api/v1/namespaces/{ns}/pods/{name}/log?follow=true&tailLines=1000");
-    if let Some(c) = container {
-        path.push_str(&format!("&container={}", enc(&c)));
-    }
-    let result: Result<()> = async {
-        let resp = ep.send(Method::GET, &path, None, Vec::new()).await?;
-        if !resp.status().is_success() {
-            let body = http_body_util::BodyExt::collect(resp.into_body()).await?.to_bytes();
-            let msg = serde_json::from_slice::<Value>(&body).ok().and_then(|v| v["message"].as_str().map(str::to_string)).unwrap_or_else(|| String::from_utf8_lossy(&body).to_string());
-            bail!("{msg}");
-        }
-        super::docker::pump_lines(Lines::new(resp.into_body()), false, id, &tx).await;
-        Ok(())
-    }
-    .await;
-    let _ = tx.send(Msg::LogEnd(id, result.err().map(|e| format!("{e:#}"))));
-}
-
-/// Active port-forwards: listeners on 127.0.0.1 relaying each connection
-/// through `pods/<pod>/portforward`.
-#[derive(Default, Clone)]
-pub struct Forwards {
-    inner: Arc<Mutex<Vec<(Forward, tokio::task::JoinHandle<()>)>>>,
-}
-
-impl Forwards {
-    pub fn list(&self) -> Vec<Forward> {
-        let mut list = self.inner.lock().unwrap();
-        list.retain(|(_, t)| !t.is_finished());
-        list.iter().map(|(f, _)| f.clone()).collect()
-    }
-
-    pub fn stop_all(&self) {
-        for (_, t) in self.inner.lock().unwrap().drain(..) {
-            t.abort();
-        }
-    }
-
-    pub async fn start(&self, ep: Endpoint, ns: String, pod: String, local: u16, remote: u16) -> Result<String> {
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", local)).await.with_context(|| format!("cannot listen on 127.0.0.1:{local}"))?;
-        // Fail now, not on the first connection, if the pod is not there.
-        ep.json(Method::GET, &format!("/api/v1/namespaces/{ns}/pods/{pod}"), None).await?;
-        let fwd = Forward { local, namespace: ns.clone(), pod: pod.clone(), remote };
-        let path = format!("/api/v1/namespaces/{ns}/pods/{pod}/portforward?ports={remote}");
-        let task = tokio::spawn(async move {
-            while let Ok((conn, _)) = listener.accept().await {
-                let ep = ep.clone();
-                let path = path.clone();
-                tokio::spawn(async move {
-                    let extra = [("X-Stream-Protocol-Version", "portforward.k8s.io")];
-                    if let Ok((_, io)) = ep.upgrade(Method::POST, &path, "SPDY/3.1", &extra, None).await {
-                        let _ = crate::kube::spdy::forward_one(io, remote, conn).await;
-                    }
-                });
-            }
-        });
-        self.inner.lock().unwrap().push((fwd, task));
-        Ok(format!("forwarding 127.0.0.1:{local} to {ns}/{pod}:{remote}"))
     }
 }
 
@@ -348,7 +298,12 @@ mod tests {
         let ep = endpoint_for(&cfg, "far", dir.path()).unwrap();
         assert_eq!(ep.headers, [("Authorization".to_string(), "Bearer s3cret".to_string())]);
         assert!(matches!(ep.transport, super::super::client::Transport::Tls { config: None, .. }));
-        assert!(endpoint_for(&cfg, "gke", dir.path()).unwrap_err().to_string().contains("exec"));
+        // Exec plugins give tokens per request.
+        let ep = endpoint_for(&cfg, "gke", dir.path()).unwrap();
+        assert!(ep.creds.is_some() && ep.headers.is_empty());
         assert!(endpoint_for(&cfg, "nope", dir.path()).is_err());
     }
 }
+
+#[cfg(test)]
+mod view_tests;

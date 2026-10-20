@@ -60,8 +60,6 @@ fn sample_app() -> App {
         owner: Some("web-7d9".into()),
         ..Default::default()
     }]));
-    app.apply(Msg::Deployments(vec![Deployment { namespace: "default".into(), name: "web".into(), desired: 1, ready: 1, updated: 1, available: 1, created: 1_767_225_600, ..Default::default() }]));
-    app.apply(Msg::Namespaces(vec!["default".into(), "kube-system".into()]));
     app.apply(Msg::DockerInfo { version: "litek8s 0.1.0".into(), cpus: Some(4), memory: Some(4_294_967_296), os: "litek8s dev aarch64".into() });
     app.apply(Msg::Home(Box::new(HomeSample {
         status: DevStatus::Up,
@@ -278,37 +276,6 @@ fn filter_narrows_lists() {
 }
 
 #[test]
-fn kubernetes_view_scale_forward_and_namespaces() {
-    let mut app = sample_app();
-    app.key(key('7'));
-    let s = render(&app, 80, 24);
-    assert!(s.contains("default/web-7d9-abc") && s.contains("Running"), "{s}");
-    app.key(key('n'));
-    assert_eq!(app.namespace.as_deref(), Some("default"));
-    assert!(render(&app, 80, 24).contains("namespace default"));
-    // Port-forward: suggests local 8080 for container port 80.
-    app.key(key('f'));
-    let Overlay::Input { value, .. } = &app.overlay else { panic!() };
-    assert_eq!(value, "8080:80");
-    assert_eq!(app.key(code(KeyCode::Enter)), vec![Effect::PortForward { namespace: "default".into(), pod: "web-7d9-abc".into(), local: 8080, remote: 80 }]);
-    // Deployments: scale validates its input.
-    app.key(key('v'));
-    app.key(key('s'));
-    app.key(code(KeyCode::Backspace));
-    for c in "x".chars() {
-        app.key(key(c));
-    }
-    assert!(app.key(code(KeyCode::Enter)).is_empty());
-    assert!(matches!(&app.overlay, Overlay::Input { error: Some(_), .. }));
-    app.key(code(KeyCode::Backspace));
-    app.key(key('3'));
-    assert_eq!(app.key(code(KeyCode::Enter)), vec![Effect::Scale { namespace: "default".into(), name: "web".into(), replicas: 3 }]);
-    // Kubernetes down: the view says so instead of an empty table.
-    app.apply(Msg::KubeDown("http://127.0.0.1:6443: connection refused".into()));
-    assert!(render(&app, 80, 24).contains("connection refused"));
-}
-
-#[test]
 fn settings_validate_and_flag_restarts() {
     let mut app = sample_app();
     app.key(key('8'));
@@ -360,11 +327,11 @@ fn settings_validate_and_flag_restarts() {
 }
 
 #[test]
-fn help_overlay_lists_keys_and_k9s() {
+fn help_overlay_lists_keys() {
     let mut app = sample_app();
     app.key(key('?'));
     let s = render(&app, 80, 24);
-    assert!(s.contains("Keys") && s.contains("k9s --context litek8s-dev") && s.contains("port-forward") && s.contains("Any key closes"), "{s}");
+    assert!(s.contains("Keys") && s.contains(":ctx") && s.contains("describe yaml edit") && s.contains("Any key closes"), "{s}");
     // Every line fits inside the box at 80 columns: nothing wraps or is cut.
     for (section, keys) in view::HELP {
         let width = 11 + keys.iter().map(|(k, v)| k.chars().count() + v.chars().count() + 3).sum::<usize>();
