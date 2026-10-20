@@ -3,3 +3,4 @@
 //! See docs/observability.md.
 
 pub mod tsdb;
+pub mod promql;
