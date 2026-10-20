@@ -9,9 +9,11 @@
 #             run here (it is on the VMs' LAN), 4 vCPU / 4 GiB
 #
 #   bench/ha.sh up litek8s|k3s     boot, install, start; wait for 4 Ready nodes
+#   bench/ha.sh up-single litek8s|k3s   one server (lk1) and the client (lk5), for baselines
 #   bench/ha.sh push               new litek8s binary everywhere, restart
 #   bench/ha.sh leader             name of the leader (Raft or etcd)
-#   bench/ha.sh kill-leader        SIGKILL the leader's server process (systemd restarts it)
+#   bench/ha.sh kill-leader        SIGKILL the leader's server process (systemd restarts it;
+#                                  HA_DOWN_SECS=20 keeps it down that long first)
 #   bench/ha.sh partition <vm> <secs>  cut <vm> off from the other servers (iptables)
 #   bench/ha.sh nemesis <every> <for>  kill-leader every <every> s for <for> s
 #   bench/ha.sh mem                PSS of each server process (MiB)
@@ -19,6 +21,7 @@
 #   bench/ha.sh down               stop every VM
 #
 # Env: LITEK8S_BIN (linux binary, default target/release/litek8s),
+# HA_RAFT_HEARTBEAT_MS (litek8s Raft timers, see docs/ha.md),
 # K3S_VERSION (default v1.33.4+k3s1), HA_SERVER_MEM/CPUS, HA_RUNNER_MEM/CPUS.
 set -euo pipefail
 
@@ -60,6 +63,7 @@ StartLimitIntervalSec=0
 
 [Service]
 ${4:+EnvironmentFile=$4}
+${HA_RAFT_HEARTBEAT_MS:+Environment=LITEK8S_RAFT_HEARTBEAT_MS=$HA_RAFT_HEARTBEAT_MS}
 ExecStart=$3
 Restart=always
 RestartSec=2
@@ -165,6 +169,30 @@ cmd_up() {
   log "not all nodes became Ready"; return 1
 }
 
+# One server (lk1, same shape) and the client (lk5): the baselines.
+cmd_up_single() {
+  local k="${1:-litek8s}" i
+  echo "$k-single" >"$STATE/kind"
+  "$VM" key >/dev/null
+  "$VM" up lk1 "$(ssh_port 1)" "${HA_SERVER_MEM:-2048}" "${HA_SERVER_CPUS:-2}" "$(lan_ip 1)" &
+  "$VM" up lk5 "$(ssh_port 5)" "${HA_RUNNER_MEM:-4096}" "${HA_RUNNER_CPUS:-4}" "$(lan_ip 5)" &
+  wait
+  for i in 1 5; do base_packages "lk$i"; install_litek8s "lk$i"; done
+  runner_tools
+  if [[ "$k" == k3s ]]; then
+    rroot lk1 "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='$K3S_VERSION' sh -s - server --node-ip $(lan_ip 1) --disable=traefik,servicelb,metrics-server --write-kubeconfig-mode=644 >/dev/null"
+    r lk1 'cat /etc/rancher/k3s/k3s.yaml' | sed "s#server: https://127.0.0.1:6443#server: https://$(lan_ip 1):6443#" | r lk5 'cat > ~/kubeconfig'
+  else
+    start_unit lk1 litek8s-apiserver "$(unit litek8s-apiserver 'litek8s API server' "/usr/local/bin/litek8s apiserver --listen 0.0.0.0:6443 --data-dir /var/lib/litek8s/apiserver --runtime crun --node-ip $(lan_ip 1)")"
+    printf 'apiVersion: v1\nkind: Config\nclusters:\n- name: s\n  cluster:\n    server: http://%s:6443\ncontexts:\n- name: s\n  context: {cluster: s, user: s}\ncurrent-context: s\nusers:\n- name: s\n  user: {}\n' "$(lan_ip 1)" | r lk5 'cat > ~/kubeconfig'
+  fi
+  for _ in $(seq 1 60); do
+    cmd_run kubectl get nodes 2>/dev/null | grep -q ' Ready' && { cmd_run kubectl get nodes; return 0; }
+    sleep 3
+  done
+  log "the single server did not become Ready"; return 1
+}
+
 cmd_push() {
   local i
   for i in 1 2 3 4 5; do install_litek8s "lk$i" & done
@@ -194,25 +222,29 @@ cmd_leader() {
 cmd_kill_leader() {
   local vm; vm="$(cmd_leader)"
   [[ -n "$vm" ]] || { log "no leader"; return 1; }
-  if [[ "$(kind)" == k3s ]]; then
-    rroot "$vm" 'systemctl kill -s KILL k3s'
+  local unit; unit=$([[ "$(kind)" == k3s ]] && echo k3s || echo litek8s-apiserver)
+  if [[ -n "${HA_DOWN_SECS:-}" ]]; then
+    # A crash that keeps the server down (else systemd restarts it in 2 s,
+    # sooner than an election).
+    rroot "$vm" "systemctl kill --kill-whom=main -s KILL $unit; systemctl stop $unit; systemd-run --quiet --on-active=${HA_DOWN_SECS}s systemctl start $unit"
   else
-    rroot "$vm" 'systemctl kill -s KILL litek8s-apiserver'
+    rroot "$vm" "systemctl kill --kill-whom=main -s KILL $unit"
   fi
   log "killed the leader on $vm"
   echo "$vm"
 }
 
 cmd_partition() { # vm secs
-  local vm="$1" secs="$2" i rules=""
+  local vm="$1" secs="$2" i add="" del=""
   for i in 1 2 3; do
     [[ "lk$i" == "$vm" ]] && continue
-    rules+="iptables -I INPUT -s $(lan_ip "$i") -j DROP; iptables -I OUTPUT -d $(lan_ip "$i") -j DROP; "
+    add+="iptables -I INPUT -s $(lan_ip "$i") -j DROP; iptables -I OUTPUT -d $(lan_ip "$i") -j DROP; "
+    del+="iptables -D INPUT -s $(lan_ip "$i") -j DROP; iptables -D OUTPUT -d $(lan_ip "$i") -j DROP; "
   done
-  rroot "$vm" "$rules"
+  rroot "$vm" "$add"
   log "partitioned $vm from the other servers for ${secs}s"
   sleep "$secs"
-  rroot "$vm" 'iptables -F INPUT; iptables -F OUTPUT'
+  rroot "$vm" "$del"
   log "healed $vm"
 }
 
@@ -227,9 +259,10 @@ cmd_nemesis() {
 }
 
 cmd_mem() {
-  local i proc
-  proc=$([[ "$(kind)" == k3s ]] && echo 'k3s server' || echo 'litek8s apiserver')
-  for i in 1 2 3; do
+  local i proc servers="1 2 3"
+  proc=$([[ "$(kind)" == k3s* ]] && echo 'k3s server' || echo 'litek8s apiserver')
+  [[ "$(kind)" == *-single ]] && servers=1
+  for i in $servers; do
     printf 'lk%s ' "$i"
     rroot "lk$i" "pid=\$(pgrep -f '$proc' | head -1); awk '/^Pss:/{s+=\$2} END{printf \"%.1f MiB\n\", s/1024}' /proc/\$pid/smaps_rollup"
   done
@@ -237,13 +270,14 @@ cmd_mem() {
 
 cmd_down() {
   local i
-  for i in 1 2 3 4 5; do "$VM" down "lk$i"; done
+  for i in 1 2 3 4 5; do "$VM" down "lk$i" 2>/dev/null || true; done
   "$VM" lanhub-stop
   rm -rf "$STATE"
 }
 
 case "${1:-}" in
   up) shift; cmd_up "$@" ;;
+  up-single) shift; cmd_up_single "$@" ;;
   push) cmd_push ;;
   leader) cmd_leader ;;
   kill-leader) cmd_kill_leader ;;

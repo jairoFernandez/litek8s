@@ -239,10 +239,12 @@ impl tracing::Subscriber for RaftLog {
 fn raft_config() -> Result<Config> {
     // A follower calls an election after the leader's lease (the max
     // election timeout) plus a random election timeout without a
-    // heartbeat: a dead leader is replaced within ~1.5-2 s. openraft also
-    // gives each AppendEntries one heartbeat interval: slow disks or a
-    // lossy network (Wi-Fi) want more, e.g. LITEK8S_RAFT_HEARTBEAT_MS=300.
-    let heartbeat: u64 = std::env::var("LITEK8S_RAFT_HEARTBEAT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(100).max(20);
+    // heartbeat: with 300 ms heartbeats a dead leader is replaced in ~5 s.
+    // openraft 0.9's core waits for each log flush, so a server whose disk
+    // stalls (an SD card, image pulls on the same disk) misses heartbeats
+    // meanwhile: shorter timers (LITEK8S_RAFT_HEARTBEAT_MS=100, ~2 s
+    // failover) suit fast dedicated disks only. bench/HA.md compares both.
+    let heartbeat: u64 = std::env::var("LITEK8S_RAFT_HEARTBEAT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(300).max(20);
     let config = Config {
         cluster_name: "litek8s".into(),
         heartbeat_interval: heartbeat,

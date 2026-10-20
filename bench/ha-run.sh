@@ -3,7 +3,7 @@
 # running (litek8s or k3s). Results go to $OUT (default bench/results/ha-<kind>-<ts>).
 #
 #   bench/ha-run.sh latency          30 s of back-to-back writes through the LB
-#   bench/ha-run.sh failover [kills] writes at 10/s while the leader is killed every 30 s
+#   bench/ha-run.sh failover [kills] [every]  writes at 10/s while the leader is killed every <every> s
 #   bench/ha-run.sh mem              PSS of every server process
 #   bench/ha-run.sh corpus [every]   the compat corpus, killing the leader every <every> s (default 120)
 #   bench/ha-run.sh conformance [every]  the conformance suite, same nemesis
@@ -34,11 +34,11 @@ phase_latency() {
 }
 
 phase_failover() {
-  local kills="${1:-10}" secs pid
-  secs=$(( kills * 30 + 20 ))
-  log "failover: writes at 10/s for ${secs}s, the leader killed every 30 s"
+  local kills="${1:-10}" every="${2:-30}" secs pid
+  secs=$(( kills * every + 20 ))
+  log "failover: writes at 10/s for ${secs}s, the leader killed every ${every} s (down ${HA_DOWN_SECS:-2} s)"
   "$HA" run bash -c "nohup python3 bench/node/haprobe.py run /home/bench/kubeconfig $secs 100 /tmp/failover.jsonl >/dev/null 2>&1 &"
-  pid=$(nemesis_start 30)
+  pid=$(nemesis_start "$every")
   sleep "$secs"
   nemesis_stop "$pid" failover
   sleep 5

@@ -128,7 +128,11 @@ async fn leader_name(addr: &str) -> Option<String> {
 /// Three servers: s1 starts the cluster, s2 and s3 join it.
 async fn cluster(root: &Path) -> Vec<Server> {
     // SAFETY: set before the servers start; they only read it.
-    unsafe { std::env::set_var("LITEK8S_HA_NO_EXIT", "1") };
+    unsafe {
+        std::env::set_var("LITEK8S_HA_NO_EXIT", "1");
+        // Loopback and a local disk: the fast timers (elections in ~2 s).
+        std::env::set_var("LITEK8S_RAFT_HEARTBEAT_MS", "100");
+    }
     let s1 = Server::start("s1", &root.join("s1"), 0, true, None);
     eventually("s1 ready", T, || async { matches!(http(&s1.addr, "GET", "/api/v1/namespaces/default", None, T).await, Ok((200, _))) }).await;
     let token = std::fs::read_to_string(root.join("s1/join-token")).unwrap();

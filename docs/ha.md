@@ -135,14 +135,14 @@ lease endpoint reconciler does).
   and the service account key from the server it joins. As in k3s by
   default, the agent token is the server token: anyone holding it can join
   either.
-- **Timers.** Heartbeats every 100 ms; a follower calls an election after
-  the leader lease (1 s) plus a random 0.5–1 s without one, so a dead leader
-  is replaced in about 1.5–2 s (bench/HA.md has measurements). openraft
-  0.9 also gives every AppendEntries one heartbeat interval to complete
-  (requests are capped at 512 KiB so big objects go a few at a time). On
-  slow disks or a lossy network (Wi-Fi) raise it on every server:
-  `LITEK8S_RAFT_HEARTBEAT_MS=300` (elections scale with it: 1.5–3 s timeout,
-  ~5 s failover).
+- **Timers.** Heartbeats every 300 ms; a follower calls an election after
+  the leader lease (3 s) plus a random 1.5–3 s without one, so a dead leader
+  is replaced in about 5 s (bench/HA.md: 4.8–5.6 s of write unavailability
+  per leader kill). openraft 0.9 also gives every AppendEntries one
+  heartbeat interval to complete (requests are capped at 512 KiB so big
+  objects go a few at a time). On fast dedicated disks and a wired network
+  `LITEK8S_RAFT_HEARTBEAT_MS=100` on every server gives ~2 s failovers (see
+  Disks below for why that is not the default).
 
 ## Consistency model
 
@@ -156,6 +156,20 @@ lease endpoint reconciler does).
 
 A request that fails with `504 Timeout` (no leader for 15 s, or the server
 was cut off) may or may not have been applied, as with etcd timeouts.
+
+## Disks
+
+Every server writes the Raft log with `fdatasync` before it acknowledges an
+entry, like etcd, and openraft 0.9's core waits for that flush before it
+handles the next message, heartbeats included. A follower whose disk takes
+seconds to flush (an SD card, or one disk shared with image pulls that write
+gigabytes) cannot answer heartbeats meanwhile, and the others elect a new
+leader. To keep flushes short the log is preallocated (16 MiB segments
+written full of zeros, as etcd's WAL), so an append is an overwrite with no
+metadata for the filesystem to journal: on ext4 a journal commit would wait
+for every other dirty file on the disk. That is why the default timers
+tolerate ~4.5 s without a heartbeat; with fast dedicated disks they can be
+shortened (`LITEK8S_RAFT_HEARTBEAT_MS=100`); bench/HA.md measures both.
 
 ## Limits
 
