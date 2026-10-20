@@ -218,12 +218,15 @@ impl Silence {
     }
 
     pub fn matches(&self, labels: &BTreeMap<String, String>) -> bool {
-        !self.matchers.is_empty()
-            && self.matchers.iter().all(|m| {
-                let v = labels.get(&m.name).map(String::as_str).unwrap_or("");
-                let hit = if m.is_regex { regex::Regex::new(&format!("^(?:{})$", m.value)).is_ok_and(|r| r.is_match(v)) } else { v == m.value };
-                hit == m.is_equal
-            })
+        !self.matchers.is_empty() && self.matchers.iter().all(|m| m.matches(labels))
+    }
+}
+
+impl SilenceMatcher {
+    pub fn matches(&self, labels: &BTreeMap<String, String>) -> bool {
+        let v = labels.get(&self.name).map(String::as_str).unwrap_or("");
+        let hit = if self.is_regex { regex::Regex::new(&format!("^(?:{})$", self.value)).is_ok_and(|r| r.is_match(v)) } else { v == self.value };
+        hit == self.is_equal
     }
 }
 
@@ -540,7 +543,7 @@ impl Alerts {
             let mut notes = Vec::new();
             let mut marks = Vec::new();
             for a in state.values() {
-                if !a.silenced_by.is_empty() || !r.matchers.iter().all(|m| Silence { name: String::new(), matchers: vec![m.clone()], starts_at: 0, ends_at: i64::MAX, until_resolved: false, comment: String::new() }.matches(&a.labels)) {
+                if !a.silenced_by.is_empty() || !r.matchers.iter().all(|m| m.matches(&a.labels)) {
                     continue;
                 }
                 let note = |firing: bool| Note {
