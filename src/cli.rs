@@ -1565,8 +1565,13 @@ pub async fn run() -> Result<()> {
         Command::Mcp(args) => crate::mcp::run(args).await,
         Command::Completion { shell } => {
             use clap::CommandFactory;
-            clap_complete::generate(shell, &mut Cli::command(), "litek8s", &mut io::stdout());
-            Ok(())
+            let mut script = Vec::new();
+            clap_complete::generate(shell, &mut Cli::command(), "litek8s", &mut script);
+            // `litek8s completion zsh | head` closes the pipe early: not an error.
+            match io::stdout().write_all(&script) {
+                Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+                r => r.context("writing the completion script"),
+            }
         }
         Command::Skill { reference, list, install } => skill(reference, list, install),
         Command::Agent { join: Some(join), token, node_name, node_ip, node_dir, runtime, wireguard_port, no_wireguard, node_grace_period, .. } => {
