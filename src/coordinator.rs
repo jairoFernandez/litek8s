@@ -569,7 +569,7 @@ pub async fn distribute_qwen(
         let p = format!("model.layers.{i}");
         // Load + transpose + distribute one tensor; each is freed before the
         // next so peak RAM stays at one layer-weight, not the whole model.
-        let mut big = |name: String, tag: String| -> Result<(Matrix, String)> {
+        let big = |name: String, tag: String| -> Result<(Matrix, String)> {
             Ok((transpose(&file.tensor_2d(&name)?), tag))
         };
 
