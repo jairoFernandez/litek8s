@@ -3,12 +3,12 @@
 //! what the backends learn arrives as [`Msg`]s. That keeps all of it
 //! testable without a terminal, Docker or a cluster.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 use super::kube::{KEffect, KMsg, KubeUi};
-use super::model::{self, Container, DiskUsage, Image, Pod, Volume};
+use super::model::{self, Container, DiskUsage, Image, Pod, ProjectUse, Volume};
 use crate::dev::config::{DevConfig, Publish};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,6 +152,11 @@ pub enum Effect {
 #[derive(Debug, Clone)]
 pub enum Msg {
     Containers(Vec<Container>),
+    /// Compose projects' use against their budgets, and the containers the
+    /// OOM killer stopped (litek8s's Docker API).
+    Projects { at: std::time::Instant, projects: Vec<ProjectUse>, oom_killed: Vec<String> },
+    /// The engine's `oom` event.
+    Oom { name: String, project: Option<String>, scope: String, memory: String },
     Images(Vec<Image>),
     Volumes(Vec<Volume>),
     Disk(DiskUsage),
@@ -416,6 +421,11 @@ pub struct App {
     pub volumes: Vec<Volume>,
     pub disk: DiskUsage,
     pub collapsed: BTreeSet<String>,
+    /// Compose projects by name (budgets, use) and when they were sampled.
+    pub projects: BTreeMap<String, ProjectUse>,
+    projects_at: Option<std::time::Instant>,
+    /// Containers whose last run ended in an OOM kill.
+    pub oom_killed: BTreeSet<String>,
 
     pub kube_error: Option<String>,
     /// Every pod (Home counts them, names cgroups and images by them).
@@ -491,6 +501,9 @@ impl App {
             volumes: Vec::new(),
             disk: DiskUsage::default(),
             collapsed: BTreeSet::new(),
+            projects: BTreeMap::new(),
+            projects_at: None,
+            oom_killed: BTreeSet::new(),
             kube_error: None,
             pods: Vec::new(),
             kube: KubeUi::new(None),
@@ -790,6 +803,28 @@ impl App {
                 self.docker_error = None;
                 self.containers = c;
                 self.relink();
+            }
+            Msg::Projects { at, projects, oom_killed } => {
+                let secs = self.projects_at.map(|p| at.saturating_duration_since(p).as_secs_f64()).filter(|s| *s > 0.2);
+                let mut next = BTreeMap::new();
+                for mut p in projects {
+                    if let (Some(secs), Some(prev)) = (secs, self.projects.get(&p.name)) {
+                        p.cpu_rate = (p.cpu_usec >= prev.cpu_usec).then(|| (p.cpu_usec - prev.cpu_usec) as f64 / 1e6 / secs);
+                    }
+                    next.insert(p.name.clone(), p);
+                }
+                self.projects = next;
+                self.projects_at = Some(at);
+                self.oom_killed = oom_killed.into_iter().collect();
+            }
+            Msg::Oom { name, project, scope, memory } => {
+                let why = match (scope.as_str(), project) {
+                    ("project", Some(p)) if !memory.is_empty() => format!("compose project {p} hit its {memory} budget"),
+                    ("project", Some(p)) => format!("compose project {p} hit its memory budget"),
+                    ("container", _) => "it hit its memory limit".to_string(),
+                    _ => "the machine ran out of memory".to_string(),
+                };
+                self.flash(format!("{name} was OOM-killed: {why}"), true);
             }
             Msg::Images(i) => {
                 self.images = i;

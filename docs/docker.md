@@ -54,8 +54,9 @@ reuse pulled layers), the DNS server, the crun shim and bundle code.
 
 ## What works
 
-Tested by `compat/docker/run.sh` (16 cases, all passing on Linux x86_64
-rootless and on the macOS VM; run it against Docker or OrbStack too):
+Tested by `compat/docker/run.sh` (17 cases, all passing on Linux x86_64
+rootless and on the macOS VM; run it against Docker or OrbStack too, where
+the litek8s-only `compose_budget` case is skipped):
 
 | area | supported |
 |---|---|
@@ -65,9 +66,91 @@ rootless and on the macOS VM; run it against Docker or OrbStack too):
 | build | `docker build` with the classic API: Dockerfile cache, multi-stage, `--target`, `--build-arg`, `.dockerignore`, `-f` outside the context; plus the BuildKit Dockerfile syntax (`RUN --mount=type=cache\|bind\|tmpfs`, `COPY --chmod`/`--link`, heredocs, `TARGETARCH` etc.) |
 | networks | `network create/ls/inspect/rm/connect/disconnect/prune`; one bridge per network, names, aliases and short IDs resolve on user-defined networks, networks are isolated from each other; `host.docker.internal` reaches the host |
 | volumes | named and anonymous volumes (filled from the image on first use, like Docker), `local` driver bind options (`o=bind,device=`), `volume ls/inspect/rm/prune` |
-| compose | `up`/`down`/`ps`/`logs -f`/`exec`/`restart`/`build`/`pull`, project networks with service names and aliases, healthchecks and `depends_on: condition: service_healthy`, env files, named and anonymous volumes, bind mounts, published ports, restart policies |
+| compose | `up`/`down`/`ps`/`logs -f`/`exec`/`restart`/`build`/`pull`, project networks with service names and aliases, healthchecks and `depends_on: condition: service_healthy`, env files, named and anonymous volumes, bind mounts, published ports, restart policies, per-service limits (`mem_limit`, `cpus`, `pids_limit`, `deploy.resources.limits`), and a budget for the whole project (next section) |
 | Dev Containers | the `devcontainer` CLI (what VS Code and Cursor run): features, `postCreateCommand`, `remoteUser`, `containerEnv`, `mounts`, exec, file ownership |
 | Testcontainers | random ports (`-P`) through inspect, log and port wait strategies, exec, copy in/out, the Ryuk reaper (it mounts the Docker socket: any bind source named `docker.sock` is this engine's own socket inside containers) |
+
+## Resource budgets for compose projects
+
+Docker and OrbStack limit containers one by one. A compose stack on a
+laptop is better thought of as one machine: litek8s puts every container
+of a compose project (label `com.docker.compose.project`) in one cgroup,
+`litek8s/docker/projects/<project>`, and that cgroup can have a budget:
+
+- **memory** (`memory.max`, no swap): the whole stack together. When it is
+  reached the kernel's OOM killer acts *inside the project*: it picks the
+  biggest process there (the runaway service), not something else in the
+  VM, and other projects and the cluster never notice. With
+  **oom_group** every container of the project is killed instead
+  (`memory.oom.group`), like a server that ran out of memory.
+- **cpus** (`cpu.max`): the stack shares that many CPUs.
+- **pids** (`pids.max`): a fork bomb stays in its project.
+
+Per-container limits (`mem_limit`, `cpus`, ...) still apply inside the
+budget. A budget comes from `~/.litek8s/config.yaml`:
+
+```yaml
+docker:
+  projects:                 # by compose project name
+    myapp: {memory: 2Gi, cpus: 2}
+    kafka-lab: {memory: 6Gi, cpus: 3, pids: 2000, oom_group: true}
+  default_project:          # any project nothing else gives a budget
+    memory: 4Gi
+  defaults:                 # a container that sets no limit of its own (off when absent)
+    memory: 1Gi
+    cpus: 1
+```
+
+or from a label on any service of the project, so the budget can travel
+with the compose file:
+
+```yaml
+services:
+  api:
+    labels:
+      dev.litek8s.project.memory: 2Gi
+      dev.litek8s.project.cpus: "2"
+      dev.litek8s.project.pids: "1000"
+      dev.litek8s.project.oom-group: "true"
+```
+
+Field by field, the config's entry for the project wins over labels
+(your machine, your limits), labels win over `default_project`; when
+several services' labels disagree the smallest wins. Sizes are `2Gi`,
+`512Mi` or `1g` (binary, as Docker reads them; a bare number is MiB, like
+the top-level `memory:`), CPUs `2`, `1.5` or `"500m"`. Labels that do not
+parse fail `docker create` with the reason. `defaults` fill in only what
+a container leaves unset (memory, cpus, pids); `docker inspect` still
+shows what the client asked for.
+
+`litek8s dev up` sends the `docker:` section to the cluster's Docker API,
+which keeps it (`<data>/docker/settings.json`) and applies it to running
+projects at once; for a cluster that already runs, `litek8s dev up` again
+(or saving the file from `litek8s ui`'s Settings) applies an edited file
+without restarting anything. Labels apply when a container of the project
+starts. `GET /litek8s/v1/docker/projects` on the Docker socket lists each
+project's budget and use; `GET`/`PUT /litek8s/v1/docker/settings` read and
+replace the settings.
+
+What you see:
+
+- `docker stats` shows the limit that really caps a container: the
+  smallest of its own, its project's budget and the cluster's (`MEM USAGE
+  / LIMIT` is `… / 256MiB` for every service of a 256Mi project), and PIDs.
+- An OOM-killed container exits with **137**, `docker inspect` says
+  `"OOMKilled": true`, and Docker's `oom` event carries which limit it
+  hit: `litek8s.oom=project` (with `litek8s.project.memory=256Mi`),
+  `container` (its own `mem_limit`) or `system`. The engine's log says it
+  in words: `docker: container shop-worker-1 (3f2a…) was OOM-killed: out
+  of compose project shop's budget (memory 256Mi)`.
+- `litek8s ui`'s Containers view puts a memory meter against the budget,
+  the CPUs in use and the OOM kills on each project's row, marks killed
+  containers `OOMKilled` and says so in the status line
+  ([ui.md](ui.md#containers-and-budgets)).
+
+`compat/docker/run.sh compose_budget` runs it end to end: a 256Mi project
+whose `tail /dev/zero` service is killed while its other service and
+another project keep running, and the same with `oom-group`.
 
 ## Builds: two builders
 
@@ -160,7 +243,7 @@ host ports below 1024.
 services, plugins and other volume or network drivers (`overlay`,
 `macvlan`, `ipvlan`), IPv6 on container networks, `--init`, `--device`,
 GPU, published UDP ports, the BuildKit API itself (`/grpc`, `/session`:
-buildx's `docker` driver), `docker stats` beyond CPU and memory,
+buildx's `docker` driver), `docker stats` beyond CPU, memory and PIDs, `docker update` (accepted, changes nothing),
 `checkpoint`. Containers do not survive `litek8s dev down` (restart
 policies bring them back on `dev up`).
 

@@ -8,6 +8,7 @@
 
 pub(crate) mod api;
 pub(crate) mod attach;
+pub mod budget;
 pub(crate) mod build;
 pub(crate) mod engine;
 pub(crate) mod error;

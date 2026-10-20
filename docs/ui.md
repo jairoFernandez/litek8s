@@ -17,7 +17,7 @@ Nine views, `1`-`9` (or `tab`) to switch, `?` for the keys of each:
 |---|---|
 | **1 Home** | the shown cluster's state (up, down, starting, stopping), mode, uptime; CPU, memory and disk of the VM or rootless sandbox; the Docker socket and API server; whether `docker` and `kubectl` point at it. `u` up, `d` down, `R` delete (asks first) |
 | **2 Clusters** | the local clusters (state, API port, nodes, memory, age) and your kubeconfig's other contexts; `n` new (name, nodes), `u`/`d` up/down, `D` delete, `enter` shows it in every view (and offers to point `kubectl` and `docker` at it); see [Clusters](#clusters) |
-| **3 Containers** | `docker ps -a`, grouped by compose project: `l` logs (follow), `s` a shell in the container, `u`/`x`/`r` start/stop/restart, `d` remove; on a project row they act on the whole project, `space` folds it |
+| **3 Containers** | `docker ps -a`, grouped by compose project, with each project's memory against its budget, CPUs and OOM kills: `l` logs (follow), `s` a shell in the container, `u`/`x`/`r` start/stop/restart, `d` remove; on a project row they act on the whole project, `space` folds it |
 | **4 Images** | sizes, age, which containers and pods use each; `d` remove |
 | **5 Volumes** | sizes, which containers mount each, compose project; `d` remove |
 | **6 Free space** | what can be reclaimed: stopped containers, dangling images, build cache, unused images, unused volumes; select with `space`, `p` frees it |
@@ -412,6 +412,32 @@ confirmation:
  l logs  s shell  u start  x stop  r restart  d remove  / filter        ?  help
 ```
 
+### Containers and budgets
+
+On litek8s a compose project can have a resource budget
+([docker.md](docker.md#resource-budgets-for-compose-projects)). Its row
+then shows the project's memory against the budget (the meter Home uses),
+the CPUs it uses out of its budget, and how many processes the OOM killer
+took; a container the OOM killer stopped says `OOMKilled` instead of
+`exited`, and the kill shows in the status line as it happens
+(`shop-worker-1 was OOM-killed: compose project shop hit its 256Mi budget`):
+
+```
+╭─ Containers ─────────────────────────────────────────────────── 2/4 running ─╮
+│ NAME                    STATE       IMAGE                   PORTS            │
+│▌scratch                 ○ exited    nginx:1.27                               │
+│ ▾ shop                  ◐ 2/3 up    ████▌░  75% 192Mi/256Mi cpu 0.5/2 ✗ 1 OOM│
+│   web                   ● running   nginx:1.27              8080->80/tcp     │
+│   db                    ● running   nginx:1.27              8080->80/tcp     │
+│   worker                ✕ OOMKilled nginx:1.27                               │
+╰──────────────────────────────────────────────────────────────────────────────╯
+```
+
+A project without a budget shows its memory (`mem 115Mi · no budget`).
+Use is sampled every 2 s while the view is on screen (one request to
+`/litek8s/v1/docker/projects`) and not at all otherwise; other Docker
+engines have no budgets and are not asked again.
+
 `l` follows a container's (or pod's) log; `↑`/`PgUp` scroll back and stop
 following, `G` or `f` follow again, `w` wraps long lines. Escape sequences
 are stripped, so colored logs cannot paint over the UI:
@@ -644,12 +670,17 @@ shares:              # macOS: directories shared with the VM at the same path (d
 port: 6443           # the API server's port on localhost
 publish: localhost   # where published container ports and NodePorts listen:
                      #   localhost (default) or all (other machines on the network too)
+docker:              # Docker API: compose project budgets, container defaults
+  projects: {shop: {memory: 2Gi, cpus: 2}}
+  default_project: {memory: 4Gi}
 ```
 
 The file is read when the cluster starts. The cluster records what it
 started with, so the Settings view (and nothing else) tells you which
 changes still need `d` and `u` on Home. "Config file" opens it in
-`$VISUAL`/`$EDITOR` (`vi` otherwise) and checks it when the editor exits.
+`$VISUAL`/`$EDITOR` (`vi` otherwise) and checks it when the editor exits;
+a changed `docker:` section goes to the running cluster's Docker API at
+once (no restart, see [docker.md](docker.md#resource-budgets-for-compose-projects)).
 
 ## Contexts: pointing your tools at litek8s
 
@@ -982,7 +1013,9 @@ on screen, and waits on sockets otherwise:
 - **No polling for lists.** Containers, images and volumes are re-listed
   only after Docker events (`GET /events`), coalesced over 150 ms; sizes
   (`/system/df`, which walks directories) only after events that change
-  them and at most every 2 s. Pods, deployments and namespaces come from
+  them and at most every 2 s. Compose projects' use against their budgets
+  is the exception: every 2 s while Containers is on screen, never
+  otherwise. Pods, deployments and namespaces come from
   Kubernetes watches, coalesced over 100 ms.
 - **Clusters** lists the clusters every 2 s while the view is on screen
   (their files, one memory request to the VM or sandbox, a node list from

@@ -342,6 +342,7 @@ pub async fn run(command: DevCommand) -> Result<()> {
                     cpus: cpus.or(config.cpus),
                     shares,
                     publish,
+                    docker: config.docker.clone(),
                 },
             )
             .await
@@ -375,6 +376,9 @@ pub struct UpOptions {
     /// Shared directories (macOS; empty: $HOME).
     pub shares: Vec<PathBuf>,
     pub publish: config::Publish,
+    /// Docker API budgets (`docker:` in config.yaml), sent to the cluster's
+    /// engine once it runs.
+    pub docker: crate::docker::budget::DockerSettings,
 }
 
 fn server(port: u16) -> String {
@@ -392,6 +396,7 @@ async fn up(cluster: &cluster::Cluster, nodes: Option<u32>, opts: UpOptions) -> 
             kubeconfig::install(&kubeconfig::default_path(), &context, &server(state.port), opts.switch)?;
         }
         println!("{context} is already running ({}, {}, context {context})", state.mode, server(state.port));
+        send_docker_settings(cluster, &opts.docker, true).await;
         return Ok(());
     }
     let lock = env::lock(&home)?;
@@ -427,9 +432,52 @@ async fn up(cluster: &cluster::Cluster, nodes: Option<u32>, opts: UpOptions) -> 
     if opts.kubeconfig {
         kubeconfig::install(&kubeconfig::default_path(), &context, &server(port), opts.switch)?;
     }
+    send_docker_settings(cluster, &opts.docker, false).await;
     let nodes = if meta.nodes > 1 { format!("{} nodes, ", meta.nodes) } else { String::new() };
     println!("{context} ready in {:.2}s ({}{}, {}, kubectl context {context})", started.elapsed().as_secs_f64(), nodes, env_state.mode, server(port));
     Ok(())
+}
+
+/// Hand the `docker:` settings to the cluster's Docker API (it keeps them
+/// and applies them to running projects at once). A failure only warns.
+async fn send_docker_settings(cluster: &cluster::Cluster, settings: &crate::docker::budget::DockerSettings, report: bool) {
+    let ep = crate::ui::client::Endpoint::unix(cluster.docker_socket());
+    let body = serde_json::to_vec(settings).unwrap_or_default();
+    let mut problem = String::new();
+    // The engine starts with the node agent, a moment after the node is
+    // Ready: retry while nothing answers; an answer is final.
+    for _ in 0..50 {
+        let sent = tokio::time::timeout(Duration::from_secs(10), ep.send(hyper::Method::PUT, "/litek8s/v1/docker/settings", Some("application/json"), body.clone())).await;
+        let resp = match sent {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                problem = format!("{e:#}");
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                continue;
+            }
+            Err(_) => {
+                problem = "timed out".into();
+                break;
+            }
+        };
+        let status = resp.status();
+        let data = http_body_util::BodyExt::collect(resp.into_body()).await.map(|b| b.to_bytes()).unwrap_or_default();
+        if let Err(e) = crate::ui::client::check(status, &data) {
+            problem = format!("{e:#}");
+            break;
+        }
+        if report {
+            let r: serde_json::Value = serde_json::from_slice(&data).unwrap_or_default();
+            for a in r["Applied"].as_array().into_iter().flatten() {
+                let b: crate::docker::budget::Budget = serde_json::from_value(a["Budget"].clone()).unwrap_or_default();
+                println!("docker project {}: {}", a["Name"].as_str().unwrap_or("?"), b.summary());
+            }
+        }
+        return;
+    }
+    if !settings.is_empty() {
+        eprintln!("warning: the docker: settings did not reach {}: {problem}", cluster.docker_socket().display());
+    }
 }
 
 /// Settings of a running VM or sandbox apply to every cluster in it.

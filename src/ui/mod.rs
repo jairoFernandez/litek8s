@@ -118,7 +118,8 @@ pub async fn run(args: UiArgs) -> Result<()> {
     let obs_visible = Arc::new(AtomicBool::new(false));
     let wake_obs = Arc::new(Notify::new());
     let obs_ep: obs::Shared = Arc::new(Mutex::new(fixed.as_ref().map(|(ep, _)| ep.clone())));
-    let docker_task = docker::spawn(docker_ep.clone(), tx.clone(), refresh.clone());
+    let budgets = docker::Budgets::default();
+    let docker_task = docker::spawn(docker_ep.clone(), tx.clone(), refresh.clone(), budgets.clone());
     let tasks = vec![
         home::spawn(tx.clone(), local, pace.clone(), wake_home.clone(), active.clone(), fixed.as_ref().filter(|_| !local).map(|(ep, _)| ep.clone())),
         clusters::spawn(tx.clone(), clusters_visible.clone(), wake_clusters.clone()),
@@ -152,6 +153,7 @@ pub async fn run(args: UiArgs) -> Result<()> {
     let mut rt = Runtime {
         docker: docker_ep,
         docker_task,
+        budgets,
         local,
         active,
         clusters_visible,
@@ -380,6 +382,8 @@ impl Input {
 struct Runtime {
     docker: Endpoint,
     docker_task: tokio::task::JoinHandle<()>,
+    /// The Containers view samples project budgets only while shown.
+    budgets: docker::Budgets,
     /// The views show a local cluster (not a --docker-host / --context).
     local: bool,
     /// The local cluster shown (Home samples it).
@@ -516,6 +520,10 @@ impl Runtime {
             if self.clusters_visible.swap(on_clusters, Ordering::Relaxed) != on_clusters && on_clusters {
                 self.wake_clusters.notify_one();
             }
+            let on_ctrs = app.tab == Tab::Containers && app.logs.is_none();
+            if self.budgets.visible.swap(on_ctrs, Ordering::Relaxed) != on_ctrs && on_ctrs {
+                self.budgets.wake.notify_one();
+            }
             let on_obs = app.tab == Tab::Observe && app.logs.is_none();
             if self.obs_visible.swap(on_obs, Ordering::Relaxed) != on_obs && on_obs {
                 self.wake_obs.notify_one();
@@ -544,6 +552,7 @@ impl Runtime {
             Msg::Home(_) => matches!(app.tab, Tab::Home | Tab::Space | Tab::Settings) && app.logs.is_none(),
             Msg::Clusters(_) => app.tab == Tab::Clusters && app.logs.is_none(),
             Msg::Obs(_) => app.tab == Tab::Observe && app.logs.is_none(),
+            Msg::Projects { .. } => app.tab == Tab::Containers && app.logs.is_none(),
             Msg::LogLines(..) | Msg::LogEnd(..) => app.logs.is_some(),
             Msg::Kube(kube::KMsg::Data(..) | kube::KMsg::LogLines { .. } | kube::KMsg::Ext { .. } | kube::KMsg::Forwards(_)) => app.tab == Tab::Kube && app.logs.is_none(),
             _ => true,
@@ -683,8 +692,21 @@ impl Runtime {
                 match status {
                     Ok(s) if s.success() => match crate::dev::config::DevConfig::load_from(&path) {
                         Ok(c) => {
+                            // Docker budgets apply to the running cluster at once.
+                            let docker = (c.docker != app.config.docker && self.local).then(|| serde_json::to_value(&c.docker).unwrap_or_default());
                             app.apply(Msg::Config(Ok(c)));
                             app.flash("config file saved; it is valid", false);
+                            if let Some(body) = docker {
+                                let ep = self.docker.clone();
+                                let tx = self.tx.clone();
+                                tokio::spawn(async move {
+                                    let r = ep.json(hyper::Method::PUT, "/litek8s/v1/docker/settings", Some(&body)).await;
+                                    let _ = tx.send(Msg::Done(match r {
+                                        Ok(_) => Ok("config file saved; Docker budgets applied to the running cluster".into()),
+                                        Err(e) => Err(format!("config file saved, but the cluster's Docker API did not take the budgets: {e:#}")),
+                                    }));
+                                });
+                            }
                         }
                         Err(e) => {
                             app.config_error = Some(format!("{e:#}"));
@@ -754,7 +776,7 @@ impl Runtime {
             self.docker = client::Endpoint::unix(socket);
             app.docker_endpoint = self.docker.display.clone();
             app.apply(Msg::DockerDown(format!("connecting to {name}…")));
-            self.docker_task = docker::spawn(self.docker.clone(), self.tx.clone(), self.refresh.clone());
+            self.docker_task = docker::spawn(self.docker.clone(), self.tx.clone(), self.refresh.clone(), self.budgets.clone());
         }
         // The Kubernetes side follows the new cluster's port.
         self.follow_dev = true;
