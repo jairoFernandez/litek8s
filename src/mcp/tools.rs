@@ -737,7 +737,6 @@ impl Server {
             q.push_str("&dryRun=All");
         }
         let after = k.ep.json_typed(Method::PATCH, &q, "application/apply-patch+yaml", Some(&d)).await?;
-        let rv = |v: &Value| v.pointer("/metadata/resourceVersion").and_then(Value::as_str).unwrap_or_default().to_string();
         let action = match &before {
             None => {
                 if dry {
@@ -746,7 +745,9 @@ impl Server {
                     "created"
                 }
             }
-            Some(b) if rv(b) == rv(&after) => "unchanged",
+            // Not the resourceVersion: a controller may write the object
+            // (status, annotations) between the GET and the apply.
+            Some(b) if same_where_declared(&d, b, &after) => "unchanged",
             Some(_) if dry => "would be configured",
             Some(_) => "configured",
         };
@@ -1218,9 +1219,30 @@ async fn docker(tool: &str, a: &Value) -> Result<Value> {
     }
 }
 
+/// Whether `before` and `after` agree on every field the applied manifest
+/// declares (objects are walked key by key; lists and scalars compare whole),
+/// so that only the apply's own effect decides "unchanged".
+fn same_where_declared(declared: &Value, before: &Value, after: &Value) -> bool {
+    match declared {
+        Value::Object(fields) => fields.iter().all(|(k, v)| same_where_declared(v, &before[k.as_str()], &after[k.as_str()])),
+        _ => before == after,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unchanged_ignores_fields_the_manifest_does_not_declare() {
+        use serde_json::json;
+        let declared = json!({"metadata": {"name": "web", "labels": {"app": "web"}}, "spec": {"replicas": 2}});
+        let before = json!({"metadata": {"name": "web", "labels": {"app": "web"}, "resourceVersion": "5"}, "spec": {"replicas": 2}, "status": {"replicas": 1}});
+        let mut after = json!({"metadata": {"name": "web", "labels": {"app": "web"}, "resourceVersion": "7", "annotations": {"deployment.kubernetes.io/revision": "1"}}, "spec": {"replicas": 2}, "status": {"replicas": 2}});
+        assert!(super::same_where_declared(&declared, &before, &after), "a controller's status write is not the apply's change");
+        after["spec"]["replicas"] = json!(3);
+        assert!(!super::same_where_declared(&declared, &before, &after));
+    }
 
     #[test]
     fn every_tool_has_a_valid_schema() {
@@ -1288,3 +1310,4 @@ mod tests {
         assert_eq!(workload_status(&json!({"spec": {}, "status": {"desiredNumberScheduled": 2, "numberReady": 2}})).unwrap(), "ready 2/2");
     }
 }
+
