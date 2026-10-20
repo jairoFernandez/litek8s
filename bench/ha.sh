@@ -121,6 +121,9 @@ up_k3s() {
     rroot "lk$i" "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='$K3S_VERSION' K3S_TOKEN=lkha-bench-token sh -s - server --server https://$(lan_ip 1):6443 --node-ip $(lan_ip "$i") $flags >/dev/null"
   done
   rroot lk4 "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='$K3S_VERSION' K3S_TOKEN=lkha-bench-token K3S_URL=https://$(lan_ip 1):6443 sh -s - agent --node-ip $(lan_ip 4) >/dev/null"
+  for i in 1 2 3; do
+    rroot "lk$i" 'test -x /usr/local/bin/etcdctl || { curl -fsSL https://github.com/etcd-io/etcd/releases/download/v3.5.21/etcd-v3.5.21-linux-amd64.tar.gz | tar xz -C /tmp && install -m 0755 /tmp/etcd-v3.5.21-linux-amd64/etcdctl /usr/local/bin/etcdctl; }'
+  done
   start_unit lk5 litek8s-lb "$(unit litek8s-lb 'API load balancer' "/usr/local/bin/litek8s lb --tcp-check --listen 127.0.0.1:6443 --server $(lan_ip 1):6443 --server $(lan_ip 2):6443 --server $(lan_ip 3):6443")"
   r lk1 'cat /etc/rancher/k3s/k3s.yaml' | sed 's#server: https://127.0.0.1:6443#server: https://127.0.0.1:6443#' | r lk5 'cat > ~/kubeconfig'
 }
@@ -207,12 +210,15 @@ cmd_run() { r lk5 "cd ~/lk && KUBECONFIG=\$HOME/kubeconfig $(printf '%q ' "$@")"
 # The VM of the current leader.
 cmd_leader() {
   if [[ "$(kind)" == k3s ]]; then
-    local i
+    local i out
     for i in 1 2 3; do
-      # etcd's leader: the member whose status says it leads.
-      if r "lk$i" "sudo ETCDCTL_API=3 bash -c 'curl -s --cacert /var/lib/rancher/k3s/server/tls/etcd/server-ca.crt --cert /var/lib/rancher/k3s/server/tls/etcd/client.crt --key /var/lib/rancher/k3s/server/tls/etcd/client.key https://127.0.0.1:2379/v3/maintenance/status -X POST -d {}'" 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("leader")==d["header"]["member_id"] else 1)' 2>/dev/null; then
-        echo "lk$i"; return 0
-      fi
+      # etcd's leader, as any live member reports it.
+      out=$(r "lk$i" "sudo ETCDCTL_API=3 /usr/local/bin/etcdctl --endpoints https://127.0.0.1:2379 --cacert /var/lib/rancher/k3s/server/tls/etcd/server-ca.crt --cert /var/lib/rancher/k3s/server/tls/etcd/client.crt --key /var/lib/rancher/k3s/server/tls/etcd/client.key --command-timeout=3s endpoint status --cluster -w json" 2>/dev/null) || continue
+      echo "$out" | python3 -c 'import json,sys
+for e in json.load(sys.stdin):
+    s=e["Status"]
+    if s["leader"]==s["header"]["member_id"]:
+        print("lk%d" % (int(e["Endpoint"].split("//")[1].split(":")[0].split(".")[-1]) - 10))' && return 0
     done
     return 1
   fi
@@ -265,6 +271,10 @@ cmd_mem() {
   for i in $servers; do
     printf 'lk%s ' "$i"
     rroot "lk$i" "pid=\$(pgrep -f '$proc' | head -1); awk '/^Pss:/{s+=\$2} END{printf \"%.1f MiB\n\", s/1024}' /proc/\$pid/smaps_rollup"
+    if [[ "$(kind)" == k3s* ]]; then
+      printf 'lk%s containerd ' "$i"
+      rroot "lk$i" "pid=\$(pgrep -x containerd | head -1); awk '/^Pss:/{s+=\$2} END{printf \"%.1f MiB\n\", s/1024}' /proc/\$pid/smaps_rollup"
+    fi
   done
 }
 

@@ -90,7 +90,7 @@ phase_lincheck() {
     i=$((i + 1))
   done
   # The check itself runs when the workload ends.
-  while "$VM_SH" ssh lk5 'pgrep -f "litek8s ha-check" >/dev/null'; do sleep 5; done
+  while "$VM_SH" ssh lk5 'pgrep -f "[l]itek8s ha-check --server" >/dev/null'; do sleep 5; done
   "$VM_SH" ssh lk5 'cat /tmp/lincheck.out' | tee "$OUT/lincheck.txt"
   "$VM_SH" ssh lk5 'gzip -c /tmp/history.json' >"$OUT/lincheck-history.json.gz"
 }
