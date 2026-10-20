@@ -283,7 +283,8 @@ cluster alone.
 Caveats: the macOS memory is the VM process's physical footprint, which
 keeps pages the guest touched at boot (unpacking the initramfs) even after
 the guest frees them; a balloon "squeeze" to hand them back made it worse
-(the guest zeroes balloon pages). k3d on OrbStack ran with kubelet eviction
+(the guest zeroes balloon pages; see the next section for what the balloon
+can and cannot do). k3d on OrbStack ran with kubelet eviction
 thresholds lowered to 1 % because OrbStack's disk was 91 % full from other
 work (the default 10 % put the node in DiskPressure); kind ran before that.
 kind could not `load image-archive` Docker 29's default (multi-platform)
@@ -294,6 +295,93 @@ Compatibility is the same as the plain API server's: the 101-case corpus
 passes 101/101 against `litek8s dev` both on Linux (rootless) and in the macOS
 VM ([compat/RESULTS.md](../compat/RESULTS.md); k3d is the 101/101 reference
 there). kind was not scored; it runs upstream Kubernetes.
+
+## The macOS VM's memory: a ceiling instead of a ratchet (2026-10-19)
+
+The Home view showed "cache 2.0 GB reclaimable" for the dev VM, and it was
+reclaimable inside Linux but not on the Mac: with the VM at `--memory 4096`,
+Argo CD and a demo load, `echo 3 > /proc/sys/vm/drop_caches` in the guest
+freed 1.5 GB and the VM process's footprint stayed at 2885 MB.
+
+**What Virtualization.framework does (macOS 27, M-series, 36 GB).** Every
+guest page touched once stays charged to the VM's XPC helper until the VM
+stops. Measured here:
+
+| experiment | footprint |
+|---|---|
+| fresh VM, then 2.4 GB written to a file in a pod, deleted, caches dropped | 366 → 2927 → 2927 MB |
+| then the balloon inflated by 3 GiB (target 1 GiB), Alpine's default `init_on_alloc=1` | 2927 → 3464 MB: the driver zeroes the pages it takes, and nothing comes back |
+| fresh VM with `init_on_alloc=0`, balloon inflated by 3 GiB | 281 → 289 MB: free, as the pages were never touched |
+| then 2.5 GB written through the page cache under that 1 GiB ceiling | 289 → 1046 MB (without the ceiling: 2927) |
+| save + stop + restore + resume of a 2.3 GB-footprint VM using ~300 MB | 6.8 s pause (save 3.3 s, 2.1 GB state file); the new helper's footprint: 4251 MB (restore brings all of it in) |
+
+The framework's balloon offers MUST_TELL_HOST and DEFLATE_ON_OOM only
+(`/sys/bus/virtio/devices/*/features`): no free page reporting, no free
+page hints, no statistics; Lima and ArcBox report the same, and OrbStack and
+Docker Desktop got dynamic memory by moving to their own VMMs on
+Hypervisor.framework. So litek8s cannot hand memory back; what it can do is
+keep the guest from touching memory it does not need:
+
+- the VM boots with a 1 GiB ceiling (a quarter of `--memory` when that is
+  more); the balloon takes the rest before the guest touches it
+  (`init_on_alloc=0` on the guest's command line);
+- the guest reports MemAvailable, the balloon and PSI on the console
+  (`LITEK8S_MEM`: every 2 s on change, 250 ms when low, at once on a PSI
+  trigger of 100 ms stalled in 1 s); `litek8s dev-vm` grows the ceiling by
+  half when less than 256 MiB is available or memory stalls while less than
+  that is free (a first version also grew on stalls with gigabytes free:
+  during the compat corpus, pods at their own memory limits stalled and the
+  ceiling went to 4 GiB for nothing), and to the
+  whole VM when it is nearly out; it shrinks it by half the excess over
+  512 MiB available, at most once a minute, after 2 calm minutes
+  (`src/dev/balloon.rs`);
+- `lru_gen/min_ttl_ms=1000` in the guest: without it, a 1 GiB burst under
+  the 1 GiB ceiling evicted the code of every process (the root filesystem
+  is a disk now) and the guest thrashed for 60 s, long enough for the node
+  agent to lose its connection; with it the kernel takes its OOM path, the
+  balloon deflates there (DEFLATE_ON_OOM), and the burst took 0.40 s;
+- a smaller fixed cost: the root filesystem is a 53 MiB romfs image on a
+  read-only virtio disk with a tmpfs overlay (a 753 KiB initrd mounts it)
+  instead of a 56 MiB initramfs in RAM plus the 25 MiB archive the
+  framework loads for it, and `swiotlb=noforce` drops 64 MiB of bounce
+  buffers the kernel zeroed at boot (virtio devices here do not need them).
+
+**Results** (`bench/vm-memory.sh`, `--cpus 4 --memory 4096`, a fresh
+cluster each, a `python:3.13-alpine` pod; before: bf1f538's guest and host,
+the same behaviour as main before this change):
+
+| phase | before: footprint | before: guest used / cache | now: footprint | now: guest used / cache | now: ceiling |
+|---|---|---|---|---|---|
+| idle, 2 min after `dev up` | 461 MB | 200 / 121 MiB | **389 MB** | 227 / 128 MiB | 1024 MiB |
+| Argo CD v3.1.9 (manifests), 2 min after rollout | 1847 MB | 1586 / 1248 MiB | **1140 MB** | 834 / 513 MiB | 1024 MiB |
+| `docker pull python:3.13` (1.0 GB) | 3296 MB | 2837 / 2407 MiB | **1200 MB** | 790 / 436 MiB | 1024 MiB |
+| 5 min idle | 3296 MB | 2837 / 2408 MiB | **1210 MB** | 786 / 436 MiB | 1024 MiB |
+| 1 GiB allocated and touched in the pod | 0.39 s, 4083 MB | | **0.36 s**, 1596 MB | | 4096 MiB |
+
+No OOM kill in either run; the node stayed Ready. The compat corpus passes
+119/119 on this VM
+([compat/results/20261019-224949-litek8s-dev-macos-vm-balloon](../compat/results/20261019-224949-litek8s-dev-macos-vm-balloon/summary.md)). Guest used is MemTotal -
+MemFree - balloon (cache included). Argo CD's seven pods and litek8s fit in
+the 1 GiB ceiling with half of it page cache, so the ceiling never moved
+until the burst.
+
+- Idle with nothing deployed: 384 → 295 MB.
+- 1 GiB written, read and deleted in a container (`docker run alpine`): 384
+  → 1442 MB before, 295 → 1028 MB now; on OrbStack's VM (running other
+  sessions' clusters, not reconfigured) 4052 → 6325 MB and back to 4065 MB
+  30 s later.
+- Shrinking: after a 1.5 GiB burst grew the ceiling to 4096 MiB, it came
+  down to 2471, 1662, 1257 and 1052 MiB, a minute apart, starting 2 minutes
+  after the burst; a 600 MB file read every 10 s in a pod stayed cached the
+  whole time (124–130 ms per read, `workingset_refault_file` unchanged).
+
+What is left: the footprint only grows. After a peak (a big build) the VM
+stays charged for it until `litek8s dev down && litek8s dev up` (~3 s plus
+pods restarting); the TUI says so ("freed, still charged ... macOS keeps it
+until the VM restarts"). The kernel's page structures (64 MiB for 4 GiB)
+and image (~35 MiB) are the rest of the fixed cost; a 16K-page guest
+kernel would cut the first by four, but Alpine ships none and some arm64
+binaries (jemalloc's, for one) assume 4K pages; not tried.
 
 ## Argo CD on k3s and on litek8s (2026-10-19, x86_64/KVM)
 
