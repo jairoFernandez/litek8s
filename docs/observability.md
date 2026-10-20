@@ -43,6 +43,13 @@ litek8s alerts ack KubePodCrashLooping                     # mute until it resol
 Grafana: add a **Prometheus** data source with URL
 `http://<api server>:6443/prometheus` (or start the API server with
 `--prometheus-listen 0.0.0.0:9090` and use `http://<server>:9090`).
+Checked with Grafana 12.2: the data source's health check ("Successfully
+queried the Prometheus API"), range queries (GET or POST), the metric
+browser and label values. Dashboards built on the raw cAdvisor,
+kube-state-metrics and node-exporter series (the `job`, `image!=""`,
+`container!=""` selectors they use match) work; the kubernetes-mixin
+dashboards kube-prometheus-stack ships read its recording rules
+(`node_namespace_pod_container:…`), which litek8s does not have.
 
 The CLI finds the API server like `litek8s ui`: `--context`, else
 `$KUBECONFIG`'s current context, else the local dev cluster.
