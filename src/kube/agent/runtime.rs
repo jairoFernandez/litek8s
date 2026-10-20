@@ -237,6 +237,28 @@ pub trait PodRuntime: Send + Sync + 'static {
         let _ = (sandbox, port);
         async { Ok(None) }
     }
+    /// A container's cgroup directory, for detailed metrics; `None`: only
+    /// [`PodRuntime::stats`].
+    fn container_cgroup(&self, id: &str) -> Option<std::path::PathBuf> {
+        let _ = id;
+        None
+    }
+    /// The host side of a pod sandbox's network interface.
+    fn sandbox_netdev(&self, sandbox: &str) -> Option<String> {
+        let _ = sandbox;
+        None
+    }
+    /// A container's CRI log files, oldest first; empty: read them with
+    /// [`PodRuntime::logs`].
+    fn log_files(&self, id: &str) -> Vec<std::path::PathBuf> {
+        let _ = id;
+        Vec::new()
+    }
+    /// Where a named volume's data is on this node.
+    fn volume_path(&self, name: &str) -> Option<std::path::PathBuf> {
+        let _ = name;
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1120,5 +1142,17 @@ impl PodRuntime for NodeRuntime {
     }
     async fn connect(&self, sandbox: &str, port: u16) -> std::io::Result<Option<tokio::net::TcpStream>> {
         each!(self, rt => rt.connect(sandbox, port).await)
+    }
+    fn container_cgroup(&self, id: &str) -> Option<std::path::PathBuf> {
+        each!(self, rt => rt.container_cgroup(id))
+    }
+    fn sandbox_netdev(&self, sandbox: &str) -> Option<String> {
+        each!(self, rt => rt.sandbox_netdev(sandbox))
+    }
+    fn log_files(&self, id: &str) -> Vec<std::path::PathBuf> {
+        each!(self, rt => rt.log_files(id))
+    }
+    fn volume_path(&self, name: &str) -> Option<std::path::PathBuf> {
+        each!(self, rt => rt.volume_path(name))
     }
 }

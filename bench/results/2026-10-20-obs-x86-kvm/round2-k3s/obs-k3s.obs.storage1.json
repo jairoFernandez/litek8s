@@ -1,0 +1,1 @@
+{"metrics_bytes": 32329728, "metrics_parts": {"wal": 32169984, "chunks_head": 135168, "blocks": 0}, "logs_bytes": 2846720, "logs_parts": {"chunks": 532480, "wal": 2179072, "tsdb-shipper-active": 57344, "tsdb-shipper-cache": 4096, "compactor": 65536}, "container_log_files_bytes": 9095953}

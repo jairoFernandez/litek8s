@@ -113,7 +113,7 @@ fn home_shows_state_resources_and_contexts() {
     assert!(s.contains("macOS VM"), "{s}");
     assert!(s.contains("up 2h 1m"), "{s}");
     assert!(s.contains("12% of 1 CPU = 3% of 4"), "{s}");
-    assert!(s.contains("1.2 GB / 4.3 GB"), "{s}");
+    assert!(s.contains("1.2 GB of 4.3 GB VM limit"), "{s}");
     assert!(s.contains("150 GB free"), "{s}");
     assert!(s.contains("✓ docker context"), "{s}");
     assert!(s.contains("✓ kubectl context"), "{s}");
@@ -375,8 +375,8 @@ fn mouse_selects_tabs_and_rows_also_when_scrolled() {
     let click = |column, row| MouseEvent { kind: MouseEventKind::Down(MouseButton::Left), column, row, modifiers: KeyModifiers::NONE };
     let mut app = sample_app();
     render(&app, 80, 24);
-    // "4 Images" in the tab bar.
-    app.mouse(click(38, 0));
+    // "4 Imgs" in the tab bar.
+    app.mouse(click(34, 0));
     assert_eq!(app.tab, Tab::Images);
     app.key(key('3'));
     let many: Vec<Container> = (0..40).map(|i| ctr(&format!("c{i:02}"), None, "running")).collect();
@@ -588,4 +588,72 @@ fn home_explains_cpu_and_disk_with_b() {
     // A tall terminal shows all three.
     let s = render(&app, 100, 60);
     assert!(s.contains("Memory ·") || s.contains("CPU ·") && s.contains("Disk ·"), "{s}");
+}
+
+#[test]
+fn observe_shows_alerts_top_pods_and_searches_logs() {
+    let mut app = sample_app();
+    let series = |base: f64| (0..17).map(|i| if i == 3 { None } else { Some(base * (1.0 + i as f64 / 16.0)) }).collect::<Vec<_>>();
+    app.apply(Msg::Obs(Box::new(ObsSample {
+        pods: vec![
+            PodUsage { namespace: "default".into(), name: "web-7d9-abc".into(), cpu: series(0.05), mem: series(80e6) },
+            PodUsage { namespace: "shop".into(), name: "db-0".into(), cpu: series(0.4), mem: series(30e6) },
+        ],
+        alerts: vec![AlertRow {
+            state: "firing".into(),
+            name: "KubePodCrashLooping".into(),
+            target: "default/web-7d9-abc/nginx".into(),
+            severity: "warning".into(),
+            since: app.now - 300,
+            summary: "default/web-7d9-abc (nginx) is crash looping".into(),
+            fingerprint: "abc".into(),
+            pod: Some(("default".into(), "web-7d9-abc".into())),
+            ..Default::default()
+        }],
+        error: None,
+        at: app.now,
+    })));
+    app.key(key('9'));
+    assert_eq!(app.tab, Tab::Observe);
+    let s = render(&app, 80, 24);
+    assert!(s.contains("9 Obs") && s.contains("8 Settings"), "{s}");
+    assert!(s.contains("1 firing") && s.contains("KubePodCrashLooping") && s.contains("web-7d9-abc (nginx)"), "{s}");
+    assert!(s.contains("Pods by CPU") && s.contains("db-0") && s.contains("800m") && s.contains("▁"), "{s}");
+    // Top consumer first; s sorts by memory.
+    assert_eq!(app.selected_obs_pod().unwrap().name, "db-0");
+    // A pod deleted 20 minutes ago ranks last, marked gone.
+    let mut gone = PodUsage { namespace: "default".into(), name: "old-job".into(), cpu: series(5.0), mem: series(1e9) };
+    let n = gone.cpu.len();
+    for i in n - 10..n {
+        gone.cpu[i] = None;
+        gone.mem[i] = None;
+    }
+    let mut with_gone = app.obs.clone();
+    with_gone.pods.push(gone);
+    app.apply(Msg::Obs(Box::new(with_gone)));
+    assert_eq!(app.obs.pods[*app.visible_obs_pods().last().unwrap()].name, "old-job");
+    assert!(render(&app, 80, 24).contains("gone"));
+    app.key(key('s'));
+    assert_eq!(app.selected_obs_pod().unwrap().name, "web-7d9-abc");
+    assert!(render(&app, 80, 24).contains("Pods by memory"));
+    // l: every container of the pod, gone ones too, through the log search.
+    assert_eq!(app.key(key('l')), vec![Effect::Logs(LogSource::Search { namespace: Some("default".into()), pod: Some("web-7d9-abc".into()), grep: String::new() })]);
+    app.key(code(KeyCode::Esc));
+    // a: acknowledge the pod's alerts (asks first).
+    assert!(app.key(key('a')).is_empty());
+    assert!(matches!(&app.overlay, Overlay::Confirm { effect: Effect::AckAlerts(a), .. } if a.len() == 1));
+    app.key(key('n'));
+    // L: a regex for every pod's logs.
+    app.key(key('L'));
+    for c in "ERR(".chars() {
+        app.key(key(c));
+    }
+    app.key(code(KeyCode::Enter));
+    assert!(matches!(&app.overlay, Overlay::Input { error: Some(_), .. }), "a bad regex is refused");
+    app.key(code(KeyCode::Backspace));
+    assert_eq!(app.key(code(KeyCode::Enter)), vec![Effect::Logs(LogSource::Search { namespace: None, pod: None, grep: "ERR".into() })]);
+    // Without the API server's observability: an explanation, not an empty view.
+    app.key(code(KeyCode::Esc));
+    app.apply(Msg::Obs(Box::new(ObsSample { error: Some("observability is off on this server".into()), ..Default::default() })));
+    assert!(render(&app, 80, 24).contains("observability is off"));
 }

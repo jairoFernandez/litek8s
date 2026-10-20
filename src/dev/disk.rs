@@ -81,6 +81,15 @@ pub fn category(rel: &Path) -> Category {
         ["docker", "containers", _, _] if is_log => Category::Logs,
         ["docker", "volumes", ..] => Category::Volumes,
         ["docker", "build" | "build-cache-mounts", ..] => Category::Builds,
+        // Logs of removed containers (crate::obs::logs's archive).
+        ["node" | "node-agent", "logs", ..] => Category::Logs,
+        // The same, relative to a node agent's own directory (what the
+        // agent's metrics walk).
+        ["crun", "images", ..] => Category::Images,
+        ["crun", "containers", _, "upper" | "work", ..] => Category::ContainerLayers,
+        ["crun", "containers", _, _] if is_log => Category::Logs,
+        ["crun", "volumes", ..] | ["pods", _, "volumes", ..] => Category::Volumes,
+        ["logs", ..] => Category::Logs,
         _ => Category::Other,
     }
 }
@@ -349,6 +358,11 @@ mod tests {
         assert_eq!(c("node/crun/ipam/10.42.0.2"), Category::Other);
         assert_eq!(c("objects.wal"), Category::Objects);
         assert_eq!(c("node-agent/crun/images/l/x"), Category::Images);
+        // Logs of removed containers; paths relative to an agent's own dir.
+        assert_eq!(c("node-agent/logs/default/web/nginx.0.ab12cd34.log"), Category::Logs);
+        assert_eq!(c("crun/containers/0a1b/log"), Category::Logs);
+        assert_eq!(c("crun/images/l/x"), Category::Images);
+        assert_eq!(c("logs/default/web/labels.json"), Category::Logs);
     }
 
     #[test]
