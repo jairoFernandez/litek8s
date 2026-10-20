@@ -107,6 +107,10 @@ pub struct Cluster {
     /// When the leader last reached this server (ms since `started`).
     leader_contact: AtomicU64,
     started: std::time::Instant,
+    /// This cluster, for work it hands to tasks of its own.
+    me: std::sync::Weak<Cluster>,
+    /// Mirrors `runtime_config().elect(..)`, which openraft does not report.
+    elections: std::sync::atomic::AtomicBool,
 }
 
 /// What a joining server needs to be one of the cluster's servers.
@@ -155,6 +159,17 @@ pub struct ClusterStatus {
     pub term: u64,
     pub last_log_index: Option<u64>,
     pub applied: Option<u64>,
+    /// This server's Raft state (Leader, Follower, Candidate, Learner), its
+    /// vote, and how long ago it last heard from a leader: for diagnosis.
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub vote: String,
+    #[serde(default)]
+    pub leader_heard_ms_ago: Option<u64>,
+    /// Whether this server may call elections (see `hold_elections_until_leader_heard`).
+    #[serde(default)]
+    pub elections: bool,
 }
 
 fn data_file(dir: &Path, name: &str) -> PathBuf {
@@ -292,6 +307,7 @@ impl Cluster {
             migrated = true;
         }
         let log = log::LogStore::open(&raft_dir.join("log"))?;
+        let raft_slot = log.raft_slot();
         let state_machine = sm::StateMachine::open(&snap_dir, store.clone())?;
         let peers = Arc::new(Peers::new(ca_pem, secret)?);
         // Raft runs on threads of its own: a burst of API work (a chart's
@@ -325,6 +341,8 @@ impl Cluster {
             .await
             .context("raft runtime")?
             .context("failed to start raft")?;
+        // The log store pauses ticks while it saves a vote.
+        let _ = raft_slot.set(raft.clone());
         let me = ServerNode { name: opts.name.clone(), addr: opts.advertise.clone(), raft: opts.advertise_raft.clone() };
         if fresh && opts.cluster_init {
             raft.initialize(BTreeMap::from([(id, me.clone())])).await.context("failed to initialize the cluster")?;
@@ -359,7 +377,7 @@ impl Cluster {
                 }
             }
         });
-        let cluster = Arc::new(Self {
+        let cluster = Arc::new_cyclic(|me| Self {
             id,
             name: opts.name.clone(),
             addr: opts.advertise.clone(),
@@ -377,6 +395,8 @@ impl Cluster {
             membership_lock: Default::default(),
             leader_contact: AtomicU64::new(0),
             started: std::time::Instant::now(),
+            me: me.clone(),
+            elections: std::sync::atomic::AtomicBool::new(true),
         });
         if migrated {
             // Members that join later must get the moved objects: they only
@@ -432,7 +452,7 @@ impl Cluster {
                 let member = metrics.borrow_and_update().membership_config.membership().voter_ids().any(|v| v == c.id);
                 if was_member && !member {
                     eprintln!("apiserver: this server was removed from the cluster; stop it (its data dir no longer belongs to a cluster member)");
-                    c.raft.runtime_config().elect(false);
+                    c.set_elections(false);
                 }
                 was_member |= member;
                 drop(c);
@@ -443,14 +463,28 @@ impl Cluster {
         });
     }
 
+    /// Allow or stop this server's elections.
+    fn set_elections(&self, on: bool) {
+        self.raft.runtime_config().elect(on);
+        if self.elections.swap(on, Ordering::Relaxed) != on {
+            eprintln!("apiserver: {} elections on {}", if on { "allowing" } else { "holding" }, self.name);
+        }
+    }
+
     /// A server that just (re)started does not call an election until it
     /// has heard from the leader or a few seconds passed without one: Raft
     /// without pre-vote would otherwise depose a healthy leader every time a
     /// follower restarts (its term goes up and the leader steps down when it
-    /// sees it).
+    /// sees it). Nor before it sees itself as a voter: a joining server is a
+    /// learner until the leader promotes it, and a removed one stays held.
+    /// (Deciding "removed" from one look at the membership held a server
+    /// that had just joined forever: the leader commits the promotion before
+    /// the new voter has the entry. With the longer log, it then stopped the
+    /// others from ever electing a leader without it.)
     fn hold_elections_until_leader_heard(self: &Arc<Self>) {
-        self.raft.runtime_config().elect(false);
+        self.set_elections(false);
         let me = Arc::downgrade(self);
+        let mut metrics = self.raft.metrics();
         tokio::spawn(async move {
             let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
             while tokio::time::Instant::now() < deadline {
@@ -461,10 +495,15 @@ impl Cluster {
                 drop(c);
                 tokio::time::sleep(Duration::from_millis(100)).await;
             }
-            if let Some(c) = me.upgrade() {
-                let removed = !c.raft.metrics().borrow().membership_config.membership().voter_ids().any(|v| v == c.id) && c.raft_dir.join("joined").exists();
-                if !removed {
-                    c.raft.runtime_config().elect(true);
+            loop {
+                let Some(c) = me.upgrade() else { return };
+                if metrics.borrow_and_update().membership_config.membership().voter_ids().any(|v| v == c.id) {
+                    c.set_elections(true);
+                    return;
+                }
+                drop(c);
+                if metrics.changed().await.is_err() {
+                    return;
                 }
             }
         });
@@ -697,7 +736,18 @@ impl Cluster {
             Ok(()) => "ok".to_string(),
             Err(e) => e.to_string(),
         };
-        ClusterStatus { raft, servers, term: m.current_term, last_log_index: m.last_log_index, applied: m.last_applied.map(|l| l.index) }
+        let heard = self.leader_contact.load(Ordering::Relaxed);
+        ClusterStatus {
+            raft,
+            servers,
+            term: m.current_term,
+            last_log_index: m.last_log_index,
+            applied: m.last_applied.map(|l| l.index),
+            state: format!("{:?}", m.state),
+            vote: m.vote.to_string(),
+            leader_heard_ms_ago: (heard > 0).then(|| (self.started.elapsed().as_millis() as u64).saturating_sub(heard)),
+            elections: self.elections.load(Ordering::Relaxed),
+        }
     }
 
     async fn add_member(&self, req: MemberRequest) -> Result<()> {
@@ -758,21 +808,37 @@ impl Cluster {
 impl Replicator for Cluster {
     fn replicate(&self, mutation: Mutation) -> Result<Value, StoreError> {
         let leader_only = LEADER_ONLY.try_with(|_| ()).is_ok();
-        block_on(self.propose(mutation, leader_only))
+        let shutting_down = || StoreError::Unavailable("this server is shutting down".into());
+        let Some(me) = self.me.upgrade() else { return Err(shutting_down()) };
+        wait_for(async move { me.propose(mutation, leader_only).await }).unwrap_or_else(|| Err(shutting_down()))
     }
 }
 
 /// Run a future to completion from synchronous code inside the runtime
 /// (the store's API is synchronous; a replicated write waits for Raft).
-fn block_on<F: Future>(f: F) -> F::Output {
+/// Inside a runtime the future runs as a task of it, so a runtime that
+/// shuts down meanwhile cancels it (`None`): polled from this thread
+/// instead, its timers would panic once the runtime's timer is gone.
+fn wait_for<F>(f: F) -> Option<F::Output>
+where
+    F: Future + Send + 'static,
+    F::Output: Send + 'static,
+{
     match tokio::runtime::Handle::try_current() {
         Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread => {
             panic!("a replicated store needs the multi-threaded tokio runtime")
         }
-        Ok(handle) => tokio::task::block_in_place(|| handle.block_on(f)),
+        Ok(handle) => {
+            let task = handle.spawn(f);
+            match tokio::task::block_in_place(|| handle.block_on(task)) {
+                Ok(out) => Some(out),
+                Err(e) if e.is_panic() => std::panic::resume_unwind(e.into_panic()),
+                Err(_) => None,
+            }
+        }
         // Outside the runtime (a plain thread): drive it on a small one;
         // Raft itself keeps running on the main runtime.
-        Err(_) => tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio runtime").block_on(f),
+        Err(_) => Some(tokio::runtime::Builder::new_current_thread().enable_all().build().expect("tokio runtime").block_on(f)),
     }
 }
 

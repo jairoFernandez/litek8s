@@ -168,6 +168,9 @@ enum Job {
 pub struct LogStore {
     inner: Arc<Mutex<Inner>>,
     flusher: mpsc::Sender<Job>,
+    /// The Raft this log belongs to, once started: its ticks pause while
+    /// a vote is saved (see `save_vote`).
+    raft: Arc<std::sync::OnceLock<openraft::Raft<TypeConfig>>>,
 }
 
 /// A reader sharing the log (replication tasks read concurrently).
@@ -251,7 +254,12 @@ impl LogStore {
         let (tx, rx) = mpsc::channel::<Job>();
         let shared = inner.clone();
         std::thread::Builder::new().name("raft-log-flush".into()).spawn(move || flusher(rx, shared))?;
-        Ok(Self { inner, flusher: tx })
+        Ok(Self { inner, flusher: tx, raft: Arc::default() })
+    }
+
+    /// Where to put the Raft this log is given to, once it is started.
+    pub fn raft_slot(&self) -> Arc<std::sync::OnceLock<openraft::Raft<TypeConfig>>> {
+        self.raft.clone()
     }
 
     /// Lay out `entries` in the log (in memory) and queue their write.
@@ -524,10 +532,38 @@ impl RaftLogStorage<TypeConfig> for LogStore {
         // Durable before Raft answers, but off the Raft threads.
         let path = self.inner.lock().unwrap().dir.join("vote.json");
         let v = *vote;
-        tokio::task::spawn_blocking(move || write_json_atomic(&path, &v, true))
-            .await
-            .map_err(|e| io_err(ErrorSubject::Vote, ErrorVerb::Write, io::Error::other(e.to_string())))?
-            .map_err(|e| io_err(ErrorSubject::Vote, ErrorVerb::Write, e))?;
+        // openraft 0.9 ticks every 1.5 heartbeats and its core waits for
+        // this save; ticks that queue up meanwhile are handled before the
+        // vote's answers. A lone voter starts an election on every tick, so
+        // with a disk slower than a tick each new election superseded the
+        // last one before it could be counted, and a one-server cluster
+        // never elected itself (seen on loaded CI runners). No ticks while
+        // the vote is being made durable.
+        struct Paused(Option<openraft::Raft<TypeConfig>>);
+        impl Drop for Paused {
+            fn drop(&mut self) {
+                if let Some(raft) = &self.0 {
+                    raft.runtime_config().tick(true);
+                }
+            }
+        }
+        let paused = Paused(self.raft.get().cloned());
+        if let Some(raft) = &paused.0 {
+            raft.runtime_config().tick(false);
+        }
+        tokio::task::spawn_blocking(move || {
+            // Fault injection for tests: a disk slower than a tick.
+            if std::env::var_os("LITEK8S_HA_FAULTS").is_some() {
+                if let Some(ms) = std::env::var("LITEK8S_HA_SLOW_VOTE_MS").ok().and_then(|v| v.parse().ok()) {
+                    std::thread::sleep(std::time::Duration::from_millis(ms));
+                }
+            }
+            write_json_atomic(&path, &v, true)
+        })
+        .await
+        .map_err(|e| io_err(ErrorSubject::Vote, ErrorVerb::Write, io::Error::other(e.to_string())))?
+        .map_err(|e| io_err(ErrorSubject::Vote, ErrorVerb::Write, e))?;
+        drop(paused);
         self.inner.lock().unwrap().vote = Some(v);
         Ok(())
     }
