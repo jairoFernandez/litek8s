@@ -39,7 +39,9 @@ kubectl --server http://127.0.0.1:6443 get nodes
 
 It learns every server from the one given, checks each one's `/readyz`
 every second and passes whole TCP connections (HTTP or TLS) to a ready one,
-staying with the same server while it is ready. A virtual IP (keepalived)
+staying with the same server while it is ready. (`--https-check` checks
+`/readyz` over TLS instead, for kube-apiservers that allow anonymous
+`/readyz`; `--tcp-check` only connects.) A virtual IP (keepalived)
 or a DNS name with every server's address also work: every server serves
 the whole API, and `/readyz` says whether it may be used.
 
@@ -137,8 +139,8 @@ lease endpoint reconciler does).
   either.
 - **Timers.** Heartbeats every 300 ms; a follower calls an election after
   the leader lease (3 s) plus a random 1.5–3 s without one, so a dead leader
-  is replaced in about 5 s (bench/HA.md: 4.8–5.6 s of write unavailability
-  per leader kill). openraft 0.9 also gives every AppendEntries one
+  is replaced in about 5 s (bench/HA.md: 4.7–5.9 s of write unavailability
+  for most leader kills, up to 15 s when log flushes were slow). openraft 0.9 also gives every AppendEntries one
   heartbeat interval to complete (requests are capped at 512 KiB so big
   objects go a few at a time). On fast dedicated disks and a wired network
   `LITEK8S_RAFT_HEARTBEAT_MS=100` on every server gives ~2 s failovers (see

@@ -1,0 +1,7 @@
+# Conformance: k3s-ha
+
+**0/0 passed** (0 skipped), 2 min wall clock
+
+| SIG | passed | ran | skipped |
+|---|---|---|---|
+results: /home/bench/lk/compat/results/conformance-20261020-073553-k3s-ha

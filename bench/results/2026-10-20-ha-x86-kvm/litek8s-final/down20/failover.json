@@ -1,0 +1,202 @@
+{
+ "writes": 3985,
+ "ok": 3980,
+ "failed": 5,
+ "p50_ms": 4.823,
+ "p90_ms": 5.566,
+ "p99_ms": 489.123,
+ "max_ms": 5834.918,
+ "windows": [
+  {
+   "seconds": 0.5,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 0.533,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 0.749,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 2.302,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 0.801,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 0.553,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 0.553,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 0.589,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 1.249,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 0.912,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 1.009,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 0.512,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 0.581,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 0.931,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 0.624,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 4.138,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 0.545,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 0.809,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 0.674,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 1.079,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 1.417,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 0.679,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 0.532,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 0.544,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 0.559,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 1.252,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 1.097,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 0.602,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 0.781,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 0.539,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 11.194,
+   "after_kill_s": 11.969,
+   "killed": "lk2"
+  },
+  {
+   "seconds": 15.334,
+   "after_kill_s": 16.122,
+   "killed": "lk1"
+  },
+  {
+   "seconds": 5.341,
+   "after_kill_s": 6.166,
+   "killed": "lk3"
+  },
+  {
+   "seconds": 5.93,
+   "after_kill_s": 6.711,
+   "killed": "lk1"
+  },
+  {
+   "seconds": 5.205,
+   "after_kill_s": 6.025,
+   "killed": "lk3"
+  },
+  {
+   "seconds": 4.715,
+   "after_kill_s": 5.469,
+   "killed": "lk1"
+  },
+  {
+   "seconds": 11.424,
+   "after_kill_s": 12.214,
+   "killed": "lk3"
+  },
+  {
+   "seconds": 4.808,
+   "after_kill_s": 5.612,
+   "killed": "lk2"
+  }
+ ],
+ "kills": 8
+}

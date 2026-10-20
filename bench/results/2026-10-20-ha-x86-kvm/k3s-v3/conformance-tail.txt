@@ -1,0 +1,30 @@
+# Conformance: k3s-ha
+
+**22/390 passed** (29 skipped), 36 min wall clock
+
+| SIG | passed | ran | skipped |
+|---|---|---|---|
+| api-machinery | 7 | 85 | 9 |
+| apps | 1 | 52 | 8 |
+| architecture | 1 | 1 | 0 |
+| auth | 1 | 10 | 0 |
+| cli | 2 | 17 | 0 |
+| instrumentation | 0 | 4 | 0 |
+| network | 2 | 43 | 0 |
+| node | 6 | 87 | 2 |
+| scheduling | 0 | 2 | 9 |
+| storage | 2 | 89 | 1 |
+
+## Failing (368)
+
+- [It] [sig-api-machinery] API priority and fairness should support FlowSchema API operations [Conformance]  
+  `[FAILED] context deadline exceeded`
+- [It] [sig-api-machinery] API priority and fairness should support PriorityLevelConfiguration API operations [Conformance]  
+  `[FAILED] context deadline exceeded`
+- [It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] listing mutating webhooks should work [Conformance]  
+  `[FAILED] context deadline exceeded`
+- [It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] listing validating webhooks should work [Conformance]  
+  `[FAILED] context deadline exceeded`
+- [It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] patching/updating a mutating webhook should work [Conformance]  
+  `[FAILED] context deadline exceeded`
+- [It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] patching/updating a validating webhook should work [Conformance]  

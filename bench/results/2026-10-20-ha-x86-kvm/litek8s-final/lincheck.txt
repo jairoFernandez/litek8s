@@ -1,0 +1,2 @@
+{"ops":109912,"ok":30811,"failed":34931,"unknown":119,"reads":44051}
+linearizable (109912 operations, checked in 301.664638ms)

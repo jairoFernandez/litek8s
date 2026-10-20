@@ -1,0 +1,3 @@
+[ 4516.524386] Out of memory: Killed process 41546 (s6-supervise) total-vm:220kB, anon-rss:0kB, file-rss:0kB, shmem-rss:0kB, UID:0 pgtables:28kB oom_score_adj:1000
+[ 4516.527956] Out of memory: Killed process 41549 (s6-linux-init-s) total-vm:208kB, anon-rss:0kB, file-rss:0kB, shmem-rss:0kB, UID:0 pgtables:24kB oom_score_adj:1000
+[ 4516.531329] Out of memory: OOM victim 41600 (python3) is already exiting. Skip killing the task

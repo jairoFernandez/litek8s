@@ -1,0 +1,42 @@
+{
+ "writes": 4434,
+ "ok": 4426,
+ "failed": 8,
+ "p50_ms": 4.923,
+ "p90_ms": 8.521,
+ "p99_ms": 24.091,
+ "max_ms": 6047.288,
+ "windows": [
+  {
+   "seconds": 10.131,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 10.236,
+   "after_kill_s": 11.002,
+   "killed": "lk1"
+  },
+  {
+   "seconds": 10.135,
+   "after_kill_s": 11.098,
+   "killed": "lk3"
+  },
+  {
+   "seconds": 10.131,
+   "after_kill_s": 10.735,
+   "killed": "lk1"
+  },
+  {
+   "seconds": 6.243,
+   "after_kill_s": null,
+   "killed": null
+  },
+  {
+   "seconds": 10.234,
+   "after_kill_s": 10.85,
+   "killed": "lk1"
+  }
+ ],
+ "kills": 7
+}

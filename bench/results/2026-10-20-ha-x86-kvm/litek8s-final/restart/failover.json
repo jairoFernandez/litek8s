@@ -1,0 +1,52 @@
+{
+ "writes": 2425,
+ "ok": 2425,
+ "failed": 0,
+ "p50_ms": 4.945,
+ "p90_ms": 5.521,
+ "p99_ms": 29.536,
+ "max_ms": 2422.317,
+ "windows": [
+  {
+   "seconds": 2.466,
+   "after_kill_s": 3.03,
+   "killed": "lk3"
+  },
+  {
+   "seconds": 2.517,
+   "after_kill_s": 3.136,
+   "killed": "lk3"
+  },
+  {
+   "seconds": 2.379,
+   "after_kill_s": 2.999,
+   "killed": "lk3"
+  },
+  {
+   "seconds": 2.254,
+   "after_kill_s": 2.84,
+   "killed": "lk3"
+  },
+  {
+   "seconds": 2.305,
+   "after_kill_s": 2.932,
+   "killed": "lk3"
+  },
+  {
+   "seconds": 2.166,
+   "after_kill_s": 2.774,
+   "killed": "lk3"
+  },
+  {
+   "seconds": 2.314,
+   "after_kill_s": 2.871,
+   "killed": "lk3"
+  },
+  {
+   "seconds": 2.407,
+   "after_kill_s": 2.971,
+   "killed": "lk3"
+  }
+ ],
+ "kills": 8
+}

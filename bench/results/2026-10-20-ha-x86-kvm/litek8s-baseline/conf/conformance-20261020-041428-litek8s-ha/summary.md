@@ -1,0 +1,41 @@
+# Conformance: litek8s-ha
+
+**408/419 passed** (0 skipped), 25 min wall clock
+
+| SIG | passed | ran | skipped |
+|---|---|---|---|
+| api-machinery | 94 | 94 | 0 |
+| apps | 59 | 60 | 0 |
+| architecture | 1 | 1 | 0 |
+| auth | 10 | 10 | 0 |
+| cli | 16 | 17 | 0 |
+| instrumentation | 4 | 4 | 0 |
+| network | 43 | 43 | 0 |
+| node | 87 | 89 | 0 |
+| scheduling | 11 | 11 | 0 |
+| storage | 83 | 90 | 0 |
+
+## Failing (11)
+
+- [It] [sig-apps] Daemon set [Serial] should update pod when spec was updated and update strategy is RollingUpdate [Conformance]  
+  `[FAILED] Expected`
+- [It] [sig-cli] Kubectl client Guestbook application should create and stop a working application [Conformance]  
+  `[FAILED] Frontend service did not start serving content in 600 seconds.`
+- [It] [sig-node] Kubelet when scheduling a busybox command that always fails in a pod should have an terminated reason [NodeConformance] [Conformance]  
+  `[FAILED] Error creating Pod: Post "http://127.0.0.1:6443/api/v1/namespaces/kubelet-test-3443/pods": read tcp 127.0.0.1:56406->127.0.0.1:6443: read: connection reset by peer`
+- [It] [sig-node] PodTemplates should replace a pod template [Conformance]  
+  `[FAILED] failed to create pod template: cannot confirm the latest state with the cluster: timed out confirming the leader`
+- [It] [sig-storage] EmptyDir volumes should support (non-root,0644,tmpfs) [LinuxOnly] [NodeConformance] [Conformance]  
+  `[FAILED] expected "mount type of \"/test-volume\": tmpfs" in container output: Expected`
+- [It] [sig-storage] EmptyDir volumes should support (non-root,0666,tmpfs) [LinuxOnly] [NodeConformance] [Conformance]  
+  `[FAILED] expected "mount type of \"/test-volume\": tmpfs" in container output: Expected`
+- [It] [sig-storage] EmptyDir volumes should support (non-root,0777,tmpfs) [LinuxOnly] [NodeConformance] [Conformance]  
+  `[FAILED] expected "mount type of \"/test-volume\": tmpfs" in container output: Expected`
+- [It] [sig-storage] EmptyDir volumes should support (root,0644,tmpfs) [LinuxOnly] [NodeConformance] [Conformance]  
+  `[FAILED] expected "mount type of \"/test-volume\": tmpfs" in container output: Expected`
+- [It] [sig-storage] EmptyDir volumes should support (root,0666,tmpfs) [LinuxOnly] [NodeConformance] [Conformance]  
+  `[FAILED] expected "mount type of \"/test-volume\": tmpfs" in container output: Expected`
+- [It] [sig-storage] EmptyDir volumes should support (root,0777,tmpfs) [LinuxOnly] [NodeConformance] [Conformance]  
+  `[FAILED] expected "mount type of \"/test-volume\": tmpfs" in container output: Expected`
+- [It] [sig-storage] EmptyDir volumes volume on tmpfs should have the correct mode [LinuxOnly] [NodeConformance] [Conformance]  
+  `[FAILED] expected "mount type of \"/test-volume\": tmpfs" in container output: Expected`

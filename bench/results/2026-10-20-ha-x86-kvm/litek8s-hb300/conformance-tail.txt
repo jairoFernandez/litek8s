@@ -1,0 +1,30 @@
+
+**390/419 passed** (0 skipped), 32 min wall clock
+
+| SIG | passed | ran | skipped |
+|---|---|---|---|
+| api-machinery | 93 | 94 | 0 |
+| apps | 55 | 60 | 0 |
+| architecture | 1 | 1 | 0 |
+| auth | 10 | 10 | 0 |
+| cli | 16 | 17 | 0 |
+| instrumentation | 4 | 4 | 0 |
+| network | 40 | 43 | 0 |
+| node | 80 | 89 | 0 |
+| scheduling | 10 | 11 | 0 |
+| storage | 81 | 90 | 0 |
+
+## Failing (29)
+
+- [It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should unconditionally reject operations on fail closed webhook [Conformance]  
+  `[FAILED] expect an internal error, got &url.Error{Op:"Post", URL:"http://127.0.0.1:6443/api/v1/namespaces/fail-closed-namespace-6784/configmaps", Err:(*net.OpError)(0xc010c1ae60)}`
+- [It] [sig-apps] CronJob should not schedule jobs when suspended [Slow] [Conformance]  
+  `[FAILED] Failed after 195.077s.`
+- [It] [sig-apps] CronJob should not schedule new jobs when ForbidConcurrent [Slow] [Conformance]  
+  `[FAILED] Failed to schedule CronJob forbid: cannot confirm the latest state with the cluster: failed to connect to 192.168.77.12:6444: Connection refused (os error 111)`
+- [It] [sig-apps] Daemon set [Serial] should update pod when spec was updated and update strategy is RollingUpdate [Conformance]  
+  `[FAILED] Expected`
+- [It] [sig-apps] Deployment deployment should delete old replica sets [Conformance]  
+  `[FAILED] checking for ready nodes: cannot confirm the latest state with the cluster: not enough for a quorum, cluster: {voters:[{3467408461920483837:ServerNode { name: "lk1", addr: "192.168.77.11:6443`
+- [It] [sig-apps] StatefulSet Basic StatefulSet functionality [StatefulSetBasic] should perform rolling updates and roll backs of template modifications [Conformance]  
+results: /home/bench/lk/compat/results/conformance-20261020-033535-litek8s-ha
