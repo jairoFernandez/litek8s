@@ -932,7 +932,7 @@ impl KubeUi {
                 self.refresh_top();
             }
             KMsg::Config(Ok(c)) => {
-                self.theme = Theme::new(&c.skin);
+                self.theme = Theme::from_config(&c);
                 self.config = c;
                 self.config_error = None;
             }

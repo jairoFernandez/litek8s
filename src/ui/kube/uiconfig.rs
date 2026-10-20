@@ -13,6 +13,9 @@
 //!     scopes: [pods]
 //!     command: dive
 //!     args: [$COL-IMAGE]
+//! theme: default          # high-contrast, mono
+//! background: auto        # dark, light
+//! ascii: false            # or LITEK8S_UI_ASCII=1
 //! skin: {accent: cyan, selected: darkgray}
 //! logs: {tail: 200, buffer: 20000, timestamps: false}
 //! ```
@@ -21,7 +24,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Color;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Deserialize, PartialEq)]
@@ -38,11 +41,29 @@ pub struct UiConfig {
     pub read_only: bool,
     /// kubectl to run for `:kubectl` (default: `kubectl` on the PATH).
     pub kubectl: Option<String>,
+    /// The whole UI's look: `default`, `high-contrast`, `mono`.
+    pub theme: crate::ui::theme::Preset,
+    /// `auto` (ask the terminal), `dark`, `light`.
+    pub background: crate::ui::theme::Background,
+    /// ASCII instead of box-drawing and block characters (also
+    /// `LITEK8S_UI_ASCII=1`).
+    pub ascii: bool,
 }
 
 impl Default for UiConfig {
     fn default() -> Self {
-        UiConfig { aliases: BTreeMap::new(), hotkeys: BTreeMap::new(), plugins: Vec::new(), skin: Skin::default(), logs: LogsConfig::default(), read_only: false, kubectl: None }
+        UiConfig {
+            aliases: BTreeMap::new(),
+            hotkeys: BTreeMap::new(),
+            plugins: Vec::new(),
+            skin: Skin::default(),
+            logs: LogsConfig::default(),
+            read_only: false,
+            kubectl: None,
+            theme: Default::default(),
+            background: Default::default(),
+            ascii: false,
+        }
     }
 }
 
@@ -96,8 +117,8 @@ impl Default for LogsConfig {
     }
 }
 
-/// Colors by name (`cyan`, `lightred`, `darkgray`, `default`), number
-/// (0-255) or `#rrggbb`. The defaults are the terminal's own palette.
+/// Colors by name (`cyan`, `lightred`, `darkgray`), number (0-255) or
+/// `#rrggbb`, over the theme's; empty (the default) keeps the theme's.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Skin {
@@ -115,15 +136,15 @@ pub struct Skin {
 impl Default for Skin {
     fn default() -> Self {
         Skin {
-            accent: "cyan".into(),
-            ok: "default".into(),
-            warn: "yellow".into(),
-            bad: "red".into(),
-            done: "darkgray".into(),
-            dim: "darkgray".into(),
-            selected: "darkgray".into(),
-            marked: "magenta".into(),
-            key: "cyan".into(),
+            accent: String::new(),
+            ok: String::new(),
+            warn: String::new(),
+            bad: String::new(),
+            done: String::new(),
+            dim: String::new(),
+            selected: String::new(),
+            marked: String::new(),
+            key: String::new(),
         }
     }
 }
@@ -156,46 +177,7 @@ pub fn color(s: &str) -> Option<Color> {
     })
 }
 
-/// The styles a skin gives (`NO_COLOR` turns colors off).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Theme {
-    pub accent: Style,
-    pub ok: Style,
-    pub warn: Style,
-    pub bad: Style,
-    pub done: Style,
-    pub dim: Style,
-    pub selected: Style,
-    pub marked: Style,
-    pub key: Style,
-    pub bold: Style,
-}
-
-impl Theme {
-    pub fn new(skin: &Skin) -> Theme {
-        let plain = std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty());
-        let fg = |s: &str| if plain { Style::new() } else { color(s).map(|c| Style::new().fg(c)).unwrap_or_default() };
-        let selected = if plain { Style::new().add_modifier(Modifier::REVERSED) } else { color(&skin.selected).map(|c| Style::new().bg(c)).unwrap_or(Style::new().add_modifier(Modifier::REVERSED)).add_modifier(Modifier::BOLD) };
-        Theme {
-            accent: fg(&skin.accent).add_modifier(Modifier::BOLD),
-            ok: fg(&skin.ok),
-            warn: fg(&skin.warn),
-            bad: fg(&skin.bad),
-            done: fg(&skin.done),
-            dim: if plain { Style::new().add_modifier(Modifier::DIM) } else { fg(&skin.dim) },
-            selected,
-            marked: fg(&skin.marked).add_modifier(Modifier::BOLD),
-            key: fg(&skin.key).add_modifier(Modifier::BOLD),
-            bold: Style::new().add_modifier(Modifier::BOLD),
-        }
-    }
-}
-
-impl Default for Theme {
-    fn default() -> Self {
-        Theme::new(&Skin::default())
-    }
-}
+pub use crate::ui::theme::Theme;
 
 /// `ctrl-x`, `shift-a`, `alt-1`, `f5`, `x`, `X`, `enter`, `tab`.
 pub fn parse_key(s: &str) -> Option<(KeyCode, KeyModifiers)> {

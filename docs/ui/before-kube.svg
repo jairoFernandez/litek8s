@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="860" height="530" viewBox="0 0 860 530" font-family="Menlo, Monaco, 'DejaVu Sans Mono', monospace" font-size="14">
+<rect width="100%" height="100%" rx="8" fill="#1e1e2e"/>
+<rect x="10.0" y="10" width="76.1" height="17" fill="#11a8cd"/>
+<text x="10.0" y="23" fill="#1e1e1e" font-weight="bold" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs"> litek8s </text>
+<text x="85.6" y="23" fill="#d4d4d8" xml:space="preserve" textLength="420.0" lengthAdjust="spacingAndGlyphs"> 1 Home 2 Clusters 3 Ctrs 4 Images 5 Vols 6 Space </text>
+<text x="505.6" y="23" fill="#11a8cd" font-weight="bold" text-decoration="underline" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">7 Kube</text>
+<text x="556.0" y="23" fill="#d4d4d8" xml:space="preserve" textLength="92.4" lengthAdjust="spacingAndGlyphs"> 8 Settings</text>
+<text x="10.0" y="40" fill="#11a8cd" font-weight="bold" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs"> ⎈ </text>
+<text x="35.2" y="40" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="142.8" lengthAdjust="spacingAndGlyphs">litek8s-ui-design</text>
+<text x="178.0" y="40" fill="#666666" xml:space="preserve" textLength="42.0" lengthAdjust="spacingAndGlyphs">  ns </text>
+<text x="220.0" y="40" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs">all</text>
+<text x="245.2" y="40" fill="#666666" xml:space="preserve" textLength="33.6" lengthAdjust="spacingAndGlyphs">  │ </text>
+<text x="278.8" y="40" fill="#d4d4d8" xml:space="preserve" textLength="33.6" lengthAdjust="spacingAndGlyphs">pods</text>
+<text x="10.0" y="57" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">┌</text>
+<text x="18.4" y="57" fill="#666666" font-weight="bold" xml:space="preserve" textLength="126.0" lengthAdjust="spacingAndGlyphs"> pods(all) [9] </text>
+<text x="144.4" y="57" fill="#666666" xml:space="preserve" textLength="705.6" lengthAdjust="spacingAndGlyphs">───────────────────────────────────────────────────────────────────────────────────┐</text>
+<text x="10.0" y="74" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="26.8" y="74" fill="#666666" font-weight="bold" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">NAMESPACE</text>
+<text x="110.8" y="74" fill="#666666" font-weight="bold" xml:space="preserve" textLength="184.8" lengthAdjust="spacingAndGlyphs">NAME                  </text>
+<text x="304.0" y="74" fill="#666666" font-weight="bold" xml:space="preserve" textLength="42.0" lengthAdjust="spacingAndGlyphs">READY</text>
+<text x="354.4" y="74" fill="#666666" font-weight="bold" xml:space="preserve" textLength="134.4" lengthAdjust="spacingAndGlyphs">STATUS          </text>
+<text x="497.2" y="74" fill="#666666" font-weight="bold" xml:space="preserve" textLength="67.2" lengthAdjust="spacingAndGlyphs">RESTARTS</text>
+<text x="572.8" y="74" fill="#666666" font-weight="bold" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">AGE   </text>
+<text x="841.6" y="74" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="91" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="91" fill="#d4d4d8" xml:space="preserve" textLength="823.2" lengthAdjust="spacingAndGlyphs"> default   burner-f57f75b8d-2gpz6 1/1   Running          0        74s                             </text>
+<text x="841.6" y="91" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<rect x="18.4" y="95" width="823.7" height="17" fill="#666666"/>
+<text x="10.0" y="108" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="108" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="823.2" lengthAdjust="spacingAndGlyphs"> default   burner-f57f75b8d-qvcq2 1/1   Running          0        74s                             </text>
+<text x="841.6" y="108" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="125" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="125" fill="#d4d4d8" xml:space="preserve" textLength="823.2" lengthAdjust="spacingAndGlyphs"> default   burner-f57f75b8d-vfp2z 1/1   Running          0        4m13s                           </text>
+<text x="841.6" y="125" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="142" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="142" fill="#cd3131" xml:space="preserve" textLength="613.2" lengthAdjust="spacingAndGlyphs"> default   crashy                 0/1   CrashLoopBackOff 13       41m    </text>
+<text x="841.6" y="142" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="159" fill="#666666" xml:space="preserve" textLength="621.6" lengthAdjust="spacingAndGlyphs">│ default   migrate-m72pw          0/1   Completed        0        41m    </text>
+<text x="841.6" y="159" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="176" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="176" fill="#e5e510" xml:space="preserve" textLength="613.2" lengthAdjust="spacingAndGlyphs"> default   waiting                0/1   Pending          0        41m    </text>
+<text x="841.6" y="176" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="193" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="193" fill="#d4d4d8" xml:space="preserve" textLength="823.2" lengthAdjust="spacingAndGlyphs"> default   web-574b8887b7-8xkrz   1/1   Running          0        41m                             </text>
+<text x="841.6" y="193" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="210" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="210" fill="#d4d4d8" xml:space="preserve" textLength="823.2" lengthAdjust="spacingAndGlyphs"> default   web-574b8887b7-f84qb   1/1   Running          0        41m                             </text>
+<text x="841.6" y="210" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="227" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="227" fill="#d4d4d8" xml:space="preserve" textLength="823.2" lengthAdjust="spacingAndGlyphs"> default   web-574b8887b7-fjmtf   1/1   Running          0        41m                             </text>
+<text x="841.6" y="227" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="244" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="841.6" y="244" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="261" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="841.6" y="261" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="278" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="841.6" y="278" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="295" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="841.6" y="295" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="312" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="841.6" y="312" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="329" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="841.6" y="329" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="346" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="841.6" y="346" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="363" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="841.6" y="363" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="380" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="841.6" y="380" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="397" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="841.6" y="397" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="414" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="841.6" y="414" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="431" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="841.6" y="431" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="448" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="841.6" y="448" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="465" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="841.6" y="465" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="482" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="841.6" y="482" fill="#666666" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="499" fill="#666666" xml:space="preserve" textLength="840.0" lengthAdjust="spacingAndGlyphs">└──────────────────────────────────────────────────────────────────────────────────────────────────┘</text>
+<text x="18.4" y="516" fill="#11a8cd" font-weight="bold" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">:</text>
+<text x="26.8" y="516" fill="#d4d4d8" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs"> cmd  </text>
+<text x="77.2" y="516" fill="#11a8cd" font-weight="bold" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">/</text>
+<text x="85.6" y="516" fill="#d4d4d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs"> filter  </text>
+<text x="161.2" y="516" fill="#11a8cd" font-weight="bold" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">l</text>
+<text x="169.6" y="516" fill="#d4d4d8" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs"> logs  </text>
+<text x="228.4" y="516" fill="#11a8cd" font-weight="bold" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">s</text>
+<text x="236.8" y="516" fill="#d4d4d8" xml:space="preserve" textLength="67.2" lengthAdjust="spacingAndGlyphs"> shell  </text>
+<text x="304.0" y="516" fill="#11a8cd" font-weight="bold" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">d</text>
+<text x="312.4" y="516" fill="#d4d4d8" xml:space="preserve" textLength="92.4" lengthAdjust="spacingAndGlyphs"> describe  </text>
+<text x="404.8" y="516" fill="#11a8cd" font-weight="bold" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">F</text>
+<text x="413.2" y="516" fill="#d4d4d8" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs"> fwd  </text>
+<text x="463.6" y="516" fill="#11a8cd" font-weight="bold" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">m</text>
+<text x="472.0" y="516" fill="#d4d4d8" xml:space="preserve" textLength="319.2" lengthAdjust="spacingAndGlyphs"> menu                                 </text>
+<text x="791.2" y="516" fill="#11a8cd" font-weight="bold" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">?</text>
+<text x="799.6" y="516" fill="#d4d4d8" xml:space="preserve" textLength="42.0" lengthAdjust="spacingAndGlyphs"> help</text>
+</svg>
