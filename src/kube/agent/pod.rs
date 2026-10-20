@@ -1329,6 +1329,9 @@ impl<R: PodRuntime> Worker<R> {
         labels.insert(LABEL_ATTEMPT.into(), c.attempts.to_string());
         labels.insert(LABEL_HASH.into(), Self::container_hash(spec));
         labels.insert(LABEL_ROLE.into(), if init { "init" } else { "container" }.into());
+        if let Some(pod_labels) = self.pod.pointer("/metadata/labels").filter(|l| l.as_object().is_some_and(|o| !o.is_empty())) {
+            labels.insert(crate::obs::logs::LABEL_POD_LABELS.into(), pod_labels.to_string());
+        }
         Ok(ContainerSpec {
             name: self.container_name(c),
             image: c.image().to_string(),
@@ -1567,9 +1570,17 @@ impl<R: PodRuntime> Worker<R> {
             ip: Some(self.pod_ip()).filter(|ip| !ip.is_empty()),
             sandbox: self.sandbox.as_ref().map(|s| s.id.clone()),
             containers: HashMap::new(),
+            labels: self
+                .pod
+                .pointer("/metadata/labels")
+                .and_then(Value::as_object)
+                .map(|o| o.iter().filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string()))).collect())
+                .unwrap_or_default(),
+            images: HashMap::new(),
         };
         for c in self.main.iter().chain(self.init.iter()) {
             view.containers.insert(c.name.clone(), (c.id.clone(), c.previous_id.clone()));
+            view.images.insert(c.name.clone(), c.image().to_string());
         }
         self.agent.set_view(&self.uid, view);
     }

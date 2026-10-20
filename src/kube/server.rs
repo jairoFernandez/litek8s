@@ -56,6 +56,8 @@ const CONTINUE_TTL_SECS: i64 = 300;
 const DEFAULT_WATCH_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const SERVICE_CIDR_PREFIX: &str = "10.43";
 const KUBERNETES_SERVICE_IP: &str = "10.43.0.1";
+/// 30000-32767.
+const NODE_PORTS: i64 = 2768;
 
 pub struct ApiServerConfig {
     pub listen: SocketAddr,
@@ -96,6 +98,14 @@ pub struct ApiServerConfig {
     /// (the dev sandbox binds it on the host before entering its network
     /// namespace).
     pub listener: Option<std::net::TcpListener>,
+    /// Serve the API on this address too (a dev cluster's cell address,
+    /// where its other nodes join).
+    pub extra_listen: Option<SocketAddr>,
+    /// NodePorts are allocated from 30000 + this offset on (wrapping).
+    pub node_port_offset: u16,
+    /// The directory whose disk use `GET /litek8s/v1/disk` explains
+    /// (default: `data_dir`).
+    pub disk_root: Option<PathBuf>,
     /// Serve the Docker API with the local node's crun runtime.
     pub docker: Option<crate::docker::Settings>,
     /// Start a new HA cluster with this server as its first member (moving
@@ -108,6 +118,11 @@ pub struct ApiServerConfig {
     pub raft_port: Option<u16>,
     /// HA: serve Raft on this already-bound listener (tests).
     pub raft_listener: Option<std::net::TcpListener>,
+    /// Built-in metrics, logs and alerts (`None`: off). Its data goes to
+    /// `<data_dir>/obs` unless the config names a directory.
+    pub obs: Option<crate::obs::server::ObsConfig>,
+    /// Also serve the Prometheus HTTP API at the root of this address.
+    pub prometheus_listen: Option<SocketAddr>,
 }
 
 /// Loads an image archive into the local node (`litek8s dev load`).
@@ -140,6 +155,11 @@ pub struct ApiState {
     /// Serializes pod CIDR allocation.
     join_lock: std::sync::Mutex<()>,
     pub(crate) network: join::ClusterNetwork,
+    /// Where NodePort allocation starts in 30000-32767 (several local dev
+    /// clusters share the host's ports: each starts somewhere else).
+    pub(crate) node_port_offset: u16,
+    /// What `GET /litek8s/v1/disk` walks.
+    pub(crate) disk_root: Option<PathBuf>,
     pub(crate) lifecycle: super::controllers::NodeLifecycle,
     pub(crate) metrics: Metrics,
     /// Where pods on other nodes reach this server over the pod overlay
@@ -157,6 +177,8 @@ pub struct ApiState {
     /// event needs its CRD and schema, and some are megabytes when parsed
     /// (Argo CD's Application): share one copy per CRD resourceVersion.
     crd_cache: std::sync::Mutex<HashMap<String, CachedCrd>>,
+    /// Metrics, log search and alerts, when on (crate::obs).
+    pub(crate) obs: std::sync::OnceLock<Arc<crate::obs::server::Obs>>,
 }
 
 struct CachedCrd {
@@ -196,6 +218,8 @@ impl ApiState {
             join_secret: join::server_secret(data_dir, None)?,
             join_lock: std::sync::Mutex::default(),
             network: join::ClusterNetwork::default(),
+            node_port_offset: 0,
+            disk_root: None,
             lifecycle: super::controllers::NodeLifecycle::default(),
             metrics: Metrics::default(),
             overlay_endpoint: std::sync::OnceLock::new(),
@@ -204,6 +228,7 @@ impl ApiState {
             image_loader: std::sync::OnceLock::new(),
             request_metrics: Default::default(),
             crd_cache: Default::default(),
+            obs: std::sync::OnceLock::new(),
         };
         Ok(state)
     }
@@ -403,6 +428,8 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
         state.join_secret = join::server_secret(config.data_dir.as_deref(), config.token.as_deref())?;
     }
     state.network = config.network.clone();
+    state.node_port_offset = config.node_port_offset;
+    state.disk_root = config.disk_root.clone().or_else(|| config.data_dir.clone());
     state.lifecycle = config.lifecycle.clone();
     let state = Arc::new(state);
     let token = state.join_token();
@@ -474,7 +501,30 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
         tokio::spawn(super::controllers::run(state.clone()));
         tokio::spawn(expire_events(state.clone()));
     }
+    if let Some(extra) = config.extra_listen {
+        let l = TcpListener::bind(extra).await.with_context(|| format!("failed to bind apiserver on {extra}"))?;
+        tokio::spawn(serve_listener(state.clone(), l));
+    }
     super::metrics::spawn_memory_trim();
+    if let Some(mut obs) = config.obs.take() {
+        if obs.dir.is_none() {
+            obs.dir = config.data_dir.as_ref().map(|d| d.join("obs"));
+        }
+        match crate::obs::server::start(&state, obs) {
+            Ok(obs) => {
+                if let Some(addr) = config.prometheus_listen {
+                    match TcpListener::bind(addr).await {
+                        Ok(l) => {
+                            eprintln!("apiserver: Prometheus API on http://{addr}");
+                            tokio::spawn(crate::obs::api::serve_prometheus(obs, l));
+                        }
+                        Err(e) => eprintln!("apiserver: cannot serve the Prometheus API on {addr}: {e}"),
+                    }
+                }
+            }
+            Err(e) => eprintln!("apiserver: observability disabled: {e:#}"),
+        }
+    }
     tokio::spawn(super::aggregator::run(state.clone()));
 
     // The local node comes first: where pods reach this host (Docker's
@@ -1098,6 +1148,21 @@ async fn handle(state: Arc<ApiState>, mut req: Request<Incoming>) -> Response<Bo
     if path == IMAGES_PATH && parts.method == Method::POST {
         return load_images(&state, body).await;
     }
+    if path == DISK_PATH && parts.method == Method::GET {
+        let Some(root) = state.disk_root.clone() else {
+            return ApiError::new(StatusCode::NOT_FOUND, "NotFound", "this API server keeps no data on disk").into_response();
+        };
+        let node = crate::dev::disk::cached(root, super::agent::default_node_name()).await;
+        return json_response(StatusCode::OK, &serde_json::to_value(node).unwrap_or_default());
+    }
+    if path == CPU_PATH && parts.method == Method::GET {
+        let node = tokio::task::spawn_blocking(|| crate::dev::cpu::this_node(&super::agent::default_node_name())).await.unwrap_or_default();
+        return json_response(StatusCode::OK, &serde_json::to_value(node).unwrap_or_default());
+    }
+    if path == MEMORY_PATH && parts.method == Method::GET {
+        let node = tokio::task::spawn_blocking(|| crate::dev::memory::this_node(&super::agent::default_node_name())).await.unwrap_or_default();
+        return json_response(StatusCode::OK, &serde_json::to_value(node).unwrap_or_default());
+    }
     let header = |name| {
         parts
             .headers
@@ -1124,6 +1189,9 @@ async fn handle(state: Arc<ApiState>, mut req: Request<Incoming>) -> Response<Bo
         headers: parts.headers.clone(),
         upgrade: std::sync::Mutex::new(upgrade),
     };
+    if let Some(resp) = crate::obs::api::route(&state, &req.method, &path, &req.raw_query, &req.body, &req.content_type).await {
+        return resp;
+    }
     let mut resp = match route(&state, &path, &req).await {
         Ok(resp) => resp,
         Err(error) => error.into_response(),
@@ -1182,6 +1250,15 @@ fn request_names_object(path: &str) -> bool {
 /// litek8s's own endpoint for loading image archives into the local node
 /// (`litek8s dev load`), like `kind load image-archive`.
 pub const IMAGES_PATH: &str = "/litek8s/v1/images";
+/// Where this server's node's memory goes (litek8s, pods, cache) and the
+/// machine's meminfo: what `litek8s ui` explains its memory figure with.
+pub const MEMORY_PATH: &str = "/litek8s/v1/memory";
+/// CPU time of this server's node by owner (litek8s, each pod and
+/// container), cumulative, and the machine's /proc/stat.
+pub const CPU_PATH: &str = "/litek8s/v1/cpu";
+/// Disk use of this server's node by category (images, layers, volumes,
+/// logs, objects, ...), from a walk at most once a minute.
+pub const DISK_PATH: &str = "/litek8s/v1/disk";
 
 /// Stream an uploaded image archive to disk (it can be far larger than an
 /// API request body) and import it.
@@ -3375,7 +3452,8 @@ impl ApiState {
                         .and_then(|p| p.get("nodePort"))
                         .and_then(Value::as_i64);
                     let np = reuse.unwrap_or_else(|| {
-                        let np = (30000..=32767).find(|p| !used.contains(p)).unwrap_or(30000);
+                        let start = self.node_port_offset as i64 % NODE_PORTS;
+                        let np = (0..NODE_PORTS).map(|i| 30000 + (start + i) % NODE_PORTS).find(|p| !used.contains(p)).unwrap_or(30000);
                         used.push(np);
                         allocated.push((format!("port:{np}"), std::time::Instant::now()));
                         np
@@ -4033,7 +4111,7 @@ impl ApiState {
     }
 
     /// `/metrics`
-    fn render_metrics(&self) -> String {
+    pub(crate) fn render_metrics(&self) -> String {
         let mut out = String::new();
         self.metrics.render(&mut out);
         out.push_str(&self.request_metrics.render());

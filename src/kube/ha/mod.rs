@@ -610,7 +610,6 @@ impl Cluster {
     /// the read barrier's deadline instead of failing the read.
     async fn read_index(&self) -> Result<u64, String> {
         let deadline = tokio::time::Instant::now() + READ_TIMEOUT - Duration::from_millis(500);
-        let mut last_error = String::from("no leader");
         loop {
             let attempt = match self.leader_id() {
                 Some(l) if l == self.id => self.leader_read_index().await,
@@ -627,10 +626,8 @@ impl Cluster {
             };
             match attempt {
                 Ok(index) => return Ok(index),
-                Err(e) => last_error = e,
-            }
-            if tokio::time::Instant::now() >= deadline {
-                return Err(last_error);
+                Err(e) if tokio::time::Instant::now() >= deadline => return Err(e),
+                Err(_) => {}
             }
             let mut m = self.raft.metrics();
             let _ = tokio::time::timeout(Duration::from_millis(200), m.changed()).await;

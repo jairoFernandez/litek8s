@@ -7,32 +7,37 @@ use std::collections::{BTreeSet, VecDeque};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
-use super::model::{self, Container, Deployment, DiskUsage, Image, Pod, Volume};
+use super::kube::{KEffect, KMsg, KubeUi};
+use super::model::{self, Container, DiskUsage, Image, Pod, Volume};
 use crate::dev::config::{DevConfig, Publish};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Home,
+    Clusters,
     Containers,
     Images,
     Volumes,
     Space,
     Kube,
     Settings,
+    Observe,
 }
 
-pub const TABS: [Tab; 7] = [Tab::Home, Tab::Containers, Tab::Images, Tab::Volumes, Tab::Space, Tab::Kube, Tab::Settings];
+pub const TABS: [Tab; 9] = [Tab::Home, Tab::Clusters, Tab::Containers, Tab::Images, Tab::Volumes, Tab::Space, Tab::Kube, Tab::Settings, Tab::Observe];
 
 impl Tab {
     pub fn title(self) -> &'static str {
         match self {
             Tab::Home => "Home",
+            Tab::Clusters => "Clusters",
             Tab::Containers => "Containers",
             Tab::Images => "Images",
             Tab::Volumes => "Volumes",
             Tab::Space => "Free space",
             Tab::Kube => "Kubernetes",
             Tab::Settings => "Settings",
+            Tab::Observe => "Observe",
         }
     }
 
@@ -60,17 +65,55 @@ impl ContainerOp {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// `litek8s dev …` on a local cluster.
+#[derive(Debug, Clone, PartialEq)]
 pub enum DevOp {
-    Up,
-    Down,
-    Reset,
+    /// Start it; `switch`: make its context kubectl's current one.
+    Up { cluster: String, switch: bool },
+    Down(String),
+    /// Stop it and delete its data and context.
+    Delete(String),
+    /// A new cluster with this many nodes.
+    Create { cluster: String, nodes: u32 },
+}
+
+impl DevOp {
+    pub fn cluster(&self) -> &str {
+        match self {
+            DevOp::Up { cluster, .. } | DevOp::Down(cluster) | DevOp::Delete(cluster) | DevOp::Create { cluster, .. } => cluster,
+        }
+    }
+
+    pub fn starts(&self) -> bool {
+        matches!(self, DevOp::Up { .. } | DevOp::Create { .. })
+    }
+
+    /// The `litek8s` arguments.
+    pub fn args(&self) -> Vec<String> {
+        let name = |c: &str| vec!["--name".to_string(), c.to_string()];
+        let mut v: Vec<String> = match self {
+            DevOp::Up { cluster, switch } => {
+                let mut v = vec!["dev".into(), "up".into()];
+                v.extend(name(cluster));
+                if !switch {
+                    v.push("--no-switch".into());
+                }
+                v
+            }
+            DevOp::Down(c) => [vec!["dev".into(), "down".into()], name(c)].concat(),
+            DevOp::Delete(c) => [vec!["dev".into(), "delete".into()], name(c)].concat(),
+            DevOp::Create { cluster, nodes } => [vec!["dev".into(), "up".into()], name(cluster), vec!["--nodes".into(), nodes.to_string(), "--no-switch".into()]].concat(),
+        };
+        v.shrink_to_fit();
+        v
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LogSource {
     Container { id: String, name: String },
-    Pod { namespace: String, name: String, container: Option<String> },
+    /// A search across every pod (the API server's log search).
+    Search { namespace: Option<String>, pod: Option<String>, grep: String },
 }
 
 /// What the runtime is asked to do.
@@ -85,11 +128,16 @@ pub enum Effect {
     StopLogs,
     Exec(String),
     Dev(DevOp),
-    Scale { namespace: String, name: String, replicas: i64 },
-    RestartDeployment { namespace: String, name: String },
-    DeletePod { namespace: String, name: String },
-    PortForward { namespace: String, pod: String, local: u16, remote: u16 },
-    StopForwards,
+    /// Show this local cluster in every view.
+    UseCluster(String),
+    /// Show this kubeconfig context in the Kubernetes view (read-only).
+    UseContext(String),
+    /// Point kubectl and docker at this local cluster.
+    SwitchTools(String),
+    /// The Kubernetes view's.
+    Kube(KEffect),
+    /// Silence these alerts until they resolve.
+    AckAlerts(Vec<AlertRow>),
     SaveConfig(DevConfig),
     EditConfig,
     DockerContext(bool),
@@ -110,9 +158,9 @@ pub enum Msg {
     DockerInfo { version: String, cpus: Option<u64>, memory: Option<u64>, os: String },
     DockerDown(String),
     Pods(Vec<Pod>),
-    Deployments(Vec<Deployment>),
-    Namespaces(Vec<String>),
     KubeDown(String),
+    /// The Kubernetes view's.
+    Kube(KMsg),
     Home(Box<HomeSample>),
     LogLines(u64, Vec<String>),
     LogEnd(u64, Option<String>),
@@ -121,17 +169,36 @@ pub enum Msg {
     /// A line of output of a running `dev up/down/reset`.
     DevOutput(String),
     DevFinished(Result<String, String>),
-    Forwards(Vec<Forward>),
     Config(Result<DevConfig, String>),
+    Clusters(Box<ClustersSample>),
+    Obs(Box<ObsSample>),
 }
 
-/// A running port-forward.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Forward {
-    pub local: u16,
-    pub namespace: String,
-    pub pod: String,
-    pub remote: u16,
+/// A local cluster in the Clusters view.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ClusterRow {
+    pub name: String,
+    pub context: String,
+    pub status: DevStatus,
+    pub port: Option<u16>,
+    pub nodes: u32,
+    pub ready_nodes: Option<usize>,
+    pub memory: Option<u64>,
+    pub age: Option<String>,
+}
+
+/// What the Clusters view shows: local clusters, the VM or sandbox they
+/// share, and the kubeconfig's other contexts.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ClustersSample {
+    pub local: Vec<ClusterRow>,
+    /// (context, server)
+    pub others: Vec<(String, Option<String>)>,
+    /// `vm`, `rootless`, `root` when one runs.
+    pub env_mode: Option<String>,
+    pub env_memory: Option<u64>,
+    pub env_cpus: Option<usize>,
+    pub env_memory_mib: Option<u64>,
 }
 
 /// The dev cluster as the supervisor's state file and API tell it.
@@ -171,6 +238,58 @@ pub struct Contexts {
     pub kubeconfig: String,
 }
 
+/// A pod's CPU (cores) and memory (bytes) over the Observe view's window,
+/// one value per step (`None`: no sample then); the last is now.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PodUsage {
+    pub namespace: String,
+    pub name: String,
+    pub cpu: Vec<Option<f64>>,
+    pub mem: Vec<Option<f64>>,
+}
+
+impl PodUsage {
+    /// Sampled in the last two steps (a pod deleted in the window is not).
+    pub fn live(&self) -> bool {
+        [&self.cpu, &self.mem].iter().any(|v| v.iter().rev().take(2).any(Option::is_some))
+    }
+
+    pub fn cpu_now(&self) -> f64 {
+        self.cpu.iter().rev().take(2).find_map(|v| *v).unwrap_or(0.0)
+    }
+
+    pub fn mem_now(&self) -> f64 {
+        self.mem.iter().rev().take(2).find_map(|v| *v).unwrap_or(0.0)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AlertRow {
+    /// firing, pending
+    pub state: String,
+    pub name: String,
+    pub target: String,
+    pub severity: String,
+    /// Active since (unix seconds).
+    pub since: i64,
+    pub summary: String,
+    pub silenced: bool,
+    pub fingerprint: String,
+    /// (namespace, pod) when it is about a pod.
+    pub pod: Option<(String, String)>,
+    pub labels: std::collections::BTreeMap<String, String>,
+}
+
+/// One sample of the Observe view.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ObsSample {
+    pub pods: Vec<PodUsage>,
+    pub alerts: Vec<AlertRow>,
+    pub error: Option<String>,
+    /// When (unix seconds).
+    pub at: i64,
+}
+
 /// One sample of the dev cluster's state and use.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct HomeSample {
@@ -186,15 +305,33 @@ pub struct HomeSample {
     pub data_dir: String,
     /// What the running cluster was started with.
     pub running: Option<crate::dev::DevState>,
+    /// The memory figure explained, when it can be.
+    pub memory: Option<crate::dev::memory::Breakdown>,
+    /// CPU counters (the App turns two into percentages: it knows the
+    /// pods' and containers' names).
+    pub cpu_sample: Option<crate::dev::cpu::Sample>,
+    /// The node's disk by category, litek8s's own files, and (macOS) the
+    /// VM disk image's allocated bytes.
+    pub disk_node: Option<(crate::dev::disk::NodeDisk, u64, Option<u64>)>,
     pub contexts: Contexts,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputKind {
     Filter,
-    Scale { namespace: String, name: String },
-    PortForward { namespace: String, pod: String },
+    /// A regex for a log search across pods.
+    LogSearch,
     Setting(Field),
+}
+
+/// The fields of the new-cluster form.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct NewCluster {
+    pub name: String,
+    pub nodes: String,
+    /// 0: name, 1: nodes.
+    pub field: usize,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -212,6 +349,7 @@ pub enum Overlay {
     Help,
     Confirm { title: String, lines: Vec<String>, effect: Effect },
     Input { prompt: String, value: String, kind: InputKind, error: Option<String> },
+    NewCluster(NewCluster),
 }
 
 pub struct LogView {
@@ -231,12 +369,6 @@ pub const LOG_LINES: usize = 5000;
 pub enum CRow {
     Group { name: String, count: usize, running: usize, collapsed: bool },
     Item(usize),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum KubeView {
-    Pods,
-    Deployments,
 }
 
 /// A reclaimable category of the free-space view.
@@ -286,15 +418,22 @@ pub struct App {
     pub collapsed: BTreeSet<String>,
 
     pub kube_error: Option<String>,
+    /// Every pod (Home counts them, names cgroups and images by them).
     pub pods: Vec<Pod>,
-    pub deployments: Vec<Deployment>,
-    pub namespaces: Vec<String>,
-    /// `None`: all namespaces.
-    pub namespace: Option<String>,
-    pub kube_view: KubeView,
-    pub forwards: Vec<Forward>,
+    /// The Kubernetes view: a cluster UI of its own (src/ui/kube).
+    pub kube: KubeUi,
 
     pub home: HomeSample,
+    /// The local cluster the views show (its Docker socket and API).
+    pub cluster: String,
+    /// A kubeconfig context the Kubernetes view shows instead (read-only).
+    pub context_override: Option<String>,
+    pub clusters: ClustersSample,
+    /// The CPU figure explained (from the last two samples).
+    pub cpu: Option<crate::dev::cpu::Breakdown>,
+    cpu_prev: Option<crate::dev::cpu::Sample>,
+    /// Which breakdown Home shows first: 0 memory, 1 CPU, 2 disk (`b`).
+    pub explain: usize,
     pub dev_busy: Option<DevOp>,
     pub dev_output: VecDeque<String>,
 
@@ -302,8 +441,13 @@ pub struct App {
     pub config_error: Option<String>,
     pub config_path: String,
 
-    pub selected: [usize; 7],
-    pub filters: [String; 7],
+    pub selected: [usize; TABS.len()],
+    pub filters: [String; TABS.len()],
+    /// The Observe view: pods' use and alerts; sorted by memory or CPU.
+    pub obs: ObsSample,
+    pub obs_by_mem: bool,
+    /// The Observe view's namespace (`None`: all).
+    pub obs_namespace: Option<String>,
     pub space_checked: BTreeSet<Reclaim>,
     pub mouse: bool,
     /// Screen rows of the current list's first row and tab titles' spans
@@ -312,7 +456,18 @@ pub struct App {
     /// The first list row on screen (the table scrolls with the selection).
     pub list_offset: std::cell::Cell<usize>,
     pub tab_spans: std::cell::RefCell<Vec<(u16, u16)>>,
+    /// The screen row of the tab titles and the header's height (one line
+    /// on short terminals, a box of three on tall ones).
+    pub tab_row: std::cell::Cell<u16>,
+    pub header_h: std::cell::Cell<u16>,
+    /// Home's CPU and memory over the last minutes (shares of the
+    /// cluster's CPUs and memory), one per sample taken while Home is on
+    /// screen: the sparklines.
+    pub history: VecDeque<(f32, f32)>,
 }
+
+/// Samples the sparklines keep (8 minutes at Home's 2 s).
+pub const HISTORY: usize = 240;
 
 impl App {
     pub fn new(docker_endpoint: String, kube_endpoint: String, kube_context: String) -> Self {
@@ -338,24 +493,32 @@ impl App {
             collapsed: BTreeSet::new(),
             kube_error: None,
             pods: Vec::new(),
-            deployments: Vec::new(),
-            namespaces: Vec::new(),
-            namespace: None,
-            kube_view: KubeView::Pods,
-            forwards: Vec::new(),
+            kube: KubeUi::new(None),
             home: HomeSample::default(),
+            cluster: crate::dev::cluster::DEFAULT.into(),
+            context_override: None,
+            clusters: ClustersSample::default(),
+            cpu: None,
+            cpu_prev: None,
+            explain: 0,
             dev_busy: None,
             dev_output: VecDeque::new(),
             config: DevConfig::default(),
             config_error: None,
             config_path: crate::dev::config::path().display().to_string(),
-            selected: [0; 7],
+            selected: [0; TABS.len()],
             filters: Default::default(),
+            obs: ObsSample::default(),
+            obs_by_mem: false,
+            obs_namespace: None,
             space_checked: [Reclaim::StoppedContainers, Reclaim::DanglingImages, Reclaim::BuildCache].into_iter().collect(),
             mouse: false,
             list_top: std::cell::Cell::new(0),
             list_offset: std::cell::Cell::new(0),
             tab_spans: std::cell::RefCell::new(Vec::new()),
+            tab_row: std::cell::Cell::new(0),
+            header_h: std::cell::Cell::new(1),
+            history: VecDeque::new(),
         }
     }
 
@@ -366,6 +529,24 @@ impl App {
     fn matches(&self, text: &[&str]) -> bool {
         let f = self.filter().to_lowercase();
         f.is_empty() || text.iter().any(|t| t.to_lowercase().contains(&f))
+    }
+
+    /// The look (ui.yaml's theme, this terminal's colors).
+    pub fn theme(&self) -> &super::theme::Theme {
+        &self.kube.theme
+    }
+
+    /// The CPUs Home's figures are shares of: a Linux sandbox's limit, else
+    /// what the engine sees (the VM's).
+    pub fn home_cpus(&self) -> Option<f64> {
+        let limits = self.home.running.as_ref().filter(|s| s.mode != "vm");
+        limits.and_then(|s| s.cpus).map(|c| c as u64).or(self.vm_cpus).map(|c| c as f64)
+    }
+
+    /// The memory Home's figure is a share of (bytes), the same way.
+    pub fn home_memory(&self) -> Option<u64> {
+        let limits = self.home.running.as_ref().filter(|s| s.mode != "vm");
+        limits.and_then(|s| s.memory_mib).map(|m| m << 20).or(self.vm_memory)
     }
 
     pub fn sel(&self) -> usize {
@@ -401,24 +582,6 @@ impl App {
 
     pub fn visible_volumes(&self) -> Vec<usize> {
         (0..self.volumes.len()).filter(|&i| self.matches(&[&self.volumes[i].name, self.volumes[i].project.as_deref().unwrap_or("")])).collect()
-    }
-
-    pub fn visible_pods(&self) -> Vec<usize> {
-        (0..self.pods.len())
-            .filter(|&i| {
-                let p = &self.pods[i];
-                self.namespace.as_ref().is_none_or(|n| *n == p.namespace) && self.matches(&[&p.name, &p.status])
-            })
-            .collect()
-    }
-
-    pub fn visible_deployments(&self) -> Vec<usize> {
-        (0..self.deployments.len())
-            .filter(|&i| {
-                let d = &self.deployments[i];
-                self.namespace.as_ref().is_none_or(|n| *n == d.namespace) && self.matches(&[&d.name])
-            })
-            .collect()
     }
 
     /// Bytes and items each free-space category would reclaim.
@@ -464,16 +627,36 @@ impl App {
     pub fn list_len(&self) -> usize {
         match self.tab {
             Tab::Home => 0,
+            Tab::Clusters => self.clusters.local.len() + self.clusters.others.len(),
             Tab::Containers => self.container_rows().len(),
             Tab::Images => self.visible_images().len(),
             Tab::Volumes => self.visible_volumes().len(),
             Tab::Space => RECLAIMS.len(),
-            Tab::Kube => match self.kube_view {
-                KubeView::Pods => self.visible_pods().len(),
-                KubeView::Deployments => self.visible_deployments().len(),
-            },
+            Tab::Kube => 0,
             Tab::Settings => SETTINGS.len(),
+            Tab::Observe => self.visible_obs_pods().len(),
         }
+    }
+
+    /// The Observe view's pods: filtered, top consumers first.
+    pub fn visible_obs_pods(&self) -> Vec<usize> {
+        let mut v: Vec<usize> = (0..self.obs.pods.len())
+            .filter(|&i| {
+                let p = &self.obs.pods[i];
+                self.obs_namespace.as_ref().is_none_or(|n| *n == p.namespace) && self.matches(&[&p.name, &p.namespace])
+            })
+            .collect();
+        // Live pods first, top consumers first; pods gone in the window last.
+        let key = |i: &usize| {
+            let p = &self.obs.pods[*i];
+            (p.live(), if self.obs_by_mem { p.mem_now() } else { p.cpu_now() })
+        };
+        v.sort_by(|a, b| key(b).partial_cmp(&key(a)).unwrap_or(std::cmp::Ordering::Equal));
+        v
+    }
+
+    pub fn selected_obs_pod(&self) -> Option<&PodUsage> {
+        self.visible_obs_pods().get(self.sel()).map(|i| &self.obs.pods[*i])
     }
 
     fn clamp(&mut self) {
@@ -518,14 +701,6 @@ impl App {
 
     pub fn selected_volume(&self) -> Option<&Volume> {
         self.visible_volumes().get(self.sel()).map(|&i| &self.volumes[i])
-    }
-
-    pub fn selected_pod(&self) -> Option<&Pod> {
-        self.visible_pods().get(self.sel()).map(|&i| &self.pods[i])
-    }
-
-    pub fn selected_deployment(&self) -> Option<&Deployment> {
-        self.visible_deployments().get(self.sel()).map(|&i| &self.deployments[i])
     }
 
     /// Settings that differ from what the running cluster started with.
@@ -649,28 +824,69 @@ impl App {
                 self.pods = p;
                 self.relink();
             }
-            Msg::Deployments(d) => self.deployments = d,
-            Msg::Namespaces(n) => {
-                self.namespaces = n;
-                if self.namespace.as_ref().is_some_and(|ns| !self.namespaces.contains(ns)) {
-                    self.namespace = None;
-                }
-            }
             Msg::KubeDown(e) => {
                 self.kube_error = Some(e);
                 self.pods.clear();
-                self.deployments.clear();
                 self.relink();
+            }
+            Msg::Kube(m) => {
+                self.kube.now = self.now;
+                self.kube.apply(m);
+                if let Some((text, error)) = self.kube.flash.take() {
+                    self.flash(text, error);
+                }
             }
             Msg::Home(sample) => {
                 let mut sample = *sample;
-                if let Some(op) = self.dev_busy {
-                    sample.status = match op {
-                        DevOp::Up => DevStatus::Starting,
-                        DevOp::Down | DevOp::Reset => DevStatus::Stopping,
-                    };
+                if let Some(op) = self.dev_busy.as_ref().filter(|op| op.cluster() == self.cluster) {
+                    sample.status = if op.starts() { DevStatus::Starting } else { DevStatus::Stopping };
+                }
+                if let Some(now) = sample.cpu_sample.take() {
+                    if let Some(prev) = &self.cpu_prev {
+                        let name = |id: &str| self.cgroup_name(id);
+                        if let Some(b) = crate::dev::cpu::breakdown(prev, &now, &self.cluster, &name) {
+                            self.cpu = Some(b);
+                        }
+                    }
+                    self.cpu_prev = Some(now);
+                } else if sample.status != DevStatus::Up {
+                    self.cpu = None;
+                    self.cpu_prev = None;
                 }
                 self.home = sample;
+                // Only while Home shows them: samples come every 2 s then,
+                // once a minute otherwise (no gaps of a minute in a line
+                // of 2 s steps).
+                if self.tab == Tab::Home && self.logs.is_none() && self.home.status == DevStatus::Up {
+                    let cpu = self.home.cpu_pct.zip(self.home_cpus()).map(|(p, c)| (p / 100.0 / c.max(1.0)) as f32);
+                    // Memory in use against its limit when the breakdown says
+                    // (the footprint also counts pages the guest freed).
+                    let in_use = self.home.memory.as_ref().and_then(|b| b.limit.filter(|l| *l > 0).map(|l| (b.in_use() as f64 / l as f64) as f32));
+                    let mem = in_use.or_else(|| self.home.mem_used.zip(self.home_memory()).map(|(u, t)| (u as f64 / t.max(1) as f64) as f32));
+                    if let (Some(c), Some(m)) = (cpu, mem) {
+                        if self.history.len() == HISTORY {
+                            self.history.pop_front();
+                        }
+                        self.history.push_back((c, m));
+                    }
+                } else if self.home.status != DevStatus::Up {
+                    self.history.clear();
+                }
+            }
+            Msg::Obs(sample) => {
+                self.obs = *sample;
+                if self.tab == Tab::Observe {
+                    self.clamp();
+                }
+            }
+            Msg::Clusters(sample) => {
+                let mut sample = *sample;
+                if let Some(op) = &self.dev_busy {
+                    if let Some(row) = sample.local.iter_mut().find(|r| r.name == op.cluster()) {
+                        row.status = if op.starts() { DevStatus::Starting } else { DevStatus::Stopping };
+                    }
+                }
+                self.clusters = sample;
             }
             Msg::LogLines(id, lines) => {
                 if let Some(v) = self.logs.as_mut().filter(|v| v.id == id) {
@@ -698,13 +914,18 @@ impl App {
                 }
             }
             Msg::DevFinished(r) => {
+                // The shown cluster is gone: back to the default one.
+                if let Some(DevOp::Delete(c)) = &self.dev_busy {
+                    if *c == self.cluster && r.is_ok() {
+                        self.cluster = crate::dev::cluster::DEFAULT.into();
+                    }
+                }
                 self.dev_busy = None;
                 match r {
                     Ok(m) => self.flash(m, false),
                     Err(e) => self.flash(e, true),
                 }
             }
-            Msg::Forwards(f) => self.forwards = f,
             Msg::Config(Ok(c)) => {
                 self.config = c;
                 self.config_error = None;
@@ -712,6 +933,44 @@ impl App {
             Msg::Config(Err(e)) => self.config_error = Some(e),
         }
         self.clamp();
+    }
+
+    /// The disk figure explained: the node's categories, with what the
+    /// Free space view can reclaim.
+    pub fn disk_breakdown(&self) -> Option<crate::dev::disk::Breakdown> {
+        let (n, own, image) = self.home.disk_node.as_ref()?;
+        let r = crate::dev::disk::Reclaimable {
+            images: self.reclaimable(Reclaim::DanglingImages).0 + self.reclaimable(Reclaim::UnusedImages).0 + self.reclaimable(Reclaim::BuildCache).0,
+            containers: self.reclaimable(Reclaim::StoppedContainers).0,
+            volumes: self.reclaimable(Reclaim::UnusedVolumes).0,
+        };
+        Some(match (self.home.status, image) {
+            (DevStatus::Remote, _) => crate::dev::disk::node_breakdown(n, &r),
+            (_, Some(img)) => crate::dev::disk::vm_breakdown(*own, *img, n, &r, &self.cluster),
+            (_, None) => crate::dev::disk::host_breakdown(*own, n, &r),
+        })
+    }
+
+    /// A pod's or container's name for its cgroup (`pod<uid>`,
+    /// `docker/<id>`, `build/<id>`).
+    pub fn cgroup_name(&self, id: &str) -> String {
+        if let Some(uid) = id.strip_prefix("pod") {
+            let uid = uid.replace('_', "-");
+            return match self.pods.iter().find(|p| p.uid == uid) {
+                Some(p) => format!("pod {}/{}", p.namespace, p.name),
+                None => format!("pod {}", &uid[..uid.len().min(8)]),
+            };
+        }
+        if let Some(cid) = id.strip_prefix("docker/") {
+            return match self.containers.iter().find(|c| c.id.starts_with(cid) || cid.starts_with(&c.id)) {
+                Some(c) => format!("container {}", c.name),
+                None => format!("container {}", &cid[..cid.len().min(12)]),
+            };
+        }
+        match id.strip_prefix("build/") {
+            Some(b) => format!("build {}", &b[..b.len().min(12)]),
+            None => id.to_string(),
+        }
     }
 
     fn relink(&mut self) {
@@ -722,10 +981,14 @@ impl App {
     fn open_logs(&mut self, source: LogSource) -> Vec<Effect> {
         let title = match &source {
             LogSource::Container { name, .. } => format!("logs: {name}"),
-            LogSource::Pod { namespace, name, container } => match container {
-                Some(c) => format!("logs: {namespace}/{name} [{c}]"),
-                None => format!("logs: {namespace}/{name}"),
-            },
+            LogSource::Search { namespace, pod, grep } => {
+                let scope = match (namespace, pod) {
+                    (Some(n), Some(p)) => format!("{n}/{p} (every container, gone ones too)"),
+                    (Some(n), None) => format!("namespace {n}"),
+                    _ => "every pod".to_string(),
+                };
+                if grep.is_empty() { format!("logs: {scope}, last hour") } else { format!("logs matching /{grep}/: {scope}, last hour") }
+            }
         };
         let id = self.next_log;
         self.next_log += 1;
@@ -761,10 +1024,8 @@ impl App {
             Overlay::Confirm { title, lines, effect } => {
                 return match key.code {
                     KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
-                        if let Effect::Dev(op) = effect {
-                            self.dev_busy = Some(op);
-                            self.dev_output.clear();
-                            self.home.status = DevStatus::Stopping;
+                        if let Effect::Dev(op) = &effect {
+                            self.busy(op.clone());
                         }
                         vec![effect]
                     }
@@ -775,6 +1036,7 @@ impl App {
                     }
                 };
             }
+            o @ Overlay::NewCluster(_) => self.overlay = o,
             Overlay::Input { prompt, mut value, kind, error } => {
                 match key.code {
                     KeyCode::Esc => {
@@ -799,13 +1061,26 @@ impl App {
                 return Vec::new();
             }
         }
+        if let Overlay::NewCluster(form) = std::mem::replace(&mut self.overlay, Overlay::None) {
+            return self.new_cluster_key(form, key);
+        }
         if self.logs.is_some() {
             return self.log_key(key);
+        }
+        if self.tab == Tab::Kube {
+            self.kube.now = self.now;
+            let handled = self.kube.key(key);
+            if let Some((text, error)) = self.kube.flash.take() {
+                self.flash(text, error);
+            }
+            if let Some(effects) = handled {
+                return effects;
+            }
         }
         match key.code {
             KeyCode::Char('q') => return vec![Effect::Quit],
             KeyCode::Char('?') | KeyCode::F(1) => self.overlay = Overlay::Help,
-            KeyCode::Char(c @ '1'..='7') => self.tab = TABS[c as usize - '1' as usize],
+            KeyCode::Char(c @ '1'..='9') => self.tab = TABS[c as usize - '1' as usize],
             KeyCode::Tab => self.tab = TABS[(self.tab.index() + 1) % TABS.len()],
             KeyCode::BackTab => self.tab = TABS[(self.tab.index() + TABS.len() - 1) % TABS.len()],
             KeyCode::Down | KeyCode::Char('j') => self.move_sel(1),
@@ -814,7 +1089,7 @@ impl App {
             KeyCode::PageUp => self.move_sel(-10),
             KeyCode::Home | KeyCode::Char('g') => self.move_sel(-(self.list_len() as isize)),
             KeyCode::End | KeyCode::Char('G') => self.move_sel(self.list_len() as isize),
-            KeyCode::Char('/') if self.tab != Tab::Home && self.tab != Tab::Settings && self.tab != Tab::Space => {
+            KeyCode::Char('/') if !matches!(self.tab, Tab::Home | Tab::Settings | Tab::Space | Tab::Clusters) => {
                 let current = self.filter().to_string();
                 self.input("filter", current, InputKind::Filter);
             }
@@ -876,32 +1151,20 @@ impl App {
         let code = key.code;
         match self.tab {
             Tab::Home => match code {
+                KeyCode::Char('b') => self.explain = (self.explain + 1) % 3,
                 KeyCode::Char('u') if self.dev_busy.is_none() => {
-                    self.dev_busy = Some(DevOp::Up);
-                    self.dev_output.clear();
-                    self.home.status = DevStatus::Starting;
-                    return vec![Effect::Dev(DevOp::Up)];
+                    let op = DevOp::Up { cluster: self.cluster.clone(), switch: true };
+                    self.busy(op.clone());
+                    return vec![Effect::Dev(op)];
                 }
                 KeyCode::Char('d') if self.dev_busy.is_none() => {
                     let n = self.containers.iter().filter(|c| c.running()).count();
-                    let mut lines = vec!["Stops the cluster, its pods and Docker containers.".to_string(), "Objects, images and volumes are kept for the next `up`.".to_string()];
-                    if n > 0 {
-                        lines.push(format!("{n} running container(s) will stop."));
-                    }
-                    self.confirm("Stop the dev cluster?", lines, Effect::Dev(DevOp::Down));
+                    self.confirm_down(self.cluster.clone(), n);
                 }
-                KeyCode::Char('R') if self.dev_busy.is_none() => self.confirm(
-                    "Reset the dev cluster?",
-                    vec![
-                        "Stops the cluster and DELETES all its data:".into(),
-                        "Kubernetes objects, pods, Docker containers, images, volumes".into(),
-                        format!("and the build cache, in {}.", if self.home.data_dir.is_empty() { "the dev data directory" } else { &self.home.data_dir }),
-                        "The kubectl context litek8s-dev is removed. This cannot be undone.".into(),
-                    ],
-                    Effect::Dev(DevOp::Reset),
-                ),
+                KeyCode::Char('R') if self.dev_busy.is_none() => self.confirm_delete(self.cluster.clone()),
                 _ => {}
             },
+            Tab::Clusters => return self.clusters_key(code),
             Tab::Containers => return self.containers_key(code),
             Tab::Images => {
                 if matches!(code, KeyCode::Char('d') | KeyCode::Delete) {
@@ -958,9 +1221,213 @@ impl App {
                 }
                 _ => {}
             },
-            Tab::Kube => return self.kube_key(code),
+            Tab::Kube => {}
             Tab::Settings => return self.settings_key(code),
+            Tab::Observe => return self.obs_key(code),
         }
+        Vec::new()
+    }
+
+    fn obs_key(&mut self, code: KeyCode) -> Vec<Effect> {
+        match code {
+            KeyCode::Char('s') => {
+                self.obs_by_mem = !self.obs_by_mem;
+                return Vec::new();
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                // The namespaces the metrics show: all → each → all.
+                let mut seen: Vec<String> = self.obs.pods.iter().map(|p| p.namespace.clone()).collect();
+                seen.sort();
+                seen.dedup();
+                let mut all: Vec<Option<String>> = vec![None];
+                all.extend(seen.into_iter().map(Some));
+                let pos = all.iter().position(|n| *n == self.obs_namespace).unwrap_or(0);
+                let next = if code == KeyCode::Char('n') { (pos + 1) % all.len() } else { (pos + all.len() - 1) % all.len() };
+                self.obs_namespace = all[next].clone();
+                self.clamp();
+                return Vec::new();
+            }
+            KeyCode::Char('L') => {
+                self.input("search logs of every pod, last hour (regex; empty: all lines)", String::new(), InputKind::LogSearch);
+                return Vec::new();
+            }
+            KeyCode::Char('A') => {
+                let firing: Vec<AlertRow> = self.obs.alerts.iter().filter(|a| !a.silenced).cloned().collect();
+                if firing.is_empty() {
+                    self.flash("no unacknowledged alerts", false);
+                } else {
+                    let lines = firing.iter().map(|a| format!("{} {}", a.name, a.target)).collect();
+                    self.confirm("Acknowledge every alert (silence each until it resolves)?", lines, Effect::AckAlerts(firing));
+                }
+                return Vec::new();
+            }
+            _ => {}
+        }
+        let Some(p) = self.selected_obs_pod().cloned() else { return Vec::new() };
+        match code {
+            KeyCode::Enter | KeyCode::Char('l') => {
+                return self.open_logs(LogSource::Search { namespace: Some(p.namespace), pod: Some(p.name), grep: String::new() });
+            }
+            KeyCode::Char('a') => {
+                let mine: Vec<AlertRow> = self.obs.alerts.iter().filter(|a| !a.silenced && a.pod.as_ref() == Some(&(p.namespace.clone(), p.name.clone()))).cloned().collect();
+                if mine.is_empty() {
+                    self.flash(format!("no unacknowledged alerts about {}/{}", p.namespace, p.name), false);
+                } else {
+                    let lines = mine.iter().map(|a| format!("{} {}", a.name, a.target)).collect();
+                    self.confirm("Acknowledge (silence until resolved)?", lines, Effect::AckAlerts(mine));
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn busy(&mut self, op: DevOp) {
+        if op.cluster() == self.cluster {
+            self.home.status = if op.starts() { DevStatus::Starting } else { DevStatus::Stopping };
+        }
+        if let Some(row) = self.clusters.local.iter_mut().find(|r| r.name == op.cluster()) {
+            row.status = if op.starts() { DevStatus::Starting } else { DevStatus::Stopping };
+        }
+        self.dev_busy = Some(op);
+        self.dev_output.clear();
+    }
+
+    fn confirm_down(&mut self, cluster: String, running_containers: usize) {
+        let mut lines = vec![
+            format!("Stops {}: its nodes, pods and Docker containers.", context_of(&cluster)),
+            "Objects, images and volumes are kept for the next `up`.".to_string(),
+        ];
+        if running_containers > 0 {
+            lines.push(format!("{running_containers} running container(s) will stop."));
+        }
+        self.confirm(format!("Stop cluster {cluster}?"), lines, Effect::Dev(DevOp::Down(cluster)));
+    }
+
+    fn confirm_delete(&mut self, cluster: String) {
+        let place = data_place(&cluster);
+        self.confirm(
+            format!("Delete cluster {cluster}?"),
+            vec![
+                "Stops it and DELETES all of its data:".into(),
+                "Kubernetes objects, pods, Docker containers, images, volumes".into(),
+                format!("and the build cache, in {place}."),
+                format!("The kubectl context {} is removed. This cannot be undone.", context_of(&cluster)),
+            ],
+            Effect::Dev(DevOp::Delete(cluster)),
+        );
+    }
+
+    /// The Clusters view's selection: a local cluster or another context.
+    pub fn selected_cluster(&self) -> Option<Result<&ClusterRow, &(String, Option<String>)>> {
+        let i = self.sel();
+        match self.clusters.local.get(i) {
+            Some(r) => Some(Ok(r)),
+            None => self.clusters.others.get(i - self.clusters.local.len()).map(Err),
+        }
+    }
+
+    fn clusters_key(&mut self, code: KeyCode) -> Vec<Effect> {
+        if code == KeyCode::Char('n') {
+            if self.dev_busy.is_some() {
+                self.flash("wait for the running `litek8s dev` to finish", true);
+                return Vec::new();
+            }
+            let taken: Vec<&str> = self.clusters.local.iter().map(|r| r.name.as_str()).collect();
+            let name = (2..).map(|i| format!("dev{i}")).find(|n| !taken.contains(&n.as_str())).unwrap_or_default();
+            self.overlay = Overlay::NewCluster(NewCluster { name, nodes: "1".into(), field: 0, error: None });
+            return Vec::new();
+        }
+        let Some(sel) = self.selected_cluster() else { return Vec::new() };
+        let row = match sel {
+            Ok(row) => row.clone(),
+            Err((context, _)) => {
+                if code == KeyCode::Enter {
+                    let context = context.clone();
+                    self.context_override = Some(context.clone());
+                    self.flash(format!("Kubernetes view: context {context} (read-only here; enter on a local cluster to go back)"), false);
+                    return vec![Effect::UseContext(context)];
+                }
+                if matches!(code, KeyCode::Char('u' | 'd' | 'D')) {
+                    self.flash("only local clusters can be started, stopped or deleted here", true);
+                }
+                return Vec::new();
+            }
+        };
+        let idle = self.dev_busy.is_none();
+        match code {
+            KeyCode::Enter => {
+                self.context_override = None;
+                let switch = self.cluster != row.name;
+                self.cluster = row.name.clone();
+                let mut effects = vec![Effect::UseCluster(row.name.clone())];
+                if switch || !self.home.contexts.kube_is_litek8s {
+                    self.confirm(
+                        format!("Point kubectl and docker at {}?", row.name),
+                        vec![
+                            format!("The views show {} now.", row.name),
+                            format!("Also make {} kubectl's current context", row.context),
+                            format!("and select the docker context {}?", crate::dev::cluster::Cluster { name: row.name.clone() }.docker_context()),
+                        ],
+                        Effect::SwitchTools(row.name.clone()),
+                    );
+                } else {
+                    effects.push(Effect::Refresh);
+                }
+                return effects;
+            }
+            KeyCode::Char('u') if idle && matches!(row.status, DevStatus::Down) => {
+                let op = DevOp::Up { cluster: row.name.clone(), switch: false };
+                self.busy(op.clone());
+                return vec![Effect::Dev(op)];
+            }
+            KeyCode::Char('u') if idle => self.flash(format!("{} is {}", row.name, row.status.label()), false),
+            KeyCode::Char('d') if idle && !matches!(row.status, DevStatus::Down) => {
+                let n = if row.name == self.cluster { self.containers.iter().filter(|c| c.running()).count() } else { 0 };
+                self.confirm_down(row.name.clone(), n);
+            }
+            KeyCode::Char('d') if idle => self.flash(format!("{} is not running", row.name), false),
+            KeyCode::Char('D') | KeyCode::Delete if idle => self.confirm_delete(row.name.clone()),
+            KeyCode::Char('u' | 'd' | 'D') => self.flash("wait for the running `litek8s dev` to finish", true),
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    fn new_cluster_key(&mut self, mut form: NewCluster, key: KeyEvent) -> Vec<Effect> {
+        match key.code {
+            KeyCode::Esc => return Vec::new(),
+            KeyCode::Tab | KeyCode::BackTab | KeyCode::Down | KeyCode::Up => form.field = 1 - form.field.min(1),
+            KeyCode::Backspace => {
+                if form.field == 0 { form.name.pop() } else { form.nodes.pop() };
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if form.field == 0 { form.name.clear() } else { form.nodes.clear() }
+            }
+            KeyCode::Char(c) if form.field == 0 => form.name.push(c),
+            KeyCode::Char(c) if c.is_ascii_digit() => form.nodes.push(c),
+            KeyCode::Enter => {
+                let name = form.name.trim().to_string();
+                let nodes = form.nodes.trim().parse::<u32>().ok().filter(|n| (1..=10).contains(n));
+                let error = match (crate::dev::cluster::validate(&name), nodes) {
+                    (Err(e), _) => Some(e.to_string()),
+                    (_, None) => Some("nodes: 1 to 10".into()),
+                    _ if self.clusters.local.iter().any(|r| r.name == name) => Some(format!("{name} exists already (u starts it)")),
+                    _ => None,
+                };
+                if let (None, Some(nodes)) = (&error, nodes) {
+                    let op = DevOp::Create { cluster: name, nodes };
+                    self.busy(op.clone());
+                    return vec![Effect::Dev(op)];
+                }
+                form.error = error;
+            }
+            _ => {}
+        }
+        if key.code != KeyCode::Enter {
+            form.error = None;
+        }
+        self.overlay = Overlay::NewCluster(form);
         Vec::new()
     }
 
@@ -1006,77 +1473,6 @@ impl App {
         Vec::new()
     }
 
-    fn kube_key(&mut self, code: KeyCode) -> Vec<Effect> {
-        match code {
-            KeyCode::Char('p') => self.kube_view = KubeView::Pods,
-            KeyCode::Char('D') => self.kube_view = KubeView::Deployments,
-            KeyCode::Left | KeyCode::Right | KeyCode::Char('v') => {
-                self.kube_view = if self.kube_view == KubeView::Pods { KubeView::Deployments } else { KubeView::Pods };
-                self.clamp();
-            }
-            KeyCode::Char('n') | KeyCode::Char('N') => {
-                // Cycle: all → each namespace → all.
-                let mut all: Vec<Option<String>> = vec![None];
-                all.extend(self.namespaces.iter().cloned().map(Some));
-                let pos = all.iter().position(|n| *n == self.namespace).unwrap_or(0);
-                let next = if code == KeyCode::Char('n') { (pos + 1) % all.len() } else { (pos + all.len() - 1) % all.len() };
-                self.namespace = all[next].clone();
-                self.clamp();
-            }
-            KeyCode::Char('a') => {
-                self.namespace = None;
-                self.clamp();
-            }
-            KeyCode::Char('X') if !self.forwards.is_empty() => return vec![Effect::StopForwards],
-            _ => {}
-        }
-        match self.kube_view {
-            KubeView::Pods => {
-                let Some(p) = self.selected_pod().cloned() else { return Vec::new() };
-                match code {
-                    KeyCode::Enter | KeyCode::Char('l') => {
-                        let container = (p.containers.len() > 1).then(|| p.containers[0].clone());
-                        return self.open_logs(LogSource::Pod { namespace: p.namespace, name: p.name, container });
-                    }
-                    KeyCode::Char('f') => {
-                        let port = p.ports.first().copied().unwrap_or(8080);
-                        let local = if port < 1024 { port as u32 + 8000 } else { port as u32 };
-                        self.input(format!("port-forward {}/{} (local:pod)", p.namespace, p.name), format!("{local}:{port}"), InputKind::PortForward { namespace: p.namespace, pod: p.name });
-                    }
-                    KeyCode::Char('d') | KeyCode::Delete => {
-                        let mut lines = vec![format!("{}/{} ({})", p.namespace, p.name, p.status)];
-                        if let Some(o) = &p.owner {
-                            lines.push(format!("Owned by {o}: a new pod replaces it."));
-                        }
-                        self.confirm("Delete pod?", lines, Effect::DeletePod { namespace: p.namespace, name: p.name });
-                    }
-                    _ => {}
-                }
-            }
-            KubeView::Deployments => {
-                let Some(d) = self.selected_deployment().cloned() else { return Vec::new() };
-                match code {
-                    KeyCode::Char('s') | KeyCode::Char('S') => self.input(format!("scale {}/{} to", d.namespace, d.name), d.desired.to_string(), InputKind::Scale { namespace: d.namespace, name: d.name }),
-                    KeyCode::Char('r') => self.confirm(
-                        format!("Restart {}/{}?", d.namespace, d.name),
-                        vec!["A rollout replaces its pods one by one.".into()],
-                        Effect::RestartDeployment { namespace: d.namespace, name: d.name },
-                    ),
-                    KeyCode::Enter | KeyCode::Char('l') => {
-                        // The logs of its first pod.
-                        let pod = self.pods.iter().find(|p| p.namespace == d.namespace && !d.selector.is_empty() && p.owner.as_ref().is_some_and(|o| o.starts_with(&format!("{}-", d.name))));
-                        if let Some(p) = pod.cloned() {
-                            return self.open_logs(LogSource::Pod { namespace: p.namespace, name: p.name, container: None });
-                        }
-                        self.flash(format!("{} has no pods", d.name), true);
-                    }
-                    _ => {}
-                }
-            }
-        }
-        Vec::new()
-    }
-
     fn settings_key(&mut self, code: KeyCode) -> Vec<Effect> {
         let row = SETTINGS[self.sel().min(SETTINGS.len() - 1)];
         match (code, row) {
@@ -1110,19 +1506,11 @@ impl App {
         };
         match &kind {
             InputKind::Filter => Vec::new(),
-            InputKind::Scale { namespace, name } => match value.trim().parse::<i64>() {
-                Ok(n) if (0..=1000).contains(&n) => vec![Effect::Scale { namespace: namespace.clone(), name: name.clone(), replicas: n }],
-                _ => fail(self, "replicas: a number from 0 to 1000".into()),
-            },
-            InputKind::PortForward { namespace, pod } => {
-                let parsed = match value.trim().split_once(':') {
-                    Some((l, r)) => l.trim().parse::<u16>().ok().zip(r.trim().parse::<u16>().ok()),
-                    None => value.trim().parse::<u16>().ok().map(|p| (p, p)),
-                };
-                match parsed {
-                    Some((local, remote)) if local > 0 && remote > 0 => vec![Effect::PortForward { namespace: namespace.clone(), pod: pod.clone(), local, remote }],
-                    _ => fail(self, "local:pod, e.g. 8080:80".into()),
+            InputKind::LogSearch => {
+                if let Err(e) = regex::Regex::new(value.trim()) {
+                    return fail(self, format!("not a regex: {e}"));
                 }
+                self.open_logs(LogSource::Search { namespace: self.obs_namespace.clone(), pod: None, grep: value.trim().to_string() })
             }
             InputKind::Setting(f) => match self.with_setting(*f, &value) {
                 Ok(c) => vec![Effect::SaveConfig(c)],
@@ -1136,6 +1524,9 @@ impl App {
     pub fn mouse(&mut self, ev: MouseEvent) -> Vec<Effect> {
         if self.overlay != Overlay::None {
             return Vec::new();
+        }
+        if self.tab == Tab::Kube && self.logs.is_none() && ev.row >= self.header_h.get() {
+            return self.kube.mouse(ev, self.list_top.get());
         }
         match ev.kind {
             MouseEventKind::ScrollDown => {
@@ -1151,7 +1542,7 @@ impl App {
                 self.move_sel(-3);
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if ev.row == 0 {
+                if ev.row == self.tab_row.get() {
                     let spans = self.tab_spans.borrow().clone();
                     if let Some(i) = spans.iter().position(|(a, b)| ev.column >= *a && ev.column < *b) {
                         self.tab = TABS[i];
@@ -1170,6 +1561,24 @@ impl App {
             _ => {}
         }
         Vec::new()
+    }
+}
+
+fn context_of(cluster: &str) -> String {
+    format!("litek8s-{cluster}")
+}
+
+/// Where a cluster's data is, for the delete confirmation.
+fn data_place(cluster: &str) -> String {
+    let c = crate::dev::cluster::Cluster { name: cluster.to_string() };
+    if cfg!(target_os = "macos") {
+        return format!("the shared VM's disk ({})", c.guest_data_dir().display());
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    match crate::dev::dev_home() {
+        Ok(h) if !home.is_empty() => c.data_dir(&h).display().to_string().replacen(&home, "~", 1),
+        Ok(h) => c.data_dir(&h).display().to_string(),
+        Err(_) => "the dev data directory".into(),
     }
 }
 
@@ -1205,7 +1614,7 @@ pub fn field_prompt(f: Field) -> &'static str {
         Field::Cpus => if cfg!(target_os = "macos") { "VM CPUs (empty: half the Mac's)" } else { "CPU limit (empty: none)" },
         Field::Memory => if cfg!(target_os = "macos") { "VM memory in MiB (empty: 4096)" } else { "memory limit in MiB (empty: none)" },
         Field::Shares => "shared directories, comma-separated (empty: $HOME)",
-        Field::Port => "API server port (empty: 6443)",
+        Field::Port => "API server port of the cluster dev (empty: 6443)",
         Field::Publish => "published ports: localhost or all",
     }
 }

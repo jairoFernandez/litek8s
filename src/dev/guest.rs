@@ -1,17 +1,21 @@
 //! PID 1 of the macOS dev VM (`/init` in its initramfs is this binary).
 //!
-//! The VM is a kernel, an initramfs (Alpine's crun, iptables, iproute2 and
-//! busybox around this binary) and a data disk. Init mounts the usual
+//! The VM is a kernel, a read-only root disk (Alpine's crun, iptables,
+//! iproute2 and busybox around this binary; an initrd mounts it under a
+//! tmpfs overlay and hands over) and a data disk. Init mounts the usual
 //! filesystems, loads the kernel modules the cluster needs, formats the data
 //! disk on first boot, mounts the Mac's shared directory (virtiofs) at the
-//! same path as on the Mac, gets an address by DHCP and runs the API server
-//! with a crun node as a child, reaping orphans and restarting it if it
-//! dies. It talks to the host over the console (hvc0): it reports
+//! same path as on the Mac, gets an address by DHCP and runs the cell
+//! manager ([`super::cells`]) as a child, which runs each cluster in cells
+//! of its own; init reaps orphans and restarts the manager if it dies. It
+//! talks to the host over the console (hvc0): it reports
 //! `LITEK8S_GUEST ip=...` once the network is up and powers off on a
-//! `poweroff` line from the host.
+//! `poweroff` line from the host; cells' output comes through it too, as
+//! `LITEK8S_LOG <cluster> <line>`, and its memory, as `LITEK8S_MEM ...`
+//! (the host moves the VM's memory ceiling with it, see
+//! [`super::balloon`]).
 
-/// The dev cluster's node name (the sandbox's hostname on Linux, the VM's
-/// on macOS).
+/// The default dev cluster's node name (the VM's hostname too).
 pub const NODE_NAME: &str = "litek8s-dev";
 
 /// The API server port inside the VM.
@@ -21,14 +25,15 @@ pub const GUEST_API_PORT: u16 = 6443;
 pub const DATA_DIR: &str = "/var/lib/litek8s";
 
 /// The vsock port the guest forwards from: the host connects, sends
-/// `tcp <port>\n` and is spliced to 127.0.0.1:<port> in the VM (the API
-/// server, NodePorts). The API then needs neither the VM's address nor its
-/// network, and listens on the VM's loopback only.
+/// `tcp <port> [<cell>]\n` and is spliced to 127.0.0.1:<port> in the VM or
+/// in a cluster's cell (the API server, NodePorts, the Docker API). The API
+/// then needs neither the VM's address nor its network, and listens on
+/// loopback only. `stats\n` gets every cluster's memory and CPU time.
 pub const VSOCK_PORT: u32 = 1024;
 
 /// Written by init once DHCP has found the Mac's address on the VM network
-/// (see `LITEK8S_HOST_LOOPBACK`).
-pub const HOST_ADDRESS_FILE: &str = "/run/litek8s-host-address";
+/// (see `LITEK8S_HOST_LOOPBACK`); outside /run, which every cell has its own of.
+pub const HOST_ADDRESS_FILE: &str = "/etc/litek8s-host-address";
 
 /// Kernel command line options init understands.
 #[derive(Debug, Default, PartialEq)]
@@ -45,6 +50,8 @@ pub struct BootOptions {
     /// The Mac shares Rosetta (tag `rosetta`): run linux/amd64 binaries
     /// with it.
     pub rosetta: bool,
+    /// Clusters deleted while the VM was down: their data goes at boot.
+    pub purge: Vec<String>,
 }
 
 pub fn parse_cmdline(cmdline: &str) -> BootOptions {
@@ -60,6 +67,8 @@ pub fn parse_cmdline(cmdline: &str) -> BootOptions {
             o.mounts = v.split(',').filter_map(|m| m.split_once(':')).map(|(t, p)| (t.to_string(), p.to_string())).collect();
         } else if word == "litek8s.rosetta=1" {
             o.rosetta = true;
+        } else if let Some(v) = word.strip_prefix("litek8s.purge=") {
+            o.purge = v.split(',').filter(|n| super::cluster::validate(n).is_ok()).map(str::to_string).collect();
         }
     }
     o
@@ -202,8 +211,26 @@ mod init {
                 _ => return,
             }
         }
-        let text = String::from_utf8_lossy(&line);
-        let Some(port) = text.strip_prefix("tcp ").and_then(|p| p.trim().parse::<u16>().ok()) else { return };
+        let text = String::from_utf8_lossy(&line).to_string();
+        if text.trim() == "stats" {
+            let stats = super::super::env::GuestStats { cells: super::super::env::cell_stats(std::path::Path::new("/sys/fs/cgroup")), meminfo: super::super::memory::meminfo(), proc_stat: super::super::cpu::proc_stat() };
+            let _ = (&conn).write_all(&serde_json::to_vec(&stats).unwrap_or_default());
+            return;
+        }
+        let mut words = text.strip_prefix("tcp ").unwrap_or_default().split_whitespace();
+        let Some(port) = words.next().and_then(|p| p.parse::<u16>().ok()) else { return };
+        // In a cell: connect from its network namespace (this thread's only).
+        if let Some(cell) = words.next() {
+            if !cell.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.') {
+                return;
+            }
+            let Ok(ns) = std::fs::File::open(format!("{}/{cell}.net", super::super::cells::NETNS_DIR)) else { return };
+            use std::os::fd::AsRawFd;
+            // SAFETY: setns on this thread with a namespace file we hold open.
+            if unsafe { libc::setns(ns.as_raw_fd(), libc::CLONE_NEWNET) } != 0 {
+                return;
+            }
+        }
         let Ok(tcp) = std::net::TcpStream::connect(("127.0.0.1", port)) else { return };
         let _ = tcp.set_nodelay(true);
         let (Ok(mut conn_r), Ok(mut tcp_w)) = (conn.try_clone(), tcp.try_clone()) else { return };
@@ -234,6 +261,124 @@ mod init {
         if let Err(e) = std::fs::write("/proc/sys/fs/binfmt_misc/register", REGISTER) {
             say(&format!("cannot register Rosetta with binfmt_misc: {e}"));
         }
+    }
+
+    /// Report the guest's memory to the host (`LITEK8S_MEM ...`, see
+    /// [`super::super::balloon`]): every 2 s if it changed (every 250 ms
+    /// while little is available), every 30 s anyway, and at once when
+    /// memory stalls 100 ms within a second (a PSI trigger), so the host
+    /// can grow the VM's ceiling before the workload notices.
+    fn watch_memory() {
+        use std::os::fd::AsRawFd;
+        use super::super::balloon;
+        // Under the ceiling, a burst of allocations would otherwise make
+        // the kernel evict the code everything runs (the root filesystem
+        // is a disk now, not RAM) and thrash for minutes instead of
+        // running out of memory: with the working set of the last second
+        // protected, it calls the OOM path at once, where the balloon
+        // gives memory back before anything is killed.
+        if let Err(e) = std::fs::write("/sys/kernel/mm/lru_gen/min_ttl_ms", "1000") {
+            say(&format!("cannot protect the working set (lru_gen min_ttl_ms: {e})"));
+        }
+        let trigger = std::fs::OpenOptions::new().read(true).write(true).open("/proc/pressure/memory").and_then(|mut f| {
+            f.write_all(b"some 100000 1000000\0")?;
+            Ok(f)
+        });
+        if let Err(e) = &trigger {
+            say(&format!("no memory pressure trigger ({e}); the host polls only"));
+        }
+        let mut last: Option<balloon::Report> = None;
+        let mut sent = Instant::now();
+        loop {
+            let mut fired = false;
+            match &trigger {
+                Ok(f) => {
+                    let mut pfd = libc::pollfd { fd: f.as_raw_fd(), events: libc::POLLPRI, revents: 0 };
+                    // SAFETY: one pollfd we own.
+                    let n = unsafe { libc::poll(&mut pfd, 1, interval(&last)) };
+                    fired = n > 0 && pfd.revents & libc::POLLPRI != 0;
+                    if n > 0 && pfd.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+                        std::thread::sleep(Duration::from_secs(2));
+                    }
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(interval(&last) as u64)),
+            }
+            let Some(r) = balloon::read(fired) else { continue };
+            if last.is_none_or(|l| r.differs(&l)) || sent.elapsed() >= Duration::from_secs(30) {
+                println!("LITEK8S_MEM {}", r.to_line());
+                let _ = std::io::stdout().flush();
+                last = Some(r);
+                sent = Instant::now();
+            }
+        }
+    }
+
+    /// Discard the data disk's free blocks (FITRIM): the framework punches
+    /// them out of the sparse disk.img on the Mac, so deleted images and
+    /// containers give their space back. Bytes discarded.
+    fn trim(dir: &str) -> std::io::Result<u64> {
+        #[repr(C)]
+        struct Range {
+            start: u64,
+            len: u64,
+            minlen: u64,
+        }
+        const FITRIM: libc::c_ulong = 0xC018_5879; // _IOWR('X', 121, struct fstrim_range)
+        let f = std::fs::File::open(dir)?;
+        let mut range = Range { start: 0, len: u64::MAX, minlen: 0 };
+        use std::os::fd::AsRawFd;
+        // SAFETY: the ioctl reads and updates the struct we own.
+        if unsafe { libc::ioctl(f.as_raw_fd(), FITRIM as _, &mut range) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(range.len)
+    }
+
+    /// Sectors written to `disk` so far and requests in flight
+    /// (/sys/block/<disk>/stat).
+    fn disk_activity(disk: &str) -> Option<(u64, u64)> {
+        let name = disk.rsplit('/').next()?;
+        let stat = std::fs::read_to_string(format!("/sys/block/{name}/stat")).ok()?;
+        let f: Vec<u64> = stat.split_whitespace().filter_map(|v| v.parse().ok()).collect();
+        Some((*f.get(6)?, *f.get(8)?))
+    }
+
+    /// Trim the data disk at boot and then whenever it has been quiet for
+    /// a while (checked every 30 s, at most once a minute): ext4 only
+    /// discards block groups freed since the last trim, so a trim with
+    /// nothing new to give back costs next to nothing. Mounting with
+    /// `discard` would do it on every delete instead, in the middle of
+    /// image pulls and container churn.
+    fn trim_when_idle(disk: String) {
+        std::thread::sleep(Duration::from_secs(10));
+        let mut last_trim: Option<Instant> = None;
+        let mut last = disk_activity(&disk);
+        loop {
+            let now = disk_activity(&disk);
+            // Under 8 MiB written in the last 30 s, nothing in flight.
+            let quiet = match (last, now) {
+                (Some((w0, _)), Some((w1, inflight))) => w1.saturating_sub(w0) < 16384 && inflight == 0,
+                _ => true,
+            };
+            last = now;
+            if quiet && last_trim.is_none_or(|t| t.elapsed() >= Duration::from_secs(60)) {
+                match trim(DATA_DIR) {
+                    Ok(n) if n >= 64 << 20 && last_trim.is_some() => say(&format!("gave back {} MiB of deleted data on the disk", n >> 20)),
+                    Ok(_) => {}
+                    Err(e) => {
+                        say(&format!("cannot trim {DATA_DIR} ({e}); disk.img keeps deleted data"));
+                        return;
+                    }
+                }
+                last_trim = Some(Instant::now());
+            }
+            std::thread::sleep(Duration::from_secs(30));
+        }
+    }
+
+    /// How long the memory watcher sleeps (ms) after `last`.
+    fn interval(last: &Option<super::super::balloon::Report>) -> i32 {
+        if last.is_some_and(|r| r.available < 512 << 20) { 250 } else { 2000 }
     }
 
     fn say(msg: &str) {
@@ -357,17 +502,17 @@ mod init {
         Some((ip, gw))
     }
 
-    fn spawn_apiserver() -> Option<libc::pid_t> {
+    /// The cell manager: the clusters the Mac asks for, each in cells of
+    /// its own.
+    fn spawn_manager() -> Option<libc::pid_t> {
         let mut cmd = std::process::Command::new("/init");
-        cmd.args(["dev", "__apiserver", "--data-dir", &format!("{DATA_DIR}/dev")]);
+        cmd.args(["dev", "__cells", "--guest"]);
         cmd.env("LITEK8S_DEV_GUEST", "1").env("PATH", "/usr/sbin:/usr/bin:/sbin:/bin").env("HOME", "/root");
-        // The node's address is the pod bridge's: the VM's own comes by
-        // DHCP, which the API server does not wait for.
-        cmd.env("LITEK8S_NODE_IP", "10.42.0.1").env("LITEK8S_HOST_LOOPBACK", HOST_ADDRESS_FILE);
+        cmd.env("LITEK8S_HOST_LOOPBACK", HOST_ADDRESS_FILE);
         match cmd.spawn() {
             Ok(child) => Some(child.id() as libc::pid_t),
             Err(e) => {
-                say(&format!("failed to start the API server: {e}"));
+                say(&format!("failed to start the cell manager: {e}"));
                 None
             }
         }
@@ -466,11 +611,24 @@ mod init {
         if opts.rosetta {
             setup_rosetta();
         }
+        for name in &opts.purge {
+            let dir = format!("{DATA_DIR}/{name}");
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => say(&format!("deleted {dir} (cluster {name} was deleted)")),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => say(&format!("cannot delete {dir}: {e}")),
+            }
+        }
         let t_disk = started.elapsed().as_millis() - t_disk_start;
         if let Err(e) = serve_vsock() {
             say(&format!("no vsock ({e}); the host cannot reach the cluster"));
         }
-        let mut main = spawn_apiserver();
+        std::thread::spawn(watch_memory);
+        if std::fs::read_to_string("/proc/mounts").is_ok_and(|m| m.lines().any(|l| l.split_whitespace().nth(1) == Some(DATA_DIR))) {
+            let disk = opts.disk.clone();
+            std::thread::spawn(move || trim_when_idle(disk));
+        }
+        let mut main = spawn_manager();
         say(&format!("booted in {} ms (mounts {t_mounts}, modules {}, disk+share {t_disk})", started.elapsed().as_millis(), t_modules - t_mounts));
         println!("LITEK8S_GUEST vsock={VSOCK_PORT}");
         let _ = std::io::stdout().flush();
@@ -525,9 +683,9 @@ mod init {
                 }
                 if Some(r) == main {
                     restarts += 1;
-                    say(&format!("API server exited ({status}); restarting ({restarts})"));
+                    say(&format!("cell manager exited ({status}); restarting ({restarts})"));
                     std::thread::sleep(Duration::from_secs(1));
-                    main = spawn_apiserver();
+                    main = spawn_manager();
                 }
             }
         }
@@ -542,7 +700,8 @@ mod tests {
     fn parses_boot_options() {
         let o = parse_cmdline("console=hvc0 quiet litek8s.share=/Users/me litek8s.disk=/dev/vdb litek8s.seed=00ff");
         assert_eq!(o, BootOptions { share: Some("/Users/me".into()), disk: "/dev/vdb".into(), seed: Some(vec![0, 255]), ..Default::default() });
-        let o = parse_cmdline("litek8s.mounts=tmp:/private/tmp,folders:/private/var/folders litek8s.rosetta=1");
+        let o = parse_cmdline("litek8s.mounts=tmp:/private/tmp,folders:/private/var/folders litek8s.rosetta=1 litek8s.purge=ci,../x,b");
+        assert_eq!(o.purge, vec!["ci".to_string(), "b".to_string()]);
         assert_eq!(o.mounts, vec![("tmp".to_string(), "/private/tmp".to_string()), ("folders".to_string(), "/private/var/folders".to_string())]);
         assert!(o.rosetta);
         assert_eq!(parse_cmdline("console=hvc0").disk, "/dev/vda");

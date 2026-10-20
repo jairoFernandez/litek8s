@@ -283,7 +283,8 @@ cluster alone.
 Caveats: the macOS memory is the VM process's physical footprint, which
 keeps pages the guest touched at boot (unpacking the initramfs) even after
 the guest frees them; a balloon "squeeze" to hand them back made it worse
-(the guest zeroes balloon pages). k3d on OrbStack ran with kubelet eviction
+(the guest zeroes balloon pages; see the next section for what the balloon
+can and cannot do). k3d on OrbStack ran with kubelet eviction
 thresholds lowered to 1 % because OrbStack's disk was 91 % full from other
 work (the default 10 % put the node in DiskPressure); kind ran before that.
 kind could not `load image-archive` Docker 29's default (multi-platform)
@@ -294,6 +295,116 @@ Compatibility is the same as the plain API server's: the 101-case corpus
 passes 101/101 against `litek8s dev` both on Linux (rootless) and in the macOS
 VM ([compat/RESULTS.md](../compat/RESULTS.md); k3d is the 101/101 reference
 there). kind was not scored; it runs upstream Kubernetes.
+
+## The macOS VM's memory: a ceiling instead of a ratchet (2026-10-19)
+
+The Home view showed "cache 2.0 GB reclaimable" for the dev VM, and it was
+reclaimable inside Linux but not on the Mac: with the VM at `--memory 4096`,
+Argo CD and a demo load, `echo 3 > /proc/sys/vm/drop_caches` in the guest
+freed 1.5 GB and the VM process's footprint stayed at 2885 MB.
+
+**What Virtualization.framework does (macOS 27, M-series, 36 GB).** Every
+guest page touched once stays charged to the VM's XPC helper until the VM
+stops. Measured here:
+
+| experiment | footprint |
+|---|---|
+| fresh VM, then 2.4 GB written to a file in a pod, deleted, caches dropped | 366 → 2927 → 2927 MB |
+| then the balloon inflated by 3 GiB (target 1 GiB), Alpine's default `init_on_alloc=1` | 2927 → 3464 MB: the driver zeroes the pages it takes, and nothing comes back |
+| fresh VM with `init_on_alloc=0`, balloon inflated by 3 GiB | 281 → 289 MB: free, as the pages were never touched |
+| then 2.5 GB written through the page cache under that 1 GiB ceiling | 289 → 1046 MB (without the ceiling: 2927) |
+| save + stop + restore + resume of a 2.3 GB-footprint VM using ~300 MB | 6.8 s pause (save 3.3 s, 2.1 GB state file); the new helper's footprint: 4251 MB (restore brings all of it in) |
+
+The framework's balloon offers MUST_TELL_HOST and DEFLATE_ON_OOM only
+(`/sys/bus/virtio/devices/*/features`): no free page reporting, no free
+page hints, no statistics; Lima and ArcBox report the same, and OrbStack and
+Docker Desktop got dynamic memory by moving to their own VMMs on
+Hypervisor.framework. So litek8s cannot hand memory back; what it can do is
+keep the guest from touching memory it does not need:
+
+- the VM boots with a 1 GiB ceiling (a quarter of `--memory` when that is
+  more); the balloon takes the rest before the guest touches it
+  (`init_on_alloc=0` on the guest's command line);
+- the guest reports MemAvailable, the balloon and PSI on the console
+  (`LITEK8S_MEM`: every 2 s on change, 250 ms when low, at once on a PSI
+  trigger of 100 ms stalled in 1 s); `litek8s dev-vm` grows the ceiling by
+  half when less than 256 MiB is available or memory stalls while less than
+  that is free (a first version also grew on stalls with gigabytes free:
+  during the compat corpus, pods at their own memory limits stalled and the
+  ceiling went to 4 GiB for nothing), and to the
+  whole VM when it is nearly out; it shrinks it by half the excess over
+  512 MiB available, at most once a minute, after 2 calm minutes
+  (`src/dev/balloon.rs`);
+- `lru_gen/min_ttl_ms=1000` in the guest: without it, a 1 GiB burst under
+  the 1 GiB ceiling evicted the code of every process (the root filesystem
+  is a disk now) and the guest thrashed for 60 s, long enough for the node
+  agent to lose its connection; with it the kernel takes its OOM path, the
+  balloon deflates there (DEFLATE_ON_OOM), and the burst took 0.40 s;
+- a smaller fixed cost: the root filesystem is a 53 MiB romfs image on a
+  read-only virtio disk with a tmpfs overlay (a 753 KiB initrd mounts it)
+  instead of a 56 MiB initramfs in RAM plus the 25 MiB archive the
+  framework loads for it, and `swiotlb=noforce` drops 64 MiB of bounce
+  buffers the kernel zeroed at boot (virtio devices here do not need them).
+
+**Results** (`bench/vm-memory.sh`, `--cpus 4 --memory 4096`, a fresh
+cluster each, a `python:3.13-alpine` pod; before: bf1f538's guest and host,
+the same behaviour as main before this change):
+
+| phase | before: footprint | before: guest used / cache | now: footprint | now: guest used / cache | now: ceiling |
+|---|---|---|---|---|---|
+| idle, 2 min after `dev up` | 461 MB | 200 / 121 MiB | **389 MB** | 227 / 128 MiB | 1024 MiB |
+| Argo CD v3.1.9 (manifests), 2 min after rollout | 1847 MB | 1586 / 1248 MiB | **1140 MB** | 834 / 513 MiB | 1024 MiB |
+| `docker pull python:3.13` (1.0 GB) | 3296 MB | 2837 / 2407 MiB | **1200 MB** | 790 / 436 MiB | 1024 MiB |
+| 5 min idle | 3296 MB | 2837 / 2408 MiB | **1210 MB** | 786 / 436 MiB | 1024 MiB |
+| 1 GiB allocated and touched in the pod | 0.39 s, 4083 MB | | **0.36 s**, 1596 MB | | 4096 MiB |
+
+No OOM kill in either run; the node stayed Ready. The compat corpus passes
+119/119 on this VM
+([compat/results/20261019-224949-litek8s-dev-macos-vm-balloon](../compat/results/20261019-224949-litek8s-dev-macos-vm-balloon/summary.md)). Guest used is MemTotal -
+MemFree - balloon (cache included). Argo CD's seven pods and litek8s fit in
+the 1 GiB ceiling with half of it page cache, so the ceiling never moved
+until the burst.
+
+- Idle with nothing deployed: 384 → 295 MB.
+- 1 GiB written, read and deleted in a container (`docker run alpine`): 384
+  → 1442 MB before, 295 → 1028 MB now; on OrbStack's VM (running other
+  sessions' clusters, not reconfigured) 4052 → 6325 MB and back to 4065 MB
+  30 s later.
+- Shrinking: after a 1.5 GiB burst grew the ceiling to 4096 MiB, it came
+  down to 2471, 1662, 1257 and 1052 MiB, a minute apart, starting 2 minutes
+  after the burst; a 600 MB file read every 10 s in a pod stayed cached the
+  whole time (124–130 ms per read, `workingset_refault_file` unchanged).
+
+What is left: the footprint only grows. After a peak (a big build) the VM
+stays charged for it until `litek8s dev down && litek8s dev up` (~3 s plus
+pods restarting); the TUI says so ("freed, still charged ... macOS keeps it
+until the VM restarts"). The kernel's page structures (64 MiB for 4 GiB)
+and image (~35 MiB) are the rest of the fixed cost; a 16K-page guest
+kernel would cut the first by four, but Alpine ships none and some arm64
+binaries (jemalloc's, for one) assume 4K pages; not tried.
+
+## The macOS VM's disk gives space back (2026-10-20)
+
+Home showed "deleted in the VM 1.5 GB — kept by disk.img (it never
+shrinks)". Unlike memory, the framework does reclaim disk: its virtio disk
+advertises discard (`discard_max_bytes` 64 GiB, granularity 512 B on vda)
+and punches discarded ranges out of the sparse `disk.img`. A 1 GiB file
+written and deleted in a pod left `du disk.img` at 1.07 GB; `fstrim` on the
+guest's ext4 brought it to 17 MB. The guest now trims at boot and whenever
+the disk has been quiet for 30 s (at most once a minute), and `docker rmi`
+/ image prune free the layers at once instead of at the node's next image
+GC (layers written in the last 10 minutes still wait for the GC):
+
+| `du disk.img` | before | now |
+|---|---|---|
+| a container writes 1 GiB, then `docker rm` | 2.6 GB, for good | 1.3 GB again 55 s later |
+| `docker pull python:3.13`, `docker rmi` after 10 min | 1.54 GB, for good | 1.29 → 0.78 GB within 3 min (854 MiB given back); the last 667 MB of layers, written under 10 minutes before, went at the next GC: 123 MB 9 min later |
+| first boot of the new guest on an old disk | – | 1.60 → 1.23 GB (deleted data an older guest left) |
+
+The compat corpus passes 119/119 on the trimming guest
+([compat/results/20261020-010915-litek8s-dev-macos-vm-trim](../compat/results/20261020-010915-litek8s-dev-macos-vm-trim/summary.md)),
+the Docker corpus 16/16 (compose_basic once another session's VM had
+released localhost:18080).
 
 ## Argo CD on k3s and on litek8s (2026-10-19, x86_64/KVM)
 
@@ -452,6 +563,108 @@ Earlier dry runs on the Mac (arm64 guests under HVF, 2 vCPU / 2 GiB, short
 windows; the example apps' amd64-only image ran under qemu-user there) gave
 the same picture: k3s-server 681 MiB with Argo CD, litek8s 72 MiB.
 
+## Observability: built in vs kube-prometheus-stack + Loki (2026-10-20, x86_64/KVM)
+
+What does it cost to see a small cluster's metrics and logs and get alerts?
+The usual answer on k3s is kube-prometheus-stack (Prometheus, Alertmanager,
+the operator, kube-state-metrics, node-exporter) plus Loki and a log
+shipper; litek8s has it built in ([docs/observability.md](../docs/observability.md)).
+
+**Setup.** `bench/run.sh obs-k3s obs-litek8s`, both at once on omarchy (AMD
+Ryzen 7 5800X, 16 threads; qemu + KVM in a Docker container given
+`/dev/kvm`). Each system gets a fresh Ubuntu 24.04 amd64 guest of **2 vCPU /
+3 GiB**, no swap, and the same workload ([`obs/workload.yaml`](obs/workload.yaml):
+three idle nginx pods and two log generators writing 10 lines/s each, one in
+ten an ERROR on stderr). k3s v1.36.5+k3s1 minimal
+(`--disable=traefik,servicelb,metrics-server`; local-path kept for Loki's
+volume) with **kube-prometheus-stack 92.10.1** (chart defaults: Prometheus
+with a 30 s scrape interval and 10 d retention, Alertmanager, operator,
+kube-state-metrics, node-exporter, the default rules; Grafana off, since
+litek8s has none either, and the controller-manager/scheduler/etcd/proxy
+jobs off, which k3s does not expose), **Loki 7.3.0** (3.6.12, single binary,
+filesystem storage, no caches or gateway: [`obs/loki-values.yaml`](obs/loki-values.yaml)) and
+**Alloy 1.14.0** tailing `/var/log/pods` ([`obs/alloy-values.yaml`](obs/alloy-values.yaml)),
+against `litek8s apiserver --runtime crun` (crun 1.14.1) at `215253f` with
+its defaults (10 s sampling, tiers 10s:6h,1m:7d,10m:90d). Each guest first
+runs the workload alone (5 min measured after 60 s), then with
+observability: 15 min warm-up, a 60 min measured window (memory at both
+ends, CPU over it, store growth on disk, samples ingested), then 20 runs
+of each query. The host was otherwise lightly loaded (about 10 % of its
+CPU busy during the window, all VMs included). A second k3s round (10 min
+warm-up, 30 min window, after fixing the disk probe) and an A/B of litek8s
+(two identical 2 vCPU / 2 GiB guests, observability on vs
+`--no-observability`, same uptime, 20 min settle, 15 min window) complete
+it. Raw data: [`results/2026-10-20-obs-x86-kvm/`](results/2026-10-20-obs-x86-kvm/)
+(`report.md` per round, `ab-litek8s-obs-{on,off}.json`).
+
+| | k3s + kube-prometheus-stack + Loki + Alloy | **litek8s, built in** |
+|---|---|---|
+| Memory observability adds (PSS) | **1,371 MiB** (round 2: 1,406) | **+1.8 MiB** (A/B: 32.0 vs 30.2 MiB API server) |
+| … its own pods | 1,057 MiB (Prometheus, Loki, Alloy, operator, KSM, node-exporter, Alertmanager) | – (in the API server and node agent) |
+| … orchestrator growth (k3s-server serving scrapes and watches, containerd) | +314 MiB (round 2: +386) | (included above) |
+| Guest memory in use, workload alone → with observability | 842 → 1,739 MiB of 2,960 | 338 → 350 MiB (A/B) |
+| CPU observability adds, % of one vCPU | **4.2 %** (round 2: 4.1 %) | **0.03 %** (A/B: 0.042 vs 0.010 % API server) |
+| Installed (images; binary) | 2.1 GiB of images | 0 (+2.1 MiB of stripped binary) |
+| Series kept | 69,672 (round 2: kubelet/cAdvisor 37.2 k, apiserver 27.0 k, node-exporter 1.1 k, KSM 1.2 k, the stack itself 3.0 k) | 342 |
+| Samples ingested / s | 2,349 (30 s scrape) | 34.1 (10 s sampling) |
+| Metrics on disk | WAL +45–50 MiB/h; blocks ≈ 0.26–0.41 GB/day at Prometheus's 1–2 bytes/sample¹ → **2.0–4.1 GB** for its default 10 days | 1.60 bytes/sample measured; **≈ 10 MB for 90 days** of this workload² |
+| Logs on disk, beyond the CRI files both keep (18–19 MiB/h here) | Loki chunks +2.2 MiB/h (+ its WAL) → ≈ 52 MiB/day, 365 MiB at 7 days | **0** (search reads the CRI files; removed containers' logs kept up to 512 MiB/node) |
+| Metric query, instant (7 dashboard queries) | 0.3–0.5 ms | 0.2–0.4 ms |
+| Metric query, 1 h range at 15 s | 0.4–1.5 ms | 0.8–4.3 ms |
+| Log query: ERRORs of `app=loggen`, last hour, 1,000 lines | 49 ms (round 2: 29) | 33 ms; **27 ms** since `d1c22ac`³ |
+| Log query: "timeout" in every pod, last 15 min, 1,000 lines | 20 ms (round 2: 15) | 32 ms; **11 ms** since `d1c22ac`³ |
+| Restarts, OOM kills | 0, none | 0, none |
+
+¹ A 60 min window does not reach Prometheus's first block (it cuts one when
+its head spans 3 h); its head chunks on disk grew only 131 KiB in round 2
+while the WAL grew 22.6 MiB in 30 min, so the compressed size is estimated
+from the samples ingested and the 1–2 bytes per sample Prometheus documents.
+³ After the run, the agent bisects each log file to the first line of the
+query's time range (records are in time order) instead of reading it
+whole; re-measured on a fresh guest with the same workload, queried at the
+same uptime (91 min): [`obs-litek8s.queries-d1c22ac.json`](results/2026-10-20-obs-x86-kvm/obs-litek8s.queries-d1c22ac.json).
+² Measured: the raw tier grew 192 KiB in the hour (1.60 bytes/sample); the
+1-minute tier 45 KiB for its first downsampled hours (≈1.1 bytes/point).
+Steady state with the default tiers: 6 h raw ≈ 1.2 MB, 7 d at 1 min ≈ 3.8 MB,
+90 d at 10 min ≈ 4.9 MB.
+
+**Read:** on a small node, the usual stack is the biggest thing running:
+1.4 GiB of memory (more than k3s itself, nearly half the 3 GiB guest), 4 %
+of a vCPU and 2 GiB of images, before Grafana. litek8s's built-in metrics,
+logs and alerts cost under 2 MiB and a few hundredths of a percent of a
+vCPU, and take no extra disk for logs.
+
+**What is not equal.** The two do not collect the same thing, and the table
+should be read that way:
+
+- kube-prometheus-stack keeps **200× more series**: every cAdvisor and
+  kubelet metric (37 k), kube-apiserver's per-resource latency and size
+  histograms (27 k), per-CPU node metrics, and its own components'. litek8s
+  keeps a curated set (the [list](../docs/observability.md#what-is-collected)):
+  per-container CPU, memory (anon/cache/working set), I/O, OOM kills,
+  throttling, network per pod, node CPU/memory/filesystem/network/disk,
+  kube-state-metrics' main families, its own request metrics. That covers
+  the usual Kubernetes dashboard panels and the built-in alerts, not
+  everything Prometheus can answer. litek8s also samples 3× more often
+  (10 s vs 30 s).
+- Prometheus scrapes any application's `/metrics`; litek8s does not scrape
+  applications yet.
+- Loki indexes labels and stores compressed chunks that outlive the node's
+  CRI files and pod deletions for its retention; litek8s searches the CRI
+  files (rotated at 10 MiB per container) and keeps logs of removed
+  containers in a per-node archive (7 days, 512 MiB by default). Searching
+  days of a chatty cluster's logs is a file scan on every node (in
+  parallel), not an index lookup.
+- litek8s's range queries are slower (0.8–4.3 ms vs 0.4–1.5 ms) but far
+  below what a dashboard notices; its instant queries are as fast.
+- Disk: Prometheus at its default 10 days is gigabytes because of the
+  series count; litek8s downsamples (1 min after 6 h, 10 min after 7 days),
+  so old data answers at a coarser resolution.
+
+**Rerun:** `LITEK8S_BIN=<linux binary> bench/run.sh obs-k3s obs-litek8s`
+(`OBS_WARMUP_SECS`, `OBS_WINDOW_SECS`, `OBS_QUERY_RUNS`, `OBS_VM_MEM`), then
+`python3 bench/obs_report.py bench/results/<timestamp>`.
+
 ## Remote node over SSH (litek8s only)
 
 Control plane in one guest, the node in a second guest of the same shape, reached through
@@ -571,6 +784,7 @@ bench/run.sh                        # all phases on fresh local VMs, ~55 min
 bench/run.sh litek8s rpc            # just litek8s single-node + remote-node phases
 bench/run.sh kube kube-crun         # the Kubernetes path on Docker and on crun
 bench/run.sh argocd-k3s argocd-litek8s   # Argo CD on both (ARGO_VM_MEM, ARGO_RUNS)
+bench/run.sh obs-k3s obs-litek8s     # observability: k3s + kube-prometheus-stack + Loki vs built in
 python3 bench/argocd_report.py bench/results/<run1> bench/results/<run2>   # pooled
 IDLE_SECS=60 SETTLE_SECS=10 bench/run.sh k3s-minimal   # quick look
 python3 bench/report.py bench/results/<timestamp>      # tables from raw JSON

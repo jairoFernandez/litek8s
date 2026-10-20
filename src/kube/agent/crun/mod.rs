@@ -273,6 +273,11 @@ impl CrunPods {
         self.inner.root.join("sandboxes").join(id)
     }
 
+    /// Where logs of removed containers go: `<node dir>/logs`.
+    fn log_archive(&self) -> PathBuf {
+        self.inner.root.parent().unwrap_or(&self.inner.root).join("logs")
+    }
+
     fn volume_dir(&self, name: &str) -> PathBuf {
         self.inner.root.join("volumes").join(name)
     }
@@ -972,6 +977,10 @@ impl PodRuntime for CrunPods {
         }
         sys::unmount(&dir.join("rootfs"));
         let _ = std::fs::remove_dir(Self::cgroup_dir(&meta.cgroup));
+        // Its logs outlive it, in the node's log archive (crate::obs::logs).
+        if let Err(e) = crate::obs::logs::archive(&self.log_archive(), &meta.labels, &[dir.join("log.1"), dir.join("log")]) {
+            eprintln!("node-agent: cannot archive the logs of container {id}: {e:#}");
+        }
         std::fs::remove_dir_all(&dir).with_context(|| format!("failed to remove container {id}"))?;
         Ok(())
     }
@@ -1186,6 +1195,24 @@ impl PodRuntime for CrunPods {
             Some(rx) => futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|id| (id, rx)) }).boxed(),
             None => futures_util::stream::empty().boxed(),
         }
+    }
+
+    fn container_cgroup(&self, id: &str) -> Option<PathBuf> {
+        Some(Self::cgroup_dir(&self.container_meta(id)?.cgroup))
+    }
+
+    fn sandbox_netdev(&self, sandbox: &str) -> Option<String> {
+        let meta = self.sandbox_meta(sandbox)?;
+        (!meta.host_network && !meta.stopped && sandbox.len() >= 12).then(|| format!("lk{}", &sandbox[..12]))
+    }
+
+    fn log_files(&self, id: &str) -> Vec<PathBuf> {
+        let dir = self.container_dir(id);
+        vec![dir.join("log.1"), dir.join("log")]
+    }
+
+    fn volume_path(&self, name: &str) -> Option<PathBuf> {
+        (!name.contains('/')).then(|| self.volume_dir(name))
     }
 
     async fn connect(&self, sandbox: &str, port: u16) -> std::io::Result<Option<tokio::net::TcpStream>> {

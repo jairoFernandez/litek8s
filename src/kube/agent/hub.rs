@@ -37,6 +37,8 @@ pub enum StreamEvent {
 
 struct NodeConn {
     id: u64,
+    /// What the agent announced it can do beyond the base protocol.
+    features: Vec<String>,
     tx: mpsc::Sender<Frame>,
     streams: Arc<Mutex<HashMap<u32, mpsc::Sender<StreamEvent>>>>,
 }
@@ -135,6 +137,13 @@ impl AgentHub {
         self.nodes.lock().unwrap().contains_key(node)
     }
 
+    /// Connected nodes whose agent announced `feature`.
+    pub fn nodes_with_feature(&self, feature: &str) -> Vec<String> {
+        let mut v: Vec<String> = self.nodes.lock().unwrap().iter().filter(|(_, c)| c.features.iter().any(|f| f == feature)).map(|(n, _)| n.clone()).collect();
+        v.sort();
+        v
+    }
+
     pub fn connected_count(&self) -> usize {
         self.nodes.lock().unwrap().len()
     }
@@ -174,9 +183,10 @@ impl AgentHub {
         let (reader, writer) = tokio::io::split(io);
         let mut reader = BufReader::new(reader);
         let node = match tokio::time::timeout(AGENT_SILENCE, read_frame(&mut reader)).await {
-            Ok(Ok(Some(Frame::Control(Message::Hello { node })))) => node,
+            Ok(Ok(Some(Frame::Control(Message::Hello { node, features })))) => (node, features),
             _ => bail!("agent did not say hello"),
         };
+        let (node, features) = node;
         let node_name = util::name(&node);
         if node_name.is_empty() {
             bail!("agent sent a Node without a name");
@@ -192,7 +202,7 @@ impl AgentHub {
         let conn_id = hub.next_conn.fetch_add(1, Ordering::Relaxed);
         hub.nodes.lock().unwrap().insert(
             node_name.clone(),
-            NodeConn { id: conn_id, tx: tx.clone(), streams: streams.clone() },
+            NodeConn { id: conn_id, features: features.clone(), tx: tx.clone(), streams: streams.clone() },
         );
         eprintln!("apiserver: node {node_name} connected");
 
@@ -214,11 +224,14 @@ impl AgentHub {
                 api_host,
                 api_port,
                 cluster_dns: api.cluster_dns.load(std::sync::atomic::Ordering::Relaxed),
+                obs: api.obs.get().filter(|_| features.iter().any(|f| f == "metrics")).map(|o| o.settings()),
             }))
             .await;
         let feed_task = tokio::spawn(feed_pods(api.clone(), node_name.clone(), tx.clone()));
 
         let status = node.get("status").cloned().unwrap_or_else(|| json!({}));
+        // This connection's metric series ids → the store's.
+        let mut metric_ids: HashMap<u32, Option<u32>> = HashMap::new();
         let result = async {
             loop {
                 let frame = match tokio::time::timeout(AGENT_SILENCE, read_frame(&mut reader)).await {
@@ -233,6 +246,11 @@ impl AgentHub {
                             let _ = tx.send(Frame::Control(Message::Resync)).await;
                         }
                         let _ = tx.send(Frame::Control(Message::HeartbeatAck)).await;
+                    }
+                    Frame::Control(Message::Metrics { ts, series, values }) => {
+                        if let Some(obs) = api.obs.get() {
+                            obs.ingest_node(&node_name, ts, series, values, &mut metric_ids);
+                        }
                     }
                     Frame::Control(msg) => handle_message(&api, &tx, &streams, msg).await,
                     Frame::Data { stream, channel, bytes } => {
@@ -258,6 +276,9 @@ impl AgentHub {
             }
         }
         streams.lock().unwrap().clear();
+        if let Some(obs) = api.obs.get() {
+            obs.node_gone(&node_name);
+        }
         eprintln!("apiserver: node {node_name} disconnected");
         result
     }

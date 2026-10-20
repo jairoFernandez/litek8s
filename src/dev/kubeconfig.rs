@@ -39,9 +39,11 @@ fn upsert(list: &mut Vec<Value>, name: &str, key: &str, body: Value) {
     }
 }
 
-/// `doc` with the dev cluster, user and context set (pointing at `server`)
-/// and, if `make_current`, made the current context.
-pub fn merge(doc: &str, server: &str, make_current: bool) -> Result<String> {
+/// `doc` with a dev cluster's cluster, user and context entries (all named
+/// `context`, pointing at `server`) and, if `make_current`, made the
+/// current context.
+pub fn merge(doc: &str, context: &str, server: &str, make_current: bool) -> Result<String> {
+    let name = context;
     let mut root = if doc.trim().is_empty() {
         Mapping::new()
     } else {
@@ -55,30 +57,30 @@ pub fn merge(doc: &str, server: &str, make_current: bool) -> Result<String> {
     root.entry("kind".into()).or_insert("Config".into());
     let mut cluster = Mapping::new();
     cluster.insert("server".into(), server.into());
-    upsert(seq(&mut root, "clusters"), CONTEXT, "cluster", Value::Mapping(cluster));
-    upsert(seq(&mut root, "users"), CONTEXT, "user", Value::Mapping(Mapping::new()));
+    upsert(seq(&mut root, "clusters"), name, "cluster", Value::Mapping(cluster));
+    upsert(seq(&mut root, "users"), name, "user", Value::Mapping(Mapping::new()));
     let mut context = Mapping::new();
-    context.insert("cluster".into(), CONTEXT.into());
-    context.insert("user".into(), CONTEXT.into());
-    upsert(seq(&mut root, "contexts"), CONTEXT, "context", Value::Mapping(context));
+    context.insert("cluster".into(), name.into());
+    context.insert("user".into(), name.into());
+    upsert(seq(&mut root, "contexts"), name, "context", Value::Mapping(context));
     if make_current || root.get("current-context").and_then(Value::as_str).is_none_or(str::is_empty) {
-        root.insert("current-context".into(), CONTEXT.into());
+        root.insert("current-context".into(), name.into());
     }
     Ok(serde_yaml::to_string(&Value::Mapping(root))?)
 }
 
-/// `doc` without the dev cluster's entries; the current context is cleared
-/// if it was the dev one.
-pub fn remove(doc: &str) -> Result<String> {
+/// `doc` without a dev cluster's entries; the current context is cleared
+/// if it was that one.
+pub fn remove(doc: &str, context: &str) -> Result<String> {
     let Value::Mapping(mut root) = serde_yaml::from_str::<Value>(doc).unwrap_or(Value::Null) else {
         return Ok(doc.to_string());
     };
     for key in ["clusters", "users", "contexts"] {
         if let Some(Value::Sequence(list)) = root.get_mut(key) {
-            list.retain(|v| v.get("name").and_then(Value::as_str) != Some(CONTEXT));
+            list.retain(|v| v.get("name").and_then(Value::as_str) != Some(context));
         }
     }
-    if root.get("current-context").and_then(Value::as_str) == Some(CONTEXT) {
+    if root.get("current-context").and_then(Value::as_str) == Some(context) {
         root.insert("current-context".into(), "".into());
     }
     Ok(serde_yaml::to_string(&Value::Mapping(root))?)
@@ -98,10 +100,10 @@ fn write_private(path: &Path, content: &str) -> Result<()> {
     std::fs::rename(&tmp, path).with_context(|| format!("failed to replace {}", path.display()))
 }
 
-/// Add or update the dev context in the kubeconfig at `path`.
-pub fn install(path: &Path, server: &str) -> Result<()> {
+/// Add or update a dev cluster's context in the kubeconfig at `path`.
+pub fn install(path: &Path, context: &str, server: &str, make_current: bool) -> Result<()> {
     let doc = std::fs::read_to_string(path).unwrap_or_default();
-    write_private(path, &merge(&doc, server, true)?)
+    write_private(path, &merge(&doc, context, server, make_current)?)
 }
 
 /// `doc` with `context` (which must exist) as the current context.
@@ -136,13 +138,30 @@ pub fn current(path: &Path) -> Option<(String, Option<String>)> {
     Some((name, server))
 }
 
-/// Drop the dev context from the kubeconfig at `path`.
-pub fn uninstall(path: &Path) -> Result<()> {
+/// Drop a dev cluster's context from the kubeconfig at `path`.
+pub fn uninstall(path: &Path, context: &str) -> Result<()> {
     let Ok(doc) = std::fs::read_to_string(path) else { return Ok(()) };
-    if !doc.contains(CONTEXT) {
+    if !doc.contains(context) {
         return Ok(());
     }
-    write_private(path, &remove(&doc)?)
+    write_private(path, &remove(&doc, context)?)
+}
+
+/// Every context of the kubeconfig at `path` with its server.
+pub fn contexts(path: &Path) -> Vec<(String, Option<String>)> {
+    let Some(root) = std::fs::read_to_string(path).ok().and_then(|d| serde_yaml::from_str::<Value>(&d).ok()) else { return Vec::new() };
+    let clusters = root.get("clusters").and_then(Value::as_sequence).cloned().unwrap_or_default();
+    root.get("contexts")
+        .and_then(Value::as_sequence)
+        .into_iter()
+        .flatten()
+        .filter_map(|c| {
+            let name = c.get("name")?.as_str()?.to_string();
+            let cluster = c.get("context").and_then(|x| x.get("cluster")).and_then(Value::as_str);
+            let server = cluster.and_then(|cl| clusters.iter().find(|x| x.get("name").and_then(Value::as_str) == Some(cl))).and_then(|x| x.get("cluster")?.get("server")?.as_str().map(str::to_string));
+            Some((name, server))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -153,7 +172,7 @@ mod tests {
 
     #[test]
     fn merges_next_to_other_clusters_and_removes_cleanly() {
-        let merged = merge(KIND, "http://127.0.0.1:6443", true).unwrap();
+        let merged = merge(KIND, CONTEXT, "http://127.0.0.1:6443", true).unwrap();
         let v: Value = serde_yaml::from_str(&merged).unwrap();
         assert_eq!(v["current-context"], "litek8s-dev");
         assert_eq!(v["clusters"].as_sequence().unwrap().len(), 2);
@@ -161,19 +180,19 @@ mod tests {
         assert_eq!(v["users"][0]["user"]["client-key-data"], "BBBB");
         assert!(v.get("preferences").is_some());
         // Idempotent: a second merge updates in place.
-        let again = merge(&merged, "http://127.0.0.1:7443", true).unwrap();
+        let again = merge(&merged, CONTEXT, "http://127.0.0.1:7443", true).unwrap();
         let v2: Value = serde_yaml::from_str(&again).unwrap();
         assert_eq!(v2["contexts"].as_sequence().unwrap().len(), 2);
         assert_eq!(v2["clusters"][1]["cluster"]["server"], "http://127.0.0.1:7443");
 
-        let removed: Value = serde_yaml::from_str(&remove(&again).unwrap()).unwrap();
+        let removed: Value = serde_yaml::from_str(&remove(&again, CONTEXT).unwrap()).unwrap();
         assert_eq!(removed["clusters"].as_sequence().unwrap().len(), 1);
         assert_eq!(removed["current-context"], "");
     }
 
     #[test]
     fn switches_the_current_context() {
-        let merged = merge(KIND, "http://127.0.0.1:6443", false).unwrap();
+        let merged = merge(KIND, CONTEXT, "http://127.0.0.1:6443", false).unwrap();
         let v: Value = serde_yaml::from_str(&with_current(&merged, CONTEXT).unwrap()).unwrap();
         assert_eq!(v["current-context"], "litek8s-dev");
         assert_eq!(v["users"][0]["user"]["client-key-data"], "BBBB");
@@ -188,10 +207,25 @@ mod tests {
 
     #[test]
     fn creates_a_kubeconfig_from_nothing() {
-        let v: Value = serde_yaml::from_str(&merge("", "http://127.0.0.1:6443", false).unwrap()).unwrap();
+        let v: Value = serde_yaml::from_str(&merge("", CONTEXT, "http://127.0.0.1:6443", false).unwrap()).unwrap();
         assert_eq!(v["kind"], "Config");
         assert_eq!(v["current-context"], "litek8s-dev");
-        let kept: Value = serde_yaml::from_str(&merge(KIND, "http://x", false).unwrap()).unwrap();
+        let kept: Value = serde_yaml::from_str(&merge(KIND, CONTEXT, "http://x", false).unwrap()).unwrap();
         assert_eq!(kept["current-context"], "kind-kind");
+    }
+
+    #[test]
+    fn several_clusters_side_by_side() {
+        let one = merge(KIND, CONTEXT, "http://127.0.0.1:6443", false).unwrap();
+        let two = merge(&one, "litek8s-ci", "http://127.0.0.1:50000", false).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config");
+        std::fs::write(&path, &two).unwrap();
+        let all = contexts(&path);
+        assert_eq!(all.len(), 3);
+        assert!(all.contains(&("litek8s-ci".to_string(), Some("http://127.0.0.1:50000".to_string()))));
+        let gone: Value = serde_yaml::from_str(&remove(&two, "litek8s-ci").unwrap()).unwrap();
+        assert_eq!(gone["contexts"].as_sequence().unwrap().len(), 2);
+        assert_eq!(gone["current-context"], "kind-kind");
     }
 }

@@ -51,6 +51,7 @@ CATEGORY = {
     "pod sandbox (pause)": "runtime",
     "k8s addon pods": "addons",
     "argocd": "argocd",
+    "observability": "observability",
     "workload": "workload",
     "litek8s-agent": "node-agent",
     "sshd": "node-agent",
@@ -116,10 +117,17 @@ def pod_kind(anchor):
 # servers, and the Redis and Dex it ships with. The guestbook apps it deploys
 # run Apache.
 ARGOCD_COMMS = ("argocd", "redis-server", "dex")
+# kube-prometheus-stack, Loki and its collector (comm is cut at 15).
+OBS_COMMS = ("prometheus", "alertmanager", "kube-state-metr", "node_exporter", "operator", "loki", "alloy", "promtail", "grafana", "config-reloade")
 
 
 def kind_of_comms(comms):
     if "nginx" in comms or "apache2" in comms:
+        return "workload"
+    if any(c.startswith(OBS_COMMS) for c in comms):
+        return "observability"
+    # The benchmark's log generators: a busybox shell loop.
+    if comms and comms <= {"sh", "sleep", "date"}:
         return "workload"
     if any(c.startswith(ARGOCD_COMMS) for c in comms):
         return "argocd"
@@ -207,7 +215,7 @@ def mem():
         cg = cgroup_of(pid)
         b = bucket(cg, comm) or "os/other"
         # Per pod: its own processes (the pause sandbox stays with the runtime).
-        if b in ("argocd", "workload", "k8s addon pods"):
+        if b in ("argocd", "observability", "workload", "k8s addon pods"):
             p = pods.setdefault(anchor_of(cg), {"kind": b, "pss_kib": 0, "comms": []})
             p["pss_kib"] += pss
             p["comms"] = sorted(set(p["comms"]) | {comm})

@@ -88,10 +88,14 @@ impl Overlay {
         let key = crate::vpn::load_or_generate_keypair_at(&node_dir.join("wireguard.key"))?;
         let (net, _) = parse_cidr(pod_cidr).with_context(|| format!("invalid pod CIDR {pod_cidr}"))?;
         let (cluster, prefix) = parse_cidr(cluster_cidr).with_context(|| format!("invalid cluster CIDR {cluster_cidr}"))?;
+        // Replies from sockets bound to the wildcard address (cluster DNS
+        // on UDP) leave from the route's preferred source: the pod gateway,
+        // the address remote pods sent to, not the interface's .0.
+        let gateway = Ipv4Addr::from(u32::from(net) + 1);
         sh(&format!(
             "ip link show {IFACE} >/dev/null 2>&1 || ip link add {IFACE} type wireguard; \
              ip addr replace {net}/32 dev {IFACE}; ip link set {IFACE} mtu {MTU} up; \
-             ip route replace {cluster}/{prefix} dev {IFACE}"
+             ip route replace {cluster}/{prefix} dev {IFACE} src {gateway} 2>/dev/null || ip route replace {cluster}/{prefix} dev {IFACE}"
         ))
         .await
         .context("failed to set up the WireGuard interface (is the wireguard kernel module available?)")?;

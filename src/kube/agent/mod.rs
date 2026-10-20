@@ -21,6 +21,7 @@
 pub(crate) mod crun;
 pub mod hub;
 mod kubelet;
+mod obs;
 pub mod overlay;
 mod pod;
 pub(crate) mod probe;
@@ -139,6 +140,10 @@ pub(crate) struct PodView {
     pub sandbox: Option<String>,
     /// container name → (current container id, previous container id)
     pub containers: HashMap<String, (Option<String>, Option<String>)>,
+    /// The pod's labels (log search by selector).
+    pub labels: std::collections::BTreeMap<String, String>,
+    /// container name → image
+    pub images: HashMap<String, String>,
 }
 
 enum StreamInput {
@@ -162,6 +167,10 @@ pub struct Agent<R: PodRuntime> {
     gateway_ip: tokio::sync::OnceCell<Option<String>>,
     proxy: Arc<proxy::Proxy>,
     overlay: Option<Arc<overlay::Overlay>>,
+    /// pod uid → its persistent volume claims (volume metrics).
+    claims: Mutex<HashMap<String, Vec<crate::obs::node::ClaimRef>>>,
+    /// Observability settings from the server, and the sampler task.
+    obs: Mutex<(Option<crate::obs::ObsSettings>, Option<JoinHandle<()>>)>,
 }
 
 enum ImageState {
@@ -190,6 +199,8 @@ impl<R: PodRuntime> Agent<R> {
             gateway_ip: tokio::sync::OnceCell::new(),
             proxy: Arc::new(proxy::Proxy::default()),
             overlay: overlay.map(Arc::new),
+            claims: Mutex::default(),
+            obs: Mutex::default(),
         });
         let weak = Arc::downgrade(&agent);
         let in_pod: proxy::InPodDial = Arc::new(move |ip: String, port: u16| {
@@ -269,6 +280,13 @@ impl<R: PodRuntime> Agent<R> {
         }
     }
 
+    pub(crate) fn track_claim(&self, uid: &str, claim: crate::obs::node::ClaimRef) {
+        let mut claims = self.claims.lock().unwrap();
+        let list = claims.entry(uid.to_string()).or_default();
+        list.retain(|c| c.claim != claim.claim || c.namespace != claim.namespace);
+        list.push(claim);
+    }
+
     pub(crate) fn set_view(&self, uid: &str, view: PodView) {
         self.views.lock().unwrap().insert(uid.to_string(), view);
     }
@@ -339,6 +357,7 @@ impl<R: PodRuntime> Agent<R> {
             pod::run(agent.clone(), pod_obj, tx, rx).await;
             agent.workers.lock().unwrap().remove(&uid);
             agent.views.lock().unwrap().remove(&uid);
+            agent.claims.lock().unwrap().remove(&uid);
         });
     }
 
@@ -396,7 +415,8 @@ impl<R: PodRuntime> Agent<R> {
                 }
             }
         });
-        tx.send(Frame::Control(Message::Hello { node: self.config.node.clone() }))
+        let features = crate::obs::AGENT_FEATURES.iter().map(|f| f.to_string()).collect();
+        tx.send(Frame::Control(Message::Hello { node: self.config.node.clone(), features }))
             .await
             .ok()
             .context("connection closed")?;
@@ -462,9 +482,10 @@ impl<R: PodRuntime> Agent<R> {
 
     async fn handle(self: &Arc<Self>, link: &Arc<Link>, msg: Message) {
         match msg {
-            Message::Welcome { api_host, api_port, cluster_dns, .. } => {
+            Message::Welcome { api_host, api_port, cluster_dns, obs, .. } => {
                 *self.api.lock().unwrap() = Some(ApiEndpoint { host: api_host, port: api_port, cluster_dns });
                 self.link.send_replace(Some(link.clone()));
+                obs::configure(self, obs);
             }
             Message::HeartbeatAck => {}
             Message::Resync => {
@@ -522,6 +543,9 @@ impl<R: PodRuntime> Agent<R> {
                 self.spawn_stream(link, stream, move |agent, link, _input| {
                     logs_stream(agent, link, stream, target, options, limit_bytes)
                 });
+            }
+            Message::LogQuery { stream, query } => {
+                self.spawn_stream(link, stream, move |agent, link, _input| obs::log_query_stream(agent, link, stream, query));
             }
             Message::PortForward { stream, pod_uid, port } => {
                 let (ip, sandbox) = self.views.lock().unwrap().get(&pod_uid).map(|v| (v.ip.clone(), v.sandbox.clone())).unwrap_or_default();

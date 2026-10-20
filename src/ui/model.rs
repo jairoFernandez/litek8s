@@ -242,6 +242,7 @@ pub fn disk_usage(df: &Value) -> DiskUsage {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Pod {
+    pub uid: String,
     pub namespace: String,
     pub name: String,
     /// What `kubectl get pods` shows in STATUS.
@@ -287,6 +288,7 @@ pub fn pod(p: &Value) -> Pod {
     let mut images: Vec<String> = specs.iter().filter_map(|c| c["image"].as_str().map(str::to_string)).collect();
     images.extend(statuses.iter().filter_map(|s| s["imageID"].as_str().filter(|i| !i.is_empty()).map(str::to_string)));
     Pod {
+        uid: p.pointer("/metadata/uid").and_then(Value::as_str).unwrap_or_default().to_string(),
         namespace: p.pointer("/metadata/namespace").and_then(Value::as_str).unwrap_or("default").to_string(),
         name: p.pointer("/metadata/name").and_then(Value::as_str).unwrap_or_default().to_string(),
         status,
