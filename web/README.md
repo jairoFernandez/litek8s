@@ -56,9 +56,9 @@ Import the GitHub repository as a new project with:
 ignored-build step that skips deployments when neither `web/` nor the synced
 markdown changed. Keep **"Include files outside the Root Directory in the
 Build Step"** on (Vercel's default): the sync step reads `../README.md` and
-`../docs/`. No environment variables are needed; `SITE_URL` (e.g.
-`https://litek8s.dev`) sets the canonical URL and sitemap for a custom domain,
-otherwise the build uses Vercel's production domain.
+`../docs/`. No environment variables are needed: on Vercel the canonical URL
+and sitemap use `https://litek8s.dev` (add the domain under Settings →
+Domains); `SITE_URL` overrides it.
 
 ## Another language
 

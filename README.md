@@ -1,5 +1,8 @@
 # litek8s
 
+**[litek8s.dev](https://litek8s.dev)** · [docs](https://litek8s.dev/docs/) ·
+[releases](https://github.com/jairoFernandez/litek8s/releases)
+
 **A lightweight Kubernetes in one binary**, for local development, home
 labs and the edge. It serves the real Kubernetes API, so `kubectl`, Helm
 and Argo CD work unchanged, but the whole control plane, scheduler,

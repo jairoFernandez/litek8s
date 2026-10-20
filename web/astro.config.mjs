@@ -4,10 +4,9 @@ import starlight from '@astrojs/starlight';
 import { REPO, groups } from './docs.manifest.mjs';
 
 // The public URL, for canonical links and the sitemap: SITE_URL if set, else
-// the production domain Vercel exposes at build time.
-const site =
-  process.env.SITE_URL ??
-  (process.env.VERCEL_PROJECT_PRODUCTION_URL ? `https://${process.env.VERCEL_PROJECT_PRODUCTION_URL}` : 'http://localhost:4321');
+// litek8s.dev on Vercel (previews too, so they point search engines at the
+// real site), else the local dev server.
+const site = process.env.SITE_URL ?? (process.env.VERCEL ? 'https://litek8s.dev' : 'http://localhost:4321');
 
 export default defineConfig({
   site,
