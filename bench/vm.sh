@@ -19,6 +19,9 @@
 # reach each other directly. `bench/vm.sh lanhub-stop` stops the switch.
 # BENCH_LAN_MCAST=1 (Linux hosts) uses a multicast group on loopback as the
 # segment instead: the kernel forwards, which keeps up with bursts.
+# BENCH_DISK_CACHE=none opens the disk image with O_DIRECT: a guest flush
+# then costs what it costs on a real disk, instead of writing back every
+# dirty page of the whole image from the host's page cache.
 #
 # To benchmark real machines instead (e.g. fresh EC2 t4g.micro from
 # infra/terraform), export BENCH_HOST_<name>=user@host[:port] (and BENCH_KEY if
@@ -187,7 +190,7 @@ boot() {
   fi
   "${machine[@]}" \
     -name "$name" -smp "$cpus" -m "$mem" \
-    -drive if=virtio,format=qcow2,file="$dir/disk.qcow2" \
+    -drive if=virtio,format=qcow2,file="$dir/disk.qcow2"${BENCH_DISK_CACHE:+,cache=$BENCH_DISK_CACHE} \
     -drive if=virtio,format=raw,readonly=on,file="$dir/seed.iso" \
     -netdev "user,id=n0,hostfwd=tcp:127.0.0.1:$port-:22" -device virtio-net-pci,netdev=n0,mac=52:54:00:12:34:56 \
     ${lan[@]+"${lan[@]}"} \

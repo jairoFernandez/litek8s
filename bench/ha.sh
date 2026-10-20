@@ -144,6 +144,15 @@ cmd_up() {
     { base_packages "lk$i"; install_litek8s "lk$i"; } &
   done
   wait
+  # apt and scp sometimes fail when five VMs do it at once: check, retry.
+  for i in 1 2 3 4 5; do
+    for _ in 1 2 3; do
+      r "lk$i" 'command -v crun >/dev/null && test -x /usr/local/bin/litek8s' && break
+      log "retrying the install on lk$i"
+      base_packages "lk$i" || true
+      install_litek8s "lk$i" || true
+    done
+  done
   runner_tools
   if [[ "$k" == k3s ]]; then up_k3s; else up_litek8s; fi
   log "waiting for 4 Ready nodes"

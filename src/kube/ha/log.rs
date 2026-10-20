@@ -213,6 +213,10 @@ impl LogStore {
             while pos + HEADER <= data.len() {
                 let len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
                 let crc = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap());
+                // The zero-filled, preallocated rest of the segment.
+                if len == 0 && crc == 0 {
+                    break;
+                }
                 let Some(payload) = data.get(pos + HEADER..pos + HEADER + len) else { break };
                 if crc32(payload) != crc {
                     break;
@@ -221,9 +225,10 @@ impl LogStore {
                 index.insert(entry.log_id.index, Loc { segment: first, offset: pos as u64, len: len as u32, log_id: entry.log_id });
                 pos += HEADER + len;
             }
-            if pos < data.len() {
-                eprintln!("apiserver: raft log: truncating {} at byte {pos} of {} (torn or corrupt record)", path.display(), data.len());
-                file.set_len(pos as u64)?;
+            let rest_is_zero = data[pos..].iter().all(|b| *b == 0);
+            if !rest_is_zero {
+                eprintln!("apiserver: raft log: cutting {} at byte {pos} of {} (torn or corrupt record)", path.display(), data.len());
+                zero_tail(&file, pos as u64, data.len() as u64)?;
                 file.sync_all()?;
                 broken = true;
             }
@@ -256,7 +261,7 @@ impl LogStore {
             let mut inner = self.inner.lock().unwrap();
             for entry in entries {
                 let payload = serde_json::to_vec(&entry).map_err(log_err)?;
-                let first = inner.active(entry.log_id.index);
+                let first = inner.active(entry.log_id.index, (HEADER + payload.len()) as u64);
                 let seg = inner.segments.get_mut(&first).unwrap();
                 let mut bytes = Vec::with_capacity(HEADER + payload.len());
                 bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
@@ -279,6 +284,37 @@ impl LogStore {
     }
 }
 
+/// Overwrite `[from, to)` with zeros (and make the file at least `to`
+/// long): a cut-off tail reads as the end of the log, and the blocks stay
+/// allocated, so later appends are overwrites.
+fn zero_tail(file: &File, from: u64, to: u64) -> io::Result<()> {
+    let zeros = vec![0u8; 1 << 20];
+    let mut at = from;
+    while at < to {
+        let n = (to - at).min(zeros.len() as u64) as usize;
+        file.write_all_at(&zeros[..n], at)?;
+        at += n as u64;
+    }
+    Ok(())
+}
+
+/// A new segment, written full of zeros up front (as etcd preallocates its
+/// WAL): appends then overwrite allocated blocks, so their `fdatasync` has
+/// no file size or extent change to journal. On ext4 a journal commit waits
+/// for every other dirty file of the disk (image layers being unpacked), and
+/// followers could not acknowledge anything for tens of seconds.
+fn create_segment(path: &Path) -> io::Result<File> {
+    let tmp = path.with_extension("seg.tmp");
+    let file = OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&tmp)?;
+    zero_tail(&file, 0, SEGMENT_BYTES)?;
+    file.sync_all()?;
+    std::fs::rename(&tmp, path)?;
+    if let Some(dir) = path.parent() {
+        File::open(dir)?.sync_all()?;
+    }
+    Ok(file)
+}
+
 /// The file of `segment`, opened (created) on first use.
 fn segment_file(inner: &Arc<Mutex<Inner>>, segment: u64) -> io::Result<Option<Arc<File>>> {
     let (path, existing) = {
@@ -292,10 +328,7 @@ fn segment_file(inner: &Arc<Mutex<Inner>>, segment: u64) -> io::Result<Option<Ar
     if let Some(file) = existing {
         return Ok(Some(file));
     }
-    let file = Arc::new(OpenOptions::new().read(true).write(true).create(true).truncate(true).open(&path)?);
-    if let Some(dir) = path.parent() {
-        File::open(dir)?.sync_all()?;
-    }
+    let file = Arc::new(create_segment(&path)?);
     let mut guard = inner.lock().unwrap();
     match guard.segments.get_mut(&segment) {
         Some(seg) => {
@@ -344,7 +377,8 @@ fn flusher(rx: mpsc::Receiver<Job>, inner: Arc<Mutex<Inner>>) {
                 }
                 Job::Truncate { segment, offset, remove } => {
                     if let Ok(Some(f)) = segment_file(&inner, segment) {
-                        if let Err(e) = f.set_len(offset).and_then(|_| f.sync_all()) {
+                        let end = f.metadata().map(|m| m.len()).unwrap_or(offset).max(SEGMENT_BYTES);
+                        if let Err(e) = zero_tail(&f, offset, end).and_then(|_| f.sync_all()) {
                             result = Err(e);
                         }
                     }
@@ -413,10 +447,12 @@ impl Inner {
 
     /// The segment to append to, a new one (opened by the flusher) when
     /// the last is full.
-    fn active(&mut self, next_index: u64) -> u64 {
+    fn active(&mut self, next_index: u64, record_len: u64) -> u64 {
         let rotate = match self.segments.iter().next_back() {
             None => true,
-            Some((_, seg)) => seg.len >= SEGMENT_BYTES,
+            // A record that does not fit the preallocated space goes to a
+            // new segment (unless it is bigger than a whole one).
+            Some((_, seg)) => seg.len > 0 && seg.len + record_len > SEGMENT_BYTES,
         };
         if rotate {
             let path = segment_path(&self.dir, next_index);
@@ -583,6 +619,19 @@ mod tests {
         rx.recv().unwrap().unwrap();
     }
 
+    /// Where the records of a segment end (the rest is zeros).
+    fn log_end(path: &Path) -> u64 {
+        let data = std::fs::read(path).unwrap();
+        let mut pos = 0;
+        loop {
+            let len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+            if len == 0 {
+                return pos as u64;
+            }
+            pos += HEADER + len;
+        }
+    }
+
     #[test]
     fn crc_matches_reference() {
         assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
@@ -636,10 +685,11 @@ mod tests {
             let mut log = LogStore::open(dir.path()).unwrap();
             append(&mut log, (1..=3).map(|i| entry(1, i)).collect()).await;
         }
+        // Tear the third record: garbage where its last bytes were.
         let seg = segment_path(dir.path(), 1);
-        let len = std::fs::metadata(&seg).unwrap().len();
+        let end = log_end(&seg);
         let f = OpenOptions::new().write(true).open(&seg).unwrap();
-        f.set_len(len - 3).unwrap();
+        f.write_all_at(&[0xff; 3], end - 3).unwrap();
         let mut log = LogStore::open(dir.path()).unwrap();
         assert_eq!(log.get_log_state().await.unwrap().last_log_id.map(|l| l.index), Some(2));
         append(&mut log, vec![entry(1, 3)]).await;
@@ -654,7 +704,7 @@ mod tests {
         let mut log = LogStore::open(dir.path()).unwrap();
         append(&mut log, vec![entry(1, 1)]).await;
         // Pretend the first segment is full so the next append rotates.
-        log.inner.lock().unwrap().segments.get_mut(&1).unwrap().len = SEGMENT_BYTES;
+        log.inner.lock().unwrap().segments.get_mut(&1).unwrap().len = SEGMENT_BYTES - 10;
         append(&mut log, vec![entry(1, 2), entry(1, 3)]).await;
         assert_eq!(log.inner.lock().unwrap().segments.len(), 2);
         log.purge(LogId::new(CommittedLeaderId::new(1, 1), 1)).await.unwrap();

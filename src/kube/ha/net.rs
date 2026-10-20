@@ -78,7 +78,13 @@ pub struct Peers {
     blocked: RwLock<HashSet<String>>,
     /// Raft-lane connections live on the Raft runtime.
     raft_runtime: std::sync::OnceLock<tokio::runtime::Handle>,
+    /// Raft requests in flight per peer: a slow peer gets a few, not a new
+    /// connection every heartbeat.
+    raft_inflight: Mutex<HashMap<String, Arc<tokio::sync::Semaphore>>>,
 }
+
+/// Raft requests in flight to one peer at most.
+const RAFT_INFLIGHT: usize = 4;
 
 impl Peers {
     pub fn new(ca_pem: &str, secret: &str) -> Result<Self> {
@@ -92,6 +98,7 @@ impl Peers {
             pool: Mutex::default(),
             blocked: RwLock::default(),
             raft_runtime: std::sync::OnceLock::new(),
+            raft_inflight: Mutex::default(),
         })
     }
 
@@ -188,8 +195,14 @@ impl Peers {
         if lane == Lane::Api {
             return self.call_api(addr, method, path, payload, timeout).await;
         }
+        let slots = self.raft_inflight.lock().unwrap().entry(addr.to_string()).or_insert_with(|| Arc::new(tokio::sync::Semaphore::new(RAFT_INFLIGHT))).clone();
+        let deadline = tokio::time::Instant::now() + timeout;
+        let Ok(Ok(permit)) = tokio::time::timeout_at(deadline, slots.acquire_owned()).await else {
+            bail!("request to {addr} timed out (too many in flight)");
+        };
         let (me, addr_owned, path) = (self.clone(), addr.to_string(), path.to_string());
         let task = async move {
+            let _permit = permit;
             let (parts, bytes) = me
                 .send_on(Lane::Raft, &addr_owned, Duration::from_secs(30), || me.build(&addr_owned, method.clone(), &path, &[], body(payload.clone())))
                 .await?;
@@ -199,7 +212,7 @@ impl Peers {
             Some(rt) => rt.spawn(task),
             None => tokio::spawn(task),
         };
-        match tokio::time::timeout(timeout, handle).await {
+        match tokio::time::timeout_at(deadline, handle).await {
             Ok(Ok(result)) => result,
             Ok(Err(e)) => Err(anyhow::anyhow!("request to {addr} failed: {e}")),
             Err(_) => Err(anyhow::anyhow!("request to {addr} timed out")),
