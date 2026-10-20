@@ -406,13 +406,13 @@ are stripped, so colored logs cannot paint over the UI:
 
 ```
 ╭─ logs: api ─────────────────────────────────────────────────────── ● follow ─╮
-│2026/10/20 05:02:04 [notice] 1#1: OS: Linux 6.12.113-0-virt                   │
-│2026/10/20 05:02:04 [notice] 1#1: getrlimit(RLIMIT_NOFILE): 4096:4096         │
-│2026/10/20 05:02:04 [notice] 1#1: start worker processes                      │
-│2026/10/20 05:02:04 [notice] 1#1: start worker process 25                     │
-│2026/10/20 05:02:04 [notice] 1#1: start worker process 26                     │
-│2026/10/20 05:02:04 [notice] 1#1: start worker process 27                     │
-│2026/10/20 05:02:04 [notice] 1#1: start worker process 28                     │
+│ 2026/10/20 05:02:04 [notice] 1#1: OS: Linux 6.12.113-0-virt                  │
+│ 2026/10/20 05:02:04 [notice] 1#1: getrlimit(RLIMIT_NOFILE): 4096:4096        │
+│ 2026/10/20 05:02:04 [notice] 1#1: start worker processes                     │
+│ 2026/10/20 05:02:04 [notice] 1#1: start worker process 25                    │
+│ 2026/10/20 05:02:04 [notice] 1#1: start worker process 26                    │
+│ 2026/10/20 05:02:04 [notice] 1#1: start worker process 27                    │
+│ 2026/10/20 05:02:04 [notice] 1#1: start worker process 28                    │
 ╰──────────────────────────────────────────────────────────────────────────────╯
   esc  back   f  follow   w  wrap   ↑↓  scroll   g/G  top/end           ?  help
 ```
