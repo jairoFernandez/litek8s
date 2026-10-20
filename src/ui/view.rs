@@ -894,14 +894,19 @@ fn observe(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .map(|i| {
             let p = &o.pods[*i];
+            // A pod gone during the window: dim, no current figures.
+            let live = p.live();
+            let (cpu, mem) = if live { (cpu_text(p.cpu_now()), bytes(p.mem_now() as u64)) } else { ("gone".into(), "-".into()) };
+            let figure = |on: bool| if !live { DIM } else if on { BOLD } else { Style::new() };
             Row::new(vec![
                 Cell::from(p.namespace.clone()),
                 Cell::from(p.name.clone()),
-                Cell::from(Span::styled(format!("{:>6}", cpu_text(p.cpu_now())), if !app.obs_by_mem { BOLD } else { Style::new() })),
+                Cell::from(Span::styled(format!("{cpu:>6}"), figure(!app.obs_by_mem))),
                 Cell::from(Span::styled(sparkline(&tail(&p.cpu), cpu_max), Style::new().fg(Color::Cyan))),
-                Cell::from(Span::styled(format!("{:>8}", bytes(p.mem_now() as u64)), if app.obs_by_mem { BOLD } else { Style::new() })),
+                Cell::from(Span::styled(format!("{mem:>8}"), figure(app.obs_by_mem))),
                 Cell::from(Span::styled(sparkline(&tail(&p.mem), mem_max), Style::new().fg(Color::Magenta))),
             ])
+            .style(if live { Style::new() } else { DIM })
         })
         .collect();
     let ns = app.namespace.as_deref().map(|n| format!(" · {n}")).unwrap_or_default();

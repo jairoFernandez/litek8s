@@ -644,6 +644,18 @@ fn observe_shows_alerts_top_pods_and_searches_logs() {
     assert!(s.contains("Pods by CPU") && s.contains("db-0") && s.contains("800m") && s.contains("▁"), "{s}");
     // Top consumer first; s sorts by memory.
     assert_eq!(app.selected_obs_pod().unwrap().name, "db-0");
+    // A pod deleted 20 minutes ago ranks last, marked gone.
+    let mut gone = PodUsage { namespace: "default".into(), name: "old-job".into(), cpu: series(5.0), mem: series(1e9) };
+    let n = gone.cpu.len();
+    for i in n - 10..n {
+        gone.cpu[i] = None;
+        gone.mem[i] = None;
+    }
+    let mut with_gone = app.obs.clone();
+    with_gone.pods.push(gone);
+    app.apply(Msg::Obs(Box::new(with_gone)));
+    assert_eq!(app.obs.pods[*app.visible_obs_pods().last().unwrap()].name, "old-job");
+    assert!(render(&app, 80, 24).contains("gone"));
     app.key(key('s'));
     assert_eq!(app.selected_obs_pod().unwrap().name, "web-7d9-abc");
     assert!(render(&app, 80, 24).contains("Pods by memory"));

@@ -262,12 +262,17 @@ pub struct PodUsage {
 }
 
 impl PodUsage {
+    /// Sampled in the last two steps (a pod deleted in the window is not).
+    pub fn live(&self) -> bool {
+        [&self.cpu, &self.mem].iter().any(|v| v.iter().rev().take(2).any(Option::is_some))
+    }
+
     pub fn cpu_now(&self) -> f64 {
-        self.cpu.iter().rev().find_map(|v| *v).unwrap_or(0.0)
+        self.cpu.iter().rev().take(2).find_map(|v| *v).unwrap_or(0.0)
     }
 
     pub fn mem_now(&self) -> f64 {
-        self.mem.iter().rev().find_map(|v| *v).unwrap_or(0.0)
+        self.mem.iter().rev().take(2).find_map(|v| *v).unwrap_or(0.0)
     }
 }
 
@@ -655,9 +660,10 @@ impl App {
                 self.namespace.as_ref().is_none_or(|n| *n == p.namespace) && self.matches(&[&p.name, &p.namespace])
             })
             .collect();
+        // Live pods first, top consumers first; pods gone in the window last.
         let key = |i: &usize| {
             let p = &self.obs.pods[*i];
-            if self.obs_by_mem { p.mem_now() } else { p.cpu_now() }
+            (p.live(), if self.obs_by_mem { p.mem_now() } else { p.cpu_now() })
         };
         v.sort_by(|a, b| key(b).partial_cmp(&key(a)).unwrap_or(std::cmp::Ordering::Equal));
         v
