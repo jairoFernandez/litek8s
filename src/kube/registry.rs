@@ -54,6 +54,9 @@ impl ResourceType {
         if matches!(self.group.as_str(), "authentication.k8s.io" | "authorization.k8s.io") {
             return vec!["create"];
         }
+        if self.group == "metrics.k8s.io" {
+            return vec!["get", "list"];
+        }
         vec![
             "create",
             "delete",

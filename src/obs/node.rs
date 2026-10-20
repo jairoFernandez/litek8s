@@ -176,6 +176,11 @@ impl Collector {
                 out.push((self.node_labels("node_disk_io_time_seconds_total", &[("device", f[2])]), n(12) / 1000.0));
             }
         }
+        if let Some((cpu, memory)) = node_usage(Path::new("/sys/fs/cgroup"), read(Path::new("/proc/stat")).as_deref(), read(Path::new("/proc/meminfo")).as_deref()) {
+            let resource = |name: &str| l(&[("__name__", name), ("job", "kubelet"), ("metrics_path", "/metrics/resource"), ("instance", &self.node), ("node", &self.node)]);
+            out.push((resource("node_cpu_usage_seconds_total"), cpu));
+            out.push((resource("node_memory_working_set_bytes"), memory));
+        }
         out.push((self.node_labels("up", &[]), 1.0));
     }
 
@@ -411,6 +416,29 @@ impl SeriesIds {
     }
 }
 
+/// The node's CPU seconds and memory working set as the kubelet reports
+/// them on `/metrics/resource` (what `kubectl top nodes` shows). A node
+/// with a cgroup of its own (a dev cluster's cell, an agent in a
+/// container: its cgroup namespace root has `memory.current`) is that
+/// cgroup; on a host's root cgroup it is the machine, from `/proc` (busy
+/// CPU modes; `MemTotal - MemAvailable`). In the macOS dev VM the second
+/// would count the balloon's pages as used and every cell would see the
+/// whole VM.
+fn node_usage(cgroup: &Path, stat: Option<&str>, meminfo: Option<&str>) -> Option<(f64, f64)> {
+    if let Some(current) = read_u64(&cgroup.join("memory.current")) {
+        let cpu = kv(&read(&cgroup.join("cpu.stat"))?, "usage_usec")? as f64 / 1e6;
+        let inactive = read(&cgroup.join("memory.stat")).and_then(|m| kv(&m, "inactive_file")).unwrap_or(0);
+        return Some((cpu, current.saturating_sub(inactive) as f64));
+    }
+    let line = stat?.lines().find(|l| l.starts_with("cpu "))?;
+    let v: Vec<f64> = line.split_whitespace().skip(1).filter_map(|x| x.parse().ok()).collect();
+    // user nice system idle iowait irq softirq steal
+    let busy: f64 = [0, 1, 2, 5, 6].iter().filter_map(|i| v.get(*i)).sum::<f64>() / 100.0;
+    let mem = meminfo?;
+    let field = |key: &str| mem.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix(':')?.split_whitespace().next()?.parse::<f64>().ok());
+    Some((busy, (field("MemTotal")? - field("MemAvailable")?).max(0.0) * 1024.0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,6 +470,20 @@ mod tests {
         ids.reset_sent();
         let (new, _) = ids.encode(vec![(a, 2.0)]);
         assert_eq!(new.len(), 1);
+    }
+
+    #[test]
+    fn node_usage_from_its_cgroup_or_the_machine() {
+        let dir = tempfile::tempdir().unwrap();
+        let stat = "cpu  1000 0 500 9000 100 0 0 0 0 0\ncpu0 1000 0 500 9000 100 0 0 0 0 0\n";
+        let meminfo = "MemTotal:        4000 kB\nMemFree:          500 kB\nMemAvailable:    1000 kB\n";
+        // A host's root cgroup: no memory.current, the machine.
+        assert_eq!(node_usage(dir.path(), Some(stat), Some(meminfo)), Some((15.0, 3_072_000.0)));
+        // A cell: its own cgroup.
+        std::fs::write(dir.path().join("memory.current"), "10000\n").unwrap();
+        std::fs::write(dir.path().join("memory.stat"), "anon 6000\ninactive_file 4000\n").unwrap();
+        std::fs::write(dir.path().join("cpu.stat"), "usage_usec 2500000\nuser_usec 2000000\n").unwrap();
+        assert_eq!(node_usage(dir.path(), Some(stat), Some(meminfo)), Some((2.5, 6000.0)));
     }
 
     #[test]

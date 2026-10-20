@@ -413,3 +413,126 @@ pub async fn query(a: QueryArgs) -> Result<()> {
     }
     Ok(())
 }
+
+/// `litek8s top` against a Kubernetes API server (no legacy daemon, or
+/// `--context`): nodes and pods from the resource metrics API.
+#[derive(Debug, Clone, clap::Args)]
+pub struct TopArgs {
+    #[arg(long, help = "kubeconfig context (top of a Kubernetes cluster rather than the legacy daemon)")]
+    pub context: Option<String>,
+    #[arg(short = 'n', long, help = "Only pods of this namespace (default: all)")]
+    pub namespace: Option<String>,
+    #[arg(short = 'l', long, help = "Only pods matching this label selector")]
+    pub selector: Option<String>,
+    #[arg(long, help = "One row per container")]
+    pub containers: bool,
+    #[arg(long, default_value = "cpu", value_parser = ["cpu", "memory", "name"], help = "Order pods by cpu, memory or name")]
+    pub sort_by: String,
+    #[arg(long, help = "Print once, also on a terminal (piped output always prints once)")]
+    pub once: bool,
+}
+
+fn milli(q: &Value) -> i128 {
+    crate::kube::quantity::milli_of(q).unwrap_or(0)
+}
+
+/// `250m` (CPU), from thousandths of a core.
+fn cores(m: i128) -> String {
+    format!("{m}m")
+}
+
+/// `123Mi` (memory), from thousandths of a byte.
+fn mebibytes(m: i128) -> String {
+    format!("{}Mi", m / 1000 / (1 << 20))
+}
+
+fn percent(used: i128, of: i128) -> String {
+    if of <= 0 { "-".into() } else { format!("{}%", used * 100 / of) }
+}
+
+/// Columns padded like kubectl's (three spaces apart).
+fn columns(rows: &[Vec<String>]) -> String {
+    let n = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let widths: Vec<usize> = (0..n).map(|i| rows.iter().filter_map(|r| r.get(i)).map(|c| c.chars().count()).max().unwrap_or(0)).collect();
+    let mut out = String::new();
+    for r in rows {
+        let line: Vec<String> = r.iter().enumerate().map(|(i, c)| if i + 1 == r.len() { c.clone() } else { format!("{c:<w$}", w = widths[i]) }).collect();
+        out.push_str(line.join("   ").trim_end());
+        out.push('\n');
+    }
+    out
+}
+
+/// One frame: nodes (usage against allocatable), then pods, busiest first.
+pub async fn top_frame(ep: &Endpoint, a: &TopArgs) -> Result<String> {
+    let nodes_metrics = ep.json(Method::GET, "/apis/metrics.k8s.io/v1beta1/nodes", None).await.map_err(|e| {
+        anyhow::anyhow!("Metrics API not available on {} ({e:#}); litek8s serves it with observability on, or install metrics-server", ep.display)
+    })?;
+    let nodes = ep.json(Method::GET, "/api/v1/nodes", None).await?;
+    let mut path = match &a.namespace {
+        Some(ns) => format!("/apis/metrics.k8s.io/v1beta1/namespaces/{}/pods", enc(ns)),
+        None => "/apis/metrics.k8s.io/v1beta1/pods".to_string(),
+    };
+    if let Some(s) = &a.selector {
+        path.push_str(&format!("?labelSelector={}", enc(s)));
+    }
+    let pods = ep.json(Method::GET, &path, None).await?;
+
+    let usage: BTreeMap<&str, &Value> = nodes_metrics["items"].as_array().into_iter().flatten().filter_map(|m| Some((m["metadata"]["name"].as_str()?, &m["usage"]))).collect();
+    let mut rows = vec![vec!["NODE".to_string(), "CPU".into(), "CPU%".into(), "MEMORY".into(), "MEMORY%".into()]];
+    for n in nodes["items"].as_array().into_iter().flatten() {
+        let name = n["metadata"]["name"].as_str().unwrap_or_default();
+        let alloc = &n["status"]["allocatable"];
+        match usage.get(name) {
+            Some(u) => {
+                let (cpu, mem) = (milli(&u["cpu"]), milli(&u["memory"]));
+                rows.push(vec![name.to_string(), cores(cpu), percent(cpu, milli(&alloc["cpu"])), mebibytes(mem), percent(mem, milli(&alloc["memory"]))]);
+            }
+            None => rows.push(vec![name.to_string(), "<unknown>".into(), "<unknown>".into(), "<unknown>".into(), "<unknown>".into()]),
+        }
+    }
+    let mut out = columns(&rows);
+    out.push('\n');
+
+    // (namespace, pod, container, cpu, memory)
+    let mut items: Vec<(String, String, String, i128, i128)> = Vec::new();
+    for p in pods["items"].as_array().into_iter().flatten() {
+        let ns = p["metadata"]["namespace"].as_str().unwrap_or_default().to_string();
+        let name = p["metadata"]["name"].as_str().unwrap_or_default().to_string();
+        let cs: Vec<&Value> = p["containers"].as_array().into_iter().flatten().collect();
+        if a.containers {
+            for c in cs {
+                items.push((ns.clone(), name.clone(), c["name"].as_str().unwrap_or_default().to_string(), milli(&c["usage"]["cpu"]), milli(&c["usage"]["memory"])));
+            }
+        } else {
+            let cpu = cs.iter().map(|c| milli(&c["usage"]["cpu"])).sum();
+            let mem = cs.iter().map(|c| milli(&c["usage"]["memory"])).sum();
+            items.push((ns, name, String::new(), cpu, mem));
+        }
+    }
+    match a.sort_by.as_str() {
+        "memory" => items.sort_by(|x, y| y.4.cmp(&x.4).then_with(|| (&x.0, &x.1, &x.2).cmp(&(&y.0, &y.1, &y.2)))),
+        "name" => items.sort_by(|x, y| (&x.0, &x.1, &x.2).cmp(&(&y.0, &y.1, &y.2))),
+        _ => items.sort_by(|x, y| y.3.cmp(&x.3).then_with(|| (&x.0, &x.1, &x.2).cmp(&(&y.0, &y.1, &y.2)))),
+    }
+    if items.is_empty() {
+        out.push_str(&format!("No pod metrics{} yet.\n", a.namespace.as_ref().map(|n| format!(" in namespace {n}")).unwrap_or_default()));
+        return Ok(out);
+    }
+    let mut header = vec!["NAMESPACE".to_string(), "POD".into()];
+    if a.containers {
+        header.push("CONTAINER".into());
+    }
+    header.extend(["CPU".to_string(), "MEMORY".into()]);
+    let mut rows = vec![header];
+    for (ns, pod, c, cpu, mem) in items {
+        let mut r = vec![ns, pod];
+        if a.containers {
+            r.push(c);
+        }
+        r.extend([cores(cpu), mebibytes(mem)]);
+        rows.push(r);
+    }
+    out.push_str(&columns(&rows));
+    Ok(out)
+}

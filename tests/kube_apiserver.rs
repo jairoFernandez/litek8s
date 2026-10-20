@@ -21,9 +21,13 @@ async fn start() -> Result<String> {
 
 /// One request on a fresh connection; returns (status, parsed JSON body).
 async fn call(addr: &str, method: &str, path: &str, content_type: &str, body: &str) -> Result<(u16, Value)> {
+    call_accept(addr, method, path, "application/json", content_type, body).await
+}
+
+async fn call_accept(addr: &str, method: &str, path: &str, accept: &str, content_type: &str, body: &str) -> Result<(u16, Value)> {
     let mut stream = TcpStream::connect(addr).await?;
     let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nAccept: application/json\r\n\
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nAccept: {accept}\r\n\
          Content-Type: {content_type}\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
@@ -461,5 +465,147 @@ async fn concurrent_service_creates_get_distinct_addresses() -> Result<()> {
         assert!(ips.insert(svc["spec"]["clusterIP"].as_str().unwrap().to_string()), "duplicate ClusterIP: {svc}");
         assert!(ports.insert(svc["spec"]["ports"][0]["nodePort"].as_i64().unwrap()), "duplicate nodePort: {svc}");
     }
+    Ok(())
+}
+
+/// An API server with the built-in observability store and the aggregator's
+/// availability loop, and the store to feed node samples into.
+async fn start_with_metrics() -> Result<(String, Arc<litek8s::obs::server::Obs>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?.to_string();
+    let state = Arc::new(ApiState::open(None, addr.clone(), false)?);
+    let config = litek8s::obs::server::ObsConfig {
+        tiers: litek8s::obs::tsdb::parse_tiers("1s:1h,10s:1d")?,
+        interval: Duration::from_secs(1),
+        ..Default::default()
+    };
+    let obs = litek8s::obs::server::start(&state, config)?;
+    tokio::spawn(litek8s::kube::aggregator::run(state.clone()));
+    tokio::spawn(serve_listener(state, listener));
+    Ok((addr, obs))
+}
+
+/// Two samples a node agent would have sent, one interval apart: n1 at
+/// 2 busy cores and 3 GiB used, pods web (default) and db (data).
+fn feed_node_samples(obs: &litek8s::obs::server::Obs) -> Result<()> {
+    let l = |pairs: &[(&str, &str)]| -> Vec<(String, String)> { pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect() };
+    let now = litek8s::obs::tsdb::now_ms();
+    for (i, t) in [now - 1000, now].into_iter().enumerate() {
+        let i = i as f64;
+        let c = |name: &str, ns: &str, pod: &str| l(&[("__name__", name), ("node", "n1"), ("namespace", ns), ("pod", pod), ("container", "app")]);
+        let cpu = |mode: &str| l(&[("__name__", "node_cpu_seconds_total"), ("node", "n1"), ("mode", mode)]);
+        obs.db.append(
+            "node/n1",
+            t,
+            vec![
+                (cpu("user"), 100.0 + i * 1.5),
+                (cpu("system"), 50.0 + i * 0.5),
+                (cpu("idle"), 900.0 + i * 2.0),
+                (l(&[("__name__", "node_memory_MemTotal_bytes"), ("node", "n1")]), 4.0 * (1u64 << 30) as f64),
+                (l(&[("__name__", "node_memory_MemAvailable_bytes"), ("node", "n1")]), (1u64 << 30) as f64),
+                (c("container_cpu_usage_seconds_total", "default", "web"), 10.0 + i * 0.25),
+                (c("container_memory_working_set_bytes", "default", "web"), (64u64 << 20) as f64),
+                (c("container_cpu_usage_seconds_total", "data", "db"), 20.0 + i * 0.5),
+                (c("container_memory_working_set_bytes", "data", "db"), (128u64 << 20) as f64),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn metrics_api_serves_node_and_pod_metrics_from_the_store() -> Result<()> {
+    let (addr, obs) = start_with_metrics().await?;
+    let node = json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "n1", "labels": {"role": "edge"}}});
+    assert_eq!(post(&addr, "/api/v1/nodes", node).await?.0, 201);
+    assert_eq!(post(&addr, "/api/v1/namespaces", json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "data"}})).await?.0, 201);
+    for (ns, name, app) in [("default", "web", "web"), ("data", "db", "db"), ("default", "idle", "idle")] {
+        let pod = json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": name, "namespace": ns, "labels": {"app": app}},
+            "spec": {"containers": [{"name": "app", "image": "nginx"}]}});
+        assert_eq!(post(&addr, &format!("/api/v1/namespaces/{ns}/pods"), pod).await?.0, 201);
+    }
+
+    // Discovery, plain and aggregated, as kubectl top checks it.
+    let (_, groups) = get(&addr, "/apis").await?;
+    let group = groups["groups"].as_array().unwrap().iter().find(|g| g["name"] == "metrics.k8s.io").cloned().context("no metrics.k8s.io group")?;
+    assert_eq!(group["preferredVersion"]["version"], "v1beta1");
+    let (_, list) = get(&addr, "/apis/metrics.k8s.io/v1beta1").await?;
+    let resources = list["resources"].as_array().unwrap();
+    let nodes = resources.iter().find(|r| r["name"] == "nodes").context("no nodes")?;
+    assert_eq!((nodes["kind"].as_str(), nodes["namespaced"].as_bool(), &nodes["verbs"]), (Some("NodeMetrics"), Some(false), &json!(["get", "list"])));
+    assert!(resources.iter().any(|r| r["name"] == "pods" && r["kind"] == "PodMetrics" && r["namespaced"] == true));
+    let (_, v2) = call_accept(&addr, "GET", "/apis", "application/json;g=apidiscovery.k8s.io;v=v2;as=APIGroupDiscoveryList", "", "").await?;
+    assert!(v2["items"].as_array().unwrap().iter().any(|g| g["metadata"]["name"] == "metrics.k8s.io"), "{v2}");
+    // A built-in group: no APIService object (so metrics-server's Helm
+    // chart can create its own).
+    let (code, _) = get(&addr, "/apis/apiregistration.k8s.io/v1/apiservices/v1beta1.metrics.k8s.io").await?;
+    assert_eq!(code, 404);
+
+    // Nothing sampled yet: empty lists, not errors.
+    let (code, v) = get(&addr, "/apis/metrics.k8s.io/v1beta1/nodes").await?;
+    assert_eq!((code, v["kind"].as_str(), v["items"].as_array().map(Vec::len)), (200, Some("NodeMetricsList"), Some(0)));
+
+    feed_node_samples(&obs)?;
+    let (code, v) = get(&addr, "/apis/metrics.k8s.io/v1beta1/nodes").await?;
+    assert_eq!(code, 200, "{v}");
+    let n1 = &v["items"][0];
+    assert_eq!((n1["kind"].as_str(), n1["metadata"]["name"].as_str(), n1["metadata"]["labels"]["role"].as_str()), (Some("NodeMetrics"), Some("n1"), Some("edge")));
+    assert_eq!((n1["usage"]["cpu"].as_str(), n1["usage"]["memory"].as_str(), n1["window"].as_str()), (Some("2000000000n"), Some("3145728Ki"), Some("1s")));
+    let (code, v) = get(&addr, "/apis/metrics.k8s.io/v1beta1/nodes/n1").await?;
+    assert_eq!((code, v["usage"]["cpu"].as_str()), (200, Some("2000000000n")));
+    let (code, v) = get(&addr, "/apis/metrics.k8s.io/v1beta1/nodes/n2").await?;
+    assert_eq!((code, v["reason"].as_str(), v["message"].as_str()), (404, Some("NotFound"), Some("nodemetrics.metrics.k8s.io \"n2\" not found")));
+
+    // Pods: all namespaces, one namespace, by label, by field, one by name.
+    let names = |v: &Value| -> Vec<String> { v["items"].as_array().unwrap().iter().map(|i| format!("{}/{}", i["metadata"]["namespace"].as_str().unwrap(), i["metadata"]["name"].as_str().unwrap())).collect() };
+    let (code, v) = get(&addr, "/apis/metrics.k8s.io/v1beta1/pods").await?;
+    assert_eq!((code, v["kind"].as_str()), (200, Some("PodMetricsList")));
+    assert_eq!(names(&v), ["data/db", "default/web"], "a pod without samples (idle) is left out");
+    let (_, v) = get(&addr, "/apis/metrics.k8s.io/v1beta1/namespaces/default/pods").await?;
+    assert_eq!(names(&v), ["default/web"]);
+    let web = &v["items"][0];
+    assert_eq!(web["containers"], json!([{"name": "app", "usage": {"cpu": "250000000n", "memory": "65536Ki"}}]));
+    assert_eq!((web["metadata"]["labels"]["app"].as_str(), web["window"].as_str()), (Some("web"), Some("1s")));
+    let (_, v) = get(&addr, "/apis/metrics.k8s.io/v1beta1/pods?labelSelector=app%3Ddb").await?;
+    assert_eq!(names(&v), ["data/db"]);
+    let (_, v) = get(&addr, "/apis/metrics.k8s.io/v1beta1/pods?fieldSelector=metadata.namespace%3Ddefault").await?;
+    assert_eq!(names(&v), ["default/web"]);
+    let (code, v) = get(&addr, "/apis/metrics.k8s.io/v1beta1/namespaces/data/pods/db").await?;
+    assert_eq!((code, v["containers"][0]["usage"]["cpu"].as_str()), (200, Some("500000000n")));
+    let (code, v) = get(&addr, "/apis/metrics.k8s.io/v1beta1/namespaces/default/pods/idle").await?;
+    assert_eq!((code, v["message"].as_str()), (404, Some("podmetrics.metrics.k8s.io \"default/idle\" not found")));
+    // kubectl get pods.metrics.k8s.io: a server-side table.
+    let (_, t) = call_accept(&addr, "GET", "/apis/metrics.k8s.io/v1beta1/namespaces/default/pods", "application/json;as=Table;v=v1;g=meta.k8s.io,application/json", "", "").await?;
+    assert_eq!((t["kind"].as_str(), &t["rows"][0]["cells"]), (Some("Table"), &json!(["web", "250000000n", "65536Ki", "1s"])));
+    // Read-only, no watch.
+    let (code, _) = call(&addr, "DELETE", "/apis/metrics.k8s.io/v1beta1/nodes/n1", "application/json", "").await?;
+    assert_eq!(code, 405);
+
+    // metrics-server's APIService takes the group over: requests go to its
+    // Service (missing here: unavailable, out of discovery).
+    let takeover = json!({"apiVersion": "apiregistration.k8s.io/v1", "kind": "APIService", "metadata": {"name": "v1beta1.metrics.k8s.io"},
+        "spec": {"group": "metrics.k8s.io", "version": "v1beta1", "service": {"name": "metrics-server", "namespace": "kube-system"},
+                 "insecureSkipTLSVerify": true, "groupPriorityMinimum": 100, "versionPriority": 100}});
+    assert_eq!(post(&addr, "/apis/apiregistration.k8s.io/v1/apiservices", takeover).await?.0, 201);
+    let (code, v) = get(&addr, "/apis/metrics.k8s.io/v1beta1/nodes").await?;
+    assert_eq!((code, v["reason"].as_str()), (503, Some("ServiceUnavailable")), "{v}");
+    eventually("metrics.k8s.io out of discovery", || async {
+        let (code, _) = get(&addr, "/apis/metrics.k8s.io/v1beta1").await?;
+        Ok((code == 404).then_some(Value::Null))
+    })
+    .await?;
+    let (_, api) = get(&addr, "/apis/apiregistration.k8s.io/v1/apiservices/v1beta1.metrics.k8s.io").await?;
+    assert_eq!((api["status"]["conditions"][0]["status"].as_str(), api["status"]["conditions"][0]["reason"].as_str()), (Some("False"), Some("ServiceNotFound")));
+    // metrics-server uninstalled: the store answers again.
+    let (code, _) = call(&addr, "DELETE", "/apis/apiregistration.k8s.io/v1/apiservices/v1beta1.metrics.k8s.io", "application/json", "").await?;
+    assert_eq!(code, 200);
+    eventually("metrics.k8s.io served again", || async {
+        let (code, v) = get(&addr, "/apis/metrics.k8s.io/v1beta1").await?;
+        Ok((code == 200).then_some(v))
+    })
+    .await?;
+    feed_node_samples(&obs)?;
+    let (code, v) = get(&addr, "/apis/metrics.k8s.io/v1beta1/nodes/n1").await?;
+    assert_eq!((code, v["kind"].as_str()), (200, Some("NodeMetrics")), "{v}");
     Ok(())
 }

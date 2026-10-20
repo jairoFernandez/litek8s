@@ -26,6 +26,7 @@ use super::admission;
 use super::controllers::util;
 use super::registry::ResourceType;
 use super::server::{ApiError, ApiState, Body, Req};
+use crate::obs::resource_metrics;
 
 const GROUP: &str = "apiregistration.k8s.io";
 const PLURAL: &str = "apiservices";
@@ -212,8 +213,18 @@ async fn check(state: &ApiState, api: &Value) -> Option<(String, String)> {
     Some((group, version))
 }
 
+/// What the API server serves itself for a group version no APIService
+/// delegates: the resource metrics API from the observability store.
+fn local_types(state: &ApiState, group: &str, version: &str) -> Vec<ResourceType> {
+    if group == resource_metrics::GROUP && version == resource_metrics::VERSION && state.obs.get().is_some() {
+        resource_metrics::types()
+    } else {
+        Vec::new()
+    }
+}
+
 /// The availability loop.
-pub(crate) async fn run(state: Arc<ApiState>) {
+pub async fn run(state: Arc<ApiState>) {
     let mut served: HashSet<(String, String)> = HashSet::new();
     loop {
         let (apis, _) = state.store().list(GROUP, PLURAL, None);
@@ -237,7 +248,7 @@ pub(crate) async fn run(state: Arc<ApiState>) {
             }
         }
         for (group, version) in served.difference(&now) {
-            state.registry.set_aggregated(group, version, Vec::new());
+            state.registry.set_aggregated(group, version, local_types(&state, group, version));
         }
         served = now;
         tokio::time::sleep(Duration::from_secs(if served.is_empty() { 2 } else { 1 })).await;

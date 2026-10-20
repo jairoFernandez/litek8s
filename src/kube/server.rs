@@ -1531,6 +1531,9 @@ async fn resource_request(
     if let Some(api) = super::aggregator::service_for(state, group, version) {
         return super::aggregator::proxy(state, &api, &req.path, req).await;
     }
+    if group == crate::obs::resource_metrics::GROUP && version == crate::obs::resource_metrics::VERSION {
+        return state.resource_metrics(req, rest);
+    }
     // Legacy `/api/v1/watch/...` form.
     let (legacy_watch, rest) = match rest {
         ["watch", tail @ ..] => (true, tail),
@@ -1882,6 +1885,77 @@ impl ApiState {
                 "metadata": list_meta,
                 "items": items,
             }),
+        ))
+    }
+
+    /// `metrics.k8s.io/v1beta1` (NodeMetrics, PodMetrics: get and list)
+    /// from the built-in observability store, while its Local APIService
+    /// is in place (see obs/resource_metrics.rs).
+    fn resource_metrics(&self, req: &Req, rest: &[&str]) -> Result<Response<Body>, ApiError> {
+        use crate::obs::resource_metrics as rm;
+        let (Some(obs), true) = (self.obs.get(), self.registry.has_group_version(rm::GROUP, rm::VERSION)) else {
+            return Err(ApiError::not_found_path());
+        };
+        let (ns, plural, name) = match rest {
+            ["nodes"] => (None, "nodes", None),
+            ["nodes", name] => (None, "nodes", Some(*name)),
+            ["pods"] => (None, "pods", None),
+            ["namespaces", ns, "pods"] => (Some(*ns), "pods", None),
+            ["namespaces", ns, "pods", name] => (Some(*ns), "pods", Some(*name)),
+            _ => return Err(ApiError::not_found_path()),
+        };
+        if req.method != Method::GET || matches!(req.q("watch"), Some("true" | "1")) {
+            return Err(ApiError::new(StatusCode::METHOD_NOT_ALLOWED, "MethodNotAllowed", "the server does not allow this method on the requested resource"));
+        }
+        let labels = LabelSelector::parse(req.q("labelSelector").unwrap_or_default()).map_err(|e| ApiError::bad_request(e.to_string()))?;
+        let fields = FieldSelector::parse(req.q("fieldSelector").unwrap_or_default()).map_err(|e| ApiError::bad_request(e.to_string()))?;
+        let now = crate::obs::tsdb::now_ms();
+        let interval = obs.config.interval.as_millis() as i64;
+        let objects = |plural: &str, ns: Option<&str>| -> Vec<Value> {
+            match name {
+                Some(n) => self.store.get(&ObjectKey::new("", plural, ns.unwrap_or_default(), n)).into_iter().collect(),
+                None => self.store.list("", plural, ns).0,
+            }
+        };
+        let (kind, items): (&str, Vec<Value>) = if plural == "nodes" {
+            let usage = rm::nodes(&obs.db, now, interval);
+            let items = objects("nodes", None)
+                .iter()
+                .filter(|n| labels.matches(n))
+                .filter_map(|n| usage.get(n.pointer("/metadata/name")?.as_str()?).map(|u| rm::node_metrics(n, u, now)))
+                .filter(|m| fields.matches(m))
+                .collect();
+            ("NodeMetrics", items)
+        } else {
+            let usage = rm::containers(&obs.db, now, interval, ns);
+            let items = objects("pods", ns)
+                .iter()
+                .filter(|p| labels.matches(p))
+                .filter_map(|p| {
+                    let key = (p.pointer("/metadata/namespace")?.as_str()?.to_string(), p.pointer("/metadata/name")?.as_str()?.to_string());
+                    usage.get(&key).map(|c| rm::pod_metrics(p, c, now))
+                })
+                .filter(|m| fields.matches(m))
+                .collect();
+            ("PodMetrics", items)
+        };
+        if let Some(name) = name {
+            let shown = ns.map(|ns| format!("{ns}/{name}")).unwrap_or_else(|| name.to_string());
+            return match items.into_iter().next() {
+                Some(item) => Ok(json_response(StatusCode::OK, &item)),
+                None => {
+                    let mut e = ApiError::new(StatusCode::NOT_FOUND, "NotFound", format!("{}.{} \"{shown}\" not found", kind.to_lowercase(), rm::GROUP));
+                    e.details = Some(json!({"name": shown, "group": rm::GROUP, "kind": plural}));
+                    Err(e)
+                }
+            };
+        }
+        if req.wants_table() {
+            return Ok(json_response(StatusCode::OK, &rm::table(kind, &items)));
+        }
+        Ok(json_response(
+            StatusCode::OK,
+            &json!({"kind": format!("{kind}List"), "apiVersion": format!("{}/{}", rm::GROUP, rm::VERSION), "metadata": {}, "items": items}),
         ))
     }
 
