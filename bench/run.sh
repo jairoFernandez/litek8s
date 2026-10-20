@@ -749,10 +749,7 @@ phase_obs() {
       systemd-run --unit=litek8s --quiet /usr/local/bin/litek8s apiserver --listen 127.0.0.1:6443         --data-dir /var/lib/litek8s/apiserver --kubeconfig /root/litek8s.kubeconfig --runtime crun --no-observability
       for i in $(seq 1 100); do curl -sf '"$KUBE_URL"'/readyz >/dev/null && break; sleep 0.1; done'
   fi
-  local wait_pods='for i in $(seq 1 300); do
-      n=$(kubectl get pods -A --no-headers 2>/dev/null | grep -vc Completed); r=$(kubectl get pods -A --no-headers 2>/dev/null | awk "{split(\$3,a,"/"); if (a[1]==a[2] && \$4=="Running") c++} END {print c+0}")
-      [ "$n" -gt 0 ] && [ "$n" = "$r" ] && break; sleep 2
-    done; kubectl get pods -A --no-headers'
+  local wait_pods='sleep 5; kubectl wait --for=condition=Ready pod -A --all --field-selector=status.phase!=Succeeded --timeout=600s >/dev/null; kubectl get pods -A --no-headers'
   rroot "$vm" "$K"'for i in $(seq 1 120); do kubectl get nodes 2>/dev/null | grep -q " Ready" && break; sleep 2; done
     kubectl apply -f workload.yaml >/dev/null; '"$wait_pods" >"$OUT/$tag.noobs.pods.txt"
   log "$tag: workload only: settle ${SETTLE_SECS}s"

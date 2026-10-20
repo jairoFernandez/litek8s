@@ -1477,3 +1477,102 @@ mod tests {
         assert_eq!(downsample(&s, 60_000, true), vec![(0, 3.0), (60_000, 10.0), (120_000, 4.0)]);
     }
 }
+
+/// What a home cluster costs the store: `cargo test --release --lib
+/// tsdb_memory_for_a_home_cluster -- --ignored --nocapture` (numbers in
+/// docs/observability.md).
+#[cfg(test)]
+mod memory {
+    use super::*;
+
+    fn rss() -> u64 {
+        // SAFETY: getrusage fills the struct we own (ru_maxrss: KiB on Linux, bytes on macOS).
+        let max = unsafe {
+            let mut ru: libc::rusage = std::mem::zeroed();
+            libc::getrusage(libc::RUSAGE_SELF, &mut ru);
+            ru.ru_maxrss as u64
+        };
+        if cfg!(target_os = "macos") { max } else { max * 1024 }
+    }
+
+    #[test]
+    #[ignore]
+    fn tsdb_memory_for_a_home_cluster() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config { dir: Some(dir.path().to_path_buf()), max_series: 30_000, ..Config::default() };
+        let db = Db::open(cfg).unwrap();
+        // 3 nodes × 40 pods × 2 containers: ~20 series per container (cAdvisor
+        // and kube-state-metrics), ~120 per node, ~400 of the API server.
+        let mut series: Vec<(String, Labels)> = Vec::new();
+        for n in 0..3 {
+            let node = format!("node-{n}");
+            for i in 0..120 {
+                series.push((node.clone(), vec![("__name__".into(), format!("node_metric_{}", i % 30)), ("node".into(), node.clone()), ("device".into(), format!("d{}", i / 30))]));
+            }
+            for p in 0..40 {
+                for c in 0..2 {
+                    for m in 0..20 {
+                        series.push((
+                            node.clone(),
+                            vec![
+                                ("__name__".into(), format!("container_metric_{m}_total")),
+                                ("namespace".into(), format!("ns-{}", p % 6)),
+                                ("pod".into(), format!("app-{p}-7d9f8c6b5-x{n}{p:02}")),
+                                ("container".into(), format!("c{c}")),
+                                ("image".into(), format!("registry.example/app-{p}:1.{c}")),
+                                ("job".into(), "kubelet".into()),
+                                ("node".into(), node.clone()),
+                            ],
+                        ));
+                    }
+                }
+            }
+        }
+        for i in 0..400 {
+            series.push(("apiserver".into(), vec![("__name__".into(), format!("apiserver_metric_{}", i % 40)), ("resource".into(), format!("r{}", i / 40))]));
+        }
+        let ids: Vec<(String, u32)> = series.iter().map(|(src, l)| (src.clone(), db.series_id(l.clone()).unwrap())).collect();
+        let before = rss();
+        let t0 = now_ms() / 10_000 * 10_000 - 6 * 3600 * 1000;
+        let hours = 6;
+        let mut values: HashMap<u32, f64> = HashMap::new();
+        let start = std::time::Instant::now();
+        for step in 0..(hours * 360) {
+            let t = t0 + step * 10_000;
+            let mut by_src: BTreeMap<&str, Vec<(u32, f64)>> = BTreeMap::new();
+            for (k, (src, id)) in ids.iter().enumerate() {
+                let v = values.entry(*id).or_insert(0.0);
+                // Counters grow, a third of the series are steady gauges.
+                if k % 3 != 0 {
+                    *v += (k % 7) as f64 * 0.37 + 1.0;
+                }
+                by_src.entry(src.as_str()).or_default().push((*id, *v));
+            }
+            for (src, batch) in by_src {
+                db.append_ids(src, t, &batch).unwrap();
+            }
+            if step % 60 == 0 {
+                db.maintain(t).unwrap();
+            }
+        }
+        db.maintain(t0 + hours * 3_600_000).unwrap();
+        let st = db.stats();
+        let samples = st.samples_appended;
+        println!(
+            "series {} samples {} in {:.1}s ({:.0}/s); store's estimate: heads {} KiB + index {} KiB; peak RSS growth {} KiB; disk {} KiB = {:.2} bytes/sample",
+            st.series,
+            samples,
+            start.elapsed().as_secs_f64(),
+            samples as f64 / start.elapsed().as_secs_f64(),
+            st.head_bytes / 1024,
+            st.index_bytes / 1024,
+            rss().saturating_sub(before) / 1024,
+            st.disk_bytes / 1024,
+            st.disk_bytes as f64 / samples as f64
+        );
+        let t = now_ms();
+        let q = std::time::Instant::now();
+        let sel = db.select(&[Matcher::new("__name__", MatchOp::Re, "container_metric_1_total").unwrap()], t - 3_600_000, t, 10_000).unwrap();
+        println!("select 1 h of {} series: {:.1} ms", sel.len(), q.elapsed().as_secs_f64() * 1000.0);
+    }
+}
