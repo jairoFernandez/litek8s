@@ -252,6 +252,60 @@ section { position: relative; scroll-margin-top: 64px; }
 }
 .badge:hover { border-color: var(--line-2); color: var(--fg); }
 .badge .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 25%, transparent); }
+/* The logo intro (first visit, motion allowed): 1.5 s of rolling in, winding
+   up and dashing off; the hero text waits --intro before rising. Transforms
+   and opacity only, in an absolutely positioned layer: no layout shift. */
+.hero { --intro: 0s; }
+.intro { display: none; }
+@media (prefers-reduced-motion: no-preference) {
+  .motion.play-intro .hero { --intro: 1.22s; }
+  .motion.play-intro .intro { display: block; }
+}
+.hero-title { position: relative; }
+.intro { --size: 104px; --roll: -960deg; --dur: 1.5s; position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+@media (max-width: 640px) { .intro { --size: 68px; --roll: -480deg; } }
+.intro-car {
+  position: absolute; left: 50%; top: 50%; width: var(--size); height: var(--size);
+  margin: calc(var(--size) / -2) 0 0 calc(var(--size) / -2);
+  animation: intro-car var(--dur) both; will-change: transform;
+}
+.intro-wheel { width: 100%; height: 100%; animation: intro-wheel var(--dur) both; will-change: transform; filter: drop-shadow(0 10px 24px rgb(124 58 237 / 0.45)); }
+.intro-shadow {
+  position: absolute; left: 12%; right: 12%; bottom: -14%; height: 14%; border-radius: 50%;
+  background: radial-gradient(closest-side, rgb(0 0 0 / 0.45), transparent); animation: intro-shadow var(--dur) both;
+}
+:root[data-theme='light'] .intro-shadow { background: radial-gradient(closest-side, rgb(40 20 90 / 0.25), transparent); }
+.intro-ghost { animation-name: intro-car, intro-ghost; animation-duration: var(--dur), var(--dur); animation-delay: calc(var(--g) * 26ms); opacity: 0; }
+.intro-ghost .intro-wheel { animation-delay: calc(var(--g) * 26ms); filter: none; }
+.intro-lines { position: absolute; left: 50%; right: -10vw; top: 50%; height: 0; }
+.intro-lines i {
+  position: absolute; left: 0; width: 46vw; height: 2px; border-radius: 2px;
+  top: calc((var(--i) - 2) * var(--size) * 0.2);
+  background: linear-gradient(90deg, transparent, var(--accent) 70%, var(--accent-2));
+  transform-origin: left; opacity: 0;
+  animation: intro-line var(--dur) both; animation-delay: calc(var(--i) * 18ms);
+}
+.intro-lines i:nth-child(odd) { width: 34vw; height: 1px; }
+/* roll in (ease-out, translate and rotation in step), wind up, dash (ease-in) */
+@keyframes intro-car {
+  0% { transform: translateX(calc(-50vw - var(--size))); animation-timing-function: cubic-bezier(0.22, 0.61, 0.36, 1); }
+  56% { transform: translateX(0); animation-timing-function: cubic-bezier(0.45, 0, 0.55, 1); }
+  68% { transform: translateX(calc(var(--size) * -0.16)) scale(0.97, 1.03); animation-timing-function: cubic-bezier(0.75, 0, 0.9, 0.3); }
+  100% { transform: translateX(calc(50vw + var(--size) * 2)) scale(1.5, 0.78); }
+}
+@keyframes intro-wheel {
+  0% { transform: rotate(var(--roll)); animation-timing-function: cubic-bezier(0.22, 0.61, 0.36, 1); }
+  56% { transform: rotate(0deg); animation-timing-function: cubic-bezier(0.45, 0, 0.55, 1); }
+  68% { transform: rotate(-30deg); animation-timing-function: cubic-bezier(0.75, 0, 0.9, 0.3); }
+  100% { transform: rotate(840deg); }
+}
+@keyframes intro-shadow { 0%, 66% { opacity: 1; } 80%, 100% { opacity: 0; } }
+@keyframes intro-ghost { 0%, 70% { opacity: 0; } 78% { opacity: calc(0.5 - var(--g) * 0.12); } 100% { opacity: 0; } }
+@keyframes intro-line {
+  0%, 70% { opacity: 0; transform: scaleX(0); }
+  84% { opacity: 0.9; transform: scaleX(1); }
+  100% { opacity: 0; transform: translateX(46vw) scaleX(0.15); }
+}
 .hero h1 { font-size: clamp(2.5rem, 8vw, 5.75rem); letter-spacing: -0.045em; line-height: 1; margin-top: 28px; }
 .hero h1 .line { display: block; overflow: hidden; padding-bottom: 0.08em; margin-bottom: -0.08em; }
 .hero h1 .line > span { display: inline-block; }
@@ -269,9 +323,9 @@ section { position: relative; scroll-margin-top: 64px; }
 .demo-caption a { color: var(--fg-2); text-underline-offset: 3px; }
 
 @media (prefers-reduced-motion: no-preference) {
-  .motion .hero h1 .line > span { animation: rise 1.2s var(--ease-out) both; animation-delay: calc(0.08s + var(--i) * 0.12s); }
-  .motion .hero [data-in] { animation: fade-up 1s var(--ease-out) both; animation-delay: calc(0.45s + var(--i, 0) * 0.08s); }
-  .motion .hero-shot { animation: shot-in 1.4s var(--ease-out) 0.7s both; }
+  .motion .hero h1 .line > span { animation: rise 1.2s var(--ease-out) both; animation-delay: calc(var(--intro) + 0.08s + var(--i) * 0.12s); }
+  .motion .hero [data-in] { animation: fade-up 1s var(--ease-out) both; animation-delay: calc(var(--intro) + 0.45s + var(--i, 0) * 0.08s); }
+  .motion .hero-shot { animation: shot-in 1.4s var(--ease-out) both; animation-delay: calc(var(--intro) + 0.7s); }
   @supports (animation-timeline: view()) {
     .motion .hero-shot .tilt { animation: tilt linear both; animation-timeline: view(); animation-range: entry 10% cover 45%; }
   }

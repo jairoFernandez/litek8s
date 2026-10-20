@@ -19,6 +19,22 @@ function watch(el: Element, fn: (visible: boolean) => void, margin = '0px') {
   new IntersectionObserver((entries) => entries.forEach((e) => fn(e.isIntersecting)), { rootMargin: margin }).observe(el);
 }
 
+// ---------- the hero intro: any input skips to the end ----------
+const intro = root.classList.contains('play-intro') && motion;
+if (intro) {
+  const hero = $('.hero')!;
+  const skip = () => {
+    for (const a of hero.getAnimations({ subtree: true })) {
+      if (a.effect?.getComputedTiming().iterations !== Infinity) a.finish();
+    }
+    stop();
+  };
+  const events = ['pointerdown', 'keydown', 'wheel', 'touchstart'] as const;
+  const stop = () => events.forEach((e) => removeEventListener(e, skip));
+  events.forEach((e) => addEventListener(e, skip, { passive: true }));
+  setTimeout(stop, 3000);
+}
+
 // ---------- theme (same localStorage key as Starlight, so the docs agree) ----------
 $('[data-theme-toggle]')?.addEventListener('click', () => {
   const next = root.dataset.theme === 'light' ? 'dark' : 'light';
@@ -297,7 +313,8 @@ if (term) {
   $('.term-replay', term)!.addEventListener('click', () => (motion ? loop(index) : select(index)));
   if (motion) {
     // Start once it is first on screen.
-    const io = new IntersectionObserver((e) => { if (e[0].isIntersecting) { io.disconnect(); loop(0); } });
+    // After the hero intro, when there is one.
+    const io = new IntersectionObserver((e) => { if (e[0].isIntersecting) { io.disconnect(); setTimeout(() => loop(0), intro ? 2000 : 0); } });
     io.observe(term);
   }
 }

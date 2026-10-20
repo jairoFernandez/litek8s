@@ -57,6 +57,10 @@ const hl = (i: number) => i >= from && i <= to && !['the', 'and'].includes(words
         d.classList.remove('no-js');
         if (matchMedia('(prefers-reduced-motion: no-preference)').matches) {
           d.classList.add('motion');
+          // The logo intro plays once per visit (tab session).
+          var seen = '1';
+          try { seen = sessionStorage.getItem('lk-intro'); sessionStorage.setItem('lk-intro', '1'); } catch (e) {}
+          if (!seen) d.classList.add('play-intro');
           // If the page script never runs, do not leave content hidden.
           setTimeout(function () { if (!window.__lk) d.classList.remove('motion'); }, 3500);
         }
@@ -89,11 +93,22 @@ const hl = (i: number) => i >= from && i <= to && !['the', 'and'].includes(words
         <div class="glow glow-2" aria-hidden="true"></div>
         <div class="wrap">
           <a class="badge" href={t.links.releases} data-in style="--i:0"><span class="dot" aria-hidden="true"></span>{t.hero.badge}</a>
-          <h1>
-            {t.hero.lines.map((l, i) => (
-              <span class="line"><span class:list={{ accent: i === t.hero.lines.length - 1 }} style={`--i:${i}`}>{l}</span></span>
-            ))}
-          </h1>
+          <div class="hero-title">
+            <!-- The intro: the mark rolls in, winds up and dashes off, then the
+                 headline rises. Visual only; the text is in the page from the start. -->
+            <div class="intro" aria-hidden="true">
+              <div class="intro-lines">{[0, 1, 2, 3, 4].map((i) => <i style={`--i:${i}`}></i>)}</div>
+              {[1, 2, 3].map((i) => (
+                <div class="intro-car intro-ghost" style={`--g:${i}`}><div class="intro-wheel"><Logo id={`intro-ghost-${i}`} /></div></div>
+              ))}
+              <div class="intro-car"><div class="intro-shadow"></div><div class="intro-wheel"><Logo id="intro-logo" /></div></div>
+            </div>
+            <h1>
+              {t.hero.lines.map((l, i) => (
+                <span class="line"><span class:list={{ accent: i === t.hero.lines.length - 1 }} style={`--i:${i}`}>{l}</span></span>
+              ))}
+            </h1>
+          </div>
           <p class="lead" data-in style="--i:1">{t.hero.lead}</p>
           <div class="hero-ctas" data-in style="--i:2">
             <a class="btn btn-primary" href="#install">{t.hero.primary}<Icon name="arrow" class="arrow" /></a>
@@ -252,6 +267,6 @@ const hl = (i: number) => i >= from && i <= to && !['the', 'and'].includes(words
 </html>
 <style>
   .btn :global(svg) { width: 16px; height: 16px; }
-  .cta-mark :global(svg) { width: 100%; height: 100%; }
+  .cta-mark :global(svg), .intro-wheel :global(svg) { width: 100%; height: 100%; display: block; }
   .limits-more :global(svg) { width: 16px; height: 16px; }
 </style>
