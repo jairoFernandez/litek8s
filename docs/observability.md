@@ -316,10 +316,35 @@ runs them for the agents connected to it.
 - No recording rules, subqueries or `@`; downsampled tiers keep one value
   per bucket (the last of counters, the mean of gauges), so `max_over_time`
   over old data sees averages.
-- Log search reads files: searching days of logs of a chatty cluster takes
-  as long as reading them (every node in parallel); there is no index.
+- Log search reads files: each file is bisected to the start of the time
+  range, but a long range over a chatty cluster is read in full (every node
+  in parallel); there is no index.
 - One API server evaluates alerts and stores metrics (see above).
 
 ## Measured
 
-See [bench/RESULTS.md](../bench/RESULTS.md#observability-built-in-vs-kube-prometheus-stack--loki).
+On a 2 vCPU / 3 GiB guest running the same small workload, against k3s
+with kube-prometheus-stack (Grafana off), Loki and Alloy
+([bench/RESULTS.md](../bench/RESULTS.md), "Observability: built in vs
+kube-prometheus-stack + Loki"):
+
+| | k3s + kube-prometheus-stack + Loki | litek8s |
+|---|---|---|
+| memory | 1.4 GiB | +1.8 MiB |
+| CPU, % of one vCPU | 4.2 % | +0.03 % |
+| images to install | 2.1 GiB | – (+2.1 MiB binary) |
+| series kept | 69.7 k | 342 (a curated set, see above) |
+| metrics on disk | 2.0–4.1 GB for 10 days | ≈ 10 MB for 90 days (1.6 bytes/sample) |
+| logs on disk beyond the CRI files | ≈ 52 MiB/day | 0 |
+| queries | < 2 ms metrics, 15–50 ms logs | < 5 ms metrics, ≈ 30 ms logs |
+
+The store itself, on a simulated 3-node cluster with 240 containers (5,560
+series, 6 hours of 10 s samples; `cargo test --release --lib
+tsdb_memory_for_a_home_cluster -- --ignored --nocapture`): ingests 4
+million samples/s, holds a 1 MiB index and 1.8 MiB of head chunks (RSS +6.4
+MiB), answers a one-hour select of 240 series in 6 ms. After the whole
+compatibility corpus (119 cases, 47 Helm charts installed and removed) the
+store held 4,839 series in 1.4 MB of memory and 2.5 MB on disk.
+
+`litek8s ui`'s Observe view idles at 0.00 % CPU and 0.4 wake-ups/s while it
+samples (every 10 s), 4.4 MiB RSS.
