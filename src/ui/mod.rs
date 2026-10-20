@@ -62,6 +62,24 @@ pub struct UiArgs {
 
 type Term = ratatui::Terminal<CrosstermBackend<std::io::Stdout>>;
 
+/// `DEV 1a2b3c4d5e6f · ~/.litek8s-dev` for a build from a checkout and/or a
+/// `$LITEK8S_HOME`, so two litek8s on one machine are told apart at a glance.
+fn build_label() -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some((_, build)) = crate::config::VERSION.split_once(' ') {
+        parts.push(build.to_string());
+    }
+    if let Some(h) = crate::config::litek8s_home() {
+        let h = h.display().to_string();
+        let home = std::env::var("HOME").unwrap_or_default();
+        parts.push(match h.strip_prefix(&home) {
+            Some(rest) if !home.is_empty() => format!("~{rest}"),
+            _ => h,
+        });
+    }
+    parts.join(" · ")
+}
+
 pub async fn run(args: UiArgs) -> Result<()> {
     use std::io::IsTerminal;
     let started = Instant::now();
@@ -103,6 +121,7 @@ pub async fn run(args: UiArgs) -> Result<()> {
     let (tx, rx) = unbounded_channel();
     let mut app = App::new(docker_ep.display.clone(), kube_ep.display.clone(), kube_context);
     app.mouse = args.mouse;
+    app.build = build_label();
     // The context's own namespace unless -n says otherwise.
     let start_ns = args.namespace.clone().or_else(|| kube::auth::load().ok().and_then(|c| c.namespace(&app.kube_context)));
     app.kube = kube::KubeUi::new(start_ns.clone());

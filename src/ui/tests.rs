@@ -897,3 +897,16 @@ fn observe_shows_alerts_top_pods_and_searches_logs() {
     app.apply(Msg::Obs(Box::new(ObsSample { error: Some("observability is off on this server".into()), ..Default::default() })));
     assert!(render(&app, 80, 24).contains("observability is off"));
 }
+
+#[test]
+fn header_shows_a_development_build() {
+    let mut app = sample_app();
+    let plain = render(&app, 80, 24);
+    assert!(!plain.contains("DEV"), "{plain}");
+    app.build = "DEV 1a2b3c4d5e6f · ~/.litek8s-dev".into();
+    // The boxed header (tall terminals) and the one-line one.
+    let tall = render(&app, 120, 30);
+    assert!(tall.lines().next().unwrap().contains("litek8s DEV 1a2b3c4d5e6f · ~/.litek8s-dev"), "{tall}");
+    let short = render(&app, 80, 10);
+    assert!(short.lines().next().unwrap().contains("litek8s DEV"), "{short}");
+}

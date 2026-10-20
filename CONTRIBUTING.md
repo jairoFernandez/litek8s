@@ -9,6 +9,27 @@ By contributing you agree that your contribution is licensed under the
 Apache License 2.0 (the project's license, see [LICENSE](LICENSE)), as
 section 5 of the license describes.
 
+## Using litek8s vs developing it
+
+Keep the two apart on your machine. **Use** litek8s from a release
+(`brew install jairoFernandez/tap/litek8s`, install.sh or `cargo install
+litek8s`): its clusters, `~/.litek8s/docker.sock` and `litek8s-<cluster>`
+contexts are your own. **Develop** it with `dev/lk`, which runs this
+checkout's `target/release/litek8s` (rebuilt when a source is newer) with
+`LITEK8S_HOME=~/.litek8s-dev`: its own dev VM, clusters, Docker socket,
+config, kubeconfig and `lkdev-<cluster>` contexts. A build from a checkout
+says so: `litek8s --version` and the UI's header show `DEV <commit>` and
+the `LITEK8S_HOME` in use.
+
+```bash
+dev/lk build-vm                      # the macOS dev VM's guest from this checkout
+dev/lk dev up && dev/lk ui           # a cluster of the checkout's build, next to the release's
+eval "$(dev/lk env)"                 # its DOCKER_HOST and KUBECONFIG in this shell
+```
+
+Details, the first guest on a new Mac and the pinned `dev/stable.sh` in
+[docs/develop-without-docker.md](docs/develop-without-docker.md#using-litek8s-vs-developing-it).
+
 ## Build
 
 Rust stable (≥ 1.90; the crate uses edition 2024):
@@ -22,7 +43,7 @@ On macOS, `litek8s dev up` also needs the dev VM's guest (a static Linux
 build of litek8s plus an Alpine kernel and userland):
 
 ```bash
-dev/vm/build.sh                      # needs a Docker API for the musl build
+dev/lk build-vm                      # needs a Docker API for the musl build
 ```
 
 You do not need Docker or OrbStack for that: a pinned litek8s can provide

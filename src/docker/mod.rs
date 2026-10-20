@@ -27,13 +27,10 @@ use anyhow::{Context, Result};
 pub(crate) use engine::{Engine, EngineOptions};
 pub use network::Publisher;
 
-/// The Docker socket on the developer's machine.
+/// The Docker socket on the developer's machine: `$LITEK8S_DOCKER_SOCKET`,
+/// else `~/.litek8s/docker.sock` (`$LITEK8S_HOME/docker.sock`).
 pub fn host_socket_path() -> PathBuf {
-    if let Some(p) = std::env::var_os("LITEK8S_DOCKER_SOCKET") {
-        return PathBuf::from(p);
-    }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/tmp"));
-    home.join(".litek8s").join("docker.sock")
+    crate::config::paths().docker_socket
 }
 
 /// Where the engine also listens inside the sandbox/VM (what containers get

@@ -1111,9 +1111,10 @@ async fn cluster_up(a: &Value) -> Result<Value> {
         args.push("--no-switch".into());
     }
     let mut v = dev_command(&args, Duration::from_secs(timeout + 120)).await?;
-    v["status"] = crate::dev::status_json(&crate::dev::cluster::Cluster::new(&name)?).await?;
+    let cluster = crate::dev::cluster::Cluster::new(&name)?;
+    v["status"] = crate::dev::status_json(&cluster).await?;
     if v["ok"] == true {
-        v["hint"] = json!(format!("Pass context: \"litek8s-{name}\" to the other tools; Docker API at {}", crate::dev::cluster::Cluster::new(&name)?.docker_socket().display()));
+        v["hint"] = json!(format!("Pass context: \"{}\" to the other tools; Docker API at {}", cluster.context(), cluster.docker_socket().display()));
     }
     Ok(v)
 }

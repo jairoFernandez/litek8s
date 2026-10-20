@@ -15,7 +15,9 @@ cargo run -- serve             # start daemon
 cargo run -- apply -f examples/nginx.yaml  # deploy a workload
 ```
 
-Integration tests in `tests/integration.rs` require a Docker API (Docker, OrbStack, or litek8s's own: `eval "$(dev/stable.sh env)"`, see docs/develop-without-docker.md); they use `tokio::test(flavor = "multi_thread")` and serialize via an async mutex to avoid Docker socket conflicts. Unit tests live next to the code (`#[cfg(test)]`). `tests/kube_apiserver.rs` exercises the API server over HTTP and needs no Docker. `tests/mcp.rs` drives `litek8s mcp` over stdio against an in-process API server (no Docker).
+Product vs development on one machine: the released litek8s (Homebrew) uses the default paths; `dev/lk <args>` runs this checkout's `target/release/litek8s` (rebuilt when stale) with `LITEK8S_HOME=~/.litek8s-dev` (own VM, clusters, sockets, kubeconfig, `lkdev-` contexts; `dev/lk build-vm` builds the VM guest from the checkout, `eval "$(dev/lk env)"` for DOCKER_HOST/KUBECONFIG). Never run a checkout build without LITEK8S_HOME against the user's own clusters. Non-release builds print `DEV <commit>` in `--version` and the UI header (build.rs; `LITEK8S_RELEASE=1` for releases).
+
+Integration tests in `tests/integration.rs` require a Docker API (Docker, OrbStack, or litek8s's own: `eval "$(dev/lk env)"` or `eval "$(dev/stable.sh env)"`, see docs/develop-without-docker.md); they use `tokio::test(flavor = "multi_thread")` and serialize via an async mutex to avoid Docker socket conflicts. Unit tests live next to the code (`#[cfg(test)]`). `tests/kube_apiserver.rs` exercises the API server over HTTP and needs no Docker. `tests/mcp.rs` drives `litek8s mcp` over stdio against an in-process API server (no Docker).
 
 Kubernetes compatibility corpus (needs kubectl, perl, python3; L4 needs helm):
 ```bash
@@ -71,3 +73,4 @@ cargo test apply_get_logs_and_delete_roundtrip
 - State is persisted atomically as JSON; the `Store` uses `RwLock` for reads and a separate `Mutex` for serializing disk writes.
 - Manifest validation enforces: exactly one container, `restartPolicy: Always`, allowed resource limit formats (`500m` cpu, `128Mi` memory).
 - Config paths use XDG directories via the `directories` crate. Socket at `$XDG_RUNTIME_DIR/litek8s/daemon.sock`, state at XDG data dir.
+- Every per-user path comes from `config::Paths` (`src/config.rs`): with `LITEK8S_HOME` all of them are under it (unit test `litek8s_home_holds_every_path`). Do not build paths from `$HOME`, `ProjectDirs` or `~/.litek8s` elsewhere, and take context names from `Cluster::context()` / `config::context_prefix()`, never a literal `litek8s-`.

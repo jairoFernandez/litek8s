@@ -460,6 +460,9 @@ pub struct App {
     pub obs_namespace: Option<String>,
     pub space_checked: BTreeSet<Reclaim>,
     pub mouse: bool,
+    /// What the header shows next to the name when this is not the plain
+    /// release: `DEV <commit>` and the `$LITEK8S_HOME` in use (empty: none).
+    pub build: String,
     /// Screen rows of the current list's first row and tab titles' spans
     /// (for mouse clicks), set while drawing.
     pub list_top: std::cell::Cell<u16>,
@@ -526,6 +529,7 @@ impl App {
             obs_namespace: None,
             space_checked: [Reclaim::StoppedContainers, Reclaim::DanglingImages, Reclaim::BuildCache].into_iter().collect(),
             mouse: false,
+            build: String::new(),
             list_top: std::cell::Cell::new(0),
             list_offset: std::cell::Cell::new(0),
             tab_spans: std::cell::RefCell::new(Vec::new()),
@@ -1600,7 +1604,7 @@ impl App {
 }
 
 fn context_of(cluster: &str) -> String {
-    format!("litek8s-{cluster}")
+    crate::dev::cluster::Cluster { name: cluster.to_string() }.context()
 }
 
 /// Where a cluster's data is, for the delete confirmation.

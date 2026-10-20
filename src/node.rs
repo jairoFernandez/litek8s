@@ -1210,10 +1210,7 @@ pub async fn install_remote_agent(
 
 /// Path of the persistent agent's Unix socket on the node.
 fn agent_socket_path() -> std::path::PathBuf {
-    let base = std::env::var_os("XDG_RUNTIME_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    base.join("litek8s").join("agent.sock")
+    crate::config::paths().agent_socket
 }
 
 /// Run the persistent agent: listen on a Unix socket, serve framed requests, and

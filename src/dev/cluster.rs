@@ -43,8 +43,9 @@ pub fn validate(name: &str) -> Result<()> {
     if !ok {
         bail!("cluster name {name:?}: 1-20 characters, lowercase letters, digits and '-', starting with a letter");
     }
-    // Directories next to the clusters' sockets in ~/.litek8s.
-    if ["stable", "clusters", "run", "vm"].contains(&name) {
+    // Directories next to the clusters' sockets in ~/.litek8s (or
+    // $LITEK8S_HOME).
+    if ["stable", "clusters", "run", "vm", "data"].contains(&name) {
         bail!("cluster name {name:?} is reserved");
     }
     Ok(())
@@ -84,8 +85,10 @@ impl Cluster {
         Path::new(super::guest::DATA_DIR).join(&self.name)
     }
 
+    /// Its kubeconfig context: `litek8s-<name>`, `lkdev-<name>` with
+    /// `$LITEK8S_HOME` (see [`crate::config::context_prefix`]).
     pub fn context(&self) -> String {
-        format!("litek8s-{}", self.name)
+        format!("{}{}", crate::config::context_prefix(), self.name)
     }
 
     /// The control-plane node's name (and the cell's hostname).
@@ -106,26 +109,38 @@ impl Cluster {
     /// 30000 as always, the others spread out by name, so two clusters
     /// rarely want the same port on the host's localhost.
     pub fn node_port_offset(&self) -> u16 {
-        if self.is_default() {
-            return 0;
-        }
+        let prefix = crate::config::context_prefix();
+        // Another litek8s on the machine ($LITEK8S_HOME) spreads its default
+        // cluster out too: both VMs forward their NodePorts to localhost.
+        let key = match (self.is_default(), prefix == "litek8s-") {
+            (true, true) => return 0,
+            (true, false) => format!("{prefix}{}", self.name),
+            (false, _) => self.name.clone(),
+        };
         // FNV-1a: stable across builds and platforms.
-        let h = self.name.bytes().fold(0x811c9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x01000193));
+        let h = key.bytes().fold(0x811c9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x01000193));
         // Steps of 100 from 30100: easy to read, 27 starting points.
         100 + (h % 27) as u16 * 100
     }
 
     pub fn docker_socket(&self) -> PathBuf {
-        let default = crate::docker::host_socket_path();
+        self.docker_socket_from(&crate::docker::host_socket_path())
+    }
+
+    /// Its socket when the default cluster's is `default`: that one, or
+    /// `<name>/docker.sock` next to it.
+    pub fn docker_socket_from(&self, default: &Path) -> PathBuf {
         if self.is_default() {
-            return default;
+            return default.to_path_buf();
         }
         default.parent().unwrap_or(Path::new("/tmp")).join(&self.name).join("docker.sock")
     }
 
-    /// The docker CLI context that points at its socket.
+    /// The docker CLI context that points at its socket: `litek8s` (`lkdev`
+    /// with `$LITEK8S_HOME`) for the default cluster, else its kubeconfig
+    /// context's name.
     pub fn docker_context(&self) -> String {
-        if self.is_default() { "litek8s".into() } else { self.context() }
+        if self.is_default() { crate::config::context_prefix().trim_end_matches('-').to_string() } else { self.context() }
     }
 
     pub fn meta(&self, dev_home: &Path) -> Option<Meta> {

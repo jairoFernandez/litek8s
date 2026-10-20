@@ -122,8 +122,11 @@ fn docker_cli(args: &[&str]) -> Option<Result<String>> {
     })
 }
 
+/// A docker context `litek8s` made: `litek8s`, `litek8s-<cluster>` (with
+/// `$LITEK8S_HOME` its own prefix's).
 fn is_ours(context: &str) -> bool {
-    context == "litek8s" || context.starts_with("litek8s-")
+    let prefix = crate::config::context_prefix();
+    context == prefix.trim_end_matches('-') || context.starts_with(&prefix)
 }
 
 /// Point the docker CLI at a local cluster (`on`) or back at what it used

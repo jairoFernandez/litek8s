@@ -160,8 +160,13 @@ fn header(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
         // ╭─ litek8s ─────────────── ● dev · macOS VM · up 2h ─╮
         // │  1 Home   2 Clusters  …                             │
         let inner_w = area.width.saturating_sub(2) as usize;
-        let room = inner_w.saturating_sub(14);
-        let b = t.block_with(Line::from(Span::styled("litek8s", t.accent)), badge(app, t, room));
+        let build = build_span(app, t, inner_w / 3);
+        let room = inner_w.saturating_sub(14 + build.width());
+        let mut title = vec![Span::styled("litek8s", t.accent)];
+        if build.width() > 0 {
+            title.extend([Span::raw(" "), build]);
+        }
+        let b = t.block_with(Line::from(title), badge(app, t, room));
         let inner = b.inner(area);
         f.render_widget(b, area);
         let (mut spans, hit) = tab_spans(app, t, inner_w.saturating_sub(1));
@@ -173,8 +178,12 @@ fn header(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
         return;
     }
     //  litek8s  1 Home  2 Clusters  …           ● dev · up 2h
-    let logo = vec![Span::styled(" litek8s", t.accent), Span::raw(" ")];
-    let lw = 9u16;
+    let mut logo = vec![Span::styled(" litek8s", t.accent), Span::raw(" ")];
+    let build = build_span(app, t, area.width as usize / 4);
+    if build.width() > 0 {
+        logo.extend([build, Span::raw(" ")]);
+    }
+    let lw = logo.iter().map(|s| s.width()).sum::<usize>() as u16;
     let (tabs, hit) = tab_spans(app, t, area.width.saturating_sub(lw) as usize);
     let tw: usize = tabs.iter().map(|s| s.width()).sum();
     let room = (area.width as usize).saturating_sub(lw as usize + tw + 1);
@@ -190,6 +199,15 @@ fn header(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     let [l, r] = Layout::horizontal([Constraint::Min(1), Constraint::Length(rw)]).areas(area);
     f.render_widget(Paragraph::new(Line::from(spans)), l);
     f.render_widget(Paragraph::new(Line::from(right)).right_aligned(), r);
+}
+
+/// `DEV <commit> · <LITEK8S_HOME>` in at most `w` columns (nothing for the
+/// plain release).
+fn build_span(app: &App, t: &Theme, w: usize) -> Span<'static> {
+    if app.build.is_empty() || w < 4 {
+        return Span::raw("");
+    }
+    Span::styled(trunc(&app.build, w), t.warn.add_modifier(Modifier::BOLD))
 }
 
 /// The keys of the view on screen, as chips, or the status line.

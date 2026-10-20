@@ -9,12 +9,17 @@
 #       Docker volume instead of target/ in the bind-mounted checkout; only the
 #       binary is copied out (to the same path).
 #   CARGO_BUILD_JOBS=<n>         passed to cargo in the container.
+#   LITEK8S_RELEASE=1            a release build (`--version` without DEV <commit>).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 TARGET_DIR="target/guest-musl-arm64"
 SETUP='apk add -q musl-dev gcc g++ make perl >/dev/null'
 args=(--rm --platform linux/arm64 -e CARGO_PROFILE_RELEASE_STRIP=symbols -v "${ROOT}:/work" -w /work)
 [[ -n "${CARGO_BUILD_JOBS:-}" ]] && args+=(-e "CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}")
+[[ -n "${LITEK8S_RELEASE:-}" ]] && args+=(-e "LITEK8S_RELEASE=${LITEK8S_RELEASE}")
+# The container has the sources but not the repository (build.rs: DEV <commit>).
+COMMIT="${LITEK8S_GIT_COMMIT:-$(git -C "$ROOT" rev-parse --short=12 HEAD 2>/dev/null || true)}"
+[[ -n "$COMMIT" ]] && args+=(-e "LITEK8S_GIT_COMMIT=${COMMIT}")
 if [[ -n "${LITEK8S_BUILD_VOLUME:-}" ]]; then
   mkdir -p "${ROOT}/${TARGET_DIR}/release"
   docker run "${args[@]}" -v "${LITEK8S_BUILD_VOLUME}:/cache" \

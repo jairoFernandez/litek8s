@@ -218,6 +218,16 @@ The dev home is `dev/` in litek8s's data directory:
 home). The guest assets built from source go in `vm/` next to it
 (`$LITEK8S_DEV_VM_ASSETS` overrides).
 
+`LITEK8S_HOME=<dir>` puts all of litek8s's per-user files under `<dir>`
+instead: the data directory becomes `<dir>/data` (so the VM, its disk and
+the clusters are `<dir>/data/dev`, the guest `<dir>/data/vm`), the Docker
+sockets and `config.yaml` are `<dir>/...` instead of `~/.litek8s/...`, the
+kubeconfig is `<dir>/kubeconfig` (unless `KUBECONFIG` is set) and contexts
+are `lkdev-<cluster>` (`$LITEK8S_CONTEXT_PREFIX`). Two litek8s with
+different homes run two VMs that know nothing of each other; that is how a
+build from a checkout (`dev/lk`) runs next to an installed release
+([develop-without-docker.md](develop-without-docker.md#using-litek8s-vs-developing-it)).
+
 Builds before the rename used `~/Library/Application Support/dev.civojairo.litek8s`
 on macOS. litek8s keeps using that directory as long as it exists and
 `dev.litek8s` does not, so an existing VM, its disk and its clusters are

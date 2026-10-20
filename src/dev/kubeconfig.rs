@@ -6,18 +6,19 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_yaml::{Mapping, Value};
 
-pub const CONTEXT: &str = "litek8s-dev";
+#[cfg(test)]
+const CONTEXT: &str = "litek8s-dev";
+
+/// The default dev cluster's context: `litek8s-dev` (`lkdev-dev` with
+/// `$LITEK8S_HOME`).
+pub fn default_context() -> String {
+    super::cluster::Cluster::default_cluster().context()
+}
 
 /// The kubeconfig file kubectl writes to: the first entry of $KUBECONFIG,
-/// else ~/.kube/config.
+/// else ~/.kube/config (`$LITEK8S_HOME/kubeconfig`).
 pub fn default_path() -> PathBuf {
-    if let Some(first) = std::env::var_os("KUBECONFIG").and_then(|v| std::env::split_paths(&v).next()) {
-        if !first.as_os_str().is_empty() {
-            return first;
-        }
-    }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    home.join(".kube").join("config")
+    crate::config::paths().kubeconfig
 }
 
 fn seq<'a>(doc: &'a mut Mapping, key: &str) -> &'a mut Vec<Value> {
