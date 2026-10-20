@@ -29,7 +29,7 @@ otherwise get from `kubectl describe pod`, `kubectl logs --previous`,
 - `cluster_up` fails or times out → its `output`/`stderr` tail; the
   cluster's log is `dev.log` in its data directory (`cluster_status`);
   the VM/sandbox log is `env.log` in the dev home
-  (`~/Library/Application Support/dev.civojairo.litek8s/dev` on macOS,
+  (`~/Library/Application Support/dev.litek8s/dev` on macOS,
   `~/.local/share/litek8s/dev` on Linux).
 - Linux multi-node: workers not joining → `wireguard` module not loaded
   (`sudo modprobe wireguard`); `litek8s dev setup` checks prerequisites.

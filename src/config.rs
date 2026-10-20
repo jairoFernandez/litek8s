@@ -18,10 +18,33 @@ pub fn default_socket_path() -> PathBuf {
     base.join(APP_DIR).join(SOCKET_FILE)
 }
 
+/// litek8s's data directory: `~/.local/share/litek8s` on Linux (or
+/// `$XDG_DATA_HOME/litek8s`), `~/Library/Application Support/dev.litek8s` on
+/// macOS. Installs from before the rename keep their macOS directory
+/// (`dev.civojairo.litek8s`) while it exists and the new one does not: their
+/// dev VM, disks and clusters live there, so it is never moved behind their
+/// back (docs/dev.md#data-directory says how to move it).
+pub fn data_dir() -> Result<PathBuf> {
+    let dirs = ProjectDirs::from("dev", "", APP_DIR)
+        .context("failed to resolve a data directory for litek8s")?;
+    let dir = dirs.data_local_dir().to_path_buf();
+    if cfg!(target_os = "macos") && !dir.exists() {
+        if let Some(legacy) = dir
+            .parent()
+            .map(|p| p.join(LEGACY_MACOS_DIR))
+            .filter(|p| p.is_dir())
+        {
+            return Ok(legacy);
+        }
+    }
+    Ok(dir)
+}
+
+/// The macOS data directory's name before litek8s had a neutral bundle id.
+const LEGACY_MACOS_DIR: &str = "dev.civojairo.litek8s";
+
 pub fn default_state_file() -> Result<PathBuf> {
-    let dirs = ProjectDirs::from("dev", "civojairo", APP_DIR)
-        .context("failed to resolve a data directory for the litek8s state file")?;
-    Ok(dirs.data_local_dir().join(STATE_FILE))
+    Ok(data_dir()?.join(STATE_FILE))
 }
 
 pub fn ensure_parent_dir(path: &Path) -> Result<()> {
@@ -33,9 +56,7 @@ pub fn ensure_parent_dir(path: &Path) -> Result<()> {
 }
 
 fn vpn_data_dir() -> Result<PathBuf> {
-    let dirs = ProjectDirs::from("dev", "civojairo", APP_DIR)
-        .context("failed to resolve a data directory for the litek8s VPN state")?;
-    Ok(dirs.data_local_dir().join("vpn"))
+    Ok(data_dir()?.join("vpn"))
 }
 
 pub fn default_vpn_state_file() -> Result<PathBuf> {
@@ -46,9 +67,7 @@ pub fn default_vpn_state_file() -> Result<PathBuf> {
 /// distributed matmul ships each `right` matrix once per node instead of on
 /// every band call. Survives agent restarts.
 pub fn weights_dir() -> Result<PathBuf> {
-    let dirs = ProjectDirs::from("dev", "civojairo", APP_DIR)
-        .context("failed to resolve a data directory for cached weights")?;
-    Ok(dirs.data_local_dir().join("weights"))
+    Ok(data_dir()?.join("weights"))
 }
 
 pub fn default_vpn_private_key_file() -> Result<PathBuf> {

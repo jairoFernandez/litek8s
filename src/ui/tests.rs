@@ -70,7 +70,7 @@ fn sample_app() -> App {
         mem_used: Some(1_200_000_000),
         disk_used: Some(2_300_000_000),
         disk_free: Some(150_000_000_000),
-        data_dir: "/Users/me/Library/Application Support/dev.civojairo.litek8s/dev".into(),
+        data_dir: "/Users/me/Library/Application Support/dev.litek8s/dev".into(),
         contexts: Contexts { docker_context: "litek8s".into(), docker_context_is_litek8s: true, kube_context: "litek8s-dev".into(), kube_is_litek8s: true, kubeconfig: "/Users/me/.kube/config".into(), ..Default::default() },
         ..Default::default()
     })));

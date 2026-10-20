@@ -91,14 +91,19 @@ side:
 - keeps the guest on as little of its memory as it needs, growing it on
   demand ([Memory](#memory-on-macos)).
 
-The framework requires the `com.apple.security.virtualization` entitlement;
-if the binary lacks it, `dev up` runs an ad-hoc signed copy
-(`codesign --sign -`), so nothing needs `sudo`. VM size: `--memory` (MiB,
+The framework requires the `com.apple.security.virtualization` entitlement.
+Release binaries are ad-hoc signed with it; a binary that lacks it (a
+`cargo build`), makes `dev up` run an ad-hoc signed copy
+(`codesign --sign -`), so nothing needs `sudo` or an Apple developer
+account. VM size: `--memory` (MiB,
 default 4096, an upper bound the guest grows into, see below) and `--cpus`
 (default half the Mac's).
 
-Build the guest once (needs a Docker API or any Linux box for the musl
-build; a running `litek8s dev` serves one, so litek8s can build its next
+The guest (kernel, root image, initrd) comes with the macOS release
+archive, in `share/litek8s/vm` beside `bin/litek8s` (install.sh puts it in
+`~/.local/share/litek8s/vm`); `dev up` looks there first, so a release
+binary always boots the guest of the same release. From source, build the
+guest once (needs a Docker API or any Linux box for the musl build; a running `litek8s dev` serves one, so litek8s can build its next
 guest itself, see [develop-without-docker.md](develop-without-docker.md)):
 
 ```bash
@@ -204,6 +209,27 @@ needs them), and the Mac has the space back within a minute or so:
 | boot with 362 MB deleted from an older guest | – | given back by the first trim |
 
 `du` of `disk.img` is what counts; `ls` shows the image's 64 GiB size.
+
+### Data directory
+
+The dev home is `dev/` in litek8s's data directory:
+`~/Library/Application Support/dev.litek8s` on macOS,
+`~/.local/share/litek8s` on Linux (`$LITEK8S_DEV_HOME` overrides the dev
+home). The guest assets built from source go in `vm/` next to it
+(`$LITEK8S_DEV_VM_ASSETS` overrides).
+
+Builds before the rename used `~/Library/Application Support/dev.civojairo.litek8s`
+on macOS. litek8s keeps using that directory as long as it exists and
+`dev.litek8s` does not, so an existing VM, its disk and its clusters are
+never moved behind your back. To move to the new name:
+
+```bash
+litek8s dev list            # note the clusters that are up
+litek8s dev down --all      # every cluster; the VM powers off with the last
+pgrep -fl 'litek8s dev-vm'  # nothing left
+mv ~/Library/Application\ Support/dev.civojairo.litek8s ~/Library/Application\ Support/dev.litek8s
+litek8s dev up              # same clusters, objects and images
+```
 
 ## Settings
 

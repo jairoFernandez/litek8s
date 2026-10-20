@@ -3,6 +3,11 @@
 # the directory `litek8s dev up` boots from.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
-OUT="${LITEK8S_DEV_VM_ASSETS:-$HOME/Library/Application Support/dev.civojairo.litek8s/vm}"
+# The data directory litek8s uses (src/config.rs data_dir): dev.litek8s, or
+# the pre-rename dev.civojairo.litek8s while only that one exists.
+APP="$HOME/Library/Application Support"
+DATA="$APP/dev.litek8s"
+[[ ! -d "$DATA" && -d "$APP/dev.civojairo.litek8s" ]] && DATA="$APP/dev.civojairo.litek8s"
+OUT="${LITEK8S_DEV_VM_ASSETS:-$DATA/vm}"
 BIN="$("$HERE/build-guest-binary.sh")"
 python3 "$HERE/build-guest.py" --litek8s "$BIN" --out "$OUT"

@@ -80,14 +80,6 @@ const ENTITLEMENTS: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict><key>com.apple.security.virtualization</key><true/></dict></plist>
 "#;
 
-/// The guest kernel and root filesystem: an installation, not cluster data, so
-/// next to the dev data directory rather than in it (`dev reset` keeps them).
-fn assets_dir(home: &Path) -> PathBuf {
-    std::env::var_os("LITEK8S_DEV_VM_ASSETS")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.parent().unwrap_or(home).join("vm"))
-}
-
 fn has_entitlement(path: &Path) -> bool {
     std::process::Command::new("codesign")
         .args(["-d", "--entitlements", ":-"])
@@ -172,7 +164,7 @@ pub async fn purge(home: &Path, cluster: &Cluster) -> Result<()> {
 
 pub fn start(home: &Path, opts: &UpOptions) -> Result<u32> {
     use std::os::unix::process::CommandExt;
-    let assets = assets_dir(home);
+    let assets = super::vm_assets_dir(home);
     let kernel = assets.join("Image");
     // A root disk image and the small initrd that mounts it, else (an
     // older build) one initramfs with everything.
@@ -182,7 +174,7 @@ pub fn start(home: &Path, opts: &UpOptions) -> Result<u32> {
     };
     if !kernel.is_file() || !initrd.is_file() {
         bail!(
-            "the dev VM's kernel and root filesystem are not in {} (build them: dev/vm/build.sh, or dev/vm/build-guest-binary.sh, then dev/vm/build-guest.py --litek8s <binary> --out {})",
+            "the dev VM's kernel and root filesystem are not in {} (a release archive has them in share/litek8s/vm, see install.sh; from source: dev/vm/build.sh, or dev/vm/build-guest-binary.sh, then dev/vm/build-guest.py --litek8s <binary> --out {})",
             assets.display(),
             assets.display()
         );

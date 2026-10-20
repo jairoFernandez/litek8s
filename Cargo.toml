@@ -2,6 +2,14 @@
 name = "litek8s"
 version = "0.1.0"
 edition = "2024"
+description = "A lightweight Kubernetes in one binary: the real API, dev clusters, a Docker API, a terminal UI and built-in observability"
+license = "Apache-2.0"
+repository = "https://github.com/jairoFernandez/litek8s"
+readme = "README.md"
+keywords = ["kubernetes", "containers", "orchestration", "crun", "edge"]
+categories = ["command-line-utilities", "virtualization"]
+# Benchmark and corpus results are large and only matter in the repository.
+exclude = ["bench/results/", "compat/results/"]
 
 [dependencies]
 anyhow = "1.0.97"
