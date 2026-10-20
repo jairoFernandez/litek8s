@@ -2,7 +2,7 @@
 //! unless asked), syntax colors for a line, and a line diff (Myers) for
 //! edits.
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 use serde_json::Value;
 
@@ -56,9 +56,9 @@ pub fn highlight(line: &str, t: &Theme) -> Vec<Span<'static>> {
 
 fn scalar(v: &str, t: &Theme) -> Span<'static> {
     let style = match v {
-        "true" | "false" | "null" | "~" => Style::new().fg(Color::Magenta),
-        _ if v.parse::<f64>().is_ok() => Style::new().fg(Color::Magenta),
-        _ if v.starts_with('"') || v.starts_with('\'') => Style::new().fg(Color::Green),
+        "true" | "false" | "null" | "~" => t.info,
+        _ if v.parse::<f64>().is_ok() => t.info,
+        _ if v.starts_with('"') || v.starts_with('\'') => t.ok,
         "|" | "|-" | ">" | ">-" | "{}" | "[]" => t.dim,
         _ => Style::new(),
     };
@@ -191,7 +191,7 @@ pub fn unified(a: &str, b: &str, context: usize) -> Vec<String> {
 
 pub fn diff_style(line: &str, t: &Theme) -> Style {
     if line.starts_with('+') {
-        Style::new().fg(Color::Green)
+        t.ok
     } else if line.starts_with('-') {
         t.bad
     } else if line.starts_with("@@") {
@@ -221,7 +221,7 @@ mod tests {
         let text: Vec<&str> = spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, vec!["  ", "- ", "name", ":", " ", "web"]);
         let spans = highlight("replicas: 3", &t);
-        assert_eq!(spans.last().unwrap().style.fg, Some(Color::Magenta));
+        assert_eq!(spans.last().unwrap().style, t.info);
         assert_eq!(highlight("# c", &t)[1].style, t.dim);
     }
 

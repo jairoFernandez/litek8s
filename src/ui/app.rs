@@ -390,7 +390,18 @@ pub struct App {
     /// The first list row on screen (the table scrolls with the selection).
     pub list_offset: std::cell::Cell<usize>,
     pub tab_spans: std::cell::RefCell<Vec<(u16, u16)>>,
+    /// The screen row of the tab titles and the header's height (one line
+    /// on short terminals, a box of three on tall ones).
+    pub tab_row: std::cell::Cell<u16>,
+    pub header_h: std::cell::Cell<u16>,
+    /// Home's CPU and memory over the last minutes (shares of the
+    /// cluster's CPUs and memory), one per sample taken while Home is on
+    /// screen: the sparklines.
+    pub history: VecDeque<(f32, f32)>,
 }
+
+/// Samples the sparklines keep (8 minutes at Home's 2 s).
+pub const HISTORY: usize = 240;
 
 impl App {
     pub fn new(docker_endpoint: String, kube_endpoint: String, kube_context: String) -> Self {
@@ -436,6 +447,9 @@ impl App {
             list_top: std::cell::Cell::new(0),
             list_offset: std::cell::Cell::new(0),
             tab_spans: std::cell::RefCell::new(Vec::new()),
+            tab_row: std::cell::Cell::new(0),
+            header_h: std::cell::Cell::new(1),
+            history: VecDeque::new(),
         }
     }
 
@@ -446,6 +460,24 @@ impl App {
     fn matches(&self, text: &[&str]) -> bool {
         let f = self.filter().to_lowercase();
         f.is_empty() || text.iter().any(|t| t.to_lowercase().contains(&f))
+    }
+
+    /// The look (ui.yaml's theme, this terminal's colors).
+    pub fn theme(&self) -> &super::theme::Theme {
+        &self.kube.theme
+    }
+
+    /// The CPUs Home's figures are shares of: a Linux sandbox's limit, else
+    /// what the engine sees (the VM's).
+    pub fn home_cpus(&self) -> Option<f64> {
+        let limits = self.home.running.as_ref().filter(|s| s.mode != "vm");
+        limits.and_then(|s| s.cpus).map(|c| c as u64).or(self.vm_cpus).map(|c| c as f64)
+    }
+
+    /// The memory Home's figure is a share of (bytes), the same way.
+    pub fn home_memory(&self) -> Option<u64> {
+        let limits = self.home.running.as_ref().filter(|s| s.mode != "vm");
+        limits.and_then(|s| s.memory_mib).map(|m| m << 20).or(self.vm_memory)
     }
 
     pub fn sel(&self) -> usize {
@@ -731,6 +763,21 @@ impl App {
                     self.cpu_prev = None;
                 }
                 self.home = sample;
+                // Only while Home shows them: samples come every 2 s then,
+                // once a minute otherwise (no gaps of a minute in a line
+                // of 2 s steps).
+                if self.tab == Tab::Home && self.logs.is_none() && self.home.status == DevStatus::Up {
+                    let cpu = self.home.cpu_pct.zip(self.home_cpus()).map(|(p, c)| (p / 100.0 / c.max(1.0)) as f32);
+                    let mem = self.home.mem_used.zip(self.home_memory()).map(|(u, t)| (u as f64 / t.max(1) as f64) as f32);
+                    if let (Some(c), Some(m)) = (cpu, mem) {
+                        if self.history.len() == HISTORY {
+                            self.history.pop_front();
+                        }
+                        self.history.push_back((c, m));
+                    }
+                } else if self.home.status != DevStatus::Up {
+                    self.history.clear();
+                }
             }
             Msg::Clusters(sample) => {
                 let mut sample = *sample;
@@ -1309,7 +1356,7 @@ impl App {
         if self.overlay != Overlay::None {
             return Vec::new();
         }
-        if self.tab == Tab::Kube && self.logs.is_none() && ev.row > 0 {
+        if self.tab == Tab::Kube && self.logs.is_none() && ev.row >= self.header_h.get() {
             return self.kube.mouse(ev, self.list_top.get());
         }
         match ev.kind {
@@ -1326,7 +1373,7 @@ impl App {
                 self.move_sel(-3);
             }
             MouseEventKind::Down(MouseButton::Left) => {
-                if ev.row == 0 {
+                if ev.row == self.tab_row.get() {
                     let spans = self.tab_spans.borrow().clone();
                     if let Some(i) = spans.iter().position(|(a, b)| ev.column >= *a && ev.column < *b) {
                         self.tab = TABS[i];

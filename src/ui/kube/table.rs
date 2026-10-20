@@ -32,16 +32,7 @@ impl Column {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
-pub enum Health {
-    #[default]
-    Ok,
-    /// On its way (pending, rolling out, not all ready).
-    Warn,
-    Bad,
-    /// Done or idle (Completed, Succeeded): fine, but not lively.
-    Done,
-}
+pub use crate::ui::theme::Health;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Owner {

@@ -307,7 +307,7 @@ fn describe_yaml_search_and_edit() {
     let obj = ObjRef { res: app.kube.catalog.find("pods").unwrap().clone(), ns: "default".into(), name: "web-7d9-def".into() };
     app.apply(Msg::Kube(KMsg::Diff { obj: obj.clone(), lines: vec!["@@ -1,2 +1,2 @@".into(), "-  replicas: 1".into(), "+  replicas: 2".into()], body: "x: 1\n".into() }));
     let s = render(&app, 80, 24);
-    assert!(s.contains("+  replicas: 2") && s.contains("y apply"), "{s}");
+    assert!(s.contains("+  replicas: 2") && s.contains(" y  apply"), "{s}");
     assert_eq!(kube_effects(app.key(key('y'))), vec![KEffect::Apply { obj, body: "x: 1\n".into() }]);
     // esc goes back down the stack to the table.
     app.key(code(KeyCode::Esc));
@@ -359,7 +359,7 @@ fn logs_pick_containers_stream_filter_and_pause() {
     app.apply(Msg::Kube(KMsg::LogLines { id, src: 0, lines: vec!["2026-10-19T10:00:00.123456789Z GET / 200".into(), "2026-10-19T10:00:01.000000000Z GET /health 200".into()] }));
     app.apply(Msg::Kube(KMsg::LogLines { id, src: 1, lines: vec!["2026-10-19T10:00:02.000000000Z ERROR upstream gone".into()] }));
     let s = render(&app, 80, 24);
-    assert!(s.contains("app") && s.contains("GET / 200") && s.contains("sidecar ERROR upstream gone") && s.contains("[follow]"), "{s}");
+    assert!(s.contains("app") && s.contains("GET / 200") && s.contains("sidecar ERROR upstream gone") && s.contains("● follow"), "{s}");
     assert!(!s.contains("10:00:00.123"), "timestamps start hidden: {s}");
     app.key(key('t'));
     assert!(render(&app, 80, 24).contains("10:00:00.123"));
@@ -369,7 +369,7 @@ fn logs_pick_containers_stream_filter_and_pause() {
     let View::Logs(l) = app.kube.top() else { panic!() };
     assert_eq!(l.visible().len(), 1);
     app.key(key('f'));
-    assert!(render(&app, 80, 24).contains("[paused]"));
+    assert!(render(&app, 80, 24).contains("○ paused"));
     // Bounded: the oldest lines go.
     if let Some(View::Logs(l)) = app.kube.views.last_mut() {
         l.cap = 2;
@@ -426,7 +426,7 @@ fn workloads_scale_restart_drill_and_xray() {
     ];
     app.apply(Msg::Kube(KMsg::Xray { id: *id, nodes, error: None }));
     let s = render(&app, 80, 24);
-    assert!(s.contains("▾ deploy web") && s.contains("    ▾ pod web-7d9-abc") && s.contains("container nginx"), "{s}");
+    assert!(s.contains("▾ ◐ deploy web") && s.contains("    ▾ ● pod web-7d9-abc") && s.contains("● container nginx"), "{s}");
     // Fold the rs; act on a pod.
     app.key(KeyEvent::from(KeyCode::Char('j')));
     app.key(code(KeyCode::Enter));

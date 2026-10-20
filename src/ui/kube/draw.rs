@@ -4,9 +4,11 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, Padding, Paragraph, Wrap};
+
+use crate::ui::view::{centered, key_chips};
 
 use super::state::*;
 use super::table::Health;
@@ -14,8 +16,19 @@ use super::uiconfig::Theme;
 use super::yaml;
 use crate::ui::app::App;
 
+/// A pane's box: a column of air inside its left border.
 fn block(title: String, t: &Theme) -> Block<'static> {
-    Block::bordered().border_style(t.dim).title(Span::styled(format!(" {title} "), t.bold))
+    t.block(title).padding(Padding::left(1))
+}
+
+/// The base style of a row: plain while fine, dim when done, yellow or red
+/// otherwise; the glyph in front carries the green.
+fn row_style(h: Health, t: &Theme) -> Style {
+    match h {
+        Health::Ok => Style::new(),
+        Health::Done => t.dim,
+        h => t.health(h),
+    }
 }
 
 fn trunc(s: &str, w: usize) -> String {
@@ -63,7 +76,8 @@ fn header(f: &mut Frame, app: &App, area: Rect) {
     if let Overlay::Prompt(p) = &ui.overlay {
         return prompt(f, ui, p, area);
     }
-    let mut spans = vec![Span::styled(" ⎈ ", t.accent), Span::styled(if app.kube_context.is_empty() { "-".to_string() } else { app.kube_context.clone() }, t.bold), Span::styled("  ns ", t.dim), Span::styled(ui.namespace.clone().unwrap_or_else(|| "all".into()), t.bold)];
+    let ctx = if app.kube_context.is_empty() { "-".to_string() } else { app.kube_context.clone() };
+    let mut spans = vec![Span::styled(" ⎈ ", t.accent), Span::styled(ctx, t.bold), Span::styled("  ns ", t.dim), Span::styled(ui.namespace.clone().unwrap_or_else(|| "all".into()), t.bold)];
     // The stack of views, as k9s's crumbs.
     let crumbs: Vec<String> = ui
         .views
@@ -89,7 +103,14 @@ fn header(f: &mut Frame, app: &App, area: Rect) {
     if c.chars().count() > room {
         c = format!("…{}", c.chars().rev().take(room.saturating_sub(1)).collect::<Vec<_>>().into_iter().rev().collect::<String>());
     }
-    spans.push(Span::raw(c));
+    // The view on top in the accent, the ones under it dim.
+    match c.rfind(" › ") {
+        Some(i) => {
+            spans.push(Span::styled(c[..i + " › ".len()].to_string(), t.dim));
+            spans.push(Span::styled(c[i + " › ".len()..].to_string(), t.accent));
+        }
+        None => spans.push(Span::styled(c, t.accent)),
+    }
     let mut right = Vec::new();
     if !ui.forwards.is_empty() {
         right.push(Span::styled(format!("⇄{} ", ui.forwards.len()), t.ok.add_modifier(Modifier::BOLD)));
@@ -178,12 +199,7 @@ pub fn fit(cols: &[DCol], width: usize, wide: bool) -> Vec<(usize, usize)> {
 }
 
 fn health_style(h: Health, t: &Theme) -> Style {
-    match h {
-        Health::Ok => t.ok,
-        Health::Warn => t.warn,
-        Health::Bad => t.bad,
-        Health::Done => t.done,
-    }
+    t.health(h)
 }
 
 fn table(f: &mut Frame, app: &App, tv: &TableView, area: Rect) {
@@ -230,9 +246,11 @@ fn table(f: &mut Frame, app: &App, tv: &TableView, area: Rect) {
         f.render_widget(Paragraph::new(vec![msg]).wrap(Wrap { trim: false }), inner);
         return;
     }
-    let fitted = fit(&tv.cols, inner.width.saturating_sub(1) as usize, tv.wide);
+    let fitted = fit(&tv.cols, inner.width.saturating_sub(2) as usize, tv.wide);
+    // Kinds with a state get its glyph in front of each row.
+    let glyphs = tv.cols.iter().any(|c| c.name.eq_ignore_ascii_case("status") || c.name.eq_ignore_ascii_case("ready") || c.name.eq_ignore_ascii_case("type"));
     // Header, with the sort column marked.
-    let mut hs = vec![Span::raw(" ")];
+    let mut hs = vec![Span::raw("  ")];
     for (i, w) in &fitted {
         let c = &tv.cols[*i];
         let mut name = c.name.clone();
@@ -241,7 +259,7 @@ fn table(f: &mut Frame, app: &App, tv: &TableView, area: Rect) {
                 name.push(if *desc { '↓' } else { '↑' });
             }
         }
-        hs.push(Span::styled(pad(&name, *w, c.numeric), t.dim.add_modifier(Modifier::BOLD)));
+        hs.push(Span::styled(pad(&name, *w, c.numeric), t.header));
         hs.push(Span::raw(" "));
     }
     let mut lines = vec![Line::from(hs)];
@@ -256,23 +274,34 @@ fn table(f: &mut Frame, app: &App, tv: &TableView, area: Rect) {
     tv.offset.set(off);
     for (i, r) in tv.rows.iter().enumerate().skip(off).take(height) {
         let marked = tv.marks.contains(&r.key());
-        let mut style = health_style(r.health, t);
+        let mut style = row_style(r.health, t);
+        if let Some(z) = t.zebra.filter(|_| i % 2 == 1) {
+            style = style.patch(z);
+        }
         if marked {
             style = style.patch(t.marked);
         }
         if i == tv.sel {
             style = style.patch(t.selected);
         }
-        let mut spans = vec![Span::styled(if marked { "◆" } else { " " }, style)];
+        let lead = if marked {
+            Span::styled("◆ ", style)
+        } else if glyphs {
+            let g = if i == tv.sel { style } else { style.patch(health_style(r.health, t)) };
+            Span::styled(format!("{} ", r.health.glyph()), g)
+        } else {
+            Span::styled("  ", style)
+        };
+        let mut spans = vec![lead];
         for (ci, w) in &fitted {
             let c = &tv.cols[*ci];
             let text = cell_value(tv, c, r, app.now);
             spans.push(Span::styled(pad(&text, *w, c.numeric), style));
             spans.push(Span::styled(" ", style));
         }
-        // The selection bar spans the width.
+        // The selection bar (and a zebra row) spans the width.
         let used: usize = spans.iter().map(|s| s.width()).sum();
-        if i == tv.sel && used < inner.width as usize {
+        if (i == tv.sel || style.bg.is_some()) && used < inner.width as usize {
             spans.push(Span::styled(" ".repeat(inner.width as usize - used), style));
         }
         lines.push(Line::from(spans));
@@ -333,7 +362,7 @@ fn pager(f: &mut Frame, p: &Pager, t: &Theme, area: Rect) {
     f.render_widget(b, area);
     let height = inner.height as usize;
     p.height.set(height.max(1));
-    let hl = Style::new().add_modifier(Modifier::REVERSED);
+    let hl = t.selected;
     let mut lines: Vec<Line> = Vec::new();
     if let Some(e) = &p.error {
         lines.push(Line::styled(e.clone(), t.bad));
@@ -387,7 +416,10 @@ fn help_line(l: &str, t: &Theme) -> Line<'static> {
 }
 
 /// Colors of log sources' prefixes.
-const PALETTE: [Color; 6] = [Color::Cyan, Color::Green, Color::Magenta, Color::Yellow, Color::Blue, Color::LightRed];
+fn palette(t: &Theme) -> [Style; 6] {
+    let plain = |s: Style| s.remove_modifier(Modifier::BOLD);
+    [plain(t.accent), t.ok, t.info, t.warn, plain(t.marked), t.bad]
+}
 
 fn logs(f: &mut Frame, l: &LogsView, t: &Theme, area: Rect) {
     let ended = l.ended.iter().filter(|e| e.is_some()).count();
@@ -395,18 +427,20 @@ fn logs(f: &mut Frame, l: &LogsView, t: &Theme, area: Rect) {
     if l.previous {
         title.push_str(" (previous)");
     }
-    title.push_str(if l.follow { "  [follow]" } else { "  [paused]" });
-    if l.sources.len() > 1 {
-        title.push_str(&format!("  {} streams", l.sources.len()));
-    }
-    if ended > 0 {
-        let why = l.ended.iter().flatten().find(|e| *e != "ended").cloned().unwrap_or_else(|| "ended".into());
-        title.push_str(&format!("  {ended} {}", if l.sources.len() == 1 { why } else { format!("ended ({why})") }));
-    }
     if let Some(fl) = &l.filter {
         title.push_str(&format!("  /{}", fl.raw));
     }
-    let b = block(trunc(&title, area.width.saturating_sub(4) as usize), t);
+    // The stream's state at the right: ● follow, ○ paused, how many ended.
+    let mut right = vec![if l.follow { Span::styled("● follow", t.ok) } else { Span::styled("○ paused", t.dim) }];
+    if l.sources.len() > 1 {
+        right.push(Span::styled(format!(" · {} streams", l.sources.len()), t.dim));
+    }
+    if ended > 0 {
+        let why = l.ended.iter().flatten().find(|e| *e != "ended").cloned().unwrap_or_else(|| "ended".into());
+        right.push(Span::styled(format!(" · {ended} {}", if l.sources.len() == 1 { why } else { format!("ended ({why})") }), t.warn));
+    }
+    let rw: usize = right.iter().map(|s| s.width()).sum();
+    let b = t.block_with(trunc(&title, (area.width as usize).saturating_sub(rw + 10)), right).padding(Padding::left(1));
     let inner = b.inner(area);
     f.render_widget(b, area);
     let height = inner.height as usize;
@@ -414,7 +448,8 @@ fn logs(f: &mut Frame, l: &LogsView, t: &Theme, area: Rect) {
     let shown = l.visible();
     let end = shown.len().saturating_sub(l.offset).max(height.min(shown.len()));
     let start = end.saturating_sub(height);
-    let hl = Style::new().add_modifier(Modifier::REVERSED);
+    let hl = t.selected;
+    let colors = palette(t);
     let multi = l.sources.len() > 1;
     let w = l.sources.iter().map(|s| s.chars().count()).max().unwrap_or(0).min(30);
     let lines: Vec<Line> = shown[start..end]
@@ -430,7 +465,7 @@ fn logs(f: &mut Frame, l: &LogsView, t: &Theme, area: Rect) {
             }
             if multi {
                 let name = l.sources.get(line.src as usize).map(String::as_str).unwrap_or("?");
-                spans.push(Span::styled(format!("{} ", pad(name, w, false)), Style::new().fg(PALETTE[line.src as usize % PALETTE.len()])));
+                spans.push(Span::styled(format!("{} ", pad(name, w, false)), colors[line.src as usize % colors.len()]));
             }
             let body = line.body();
             match &l.filter {
@@ -487,14 +522,19 @@ fn xray(f: &mut Frame, x: &XrayView, t: &Theme, area: Rect) {
             let n = &x.nodes[i];
             let has_kids = x.nodes.get(i + 1).is_some_and(|c| c.depth > n.depth);
             let fold = if !has_kids { "  " } else if x.folded.contains(&i) { "▸ " } else { "▾ " };
-            let mut style = health_style(n.health, t);
+            let mut style = row_style(n.health, t);
             if i == x.sel {
                 style = style.patch(t.selected);
             }
-            let text = format!("{}{fold}{} {}", "  ".repeat(n.depth as usize), n.kind, n.name);
-            let mut spans = vec![Span::styled(text.clone(), style)];
+            let glyph = if i == x.sel { style } else { health_style(n.health, t) };
+            let mut spans = vec![
+                Span::styled(format!("{}{fold}", "  ".repeat(n.depth as usize)), if i == x.sel { style } else { t.dim }),
+                Span::styled(format!("{} ", n.health.glyph()), glyph),
+                Span::styled(n.kind.clone(), if i == x.sel { style } else { style.patch(t.dim) }),
+                Span::styled(format!(" {}", n.name), style),
+            ];
             if !n.status.is_empty() {
-                spans.push(Span::styled(format!("  {}", n.status), if i == x.sel { style } else { t.dim.patch(health_style(n.health, t)) }));
+                spans.push(Span::styled(format!("  {}", n.status), if i == x.sel { style } else { health_style(n.health, t) }));
             }
             if i == x.sel {
                 let used: usize = spans.iter().map(|s| s.width()).sum();
@@ -517,19 +557,21 @@ fn forwards(f: &mut Frame, ui: &KubeUi, sel: usize, now: i64, area: Rect) {
     let b = block(format!("port-forwards [{}]", ui.forwards.len()), t);
     let inner = b.inner(area);
     f.render_widget(b, area);
-    let mut lines = vec![Line::styled(format!(" {:<22}{:<34}{:<7}{:<6}{}", "LOCAL", "TARGET", "REMOTE", "CONNS", "AGE"), t.dim.add_modifier(Modifier::BOLD))];
+    let mut lines = vec![Line::styled(format!("   {:<22}{:<34}{:<7}{:<6}{}", "LOCAL", "TARGET", "REMOTE", "CONNS", "AGE"), t.header)];
     for (i, fw) in ui.forwards.iter().enumerate() {
-        let mut style = if fw.error.is_some() { t.warn } else { t.ok };
+        let h = if fw.error.is_some() { Health::Warn } else { Health::Ok };
+        let mut style = row_style(h, t);
         if i == sel {
             style = style.patch(t.selected);
         }
         let target = format!("{}/{} → {}", fw.ns, fw.target, fw.pod);
-        let mut text = format!(" {:<22}{:<34}{:<7}{:<6}{}", format!("127.0.0.1:{}", fw.local), trunc(&target, 33), fw.remote, fw.connections, super::describe::human((now - fw.started).max(0)));
+        let mut text = format!("{:<22}{:<34}{:<7}{:<6}{}", format!("127.0.0.1:{}", fw.local), trunc(&target, 33), fw.remote, fw.connections, super::describe::human((now - fw.started).max(0)));
         if let Some(e) = &fw.error {
             text.push_str(&format!("  {e}"));
         }
-        let w = inner.width as usize;
-        lines.push(Line::styled(pad(&text, w, false), style));
+        let w = (inner.width as usize).saturating_sub(3);
+        let glyph = if i == sel { style } else { health_style(h, t) };
+        lines.push(Line::from(vec![Span::styled(format!(" {} ", h.glyph()), glyph), Span::styled(pad(&text, w, false), style)]));
     }
     if ui.forwards.is_empty() {
         lines.push(Line::styled(" none: shift-f on a pod, service or deployment starts one", t.dim));
@@ -537,40 +579,35 @@ fn forwards(f: &mut Frame, ui: &KubeUi, sel: usize, now: i64, area: Rect) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
-fn centered(area: Rect, width: u16, height: u16) -> Rect {
-    let w = width.min(area.width.saturating_sub(2));
-    let h = height.min(area.height.saturating_sub(2));
-    Rect { x: area.x + (area.width - w) / 2, y: area.y + (area.height - h) / 2, width: w, height: h }
-}
-
 fn confirm(f: &mut Frame, c: &Confirm, t: &Theme, area: Rect) {
     let mut text: Vec<Line> = c.lines.iter().map(|l| Line::raw(l.clone())).collect();
     if let ConfirmAction::Delete { propagation, force, .. } = &c.action {
         text.push(Line::raw(""));
-        text.push(Line::from(vec![Span::styled("p", t.key), Span::raw(format!(" cascade: {}   ", propagation.as_str())), Span::styled("f", t.key), Span::raw(format!(" force (no grace period): {}", if *force { "yes" } else { "no" }))]));
+        text.push(Line::from(vec![Span::styled(" p ", t.chip), Span::raw(format!(" cascade: {}   ", propagation.as_str())), Span::styled(" f ", t.chip), Span::raw(format!(" force (no grace period): {}", if *force { "yes" } else { "no" }))]));
     }
     text.push(Line::raw(""));
-    text.push(Line::from(vec![Span::styled("y", t.key), Span::raw(" yes   "), Span::styled("n/esc", t.key), Span::raw(" no")]));
+    text.push(Line::from(vec![Span::styled(" y ", t.chip), Span::raw(" yes   "), Span::styled(" n/esc ", t.chip), Span::raw(" no")]));
     let width = text.iter().map(|l| l.width()).max().unwrap_or(20).max(c.title.len() + 4).clamp(30, 76) as u16 + 4;
     let inner_w = width.min(area.width.saturating_sub(2)).saturating_sub(2).max(1) as usize;
     let rows: usize = text.iter().map(|l| l.width().max(1).div_ceil(inner_w)).sum();
     let r = centered(area, width, rows as u16 + 2);
     f.render_widget(Clear, r);
-    f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }).block(Block::bordered().border_style(t.warn).title(Span::styled(format!(" {} ", c.title), t.bold))), r);
+    f.render_widget(Paragraph::new(text).wrap(Wrap { trim: false }).block(t.dialog(Line::from(vec![Span::styled("⚠ ", t.warn), Span::styled(c.title.clone(), t.bold)]), t.warn)), r);
 }
 
 fn input(f: &mut Frame, i: &Input, t: &Theme, area: Rect) {
-    let mut lines = vec![Line::from(vec![Span::raw(i.value.clone()), Span::styled("█", t.accent)])];
+    let mut lines = vec![Line::from(vec![Span::styled("› ", t.accent), Span::styled(i.value.clone(), t.bold), Span::styled("█", t.accent.remove_modifier(Modifier::BOLD))])];
     if !i.hint.is_empty() {
         lines.push(Line::styled(i.hint.clone(), t.dim));
     }
     if let Some(e) = &i.error {
-        lines.push(Line::styled(e.clone(), t.bad));
+        lines.push(Line::from(vec![Span::styled("✕ ", t.bad), Span::styled(e.clone(), t.bad)]));
     }
-    lines.push(Line::styled("enter ok   esc cancel   ctrl-u clear", t.dim));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(key_chips(t, &[("enter", "ok"), ("esc", "cancel"), ("ctrl-u", "clear")], 66)));
     let r = centered(area, 70, lines.len() as u16 + 2);
     f.render_widget(Clear, r);
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(Block::bordered().border_style(t.accent).title(Span::styled(format!(" {} ", i.prompt), t.bold))), r);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(t.dialog(i.prompt.clone(), t.accent)), r);
 }
 
 fn picker(f: &mut Frame, p: &Picker, t: &Theme, area: Rect) {
@@ -579,7 +616,7 @@ fn picker(f: &mut Frame, p: &Picker, t: &Theme, area: Rect) {
     let width = (p.items.iter().map(|(l, _)| l.chars().count()).max().unwrap_or(20).max(p.title.chars().count() + 2) as u16 + 6).clamp(36, 78);
     let r = centered(area, width, height);
     f.render_widget(Clear, r);
-    let b = Block::bordered().border_style(t.accent).title(Span::styled(format!(" {} ", p.title), t.bold));
+    let b: Block = t.dialog(p.title.clone(), t.accent);
     let inner = b.inner(r);
     f.render_widget(b, r);
     let rows = inner.height.saturating_sub(1) as usize;
@@ -587,7 +624,8 @@ fn picker(f: &mut Frame, p: &Picker, t: &Theme, area: Rect) {
     let mut lines = vec![Line::from(vec![Span::styled(" ›", t.accent), Span::raw(p.filter.clone()), Span::styled("█", t.accent), Span::styled(if p.filter.is_empty() { "  type to filter" } else { "" }, t.dim)])];
     for (n, &i) in shown.iter().enumerate().skip(off).take(rows) {
         let style = if n == p.sel { t.selected } else { Style::new() };
-        lines.push(Line::styled(pad(&format!(" {}", p.items[i].0), inner.width as usize, false), style));
+        let mark = if n == p.sel { Span::styled("▌", t.accent.patch(style)) } else { Span::raw(" ") };
+        lines.push(Line::from(vec![mark, Span::styled(pad(&p.items[i].0, (inner.width as usize).saturating_sub(1), false), style)]));
     }
     if shown.is_empty() {
         lines.push(Line::styled(if p.items.is_empty() { " (loading…)" } else { " nothing matches" }, t.dim));

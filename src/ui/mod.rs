@@ -15,6 +15,7 @@ mod docker;
 mod exec;
 mod home;
 mod kube;
+pub mod theme;
 pub mod model;
 pub mod view;
 
@@ -120,7 +121,21 @@ pub async fn run(args: UiArgs) -> Result<()> {
     if fixed.is_some() {
         app.kube.reset(start_ns);
     }
+    // The look: ui.yaml's theme in this terminal's colors, its background
+    // asked once before the input reader starts (see probe_background).
+    let ui_config = kube::uiconfig::load().unwrap_or_default();
+    let mut term = theme::Term::from_env();
     let mut terminal = setup(args.mouse)?;
+    let probe_started = Instant::now();
+    let mut probed = None;
+    if ui_config.background == theme::Background::Auto && ui_config.theme == theme::Preset::Default && matches!(term.depth, theme::Depth::True | theme::Depth::X256) && !term.ascii {
+        if let Some((r, g, b)) = probe_background(Duration::from_millis(150)) {
+            term.bg = Some(theme::Bg::Rgb(r, g, b));
+        }
+        probed = Some(probe_started.elapsed());
+    }
+    theme::init(term);
+    app.kube.theme = theme::Theme::from_config(&ui_config);
     let input = Input::new();
     let kube_rt = kube::rt::Rt::new(kube_ep.clone(), tx.clone());
     let mut rt = Runtime {
@@ -140,7 +155,7 @@ pub async fn run(args: UiArgs) -> Result<()> {
         kube_rt,
         log_task: None,
         input,
-        stats: Stats { started, first_frame: None, data_frame: None, containers_seen: false, frames: 0, kube_frame: None, key_at: None, keys: 0, key_total: Duration::ZERO, key_max: Duration::ZERO },
+        stats: Stats { started, probe: probed, first_frame: None, data_frame: None, containers_seen: false, frames: 0, kube_frame: None, key_at: None, keys: 0, key_total: Duration::ZERO, key_max: Duration::ZERO },
     };
     rt.kube_rt.load_settings();
     let result = rt.event_loop(&mut terminal, &mut app, rx, &pace).await;
@@ -157,7 +172,8 @@ pub async fn run(args: UiArgs) -> Result<()> {
         let s = &rt.stats;
         let ms = |d: Option<Duration>| d.map(|d| format!("{:.1} ms", d.as_secs_f64() * 1000.0)).unwrap_or_else(|| "-".into());
         eprintln!(
-            "litek8s ui: first frame {}, first frame with containers {}, first Kubernetes list {}, {} frames in {:.1} s",
+            "litek8s ui: background asked in {}, first frame {}, first frame with containers {}, first Kubernetes list {}, {} frames in {:.1} s",
+            ms(s.probe),
             ms(s.first_frame),
             ms(s.data_frame),
             ms(s.kube_frame),
@@ -177,6 +193,8 @@ const AGES_EVERY: Duration = Duration::from_secs(30);
 /// `LITEK8S_UI_STATS=1`: what the UI did, printed when it exits.
 struct Stats {
     started: Instant,
+    /// Asking the terminal for its background.
+    probe: Option<Duration>,
     first_frame: Option<Duration>,
     /// The first frame showing the engine's containers.
     data_frame: Option<Duration>,
@@ -217,6 +235,89 @@ fn setup(mouse: bool) -> Result<Term> {
     let mut t = ratatui::Terminal::new(CrosstermBackend::new(std::io::stdout()))?;
     t.hide_cursor()?;
     Ok(t)
+}
+
+/// The terminal's background color, asked with OSC 11 and read straight
+/// from the terminal before crossterm's reader starts (crossterm would
+/// take the answer for keys). A DA1 query follows: terminals answer in
+/// order and practically all answer DA1, so the wait ends with that answer
+/// (a millisecond or two locally, a round trip over ssh); one that answers
+/// neither costs `timeout`, once, and the UI starts with colors that read
+/// on both backgrounds. Unlike the cursor-position query that once failed
+/// the start in terminals that never answer, nothing here can fail.
+#[cfg(unix)]
+fn probe_background(timeout: Duration) -> Option<(u8, u8, u8)> {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    let mut out = std::io::stdout();
+    out.write_all(b"\x1b]11;?\x1b\\\x1b[c").ok()?;
+    out.flush().ok()?;
+    let fd = std::io::stdin().as_raw_fd();
+    let deadline = Instant::now() + timeout;
+    let mut buf = Vec::new();
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            break;
+        }
+        let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+        // SAFETY: one valid pollfd for the duration of the call.
+        let n = unsafe { libc::poll(&mut pfd, 1, left.as_millis().max(1) as libc::c_int) };
+        if n <= 0 {
+            break;
+        }
+        let mut chunk = [0u8; 256];
+        // SAFETY: reads at most chunk.len() bytes into chunk.
+        let r = unsafe { libc::read(fd, chunk.as_mut_ptr().cast(), chunk.len()) };
+        if r <= 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..r as usize]);
+        if da1_answered(&buf) || buf.len() > 4096 {
+            break;
+        }
+    }
+    parse_osc11(&buf)
+}
+
+#[cfg(not(unix))]
+fn probe_background(_timeout: Duration) -> Option<(u8, u8, u8)> {
+    None
+}
+
+/// `ESC [ ? … c`: the terminal's primary device attributes.
+fn da1_answered(buf: &[u8]) -> bool {
+    let mut from = 0;
+    while let Some(p) = buf[from..].windows(3).position(|w| w == b"\x1b[?") {
+        let tail = &buf[from + p + 3..];
+        let n = tail.iter().take_while(|b| b.is_ascii_digit() || **b == b';').count();
+        if tail.get(n) == Some(&b'c') {
+            return true;
+        }
+        from += p + 3;
+    }
+    false
+}
+
+/// `ESC ] 11 ; rgb:RRRR/GGGG/BBBB` (1 to 4 hex digits a component), ended
+/// by BEL or ST.
+fn parse_osc11(buf: &[u8]) -> Option<(u8, u8, u8)> {
+    let s = String::from_utf8_lossy(buf);
+    let at = s.find("]11;")?;
+    let rest = &s[at + 4..];
+    let rest = rest.strip_prefix("rgba:").or_else(|| rest.strip_prefix("rgb:"))?;
+    let end = rest.find(['\x07', '\x1b']).unwrap_or(rest.len());
+    let mut parts = rest[..end].split('/');
+    let mut comp = || -> Option<u8> {
+        let h = parts.next()?;
+        if h.is_empty() || h.len() > 4 {
+            return None;
+        }
+        let v = u32::from_str_radix(h, 16).ok()?;
+        let max = (1u32 << (4 * h.len())) - 1;
+        Some(((v * 255 + max / 2) / max) as u8)
+    };
+    Some((comp()?, comp()?, comp()?))
 }
 
 fn restore(mouse: bool) {
@@ -603,6 +704,9 @@ impl Runtime {
     /// through Home's samples).
     fn use_cluster(&mut self, app: &mut App, name: &str) {
         let cluster = crate::dev::cluster::Cluster { name: name.to_string() };
+        if app.cluster != cluster.name {
+            app.history.clear();
+        }
         app.cluster = cluster.name.clone();
         ctx::set_active_cluster(name);
         *self.active.lock().unwrap() = cluster.name.clone();
@@ -732,3 +836,17 @@ impl Runtime {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod probe_tests {
+    #[test]
+    fn background_answers() {
+        assert_eq!(super::parse_osc11(b"\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\\x1b[?62;22c"), Some((0x1e, 0x1e, 0x2e)));
+        assert_eq!(super::parse_osc11(b"\x1b]11;rgb:ff/ff/ff\x07"), Some((255, 255, 255)));
+        assert_eq!(super::parse_osc11(b"\x1b]11;rgb:f/0/8\x07"), Some((255, 0, 136)));
+        assert_eq!(super::parse_osc11(b"\x1b[?1;2c"), None);
+        assert!(super::da1_answered(b"\x1b]11;rgb:0/0/0\x07\x1b[?62;22c"));
+        assert!(super::da1_answered(b"\x1b[?6c"));
+        assert!(!super::da1_answered(b"\x1b[?62;2"));
+    }
+}

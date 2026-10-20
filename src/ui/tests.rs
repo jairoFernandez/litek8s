@@ -100,8 +100,8 @@ fn every_view_fits_80x24() {
         let screen = render(&app, 80, 24);
         assert_eq!(screen.lines().count(), 24);
         assert!(screen.lines().all(|l| l.chars().count() == 80));
-        assert!(screen.lines().next().unwrap().contains("8 Settings"), "tab bar cut off:\n{screen}");
-        assert!(screen.lines().last().unwrap().contains("? help"), "{screen}");
+        assert!(screen.lines().next().unwrap().contains("8 Set"), "tab bar cut off:\n{screen}");
+        assert!(screen.lines().last().unwrap().contains("?  help"), "{screen}");
     }
 }
 
@@ -109,11 +109,9 @@ fn every_view_fits_80x24() {
 fn home_shows_state_resources_and_contexts() {
     let app = sample_app();
     let s = render(&app, 80, 24);
-    assert!(s.contains("● up"), "{s}");
-    assert!(s.contains("macOS VM"), "{s}");
-    assert!(s.contains("up 2h 1m"), "{s}");
-    assert!(s.contains("12% of 1 CPU = 3% of 4"), "{s}");
-    assert!(s.contains("1.2 GB / 4.3 GB"), "{s}");
+    assert!(s.contains("● dev · macOS VM · up 2h 1m"), "{s}");
+    assert!(s.contains("3% of 4 CPUs · 12% of one"), "{s}");
+    assert!(s.contains("28% 1.2 GB of 4.3 GB"), "{s}");
     assert!(s.contains("150 GB free"), "{s}");
     assert!(s.contains("✓ docker context"), "{s}");
     assert!(s.contains("✓ kubectl context"), "{s}");
@@ -153,7 +151,7 @@ fn destructive_actions_ask_first() {
         }
         o => panic!("no confirmation: {o:?}"),
     }
-    assert!(render(&app, 80, 24).contains("y yes"));
+    assert!(render(&app, 80, 24).contains(" y  yes"));
     // n cancels, y runs.
     assert!(app.key(key('n')).is_empty());
     assert_eq!(app.overlay, Overlay::None);
@@ -172,7 +170,7 @@ fn destructive_actions_ask_first() {
     app.key(key('R'));
     assert_eq!(app.key(code(KeyCode::Enter)), vec![Effect::Dev(DevOp::Delete("dev".into()))]);
     // Until it finishes, Home says it is stopping, and refuses another run.
-    assert!(render(&app, 80, 24).contains("● stopping"));
+    assert!(render(&app, 80, 24).contains("◐ dev · stopping"));
     assert!(app.key(key('u')).is_empty());
     app.apply(Msg::DevFinished(Ok("litek8s dev delete --name dev: done".into())));
     assert_eq!(app.dev_busy, None);
@@ -188,7 +186,7 @@ fn logs_follow_and_scroll() {
     app.apply(Msg::LogLines(id, (0..100).map(|i| format!("line {i}")).collect()));
     let s = render(&app, 80, 24);
     assert!(s.contains("line 99") && !s.contains("line 50"), "{s}");
-    assert!(s.contains("[follow]"));
+    assert!(s.contains("● follow"));
     app.key(code(KeyCode::PageUp));
     let s = render(&app, 80, 24);
     assert!(!s.contains("line 99") && s.contains("line 79"), "{s}");
@@ -230,7 +228,7 @@ fn free_space_counts_and_prunes_what_is_selected() {
     assert_eq!(app.reclaimable(Reclaim::UnusedImages), (0, 0));
     assert_eq!(app.reclaimable(Reclaim::UnusedVolumes), (52_001_000, 2));
     let s = render(&app, 80, 24);
-    assert!(s.contains("[x] Stopped containers"), "{s}");
+    assert!(s.contains("[✓] Stopped containers"), "{s}");
     assert!(s.contains("[ ] Unused volumes"), "{s}");
     assert!(s.contains("305 MB"), "selected total:\n{s}");
     app.key(key('p'));
@@ -366,7 +364,9 @@ fn wide_terminals_get_more_columns() {
     app.key(key('3'));
     let s = render(&app, 120, 30);
     assert!(s.contains("STATUS") && s.contains("Up 2 minutes"), "{s}");
-    assert!(render(&app, 120, 30).lines().next().unwrap().contains("Free space"));
+    // A tall one gets the header box, its tabs on the second line.
+    assert!(render(&app, 120, 30).lines().nth(1).unwrap().contains("6 Free space"));
+    assert!(render(&app, 120, 29).lines().next().unwrap().contains("6 Free space"));
 }
 
 #[test]
@@ -453,9 +453,9 @@ fn clusters_view_lists_local_clusters_and_other_contexts() {
     assert_eq!(app.tab, Tab::Clusters);
     let s = render(&app, 80, 24);
     assert!(s.contains("Local clusters") && s.contains("4 CPUs") && s.contains("412 MB used"), "{s}");
-    assert!(s.contains("● dev") && s.contains("127.0.0.1:50213") && s.contains("2/3") && s.contains("96.0 MB"), "{s}");
+    assert!(s.contains("› dev") && s.contains("● up") && s.contains("127.0.0.1:50213") && s.contains("2/3") && s.contains("96.0 MB"), "{s}");
     assert!(s.contains("Other kubeconfig contexts") && s.contains("https://192.168.1.10:6443"), "{s}");
-    assert!(s.lines().last().unwrap().contains("n new"), "{s}");
+    assert!(s.lines().last().unwrap().contains("n  new"), "{s}");
     // Start a stopped one: no question; stop and delete ask.
     app.key(key('G'));
     app.key(key('k'));
@@ -575,7 +575,21 @@ fn home_explains_cpu_and_disk_with_b() {
     assert!(s.contains("litek8s itself") && s.contains("images") && s.contains("deleted in the VM"), "{s}");
     // Unused images show as reclaimable, pointing at Free space.
     assert!(s.contains("reclaimable (6 Free space)"), "{s}");
-    // A tall terminal shows all three.
-    let s = render(&app, 100, 60);
-    assert!(s.contains("Memory ·") || s.contains("CPU ·") && s.contains("Disk ·"), "{s}");
+    // A wide and tall terminal shows all three side by side.
+    let s = render(&app, 120, 40);
+    assert!(s.contains("─ cpu · the VM process") && s.contains("─ disk · litek8s and its VM disk") && s.contains("deleted in the VM"), "{s}");
+}
+
+/// `cargo test --lib ui::tests::print_screens -- --ignored --nocapture`:
+/// every view at 80x24 and 120x40, to look at.
+#[test]
+#[ignore]
+fn print_screens() {
+    let mut app = sample_app();
+    for (w, h) in [(80, 24), (120, 40)] {
+        for (i, _) in TABS.iter().enumerate() {
+            app.key(key(char::from(b'1' + i as u8)));
+            println!("{w}x{h} tab {}\n{}", i + 1, render(&app, w, h));
+        }
+    }
 }
