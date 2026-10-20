@@ -21,7 +21,7 @@ Eight views, `1`-`8` (or `tab`) to switch, `?` for the keys of each:
 | **4 Images** | sizes, age, which containers and pods use each; `d` remove |
 | **5 Volumes** | sizes, which containers mount each, compose project; `d` remove |
 | **6 Free space** | what can be reclaimed: stopped containers, dangling images, build cache, unused images, unused volumes; select with `space`, `p` frees it |
-| **7 Kubernetes** | namespaces → pods and deployments with status; logs, port-forward, scale, restart, delete pod. For more, [k9s](https://k9scli.io) works with litek8s (`k9s --context litek8s-dev`) |
+| **7 Kubernetes** | a cluster UI for any cluster or context (litek8s, k3s, EKS, GKE, …), k9s-style: `:` any resource (CRDs too), `/` filters and selectors, describe, YAML, edit with a server dry run and a diff, logs of pods and whole workloads, shells, port-forwards, xray trees; see [Kubernetes](#kubernetes-a-cluster-ui) |
 | **8 Settings** | CPUs, memory, shared directories, API port, where published ports listen; switch the docker and kubectl contexts to litek8s and back; edit the settings file in `$EDITOR` |
 
 Everything that deletes or stops asks first, and says what goes: removing a
@@ -271,27 +271,24 @@ containers and unused images on the Mac:
               └──────────────────────────────────────────────────┘
 ```
 
-Kubernetes (`n` cycles namespaces, `v` switches to deployments):
+Kubernetes, all namespaces (`0`), `ctrl-z` would keep the two crashing pods:
 
 ```
  litek8s  1 Home 2 Clusters 3 Ctrs 4 Images 5 Vols 6 Space 7 Kube 8 Settings
- namespace all   [Pods] Deployments
-┌ Pods — litek8s-dev ──────────────────────────────────────────────────────────┐
-│NAME                                  READY  STATUS             RESTARTS AGE  │
-│default/hello-649565b5b-764k5         1/1    Running            0        27m  │
-│default/hello-649565b5b-klzzp         1/1    Running            0        27m  │
-│default/hello-649565b5b-kw2tg         1/1    Running            0        27m  │
-│demo/echo-55ff5f8478-ps8xb            1/1    Running            0        27m  │
+ ⎈ litek8s-ui-test  ns all  │ pods
+┌ pods(all) [6] ───────────────────────────────────────────────────────────────┐
+│ NAMESPACE NAME                   READY STATUS           RESTARTS AGE         │
+│ default   web-8567f99496-mtcrn   2/2   Running          0        33m         │
+│ default   web-8567f99496-r7hnq   2/2   Running          0        29m         │
+│ shop      api-6df8b694fd-ck8sd   0/1   CrashLoopBackOff 1        16s         │
+│ shop      api-6df8b694fd-x697f   0/1   CrashLoopBackOff 1        16s         │
+│ shop      cache-599d9956dc-r8xlm 1/1   Running          0        16s         │
+│ shop      migrate-6lslk          0/1   Completed        0        16s         │
 └──────────────────────────────────────────────────────────────────────────────┘
- l logs  f forward  d delete  n namespace  v deployments                 ? help
+ : cmd  / filter  l logs  s shell  d describe  F fwd  m menu             ? help
 ```
 
-A running port-forward shows in the header (marked "pod gone" if a rollout
-replaced its pod):
-
-```
- namespace all   [Pods] Deployments    ⇄ 8080→hello-f8f657f94-qz2gp:80
-```
+More of it in [Kubernetes](#kubernetes-a-cluster-ui).
 
 Settings, after changing the shares and where ports listen while the VM
 runs:
@@ -427,6 +424,270 @@ Home shows, and Settings switches:
 
 What was current before is kept in `~/.litek8s/ui-state.json`.
 
+## Kubernetes: a cluster UI
+
+View 7 is a cluster UI in the spirit of [k9s](https://k9scli.io), for any
+cluster: the local dev clusters, and every context of your kubeconfig
+(k3s, kind, EKS, GKE, AKS, …). Its keys are k9s's where k9s has one, so
+k9s habits work; it is lighter (see [the numbers](#kubernetes-performance))
+and comes with litek8s.
+
+```bash
+litek8s ui --context prod -n payments   # start on a context and namespace
+```
+
+or `:ctx` inside to pick one. Credentials are what kubectl reads:
+`$KUBECONFIG` (all its files, merged as kubectl merges them), tokens, token
+files, client certificates, basic auth, and **exec plugins**
+(`gke-gcloud-auth-plugin`, `aws eks get-token`, `kubelogin`, …), run when a
+token is needed and again when it expires or the server refuses it. Every
+request goes to the context the UI shows; `:kubectl` passes it as
+`--context`, so the kubeconfig's current context is never used by accident.
+
+### Command mode (`:`)
+
+| command | what it shows or does |
+|---|---|
+| `:pods`, `:po`, `:deploy`, `:dp`, `:svc`, `:ing`, `:no`, `:ns`, `:ev`, `:crd`, `:cm`, `:sec`, `:pvc`, … | that resource type: any type the cluster serves, custom resources and aggregated APIs included, by plural, singular, short name, kind or `plural.group` (`:certificates.cert-manager.io`, `:cert`) |
+| `:pods kube-system`, `:pods -n kube-system`, `:deploy -A` | in a namespace, or all of them |
+| `:pods -l app=web,tier!=db`, `:pods -f status.phase=Running`, `:pods /nginx` | with a label selector, a field selector (sent to the server), a filter |
+| `:ctx` / `:ctx prod` | pick a context / switch to one (the views reconnect) |
+| `:ns` / `:ns web` | the namespaces / switch the namespace |
+| `:xray deploy [ns]` | owner trees: deploy → ReplicaSets → pods → containers (also `sts`, `ds`, `rs`, `job`, `cronjob` → jobs → pods, `svc` → its pods, `node` → its pods) |
+| `:kubectl get events -A`, `:!top pods`, `!` | kubectl on the UI's context and namespace; its output in a pager (`exec -it`, `edit`, `attach` get the terminal) |
+| `:pf` | the running port-forwards |
+| `:aliases` | every resource type, to pick one |
+| `:help`, `:q` | the keys; quit |
+
+`tab` (or `→`) completes resource names, commands, namespaces after `-n` or
+`:ns`, contexts after `:ctx`; the first candidate shows greyed after the
+cursor. `↑`/`↓` walk the history (kept in `~/.litek8s/ui-history`).
+Aliases of your own come from [`ui.yaml`](#uiyaml).
+
+Columns are the server's: the same Table kubectl prints (custom resources'
+printer columns included), `ctrl-w` adds the wide ones (`-o wide`). Ages are
+computed from the creation time, so they move on. Rows are colored by
+health: pods by their status and readiness, workloads by ready counts,
+nodes by conditions, anything with a Status column by its words.
+
+### Filters (`/`)
+
+The list narrows as you type; `tab` switches the mode:
+
+| filter | keeps |
+|---|---|
+| `web` | rows whose name or any cell contains it (substring, any case) |
+| `^web-\d+` | the same as a regex (mode `regex`) |
+| `wbf` | fuzzy: the letters in order, tighter matches first (mode `fuzzy`) |
+| `!running` | the rows that do *not* match |
+| `-l app=web,tier in (a,b),!canary` | rows whose labels match the selector (matched here, instantly) |
+| `-f status.phase=Running` | a field selector, sent to the server (a list of its own) |
+
+They combine (`!running -l app=web`). Each resource type keeps its last
+filter while the UI runs, and the table's title shows it. `ctrl-z` keeps
+only the rows that are not fine (crashing, pending, not ready); `esc`
+clears marks, then the filter, then goes back.
+
+Sorting: `<` and `>` pick the column (an arrow marks it), `O` reverses it,
+`N` `A` `S` sort by name, age (newest first), status as in k9s. Numbers sort
+as numbers, `2/3` by its counts, `512Mi` and `250m` by size.
+
+### Acting on objects
+
+`m` opens the selected row's actions as a menu; each has a key:
+
+| key | on | does |
+|---|---|---|
+| `enter` | deploy, sts, ds, rs, job, svc, node | its pods (by its selector, or on the node) |
+| `enter` | pod / ns / crd / cronjob | its containers / switch to it / its objects / its jobs |
+| `d` / `y` | anything | describe (kubectl's, events at the end) / YAML (`m` there shows managedFields) |
+| `e` | anything | edit in `$EDITOR` (below) |
+| `ctrl-d`, `del` | anything | delete, asking first; `p` there picks the cascade (Background, Foreground, Orphan), `f` no grace period |
+| `ctrl-k` | pod | kill: delete with no grace period (asks) |
+| `space` | anything | mark; actions apply to every marked row (`ctrl-\` unmarks) |
+| `l` / `p` | pod, container, workload, svc | logs / the previous containers' logs |
+| `s` | pod, container | a shell (pick the container when there are several) |
+| `s` | deploy, sts, rs | scale |
+| `r` / `u` / `H` | deploy (`r`: sts, ds too) | rollout restart / undo (to the previous revision) / history and status |
+| `F` | pod, svc, deploy, sts, rs | port-forward (a service's or workload's goes to one of its ready pods) |
+| `f` | | the port-forwards (`d` stops one) |
+| `c` / `u` / `r` | node | cordon / uncordon / drain (evictions, honoring PodDisruptionBudgets; DaemonSet pods stay) |
+| `t` | cronjob | run it now (a Job from its template) |
+| `x` | secret / workloads | decode its data / its xray tree |
+| `o` / `J` / `E` | pod / anything owned / anything | its node / its owner / its events |
+| `c` / `C` | anything | copy the name / the YAML (OSC 52, so it works over SSH) |
+| `n` / `0` | | pick a namespace / all namespaces and back |
+
+**Edit** works like `kubectl edit`, with the server checking it first: the
+object goes to `$EDITOR` as YAML; what comes back is sent as a dry run
+(`PUT ?dryRun=All`), so the API server validates it (schemas, admission
+webhooks) without changing anything. A mistake comes back into the editor
+as comment lines (`# Error: ...`) over your edit; a valid change shows as a
+diff, which `y` applies (`e` edits again, `esc` drops it):
+
+```
+┌ edit deploy/team-0/web (validated by the server; not applied yet)  y apply · e edit · esc drop ──┐
+│@@ -13,7 +13,7 @@                                                                                 │
+│   uid: 256ba4d2-d410-42be-99f6-f48045d36606                                                      │
+│ spec:                                                                                            │
+│   progressDeadlineSeconds: 600                                                                   │
+│-  replicas: 3                                                                                    │
+│+  replicas: 4                                                                                    │
+│   revisionHistoryLimit: 10                                                                       │
+```
+
+### Logs
+
+`l` on a pod with several containers asks which (or all of them); on a
+deployment, statefulset, daemonset, job or service it follows every
+container of every pod it selects (up to `logs.maxStreams`, 30), each with
+a colored prefix, interleaved by time:
+
+```
+┌ logs deploy/default/web (all pods)  [follow]  4 streams ─────────────────────┐
+│mtcrn/ticker tick 45 from web-8567f99496-mtcrn                                │
+│lkzkl/ticker tick 45 from web-8567f99496-lkzkl                                │
+│lkzkl/ticker ERROR something odd 45                                           │
+│lkzkl/nginx  10.42.0.1 - - "GET / HTTP/1.1" 200 615                           │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+`f` pauses and follows again, `/` keeps the matching lines (highlighted;
+`tab` for regex or fuzzy), `t` timestamps, `w` wrap, `p` the previous
+containers' logs, `c` copies, `ctrl-s` saves to a file (in
+`$TMPDIR/litek8s/`), `x` clears. The buffer keeps the last `logs.buffer`
+lines (10 000); each stream starts with its last `logs.tail` lines (100).
+
+### Shells and port-forwards
+
+`s` suspends the UI and opens a shell (bash if the image has it, else ash
+or sh) in the container, over the API server's exec WebSocket, resized
+with the terminal; exiting it comes back to the same view with its exit
+code. `F` asks for `local:remote` with the object's ports listed (names
+work: `8080:http`); forwards listen on 127.0.0.1 until stopped or the UI
+exits, show as `⇄n` in the header, and `f` lists them with their
+connection counts.
+
+### xray
+
+```
+┌ xray deployments(shop) ──────────────────────────────────────────────────────┐
+│▾ deploy api  0/2 ready                                                       │
+│  ▾ rs api-6df8b694fd  0/2 ready, revision 1                                  │
+│    ▾ pod api-6df8b694fd-ck8sd  CrashLoopBackOff 0/1, 2 restarts              │
+│        container busybox  waiting (CrashLoopBackOff), not ready, busybox:1.36│
+│▾ deploy cache  1/1 ready                                                     │
+│  ▾ rs cache-599d9956dc  1/1 ready, revision 1                                │
+│    ▾ pod cache-599d9956dc-r8xlm  Running 1/1                                 │
+│        container redis  running, ready, redis:7-alpine                       │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+`enter` folds a branch; `d`, `y`, `e`, `l`, `s`, `ctrl-d` act on the row's
+object (on a container row: its logs and shell); `ctrl-r` reloads it.
+
+### `ui.yaml`
+
+`~/.litek8s/ui.yaml` (next to `config.yaml`; `$LITEK8S_UI_CONFIG` to put it
+elsewhere), every part optional:
+
+```yaml
+aliases:                        # :cp → pods -n kube-system -l tier=control-plane
+  cp: pods -n kube-system -l tier=control-plane
+hotkeys:                        # a key runs a command line
+  shift-1: ":pods -A"
+  f2: "!get events -A --sort-by=.lastTimestamp"
+plugins:                        # your commands, on the selected row
+  - name: dive
+    key: ctrl-i
+    scopes: [pods]              # resource names, or all
+    command: dive
+    args: [$COL-IMAGE]          # $NAME $NAMESPACE $CONTEXT $RESOURCE $CONTAINER $COL-<COLUMN>
+  - name: stern
+    key: shift-l
+    scopes: [deploy]
+    command: stern
+    args: [-n, $NAMESPACE, $NAME]
+    background: true            # output in a pager instead of the terminal
+    confirm: false              # true: ask first
+skin:                           # names, 0-255 or #rrggbb; default: the terminal's colors
+  accent: cyan
+  selected: darkgray
+  warn: yellow
+  bad: red
+logs: {tail: 100, buffer: 10000, timestamps: false, wrap: false, maxStreams: 30}
+readOnly: false                 # true: no deletes, edits, scaling, shells
+kubectl: kubectl                # which kubectl `:kubectl` runs
+```
+
+Hotkeys and plugins are checked before the built-in keys, so they can take
+any of them. Variables are also passed to plugins as environment variables.
+`NO_COLOR` turns colors off (the selection is reverse video then). `--mouse`
+selects rows with a click and scrolls with the wheel.
+
+### Kubernetes keys
+
+| where | keys |
+|---|---|
+| tables | `:` command, `/` filter, `!` kubectl, `?` help, `m` actions, `enter` open, `esc` back, `n` namespace, `0` all namespaces, `space` mark, `<` `>` `O` `N` `A` `S` sort, `ctrl-w` wide, `ctrl-z` faults, `ctrl-r` reload, `f` port-forwards, and [the actions](#acting-on-objects) |
+| pagers (describe, YAML, kubectl, help) | `/` search, `n`/`N` next/previous match, `w` wrap, `←→` scroll sideways, `e` edit, `y`/`d` YAML/describe, `m` managedFields, `c` copy, `ctrl-s` save, `esc` back |
+| logs | `f` follow/pause, `/` filter, `t` timestamps, `w` wrap, `p` previous, `c` copy, `x` clear, `ctrl-s` save, `esc` back |
+| xray | `enter` fold, `d` `y` `e` `l` `s` `ctrl-d` on the row, `ctrl-r` reload |
+
+`1`-`8` and `tab` still switch views, `q` quits.
+
+### For other views and tools
+
+The Kubernetes view's pieces are separate so other parts of litek8s can use
+them: `kube::ops` (one async function per API action), `kube::informer`
+(compact, watched lists), `kube::describe`, and extra table columns:
+a `KMsg::Ext { kind, column, values }` message adds a column (values by
+`namespace/name`) to every table of that kind. The CPU and MEM columns
+from `metrics.k8s.io` are one; an observability view can add its own
+(request rates, error counts) the same way, without touching the table
+code.
+
+### Kubernetes performance
+
+Lists are kept as compact rows (the server's cells, name, labels, owners;
+no spec, status or annotations), read straight from the API's pages into
+them; a table builds only the rows on screen; filtering and sorting run
+over the rows in memory on each keystroke. Measured on an M-series MacBook
+against a litek8s API server with no nodes (`litek8s apiserver --no-node`)
+holding 50, 1 000 and 5 000 pod objects (two containers each, 50
+namespaces), both UIs on the pods of all namespaces in a 120x40 `tmux`
+window, release build, k9s v0.50.16 (Homebrew), 60 s idle, RSS and CPU
+time from `ps` (perf script: create the pods with the API, start the UI,
+wait for the list, sample, filter, quit):
+
+| pods | | startup to the list | RSS | CPU idle | filter keystroke to screen |
+|---|---|---|---|---|---|
+| 50 | **litek8s ui** | 0.09 s | 19.7 MiB | 0.00 % | 0.5 ms (25 ms on screen) |
+| | k9s | 1.87 s | 101.7 MiB | 0.40 % | (24 ms on screen) |
+| 1 000 | **litek8s ui** | 0.16 s | 29.4 MiB | 0.02 % | 0.6 ms (22 ms on screen) |
+| | k9s | 1.64 s | 153.9 MiB | 3.17 % | (23 ms on screen) |
+| 5 000 | **litek8s ui** | 0.83 s | 61.0 MiB | 0.02 % | 1.0 ms (30 ms on screen) |
+| | k9s | 3.05 s | 359.7 MiB | 15.4 % | (26 ms on screen) |
+| 5 000, 10 updates/s | **litek8s ui** | 1.23 s | 43.6 MiB | 1.28 % | 0.9 ms (26 ms on screen) |
+| | k9s | – | 361.3 MiB | 15.2 % | (38 ms on screen) |
+
+- *Startup* is from starting the process to the full list on screen,
+  watched from outside every 10 ms (it includes `tmux` starting it);
+  `LITEK8S_UI_STATS=1` puts litek8s's own figure at 45 ms, 112 ms and
+  788 ms (most of it the API server paging 5 000 pods).
+- *Filter keystroke*: the first figure is litek8s's own, from the key to
+  the frame written (`LITEK8S_UI_STATS`); in brackets, from `tmux
+  send-keys` to a changed `tmux capture-pane`, which cannot go below about
+  22 ms: both UIs are at that floor.
+- *Idle*: pods bound to a node that does not exist, so nothing changes.
+  The last two rows are pods the server's scheduler keeps retrying (about
+  10 pod updates a second at 5 000 pods): litek8s sends a table at most
+  once a second while changes keep coming and redraws only then; k9s
+  re-renders its tables every 2 s whether or not anything changed.
+- Over SSH on omarchy (Linux x86_64, rootless dev cluster, pods table of a
+  namespace with two running pods, 100x30): 0 CPU ticks in 60 s, 24 MiB
+  RSS, 2 threads.
+
 ## How it talks to litek8s
 
 Only through what litek8s already serves, so a remote litek8s looks the
@@ -435,8 +696,14 @@ same:
 | what | from |
 |---|---|
 | containers, images, volumes, sizes, logs, exec, prune | the Docker Engine API on the socket (`GET /containers/json`, `/system/df`, `/events`, `POST /exec/{id}/start` upgraded to a raw stream, ...) |
-| pods, deployments, namespaces, logs, scale, restart, delete | the Kubernetes API (list + watch, `PATCH`, `.../log?follow=true`) |
+| resource types | discovery: aggregated (`/api`, `/apis` as `APIGroupDiscoveryList`, two requests), else the legacy per-group documents |
+| every list | `?limit=2000&includeObject=Metadata` as a server-side Table (`as=Table;g=meta.k8s.io`), then a watch from its resourceVersion (Tables too) |
+| describe, YAML, edit, delete, scale, rollouts, cordon, drain | `GET`, `PUT` (with `?dryRun=All` first for edits), `DELETE` with `propagationPolicy`, `PATCH .../scale`, merge and JSON patches, `POST .../eviction` |
+| logs | `.../log?follow=true&timestamps=true&tailLines=N` per pod and container |
+| shell | `GET .../exec` upgraded to a WebSocket (`v5.channel.k8s.io`, else `v4.channel.k8s.io`) |
 | port-forward | `POST .../pods/{name}/portforward` upgraded to SPDY/3.1 (`portforward.k8s.io`), one session per local connection, listening on 127.0.0.1 |
+| CPU and memory columns | `metrics.k8s.io` (when the cluster serves it), every 15 s while pods or nodes are shown |
+| `:kubectl`, plugins | `kubectl --context <the UI's context>`, the plugin's command, as child processes |
 | state, CPU, memory, disk of the dev cluster | the dev supervisor's state file (`dev.json`: mode, port, pid, cgroup or VM process, what it started with), its cgroup or the VM process |
 | up, down, delete, new cluster | `litek8s dev up/down/delete --name <cluster>`, run as a child process (its output shows on Home and Clusters) |
 | the local clusters, their memory | the clusters' files in the dev data directory (`cluster.json`, `dev.json`), one request to the VM or sandbox (`env.sock`) for every cluster's memory, `GET /api/v1/nodes` of each running one for its Ready nodes |
@@ -553,7 +820,7 @@ crossterm are about 200 KiB.
 | Containers | `l`/`enter` logs, `s` shell, `u` start, `x` stop (asks), `r` restart (asks), `d`/`del` remove (asks), `space` fold a project |
 | Images, Volumes | `d`/`del` remove (asks) |
 | Free space | `space` select a category, `p`/`enter` free the selected (asks) |
-| Kubernetes | `v`/`←→` pods ↔ deployments, `n`/`N` next/previous namespace, `a` all namespaces, `l` logs, `f` port-forward, `X` stop forwards, `d` delete pod (asks), on deployments `s` scale, `r` restart (asks) |
+| Kubernetes | see [its keys](#kubernetes-keys); `?` there lists the ones of what is shown |
 | Settings | `enter` edit, `del` back to the default, `space` toggle / switch a context |
 | logs | `f` follow, `w` wrap, `c` clear, `esc` back |
 
@@ -562,11 +829,13 @@ because it takes over the terminal's own text selection.
 
 ## Limits
 
-- The Kubernetes view is deliberately small: pods and deployments. k9s
-  covers the rest and works against litek8s.
-- Exec is into Docker containers; for pods use `kubectl exec -it` (or k9s).
+- Describe is kubectl's for pods, deployments, nodes and services, and its
+  generic form (fields as "Title Case" keys) for every other type.
+- Rollout undo and history are for deployments (StatefulSets' and
+  DaemonSets' ControllerRevisions are not read).
 - With `publish: all` the ports listen on every interface, but `docker ps`
   still shows them as `127.0.0.1:<port>`: the engine in the VM or sandbox
   does not know where the host side listens.
-- Kubeconfig contexts with `exec` or `auth-provider` credentials (cloud
-  clusters) are not supported by the UI's Kubernetes client.
+- Exec credential plugins that return client certificates (rather than a
+  token) are not supported; `auth-provider` only with a token in the
+  kubeconfig (OIDC's `id-token`).

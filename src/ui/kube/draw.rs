@@ -447,8 +447,14 @@ fn logs(f: &mut Frame, l: &LogsView, t: &Theme, area: Rect) {
     }
     f.render_widget(para, inner);
     if empty {
-        let msg = if l.sources.is_empty() { " connecting…".to_string() } else if l.filter.is_some() { " no line matches".to_string() } else { " no log lines yet".to_string() };
-        f.render_widget(Paragraph::new(Span::styled(msg, t.dim)), inner);
+        let why = l.ended.iter().flatten().find(|e| *e != "ended");
+        let (msg, style) = match why {
+            _ if l.sources.is_empty() => (" connecting…".to_string(), t.dim),
+            _ if l.filter.is_some() => (" no line matches".to_string(), t.dim),
+            Some(e) => (format!(" {e}"), t.bad),
+            None => (" no log lines yet".to_string(), t.dim),
+        };
+        f.render_widget(Paragraph::new(Span::styled(msg, style)).wrap(Wrap { trim: false }), inner);
     }
 }
 
@@ -608,14 +614,14 @@ pub fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         View::Table(tv) => {
             let mut v: Vec<(&str, &str)> = vec![(":", "cmd"), ("/", "filter")];
             match tv.res.kind.as_str() {
-                "Pod" => v.extend([("l", "logs"), ("s", "shell"), ("d", "describe"), ("y", "yaml"), ("F", "fwd")]),
+                "Pod" => v.extend([("l", "logs"), ("s", "shell"), ("d", "describe"), ("F", "fwd")]),
                 "Container" => v.extend([("l", "logs"), ("s", "shell"), ("d", "describe")]),
                 "Deployment" | "StatefulSet" => v.extend([("enter", "pods"), ("l", "logs"), ("s", "scale"), ("r", "restart")]),
                 "Node" => v.extend([("enter", "pods"), ("c", "cordon"), ("r", "drain"), ("d", "describe")]),
                 "Namespace" => v.extend([("enter", "pods"), ("u", "use"), ("d", "describe")]),
                 _ => v.extend([("enter", "open"), ("d", "describe"), ("y", "yaml"), ("e", "edit")]),
             }
-            v.extend([("m", "menu"), ("n", "ns")]);
+            v.push(("m", "menu"));
             v
         }
         View::Pager(p) if p.pending.is_some() => vec![("y", "apply"), ("e", "edit again"), ("esc", "drop")],
