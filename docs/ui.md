@@ -59,17 +59,16 @@ Home:
 
 Under it, Home explains its figures: what the Resources box's memory, CPU
 and disk are made of, one box at a time on 80x24 (`b` shows the next; a
-tall terminal shows all three). Memory, on the Mac (a fresh VM, `dev` and a
-second cluster idle):
+tall terminal shows all three). Memory, on the Mac (a fresh VM running the
+compat corpus):
 
 ```
-┌ Memory · 388 MB (what macOS charges the VM) ─────────────────────────────────┐
-│litek8s (dev)            2.7 MB   API server, controllers, node agent         │
-│pods & containers           0 B                                               │
-│other clusters (1)       1.8 MB   litek8s and pods of the rest                │
-│Linux kernel + base      318 MB   fixed cost: kernel, root fs in RAM          │
-│cache                   11.1 MB   reclaimable                                 │
-│freed in the VM         54.2 MB   macOS takes it back when it needs it        │
+┌ Memory · 589 MB (what macOS charges; VM ceiling 1.0/4.0 GiB)  b: next ───────┐
+│litek8s (dev)           11.9 MB   API server, controllers, node agent         │
+│pods & containers        635 kB                                               │
+│Linux kernel + base      214 MB   fixed cost: kernel, page tables             │
+│cache                    296 MB   reclaimable                                 │
+│freed, still charged    65.8 MB   macOS keeps it until the VM restarts        │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -78,10 +77,15 @@ second cluster idle):
 | litek8s (cluster) | the shown cluster's own processes (API server, controllers, node agent, crun shims) on all its nodes | its cells' cgroups: usage less file pages, less the pods' |
 | pods & containers | its pods, Docker containers and image builds | the `pod*`, `docker/*`, `build/*` cgroups under each node |
 | other clusters | the same two for every other running cluster, together | their cells |
-| Linux kernel + base (macOS) | what the VM costs before anything runs: memory the kernel sets aside at boot (its image and the page structures, ~4 % of the VM's size), its unreclaimable slab, stacks and page tables, and the root filesystem held in RAM (the initramfs: litek8s's binary, crun, iptables); also the VM's own init, cell manager and DHCP client | the VM's size less `MemTotal`, `/proc/meminfo` |
+| Linux kernel + base (macOS) | what the VM costs before anything runs: memory the kernel sets aside at boot (its image and the page structures, ~3.5 % of the VM's size), its unreclaimable slab, stacks and page tables, and tmpfs (an older guest's initramfs, the root filesystem held in RAM); also the VM's own init, cell manager and DHCP client | the VM's size less `MemTotal` and the balloon, `/proc/meminfo` |
 | sandbox (Linux) | the supervisor, pasta and the cell manager | the sandbox's cgroup less the clusters' |
 | cache | file pages: images, logs, the binary; the kernel drops them under pressure | `/proc/meminfo` (VM) or the sandbox's `file` pages |
-| freed in the VM (macOS) | pages the guest used once and has freed; macOS still counts them for the VM until it needs them back, so a VM that once filled its memory keeps a large figure while idle | the footprint less what the guest uses |
+| freed, still charged (macOS) | pages the guest used once and has freed (or handed to the balloon since): Virtualization.framework keeps charging them to the VM until it stops, however much macOS needs memory (it compresses or swaps them like any other); the guest reuses them before it touches more. Restarting the VM (`dev down`, `dev up`) hands them back | the footprint less what the guest uses |
+
+The title also says how much of its memory the guest may use now when that
+is less than all of it: the VM's ceiling, which grows on demand and shrinks
+when the guest is idle ([dev.md](dev.md#memory-on-macos)); what is above it
+was never touched, and macOS charges nothing for it.
 
 The headline figure is what macOS charges the VM process (its physical
 footprint, what Activity Monitor shows) or, on Linux, the sandbox's cgroup.
