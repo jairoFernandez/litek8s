@@ -581,7 +581,9 @@ enum Command {
         listen: std::net::SocketAddr,
         #[arg(long = "server", required = true, value_name = "URL", help = "An API server (repeat for more; the others are learned from it)")]
         servers: Vec<String>,
-        #[arg(long, help = "Consider a server ready when it accepts TCP connections (for servers whose /readyz needs credentials)")]
+        #[arg(long, help = "Check /readyz over HTTPS without verifying the certificate (a kube-apiserver with anonymous /readyz)")]
+        https_check: bool,
+        #[arg(long, conflicts_with = "https_check", help = "Consider a server ready when it accepts TCP connections (for servers whose /readyz needs credentials)")]
         tcp_check: bool,
     },
     #[command(hide = true, about = "Linearizability check of an HA control plane: a CRUD register workload, recorded and checked")]
@@ -1315,7 +1317,11 @@ pub async fn run() -> Result<()> {
             ServerCommand::List { server } => crate::kube::ha::lb::list(&server).await,
             ServerCommand::Remove { name, server, token } => crate::kube::ha::lb::remove(&server, &token, &name).await,
         },
-        Command::Lb { listen, servers, tcp_check } => crate::kube::ha::lb::run(listen, servers, tcp_check).await,
+        Command::Lb { listen, servers, https_check, tcp_check } => {
+            use crate::kube::ha::lb::Check;
+            let check = if https_check { Check::Https } else if tcp_check { Check::Tcp } else { Check::Http };
+            crate::kube::ha::lb::run(listen, servers, check).await
+        }
         Command::HaProbe { server, interval, duration, namespace, out } => {
             let samples = crate::kube::ha::lincheck::probe(&server, &namespace, interval, duration, Duration::from_secs(15)).await;
             if let Some(path) = &out {

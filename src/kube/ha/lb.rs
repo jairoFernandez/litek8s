@@ -47,17 +47,27 @@ impl Pool {
     }
 }
 
+/// How the load balancer decides a server is ready.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Check {
+    /// `GET /readyz` answers 200 (litek8s servers, plain HTTP).
+    Http,
+    /// `GET /readyz` over TLS answers 200, certificate unchecked (a
+    /// kube-apiserver with anonymous `/readyz`, as behind kubeadm's haproxy).
+    Https,
+    /// The server accepts a TCP connection.
+    Tcp,
+}
+
 /// Run the load balancer on `listen`, starting from the `seeds` servers.
-/// With `tcp_check`, a server is ready when it accepts a TCP connection
-/// (servers whose `/readyz` needs credentials, e.g. k3s).
-pub async fn run(listen: SocketAddr, seeds: Vec<String>, tcp_check: bool) -> Result<()> {
+pub async fn run(listen: SocketAddr, seeds: Vec<String>, check: Check) -> Result<()> {
     let pool = Arc::new(Mutex::new(Pool::default()));
     for s in &seeds {
         pool.lock().unwrap().servers.insert(authority(s), false);
     }
     let listener = tokio::net::TcpListener::bind(listen).await.with_context(|| format!("failed to listen on {listen}"))?;
     eprintln!("lb: listening on {listen}");
-    tokio::spawn(health(pool.clone(), tcp_check));
+    tokio::spawn(health(pool.clone(), check));
     loop {
         let (client, peer) = listener.accept().await?;
         let _ = client.set_nodelay(true);
@@ -88,23 +98,23 @@ pub async fn run(listen: SocketAddr, seeds: Vec<String>, tcp_check: bool) -> Res
 }
 
 /// Check every server's readiness each second; learn new servers from them.
-async fn health(pool: Arc<Mutex<Pool>>, tcp_check: bool) {
+async fn health(pool: Arc<Mutex<Pool>>, check: Check) {
     let mut tick = tokio::time::interval(Duration::from_secs(1));
     let mut round = 0u64;
     loop {
         tick.tick().await;
         let servers: Vec<String> = pool.lock().unwrap().servers.keys().cloned().collect();
         let checks = servers.iter().map(|s| async move {
-            let ready = if tcp_check {
-                matches!(tokio::time::timeout(Duration::from_secs(2), tokio::net::TcpStream::connect(s)).await, Ok(Ok(_)))
-            } else {
-                matches!(http(s, "GET", "/readyz", None, Duration::from_secs(2)).await, Ok((200, _)))
+            let ready = match check {
+                Check::Http => matches!(http(s, "GET", "/readyz", None, Duration::from_secs(2)).await, Ok((200, _))),
+                Check::Https => matches!(crate::kube::join::unverified_status(s, "/readyz", Duration::from_secs(2)).await, Ok(200)),
+                Check::Tcp => matches!(tokio::time::timeout(Duration::from_secs(2), tokio::net::TcpStream::connect(s)).await, Ok(Ok(_))),
             };
             (s.clone(), ready)
         });
         let results = futures_util::future::join_all(checks).await;
         let mut learned = Vec::new();
-        if round % 10 == 0 && !tcp_check {
+        if round % 10 == 0 && check == Check::Http {
             for (s, ready) in &results {
                 if !*ready {
                     continue;

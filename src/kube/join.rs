@@ -698,6 +698,21 @@ pub(crate) async fn fetch_ca(authority: &str, token: &Token) -> Result<String> {
     }
 }
 
+/// The status of `GET path` over TLS without checking the certificate: only
+/// for health checks (`litek8s lb --https-check`), which trust nothing in the
+/// answer but its status.
+pub(crate) async fn unverified_status(authority: &str, path: &str, timeout: std::time::Duration) -> Result<u16> {
+    let any = client_config(Arc::new(AnyCert(provider())))?;
+    tokio::time::timeout(timeout, async {
+        let tcp = tokio::net::TcpStream::connect(authority).await?;
+        let name = rustls::pki_types::ServerName::try_from(SERVER_NAME)?;
+        let io = tokio_rustls::TlsConnector::from(any).connect(name, tcp).await?;
+        Ok(request(Box::new(io), authority, "GET", path, &[], Vec::new()).await?.0)
+    })
+    .await
+    .with_context(|| format!("timed out checking {authority}"))?
+}
+
 /// One HTTP/1.1 request on a fresh connection.
 async fn request(io: Box<dyn Io>, authority: &str, method: &str, path: &str, headers: &[(&str, String)], body: Vec<u8>) -> Result<(u16, Vec<u8>)> {
     use http_body_util::BodyExt;

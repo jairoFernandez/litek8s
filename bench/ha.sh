@@ -115,16 +115,20 @@ EOF
 }
 
 up_k3s() {
-  local flags="--disable=traefik,servicelb,metrics-server --write-kubeconfig-mode=644"
+  # The LAN NIC: flannel would take the default route's (the NAT one,
+  # 10.0.2.15 on every VM) and pods on different nodes could not talk.
+  # Anonymous /readyz (system:public-info-viewer, as kubeadm clusters behind
+  # haproxy have it) so the LB sees a server that is up but not ready yet.
+  local flags="--disable=traefik,servicelb,metrics-server --write-kubeconfig-mode=644 --flannel-iface=enp0s3 --kube-apiserver-arg=anonymous-auth=true"
   rroot lk1 "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='$K3S_VERSION' K3S_TOKEN=lkha-bench-token sh -s - server --cluster-init --node-ip $(lan_ip 1) $flags >/dev/null"
   for i in 2 3; do
     rroot "lk$i" "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='$K3S_VERSION' K3S_TOKEN=lkha-bench-token sh -s - server --server https://$(lan_ip 1):6443 --node-ip $(lan_ip "$i") $flags >/dev/null"
   done
-  rroot lk4 "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='$K3S_VERSION' K3S_TOKEN=lkha-bench-token K3S_URL=https://$(lan_ip 1):6443 sh -s - agent --node-ip $(lan_ip 4) >/dev/null"
+  rroot lk4 "curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION='$K3S_VERSION' K3S_TOKEN=lkha-bench-token K3S_URL=https://$(lan_ip 1):6443 sh -s - agent --node-ip $(lan_ip 4) --flannel-iface=enp0s3 >/dev/null"
   for i in 1 2 3; do
     rroot "lk$i" 'test -x /usr/local/bin/etcdctl || { curl -fsSL https://github.com/etcd-io/etcd/releases/download/v3.5.21/etcd-v3.5.21-linux-amd64.tar.gz | tar xz -C /tmp && install -m 0755 /tmp/etcd-v3.5.21-linux-amd64/etcdctl /usr/local/bin/etcdctl; }'
   done
-  start_unit lk5 litek8s-lb "$(unit litek8s-lb 'API load balancer' "/usr/local/bin/litek8s lb --tcp-check --listen 127.0.0.1:6443 --server $(lan_ip 1):6443 --server $(lan_ip 2):6443 --server $(lan_ip 3):6443")"
+  start_unit lk5 litek8s-lb "$(unit litek8s-lb 'API load balancer' "/usr/local/bin/litek8s lb --https-check --listen 127.0.0.1:6443 --server https://$(lan_ip 1):6443 --server https://$(lan_ip 2):6443 --server https://$(lan_ip 3):6443")"
   r lk1 'cat /etc/rancher/k3s/k3s.yaml' | sed 's#server: https://127.0.0.1:6443#server: https://127.0.0.1:6443#' | r lk5 'cat > ~/kubeconfig'
 }
 
@@ -266,7 +270,8 @@ cmd_nemesis() {
 
 cmd_mem() {
   local i proc servers="1 2 3"
-  proc=$([[ "$(kind)" == k3s* ]] && echo 'k3s server' || echo 'litek8s apiserver')
+  # "[x]yz" so pgrep -f does not find the shell running it.
+  proc=$([[ "$(kind)" == k3s* ]] && echo '[k]3s server' || echo '[l]itek8s apiserver')
   [[ "$(kind)" == *-single ]] && servers=1
   for i in $servers; do
     printf 'lk%s ' "$i"
