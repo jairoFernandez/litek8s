@@ -1,0 +1,51 @@
+<svg viewBox="0 0 760 444" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="local-title local-desc" class="d d-local">
+  <title id="local-title">Local dev clusters</title>
+  <desc id="local-desc">On your machine, kubectl, docker and litek8s ui talk to clusters that all run in one VM on macOS or one rootless sandbox on Linux. Cluster dev has one node, on 127.0.0.1:6443 with context litek8s-dev and its own docker.sock. Cluster ci has three nodes: nodes 2 and 3 join node 1, which runs the API server on its own port with context litek8s-ci.</desc>
+  <defs>
+    <marker id="local-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 9 5 0 9z" class="d-head"/></marker>
+  </defs>
+  <rect class="d-frame" x="8" y="8" width="744" height="428" rx="20"/>
+  <text class="d-fl" x="28" y="36">your machine</text>
+  <rect class="d-pill" x="28" y="176" width="150" height="72" rx="20"/>
+  <text class="d-t" x="103" y="207" text-anchor="middle">kubectl · docker</text>
+  <text class="d-s" x="103" y="228" text-anchor="middle">litek8s ui</text>
+  <!-- the one VM / sandbox -->
+  <rect class="d-frame d-frame-dashed" x="350" y="40" width="386" height="380" rx="16"/>
+  <text class="d-fl" x="366" y="408">one VM (macOS) · one sandbox (Linux)</text>
+  <rect class="d-frame d-frame-accent" x="372" y="84" width="342" height="90" rx="12"/>
+  <text class="d-t" x="390" y="120">cluster</text>
+  <text class="d-mono" x="390" y="142">dev</text>
+  <rect class="d-box d-box-accent" x="548" y="100" width="148" height="58" rx="10"/>
+  <circle class="d-ready d-pulse" cx="568" cy="122" r="5"/>
+  <text class="d-t" x="582" y="127">node</text>
+  <text class="d-s" x="568" y="146">API server · pods</text>
+  <rect class="d-frame d-frame-accent" x="372" y="200" width="342" height="184" rx="12"/>
+  <text class="d-t" x="390" y="226">cluster <tspan class="d-mono">ci</tspan></text>
+  <text class="d-s" x="390" y="244">3 nodes</text>
+  <rect class="d-box d-box-accent" x="390" y="258" width="128" height="64" rx="10"/>
+  <circle class="d-ready d-pulse" cx="408" cy="280" r="5" style="--delay:-0.6s"/>
+  <text class="d-t" x="422" y="285">node 1</text>
+  <text class="d-s" x="408" y="306">API server</text>
+  <rect class="d-box" x="560" y="226" width="136" height="54" rx="10"/>
+  <circle class="d-ready" cx="578" cy="253" r="5"/>
+  <text class="d-t" x="592" y="258">node 2</text>
+  <rect class="d-box" x="560" y="310" width="136" height="54" rx="10"/>
+  <circle class="d-ready" cx="578" cy="337" r="5"/>
+  <text class="d-t" x="592" y="342">node 3</text>
+  <path class="d-edge" d="M560 253C540 253 538 280 518 280" marker-end="url(#local-arrow)"/>
+  <path class="d-edge" d="M560 337C540 337 538 300 518 300" marker-end="url(#local-arrow)"/>
+  <text class="d-l" x="526" y="378">join</text>
+  <path class="d-comet" pathLength="100" d="M560 253C540 253 538 280 518 280"/>
+  <path class="d-comet" pathLength="100" d="M560 337C540 337 538 300 518 300" style="--delay:-1.2s"/>
+  <!-- your tools to each cluster -->
+  <path class="d-edge" d="M178 196C290 196 300 129 548 129" marker-end="url(#local-arrow)"/>
+  <path class="d-comet" pathLength="100" d="M178 196C290 196 300 129 548 129"/>
+  <text class="d-l" x="190" y="150">127.0.0.1:6443</text>
+  <text class="d-l d-l-muted" x="190" y="166">context litek8s-dev</text>
+  <path class="d-edge" d="M178 228C290 228 300 290 390 290" marker-end="url(#local-arrow)"/>
+  <path class="d-comet" pathLength="100" d="M178 228C290 228 300 290 390 290" style="--delay:-0.9s"/>
+  <text class="d-l" x="190" y="272">127.0.0.1:&lt;port&gt;</text>
+  <text class="d-l d-l-muted" x="190" y="288">context litek8s-ci</text>
+  <path class="d-edge d-edge-dashed" d="M103 176V64H622V100" marker-end="url(#local-arrow)"/>
+  <text class="d-l" x="190" y="56">docker.sock</text>
+</svg>

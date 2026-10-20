@@ -16,3 +16,8 @@ compat/.work/
 # Release archives (dev/release/package.sh)
 dist/
 __pycache__/
+
+# Website (web/, Astro): dependencies, build output, generated docs
+web/node_modules/
+web/dist/
+.astro/

@@ -1,0 +1,44 @@
+---
+// The animated terminal. The server renders every scene in its final state,
+// so without JavaScript (or with reduced motion) the tabs show a static
+// transcript; src/scripts/landing.ts replays the steps with typing.
+import Icon from './Icon.astro';
+import type { Dict } from '../../i18n/en';
+
+interface Props { t: Dict['demo'] }
+const { t } = Astro.props;
+const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const tuiDark = '/docs-assets/ui/home-dark.svg';
+---
+<div class="term" data-term data-tui={tuiDark} role="region" aria-label={t.label}>
+  <div class="term-bar">
+    <div class="term-dots" aria-hidden="true"><i></i><i></i><i></i></div>
+    <div class="term-tabs" role="tablist" aria-label={t.label}>
+      {t.scenes.map((s, i) => (
+        <button type="button" class="term-tab" role="tab" id={`term-tab-${s.id}`} aria-controls={`term-scene-${s.id}`} aria-selected={i === 0 ? 'true' : 'false'} tabindex={i === 0 ? 0 : -1} data-scene={s.id}>
+          {s.tab}<span class="prog" aria-hidden="true"></span>
+        </button>
+      ))}
+    </div>
+    <div class="term-meta">
+      <span class="term-clock" aria-hidden="true">0.00 s</span>
+      <button type="button" class="term-replay" aria-label={t.replay} title={t.replay}><Icon name="replay" /></button>
+    </div>
+  </div>
+  <div class="term-body">
+    {t.scenes.map((s, i) => (
+      <div class="term-scene" id={`term-scene-${s.id}`} role="tabpanel" aria-labelledby={`term-tab-${s.id}`} data-scene={s.id} hidden={i !== 0} data-steps={JSON.stringify(s.steps)}>
+        {s.steps.map(([kind, v]) =>
+          kind === '$' ? (
+            <div class="ln cmdline"><span class="p">$</span> <span set:html={esc(String(v))} /></div>
+          ) : kind === '>' ? (
+            <div class="ln out" set:html={String(v)} />
+          ) : kind === 'ui' ? (
+            <div class="term-ui"><img src={tuiDark} alt="litek8s ui: the home view with clusters, nodes, CPU and memory meters" width="1028" height="700" loading="lazy" decoding="async" /></div>
+          ) : null,
+        )}
+        <div class="ln"><span class="p">$</span> <span class="caret"></span></div>
+      </div>
+    ))}
+  </div>
+</div>

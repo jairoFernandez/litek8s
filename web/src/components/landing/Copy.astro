@@ -1,0 +1,11 @@
+---
+import Icon from './Icon.astro';
+interface Props { text: string; label: string; done: string }
+const { text, label, done } = Astro.props;
+---
+<button type="button" class="copy" data-copy={text} data-done={done} aria-label={`${label}: ${text}`}>
+  <Icon name="copy" class="i-copy" /><Icon name="check" class="i-check" /><span>{label}</span>
+</button>
+<style>
+  .copy :global(svg) { width: 14px; height: 14px; }
+</style>

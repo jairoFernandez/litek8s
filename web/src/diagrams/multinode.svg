@@ -1,0 +1,40 @@
+<svg viewBox="0 0 760 440" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="mn-title mn-desc" class="d d-multinode">
+  <title id="mn-title">Joining machines</title>
+  <desc id="mn-desc">Your laptop runs kubectl against the server on port 6443. The server, a systemd unit called litek8s-server, runs the API server, the controllers and its own pods. Nodes running litek8s-agent, such as a Raspberry Pi, an old laptop or a cheap cloud VM, join it with the join token over HTTPS. Pods talk across nodes over a WireGuard mesh, 10.42.0.0/16 with one /24 per node.</desc>
+  <defs>
+    <marker id="mn-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 9 5 0 9z" class="d-head"/></marker>
+  </defs>
+  <rect class="d-pill" x="270" y="12" width="220" height="48" rx="24"/>
+  <text class="d-t" x="380" y="42" text-anchor="middle">your laptop · kubectl</text>
+  <path class="d-edge" d="M380 60V104" marker-end="url(#mn-arrow)"/>
+  <path class="d-comet" pathLength="100" d="M380 60V104"/>
+  <text class="d-l" x="390" y="88">:6443</text>
+  <rect class="d-box d-box-accent" x="190" y="106" width="380" height="76" rx="14"/>
+  <circle class="d-ready d-pulse" cx="214" cy="135" r="5"/>
+  <text class="d-t" x="228" y="140">server <tspan class="d-mono d-s">litek8s-server (systemd)</tspan></text>
+  <text class="d-s" x="214" y="164">API server, controllers, its own pods</text>
+  <!-- joins -->
+  <path class="d-edge" d="M151 274C151 228 300 228 300 184" marker-end="url(#mn-arrow)"/>
+  <path class="d-edge" d="M380 274V184" marker-end="url(#mn-arrow)"/>
+  <path class="d-edge" d="M609 274C609 228 460 228 460 184" marker-end="url(#mn-arrow)"/>
+  <path class="d-comet" pathLength="100" d="M151 274C151 228 300 228 300 184"/>
+  <path class="d-comet" pathLength="100" d="M380 274V184" style="--delay:-0.8s"/>
+  <path class="d-comet" pathLength="100" d="M609 274C609 228 460 228 460 184" style="--delay:-1.6s"/>
+  <text class="d-l" x="620" y="226">join token · HTTPS</text>
+  <rect class="d-frame" x="24" y="244" width="712" height="184" rx="16"/>
+  <text class="d-fl" x="40" y="266">nodes · litek8s-agent</text>
+  <rect class="d-box" x="56" y="276" width="190" height="64" rx="12"/>
+  <circle class="d-ready" cx="78" cy="303" r="5"/>
+  <text class="d-t" x="92" y="308">Raspberry Pi</text>
+  <rect class="d-box" x="285" y="276" width="190" height="64" rx="12"/>
+  <circle class="d-ready" cx="307" cy="303" r="5"/>
+  <text class="d-t" x="321" y="308">old laptop</text>
+  <rect class="d-box" x="514" y="276" width="190" height="64" rx="12"/>
+  <circle class="d-ready" cx="536" cy="303" r="5"/>
+  <text class="d-t" x="550" y="308">cheap cloud VM</text>
+  <!-- the WireGuard mesh -->
+  <path class="d-edge d-edge-wg" d="M246 308H285M475 308H514M151 340C151 392 609 392 609 340"/>
+  <path class="d-comet d-comet-wg" pathLength="100" d="M151 340C151 392 609 392 609 340"/>
+  <path class="d-comet d-comet-wg" pathLength="100" d="M609 340C609 392 151 392 151 340" style="--delay:-1.3s"/>
+  <text class="d-l d-l-wg" x="380" y="412" text-anchor="middle">WireGuard mesh · 10.42.0.0/16, one /24 per node</text>
+</svg>

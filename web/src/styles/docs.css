@@ -1,0 +1,82 @@
+/* Starlight, in litek8s's look: the landing page's violet, fonts and the
+   diagrams' tokens. Starlight sets data-theme="dark|light" on <html>. */
+@import '@fontsource-variable/space-grotesk/wght.css';
+@import '@fontsource-variable/jetbrains-mono/wght.css';
+@import './diagrams.css';
+
+:root {
+  --lk-font-display: 'Space Grotesk Variable', ui-sans-serif, system-ui, sans-serif;
+  --sl-font: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --sl-font-mono: 'JetBrains Mono Variable', ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --sl-color-accent-low: #251a45;
+  --sl-color-accent: #8b5cf6;
+  --sl-color-accent-high: #ddd6fe;
+  --sl-color-white: #f4f3f8;
+  --sl-color-gray-1: #e6e4ee;
+  --sl-color-gray-2: #c1bfd0;
+  --sl-color-gray-3: #9693a8;
+  --sl-color-gray-4: #5d5a72;
+  --sl-color-gray-5: #393649;
+  --sl-color-gray-6: #1c1a27;
+  --sl-color-black: #0c0b12;
+
+  --d-fg: var(--sl-color-white);
+  --d-muted: var(--sl-color-gray-3);
+  --d-line: rgb(255 255 255 / 0.15);
+  --d-edge: rgb(255 255 255 / 0.28);
+  --d-box: #15141e;
+  --d-pill: #1a1924;
+  --d-frame: rgb(255 255 255 / 0.015);
+  --d-accent: #a78bfa;
+  --d-accent-line: rgb(167 139 250 / 0.5);
+  --d-ok: #4ade80;
+  --d-ok-line: rgb(74 222 128 / 0.5);
+  --d-font: var(--sl-font);
+  --d-mono: var(--sl-font-mono);
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #ede9fe;
+  --sl-color-accent: #6d28d9;
+  --sl-color-accent-high: #3b0f7a;
+  --sl-color-white: #14121f;
+  --sl-color-gray-1: #24212f;
+  --sl-color-gray-2: #3d3a4f;
+  --sl-color-gray-3: #5a566e;
+  --sl-color-gray-4: #8a879c;
+  --sl-color-gray-5: #c9c6d6;
+  --sl-color-gray-6: #ecebf3;
+  --sl-color-gray-7: #f6f5fb;
+  --sl-color-black: #fdfcff;
+
+  --d-line: rgb(20 16 40 / 0.16);
+  --d-edge: rgb(20 16 40 / 0.32);
+  --d-box: #ffffff;
+  --d-pill: #f4f2fb;
+  --d-frame: rgb(109 40 217 / 0.02);
+  --d-accent: #6d28d9;
+  --d-accent-line: rgb(109 40 217 / 0.45);
+  --d-ok: #15803d;
+  --d-ok-line: rgb(21 128 61 / 0.45);
+}
+
+.sl-markdown-content :is(h1, h2, h3, h4),
+h1#_top {
+  font-family: var(--lk-font-display);
+  letter-spacing: -0.02em;
+}
+h1#_top { letter-spacing: -0.03em; }
+
+.lk-diagram.not-content {
+  margin-block: 1.5rem;
+  padding: clamp(0.5rem, 2vw, 1.25rem);
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 1rem;
+  background: var(--sl-color-gray-6);
+}
+:root[data-theme='light'] .lk-diagram.not-content { background: var(--sl-color-gray-7); }
+
+/* Wide tables in the docs scroll instead of squeezing. */
+.sl-markdown-content table { display: block; overflow-x: auto; }
+.sl-markdown-content img { border-radius: 0.6rem; }

@@ -1,0 +1,12 @@
+---
+// The mark (src/assets/logo.svg) inline, with gradient ids unique per use.
+import raw from '../../assets/logo.svg?raw';
+interface Props { class?: string; id: string; title?: string }
+const { class: cls, id, title } = Astro.props;
+const svg = raw
+  .replaceAll('lk-fill', `${id}-fill`)
+  .replaceAll('lk-shine', `${id}-shine`)
+  .replace(/role="img" aria-label="litek8s"/, title ? `role="img" aria-label="${title}"` : 'aria-hidden="true"')
+  .replace('<svg ', `<svg class="${cls ?? ''}" `);
+---
+<Fragment set:html={svg} />

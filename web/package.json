@@ -1,0 +1,28 @@
+{
+  "name": "litek8s-web",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "description": "litek8s.dev: landing page and documentation (Astro + Starlight). Not part of the Rust crate.",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.22"
+  },
+  "scripts": {
+    "sync": "node scripts/sync-docs.mjs",
+    "dev": "npm run sync && astro dev",
+    "build": "npm run sync && astro build",
+    "preview": "astro preview",
+    "check-links": "node scripts/check-links.mjs"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.42.6",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@fontsource-variable/space-grotesk": "^5.3.0",
+    "astro": "^7.4.1"
+  },
+  "devDependencies": {
+    "github-slugger": "^2.0.0",
+    "sharp": "^0.35.5"
+  }
+}
