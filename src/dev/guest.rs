@@ -1,7 +1,8 @@
 //! PID 1 of the macOS dev VM (`/init` in its initramfs is this binary).
 //!
-//! The VM is a kernel, an initramfs (Alpine's crun, iptables, iproute2 and
-//! busybox around this binary) and a data disk. Init mounts the usual
+//! The VM is a kernel, a read-only root disk (Alpine's crun, iptables,
+//! iproute2 and busybox around this binary; an initrd mounts it under a
+//! tmpfs overlay and hands over) and a data disk. Init mounts the usual
 //! filesystems, loads the kernel modules the cluster needs, formats the data
 //! disk on first boot, mounts the Mac's shared directory (virtiofs) at the
 //! same path as on the Mac, gets an address by DHCP and runs the cell
@@ -10,7 +11,9 @@
 //! talks to the host over the console (hvc0): it reports
 //! `LITEK8S_GUEST ip=...` once the network is up and powers off on a
 //! `poweroff` line from the host; cells' output comes through it too, as
-//! `LITEK8S_LOG <cluster> <line>`.
+//! `LITEK8S_LOG <cluster> <line>`, and its memory, as `LITEK8S_MEM ...`
+//! (the host moves the VM's memory ceiling with it, see
+//! [`super::balloon`]).
 
 /// The default dev cluster's node name (the VM's hostname too).
 pub const NODE_NAME: &str = "litek8s-dev";
@@ -260,6 +263,61 @@ mod init {
         }
     }
 
+    /// Report the guest's memory to the host (`LITEK8S_MEM ...`, see
+    /// [`super::super::balloon`]): every 2 s if it changed (every 250 ms
+    /// while little is available), every 30 s anyway, and at once when
+    /// memory stalls 100 ms within a second (a PSI trigger), so the host
+    /// can grow the VM's ceiling before the workload notices.
+    fn watch_memory() {
+        use std::os::fd::AsRawFd;
+        use super::super::balloon;
+        // Under the ceiling, a burst of allocations would otherwise make
+        // the kernel evict the code everything runs (the root filesystem
+        // is a disk now, not RAM) and thrash for minutes instead of
+        // running out of memory: with the working set of the last second
+        // protected, it calls the OOM path at once, where the balloon
+        // gives memory back before anything is killed.
+        if let Err(e) = std::fs::write("/sys/kernel/mm/lru_gen/min_ttl_ms", "1000") {
+            say(&format!("cannot protect the working set (lru_gen min_ttl_ms: {e})"));
+        }
+        let trigger = std::fs::OpenOptions::new().read(true).write(true).open("/proc/pressure/memory").and_then(|mut f| {
+            f.write_all(b"some 100000 1000000\0")?;
+            Ok(f)
+        });
+        if let Err(e) = &trigger {
+            say(&format!("no memory pressure trigger ({e}); the host polls only"));
+        }
+        let mut last: Option<balloon::Report> = None;
+        let mut sent = Instant::now();
+        loop {
+            let mut fired = false;
+            match &trigger {
+                Ok(f) => {
+                    let mut pfd = libc::pollfd { fd: f.as_raw_fd(), events: libc::POLLPRI, revents: 0 };
+                    // SAFETY: one pollfd we own.
+                    let n = unsafe { libc::poll(&mut pfd, 1, interval(&last)) };
+                    fired = n > 0 && pfd.revents & libc::POLLPRI != 0;
+                    if n > 0 && pfd.revents & (libc::POLLERR | libc::POLLNVAL) != 0 {
+                        std::thread::sleep(Duration::from_secs(2));
+                    }
+                }
+                Err(_) => std::thread::sleep(Duration::from_millis(interval(&last) as u64)),
+            }
+            let Some(r) = balloon::read(fired) else { continue };
+            if last.is_none_or(|l| r.differs(&l)) || sent.elapsed() >= Duration::from_secs(30) {
+                println!("LITEK8S_MEM {}", r.to_line());
+                let _ = std::io::stdout().flush();
+                last = Some(r);
+                sent = Instant::now();
+            }
+        }
+    }
+
+    /// How long the memory watcher sleeps (ms) after `last`.
+    fn interval(last: &Option<super::super::balloon::Report>) -> i32 {
+        if last.is_some_and(|r| r.available < 512 << 20) { 250 } else { 2000 }
+    }
+
     fn say(msg: &str) {
         let mut out = std::io::stdout();
         let _ = writeln!(out, "litek8s-guest: {msg}");
@@ -502,6 +560,7 @@ mod init {
         if let Err(e) = serve_vsock() {
             say(&format!("no vsock ({e}); the host cannot reach the cluster"));
         }
+        std::thread::spawn(watch_memory);
         let mut main = spawn_manager();
         say(&format!("booted in {} ms (mounts {t_mounts}, modules {}, disk+share {t_disk})", started.elapsed().as_millis(), t_modules - t_mounts));
         println!("LITEK8S_GUEST vsock={VSOCK_PORT}");

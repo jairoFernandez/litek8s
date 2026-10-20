@@ -206,7 +206,7 @@ pub async fn cached(dir: PathBuf, node: String) -> NodeDisk {
 }
 
 /// litek8s's own files on this machine: the binary and, on macOS, the
-/// VM's kernel and initramfs and the signed copy the VM runs from.
+/// VM's kernel, root filesystem and the signed copy the VM runs from.
 pub fn litek8s_files(dev_home: &Path) -> u64 {
     let alloc = |p: &Path| -> u64 {
         #[cfg(unix)]
@@ -222,7 +222,7 @@ pub fn litek8s_files(dev_home: &Path) -> u64 {
     let mut total = std::env::current_exe().ok().and_then(|e| e.canonicalize().ok()).map(|e| alloc(&e)).unwrap_or(0);
     if cfg!(target_os = "macos") {
         let assets = std::env::var_os("LITEK8S_DEV_VM_ASSETS").map(PathBuf::from).unwrap_or_else(|| dev_home.parent().unwrap_or(dev_home).join("vm"));
-        total += alloc(&assets.join("Image")) + alloc(&assets.join("initramfs.gz"));
+        total += ["Image", "initramfs.gz", "initrd.gz", "root.img"].iter().map(|f| alloc(&assets.join(f))).sum::<u64>();
         total += alloc(&dev_home.join("vm-state").join("litek8s-vm"));
     }
     total
@@ -302,7 +302,7 @@ fn node_lines(n: &NodeDisk, r: &Reclaimable) -> Vec<Line> {
 /// the VM's filesystem (other clusters, ext4), and what the disk image
 /// keeps that the guest deleted (no TRIM: it never shrinks).
 pub fn vm_breakdown(own: u64, image_alloc: u64, n: &NodeDisk, r: &Reclaimable, cluster: &str) -> Breakdown {
-    let mut lines = vec![line("litek8s itself", own, "binary, VM kernel and initramfs".into())];
+    let mut lines = vec![line("litek8s itself", own, "binary, VM kernel and root fs".into())];
     let mut node = node_lines(n, r);
     for l in &mut node {
         l.indent = true;

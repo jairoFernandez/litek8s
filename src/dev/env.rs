@@ -75,6 +75,13 @@ pub struct Response {
     /// The VM's `/proc/stat` (macOS).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proc_stat: Option<super::cpu::ProcStat>,
+    /// What the VM's guest may use now, of its memory (macOS: the
+    /// ceiling, see `super::balloon`), in bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_limit: Option<u64>,
+    /// The VM's memory its balloon holds (never touched, not charged), bytes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub balloon: Option<u64>,
     /// Clusters still running after the request.
     #[serde(default)]
     pub running: Vec<String>,
