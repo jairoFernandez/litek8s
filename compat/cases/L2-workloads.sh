@@ -213,3 +213,29 @@ EOF
     k -n "$NS" wait --for=condition=Ready pod/r --timeout=120s >/dev/null
     expect_eq "$(k -n "$NS" exec r -- cat /d/f)" kept
 }
+
+case_def kubectl_top L2 240 "kubectl top nodes and pods read the resource metrics API"
+t_kubectl_top() {
+    use_ns
+    # A busy loop held to 200m by its limit: well above an idle pod's usage.
+    k -n "$NS" apply -f - >/dev/null <<EOF
+apiVersion: v1
+kind: Pod
+metadata: {name: busy, labels: {app: busy}}
+spec:
+  containers:
+  - name: spin
+    image: busybox:1.36
+    command: ["sh", "-c", "while :; do :; done"]
+    resources: {limits: {cpu: 200m, memory: 32Mi}}
+EOF
+    k -n "$NS" wait --for=condition=Ready pod/busy --timeout=90s >/dev/null
+    # metrics-server reports after two scrapes (k3s: 15 s apart).
+    wait_for 120 bash -c "kubectl top nodes --no-headers | grep -v '<unknown>' | grep -q ."
+    wait_for 120 bash -c "kubectl -n $NS top pod busy --no-headers | grep -q '^busy '"
+    expect_contains "$(k top pods -A --no-headers)" "$NS"
+    expect_contains "$(k -n "$NS" top pod -l app=busy --containers --no-headers)" "spin"
+    local cpu
+    cpu=$(k -n "$NS" top pod busy --no-headers | awk '{print $2}')
+    [[ $cpu == *m && ${cpu%m} -ge 50 ]] || { echo "busy pod at $cpu, expected >= 50m" >&2; return 1; }
+}

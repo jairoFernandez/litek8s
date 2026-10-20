@@ -11,6 +11,7 @@ pub mod notify;
 pub mod server;
 pub mod tsdb;
 pub mod promql;
+pub mod resource_metrics;
 pub mod logs;
 pub mod node;
 

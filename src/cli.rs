@@ -57,6 +57,7 @@ Observability (built into the API server):
   logs           Search and follow pod logs, including containers that are gone
   query          Run a PromQL query against the cluster's built-in metrics
   alerts         List, silence and acknowledge the cluster's alerts
+  top            Live CPU and memory of nodes and pods (metrics.k8s.io; the legacy daemon's when it runs)
 
 Agents:
   mcp            MCP server for LLM agents on stdin/stdout (claude mcp add litek8s -- litek8s mcp)
@@ -69,7 +70,6 @@ Legacy daemon (litek8s.dev/v1alpha1 manifests, started with `litek8s serve`):
   describe       Show a single deployment in detail
   delete         Delete a deployment or service by name or manifest
   events         Show recent control-plane events
-  top            Watch live resource usage for the daemon and deployments
   tree           Show a relationship tree of the control plane, nodes, deployments, and services
   proxy          Open a local TCP proxy to a published deployment port
   service        Manage stable local service listeners backed by deployments
@@ -217,10 +217,16 @@ Examples:
   litek8s apply -f ./my-app.yaml";
 
 const TOP_AFTER_HELP: &str = "\
+With no legacy daemon running (or with --context), shows nodes and pods of
+the current kube context from its metrics API (metrics.k8s.io): live on a
+terminal, once when piped.
+
 Examples:
   litek8s top
   litek8s top --watch
-  litek8s top --watch --interval-secs 1";
+  litek8s top --watch --interval-secs 1
+  litek8s top --context litek8s-dev -n kube-system --containers
+  litek8s top --once --sort-by memory";
 
 const TENSOR_AFTER_HELP: &str = "\
 Examples:
@@ -664,7 +670,7 @@ enum Command {
         interval_secs: u64,
     },
     #[command(
-        about = "Watch live resource usage for the daemon and deployments",
+        about = "Live CPU and memory of nodes and pods (metrics.k8s.io; the legacy daemon's when it runs)",
         help_template = HELP_TEMPLATE,
         after_help = TOP_AFTER_HELP
     )]
@@ -673,6 +679,8 @@ enum Command {
         watch: bool,
         #[arg(long, default_value_t = 2, help = "Refresh interval in seconds")]
         interval_secs: u64,
+        #[command(flatten)]
+        kube: crate::obs::cli::TopArgs,
     },
     #[command(
         about = "Show a relationship tree of the control plane, nodes, deployments, and services",
@@ -1679,7 +1687,21 @@ pub async fn run() -> Result<()> {
         Command::Top {
             watch,
             interval_secs,
-        } => run_top(&endpoint, watch, Duration::from_secs(interval_secs)).await,
+            kube,
+        } => {
+            // The legacy daemon when one answers; else the kube context's
+            // metrics API (a litek8s cluster's built-in one, or metrics-server).
+            let daemon = kube.context.is_none()
+                && match &endpoint {
+                    DaemonEndpoint::Tcp(_) => true,
+                    DaemonEndpoint::Unix(path) => std::os::unix::net::UnixStream::connect(path).is_ok(),
+                };
+            if daemon {
+                run_top(&endpoint, watch, Duration::from_secs(interval_secs)).await
+            } else {
+                run_kube_top(kube, watch, Duration::from_secs(interval_secs)).await
+            }
+        }
         Command::Tree {
             watch,
             interval_secs,
@@ -3656,6 +3678,32 @@ fn print_response(response: Response) -> Result<()> {
             bail!("model list results are rendered by `model list`, not print_response")
         }
         Response::Error { message } => Err(anyhow!(message)),
+    }
+}
+
+/// `litek8s top` of a Kubernetes cluster: live on a terminal (as `top`),
+/// once when piped or with `--once`.
+async fn run_kube_top(args: crate::obs::cli::TopArgs, watch: bool, interval: Duration) -> Result<()> {
+    let ep = crate::obs::cli::endpoint(args.context.as_deref())?;
+    if !(watch || (io::stdout().is_terminal() && !args.once)) {
+        print!("{}", crate::obs::cli::top_frame(&ep, &args).await?);
+        return Ok(());
+    }
+    let banner = format!("{}  {}", build_watch_banner("top", interval, None, None), muted(&ep.display));
+    let mut display = WatchDisplay::new(banner)?;
+    // One listener for the whole loop: a ^C during a fetch is not lost.
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+    loop {
+        let body = tokio::select! {
+            frame = crate::obs::cli::top_frame(&ep, &args) => frame.unwrap_or_else(|e| format_error_body(&format!("{e:#}"))),
+            _ = &mut ctrl_c => return Ok(()),
+        };
+        display.render_frame(&body)?;
+        tokio::select! {
+            _ = tokio::time::sleep(interval) => {}
+            _ = &mut ctrl_c => return Ok(()),
+        }
     }
 }
 

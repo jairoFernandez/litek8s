@@ -25,6 +25,9 @@ itself (see [the measurements](#measured)). litek8s has it built in:
   not ready, node pressure, full disks and volumes, low memory), your own as
   `AlertRule` objects in Prometheus rule syntax, notifications to a webhook
   (Alertmanager's payload), ntfy or Telegram, silences and acks.
+- **`kubectl top` and `litek8s top`** read the resource metrics API
+  (`metrics.k8s.io/v1beta1`) the API server serves from the same store: no
+  metrics-server ([below](#resource-metrics-api-kubectl-top)).
 - **`litek8s ui`** shows it all in its Observe view (9).
 
 Everything is on by default in `litek8s apiserver` and `litek8s dev`;
@@ -38,6 +41,8 @@ litek8s logs -n shop -f                                    # follow a namespace
 litek8s query 'topk(5, sum by (namespace, pod) (rate(container_cpu_usage_seconds_total[5m])))'
 litek8s alerts                                             # what is firing
 litek8s alerts ack KubePodCrashLooping                     # mute until it resolves
+litek8s top                                                # nodes and pods, live
+kubectl top pods -A --containers                           # no metrics-server needed
 ```
 
 Grafana: add a **Prometheus** data source with URL
@@ -168,6 +173,54 @@ format:
 | `/api/v1/rules`, `/api/v1/alerts` | the alert rules and active alerts |
 | `/api/v1/status/buildinfo` | reports Prometheus 2.53 (Grafana picks its features by it) |
 | `/federate` | `match[]`: the latest sample of every matching series, text format |
+
+### Resource metrics API (`kubectl top`)
+
+The API server serves `metrics.k8s.io/v1beta1`, what metrics-server
+serves, from the store: `NodeMetrics` and `PodMetrics`, get and list,
+label and field selectors, per namespace or across all, and a table for
+`kubectl get pods.metrics.k8s.io`. So `kubectl top nodes`, `kubectl top
+pods -A [--containers]` and other metrics-server clients work with
+nothing installed (litek8s has no HorizontalPodAutoscaler controller yet). The numbers are metrics-server's:
+
+| | CPU | memory |
+|---|---|---|
+| container | rate of `container_cpu_usage_seconds_total` between its last two samples (the `window`, 10 s by default) | last `container_memory_working_set_bytes` |
+| node | rate of `node_cpu_usage_seconds_total` | last `node_memory_working_set_bytes` |
+
+The two node series carry the kubelet's `/metrics/resource` names
+(`job="kubelet"`, `metrics_path="/metrics/resource"`). An agent samples
+them from the node's own cgroup when it has one (each node of a `litek8s
+dev` cluster is a cell with its own cgroup; an agent in a container), else
+from the machine: busy modes of `/proc/stat` and `MemTotal - MemAvailable`.
+Reading `/proc` in the macOS dev VM would count the memory balloon as used
+and give every node the whole VM. Nodes of agents from before these series
+fall back to node-exporter's (`node_cpu_seconds_total` without `idle`,
+`iowait`, `steal`; `MemTotal - MemAvailable`), and a node with no node
+series at all (the Docker runtime on macOS has no `/proc`) reports the sum
+of its containers.
+
+A pod shows up one sample interval after it started (two CPU samples are
+needed), and a series older than three intervals is not current (a node
+that stopped reporting drops out, `kubectl top nodes` shows `<unknown>`).
+
+The group is built in (litek8s registers no APIService objects for its
+built-in groups), in discovery (also aggregated v2) while observability
+runs. To run metrics-server instead, install it as usual (its Helm chart
+or `components.yaml`): its APIService `v1beta1.metrics.k8s.io` points at
+its Service and takes the group over, every request under
+`/apis/metrics.k8s.io/v1beta1` goes to metrics-server from then on, and
+uninstalling it gives the group back to the store. (A Local APIService
+object, as kube-apiserver keeps for its own groups, would make `helm
+install metrics-server` fail: Helm does not adopt objects it did not
+create.)
+
+`litek8s top` with no legacy daemon running (or with `--context`) shows
+the current kube context's nodes (usage against allocatable) and pods,
+busiest first, refreshed every `--interval-secs` on a terminal and printed
+once when piped or with `--once`; `-n`, `-l`, `--containers` and
+`--sort-by cpu|memory|name` narrow and order it. It reads only the
+metrics API, so it works against any cluster with metrics-server too.
 
 ## Logs
 

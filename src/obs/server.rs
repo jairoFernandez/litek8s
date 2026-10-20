@@ -16,6 +16,7 @@ use anyhow::Result;
 use serde_json::{Value, json};
 
 use super::alerts::{self, Alerts};
+use super::resource_metrics;
 use super::tsdb::{self, Db, Labels, TierConfig};
 use super::ObsSettings;
 use crate::kube::server::ApiState;
@@ -232,6 +233,11 @@ pub fn start(api: &Arc<ApiState>, config: ObsConfig) -> Result<Arc<Obs>> {
     let obs = Arc::new(Obs::open(config)?);
     if api.obs.set(obs.clone()).is_err() {
         anyhow::bail!("observability already started");
+    }
+    // Served from now on; an APIService for the group version
+    // (metrics-server's) takes it over (kube/aggregator.rs).
+    if crate::kube::aggregator::service_for(api, resource_metrics::GROUP, resource_metrics::VERSION).is_none() {
+        api.registry.set_aggregated(resource_metrics::GROUP, resource_metrics::VERSION, resource_metrics::types());
     }
     tokio::spawn(run(api.clone(), obs.clone()));
     Ok(obs)
