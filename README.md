@@ -68,6 +68,32 @@ litek8s dev down                             # stop; objects and images are kept
 litek8s dev delete                           # remove everything
 ```
 
+Every cluster, and every node of a multi-node cluster, runs in one small
+VM on macOS or one rootless sandbox on Linux, started with the first
+cluster and stopped with the last. Each cluster gets its own API port,
+kubectl context and Docker socket:
+
+```mermaid
+flowchart LR
+    subgraph host["your machine"]
+        you["kubectl · docker · litek8s ui"]
+        subgraph env["one VM / sandbox"]
+            subgraph dev["cluster dev"]
+                d1["node"]
+            end
+            subgraph ci["cluster ci, 3 nodes"]
+                c1["node 1<br/>API server"]
+                c2["node 2"]
+                c3["node 3"]
+                c2 & c3 -->|join| c1
+            end
+        end
+    end
+    you -->|"127.0.0.1:6443<br/>context litek8s-dev"| d1
+    you -->|"127.0.0.1:port<br/>context litek8s-ci"| c1
+    you -.->|"docker.sock"| d1
+```
+
 ## Numbers
 
 Measured against k3s, kind and k3d with the scripts in this repository; the
@@ -122,6 +148,34 @@ leak ([bench/SOAK.md](bench/SOAK.md)).
   and cost-estimated, ratcheting, server-side apply with managedFields.
   [docs/crds.md](docs/crds.md)
 
+## How it works
+
+One process does what a Kubernetes distribution splits across etcd, the
+API server, the controller manager, the scheduler, CoreDNS, kube-proxy,
+the kubelet and containerd, plus a Docker-compatible API and a metrics,
+logs and alerts stack:
+
+```mermaid
+flowchart TB
+    k8s["kubectl · Helm · Argo CD · litek8s ui · MCP agents"]
+    dk["docker · compose · Dev Containers · Testcontainers"]
+    subgraph bin["litek8s · one process"]
+        api["Kubernetes API server<br/>CRDs + CEL · server-side apply · watch"]
+        dockerapi["Docker Engine API"]
+        store[("object store<br/>WAL, or Raft in HA")]
+        ctrl["controllers<br/>+ scheduler"]
+        net["DNS +<br/>service proxy"]
+        obs["metrics · logs<br/>alerts"]
+        agent["node agent"]
+        api --- store
+        api <--> ctrl & net & obs & agent
+    end
+    k8s -->|":6443"| api
+    dk -->|"docker.sock"| dockerapi
+    agent --> crun["crun: containers<br/>no containerd, no pause containers"]
+    dockerapi --> crun
+```
+
 ## Platforms
 
 | | dev clusters | server / node (`apiserver`, `agent`) | release binary |
@@ -136,6 +190,23 @@ silicon. Ubuntu ≥ 23.10 needs `sudo litek8s dev setup` once (AppArmor and
 unprivileged user namespaces).
 
 ## Multi-node and HA
+
+A server runs the whole control plane and its own pods; any Linux machine
+(a Raspberry Pi, an old laptop, a cheap cloud VM) joins it as a node with
+the token the server prints:
+
+```mermaid
+flowchart TB
+    laptop["your laptop · kubectl"] -->|":6443"| s
+    s["server · litek8s-server (systemd)<br/>API server, controllers, its own pods"]
+    subgraph nodes["nodes (litek8s-agent)"]
+        direction LR
+        pi["Raspberry Pi"] ~~~ old["old laptop"] ~~~ ec2["cheap cloud VM"]
+    end
+    nodes -->|"join token · HTTPS"| s
+    wg["pods talk across nodes over a WireGuard mesh<br/>10.42.0.0/16, one /24 per node"]
+    nodes -.- wg
+```
 
 On Linux servers (systemd, root), one command per machine, like k3s's
 installer:
@@ -170,7 +241,23 @@ rescheduled after their `tolerationSeconds`; laptops that sleep can join
 with a longer `--node-grace-period`. Three servers make the control plane
 highly available: `install.sh | sh -s -- server --cluster-init` on the first,
 `... server --server https://<first>:6443 --token <token>` on two more
-([docs/ha.md](docs/ha.md)).
+([docs/ha.md](docs/ha.md)). Any one server can die without losing writes;
+`litek8s lb` gives kubectl one address in front of all three:
+
+```mermaid
+flowchart TB
+    laptop["your laptop · kubectl"] --> lb["litek8s lb<br/>127.0.0.1:6443"]
+    subgraph cp["control plane"]
+        direction LR
+        s1["server 1"] <-->|"Raft :6444"| s2["server 2"] <-->|"Raft :6444"| s3["server 3"]
+    end
+    lb --> cp
+    subgraph nodes["nodes"]
+        direction LR
+        n1["agent"] ~~~ n2["agent"] ~~~ n3["agent"]
+    end
+    nodes -->|"any server, fail over"| cp
+```
 
 ```bash
 litek8s logs -l app=web --since 1h --grep ERROR
