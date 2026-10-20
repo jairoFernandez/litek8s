@@ -152,7 +152,7 @@ for as long as Home has been on screen), disk and the workloads under them:
 │   objects           ▏        1.4 MB  Kubernetes objects… ││                                                          │
 │   other             ▏        1.1 MB  metadata, IP alloc… ││                                                          │
 │ rest of the VM disk ▏        2.2 MB  other clusters, fi… ││                                                          │
-│ deleted in the VM   ▊       38.3 MB  kept by disk.img (… ││                                                          │
+│ deleted in the VM   ▊       38.3 MB  disk.img gives it … ││                                                          │
 ```
 
 **Terminals.** Nothing needs a Nerd Font: only box-drawing and block
