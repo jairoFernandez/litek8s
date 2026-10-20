@@ -112,6 +112,14 @@ impl Drop for Server {
 }
 
 const T: Duration = Duration::from_secs(10);
+/// How long an election may take before a test gives up: elections take
+/// ~1–2 s here, but a slow CI runner's fsyncs can take a few times that.
+const ELECTION: Duration = Duration::from_secs(20);
+
+/// One cluster at a time: each test runs three servers (and their Raft
+/// runtimes) on 100 ms timers; four at once on a 3–4 vCPU CI runner starve
+/// each other into spurious elections.
+static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 async fn eventually<F, Fut>(what: &str, timeout: Duration, mut check: F)
 where
@@ -149,7 +157,7 @@ async fn cluster(root: &Path) -> Vec<Server> {
         std::env::set_var("LITEK8S_RAFT_HEARTBEAT_MS", "100");
     }
     let s1 = Server::start("s1", &root.join("s1"), 0, true, None);
-    eventually("s1 ready", T, || async { matches!(http(&s1.addr, "GET", "/api/v1/namespaces/default", None, T).await, Ok((200, _))) }).await;
+    eventually("s1 ready", ELECTION, || async { matches!(http(&s1.addr, "GET", "/api/v1/namespaces/default", None, T).await, Ok((200, _))) }).await;
     let token = std::fs::read_to_string(root.join("s1/join-token")).unwrap();
     let url = format!("https://{}", s1.addr);
     let s2 = Server::start("s2", &root.join("s2"), 0, false, Some((&url, &token)));
@@ -163,6 +171,27 @@ async fn cluster(root: &Path) -> Vec<Server> {
         eventually("every server serves", T, || async { matches!(http(&s.addr, "GET", "/api/v1/namespaces/default", None, T).await, Ok((200, _))) }).await;
     }
     all
+}
+
+/// Create `obj` through `addr`, retrying while there is no leader (a
+/// spurious election on a slow machine). A retry may find the object
+/// already there: the attempt that timed out was applied after all.
+async fn create(addr: &str, base: &str, obj: &Value) {
+    let deadline = Instant::now() + ELECTION;
+    let mut retried = false;
+    loop {
+        match http(addr, "POST", base, Some(obj), T).await {
+            Ok((201, _)) => return,
+            Ok((409, _)) if retried => return,
+            Ok((code, v)) if code < 500 => panic!("create {} answered {code}: {v}", obj["metadata"]["name"]),
+            other if Instant::now() < deadline => {
+                eprintln!("create {}: {other:?}; retrying", obj["metadata"]["name"]);
+                retried = true;
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            other => panic!("create {}: {other:?}", obj["metadata"]["name"]),
+        }
+    }
 }
 
 fn cm(name: &str, data: Value) -> Value {
@@ -218,6 +247,7 @@ async fn watch_once(addr: &str, rv: u64, out: &Arc<std::sync::Mutex<Vec<(String,
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn failover_keeps_acknowledged_writes_and_watches_resume() {
+    let _serial = SERIAL.lock().await;
     let root = tempfile::tempdir().unwrap();
     let mut servers_ = cluster(root.path()).await;
     let addrs: Vec<String> = servers_.iter().map(|s| s.addr.clone()).collect();
@@ -304,7 +334,7 @@ async fn failover_keeps_acknowledged_writes_and_watches_resume() {
     eprintln!("killed the leader {leader}");
     let survivors: Vec<String> = servers_.iter().filter(|s| s.alive()).map(|s| s.addr.clone()).collect();
     // A new leader is elected, and writes go through again.
-    eventually("a new leader", T, || async { leader_name(&survivors[0]).await.is_some_and(|l| l != leader) }).await;
+    eventually("a new leader", ELECTION, || async { leader_name(&survivors[0]).await.is_some_and(|l| l != leader) }).await;
     let (code, _) = http(&survivors[0], "POST", base, Some(&cm("after-failover", json!({}))), Duration::from_secs(20)).await.unwrap();
     assert_eq!(code, 201);
     eprintln!("writes resumed {:?} after the kill", killed_at.elapsed());
@@ -364,6 +394,7 @@ async fn failover_keeps_acknowledged_writes_and_watches_resume() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn linearizable_under_leader_kills_and_partitions() {
+    let _serial = SERIAL.lock().await;
     // SAFETY: tests only read it; set before the servers start.
     unsafe { std::env::set_var("LITEK8S_HA_FAULTS", "1") };
     let root = tempfile::tempdir().unwrap();
@@ -411,10 +442,21 @@ async fn linearizable_under_leader_kills_and_partitions() {
         for o in &others {
             partition(o.clone(), vec![addrs[li].clone()], true).await;
         }
+        // Partitioned for at least 4 s, and until the majority has elected
+        // a leader of its own.
         tokio::time::sleep(Duration::from_secs(4)).await;
-        let majority_leader = leader_name(&others[0]).await;
-        eprintln!("{} nemesis: the majority side's leader is {majority_leader:?}", at());
-        assert!(majority_leader.is_some_and(|l| l != leader), "the majority did not elect a new leader");
+        let deadline = Instant::now() + ELECTION;
+        while !leader_name(&others[0]).await.is_some_and(|l| l != leader) {
+            if Instant::now() > deadline {
+                for o in &others {
+                    let v = servers(o).await.unwrap_or_default();
+                    eprintln!("{o}: {}", json!({"state": v["state"], "vote": v["vote"], "term": v["term"], "last_log_index": v["last_log_index"], "leader_heard_ms_ago": v["leader_heard_ms_ago"], "elections": v["elections"]}));
+                }
+                panic!("the majority did not elect a new leader");
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        eprintln!("{} nemesis: the majority side's leader is {:?}", at(), leader_name(&others[0]).await);
         partition(addrs[li].clone(), others.clone(), false).await;
         for o in &others {
             partition(o.clone(), vec![addrs[li].clone()], false).await;
@@ -459,6 +501,7 @@ async fn linearizable_under_leader_kills_and_partitions() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn big_objects_replicate() {
+    let _serial = SERIAL.lock().await;
     let root = tempfile::tempdir().unwrap();
     let servers_ = cluster(root.path()).await;
     let addrs: Vec<String> = servers_.iter().map(|s| s.addr.clone()).collect();
@@ -486,17 +529,18 @@ async fn big_objects_replicate() {
 /// include every write it acknowledged before dying.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn restarted_leader_serves_fresh_reads() {
+    let _serial = SERIAL.lock().await;
     let root = tempfile::tempdir().unwrap();
     let mut servers_ = cluster(root.path()).await;
     let base = "/api/v1/namespaces/default/configmaps";
     for round in 0..3 {
+        eventually("a leader", ELECTION, || async { leader_name(&servers_[0].addr).await.is_some() }).await;
         let leader = leader_name(&servers_[0].addr).await.expect("a leader");
         let li = servers_.iter().position(|s| s.name == leader).unwrap();
         let addr = servers_[li].addr.clone();
         let names: Vec<String> = (0..30).map(|i| format!("r{round}-{i}")).collect();
         for n in &names {
-            let (code, _) = http(&addr, "POST", base, Some(&cm(n, json!({}))), T).await.unwrap();
-            assert_eq!(code, 201);
+            create(&addr, base, &cm(n, json!({}))).await;
         }
         // Back at once: sooner than any election.
         let (dir, port, name, raft_port) = (servers_[li].dir.clone(), servers_[li].port(), servers_[li].name.clone(), servers_[li].raft_port);
@@ -507,7 +551,7 @@ async fn restarted_leader_serves_fresh_reads() {
         let mut errors = 0;
         for n in &names {
             // An error (no leader yet) is fine and retried; an answer must not be stale.
-            let deadline = Instant::now() + Duration::from_secs(10);
+            let deadline = Instant::now() + ELECTION;
             loop {
                 match http(&addr, "GET", &format!("{base}/{n}"), None, T).await {
                     Ok((200, _)) => break,
@@ -522,4 +566,34 @@ async fn restarted_leader_serves_fresh_reads() {
         }
         eprintln!("round {round}: {errors} retried reads");
     }
+}
+
+/// openraft 0.9 makes a lone voter start an election on every tick (1.5
+/// heartbeats). With vote saves slower than that, each election used to be
+/// superseded by the next before its own vote was counted, and a fresh
+/// `--cluster-init` server never became leader (loaded CI runners).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn lone_server_elects_itself_with_slow_vote_saves() {
+    let _serial = SERIAL.lock().await;
+    let root = tempfile::tempdir().unwrap();
+    // SAFETY: set before the server starts and removed after it stops,
+    // with no other test's servers running (SERIAL).
+    unsafe {
+        std::env::set_var("LITEK8S_HA_NO_EXIT", "1");
+        std::env::set_var("LITEK8S_RAFT_HEARTBEAT_MS", "100");
+        std::env::set_var("LITEK8S_HA_FAULTS", "1");
+        std::env::set_var("LITEK8S_HA_SLOW_VOTE_MS", "400");
+    }
+    let mut s1 = Server::start("s1", &root.path().join("s1"), 0, true, None);
+    let started = Instant::now();
+    let ready = async {
+        while !matches!(http(&s1.addr, "GET", "/api/v1/namespaces/default", None, T).await, Ok((200, _))) {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    };
+    let elected = tokio::time::timeout(Duration::from_secs(15), ready).await.is_ok();
+    s1.kill();
+    unsafe { std::env::remove_var("LITEK8S_HA_SLOW_VOTE_MS") };
+    assert!(elected, "a lone server with 400 ms vote saves did not elect itself in 15 s");
+    eprintln!("elected and serving after {:?}", started.elapsed());
 }
