@@ -4,6 +4,7 @@
 
 pub mod alerts;
 pub mod api;
+pub mod cli;
 pub mod expo;
 pub mod kube_state;
 pub mod notify;

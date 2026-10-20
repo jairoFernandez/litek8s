@@ -171,9 +171,30 @@ Examples:
   litek8s describe deployments demo-nginx";
 
 const LOGS_AFTER_HELP: &str = "\
+Searches the logs of every pod on every node (also of containers that are
+gone, kept per node for --obs-log-retention), newest last.
+
 Examples:
-  litek8s logs demo-nginx
-  litek8s logs demo-nginx --tail 200";
+  litek8s logs -l app=web --since 1h --grep 'ERROR|panic'
+  litek8s logs -n prod api- -f
+  litek8s logs --grep '(?i)timeout' --since 2026-10-19T08:00:00Z --until 30m --json
+  litek8s logs demo-nginx --tail 200        (the legacy daemon's deployments)";
+
+const ALERTS_AFTER_HELP: &str = "\
+Examples:
+  litek8s alerts
+  litek8s alerts ack 3f2a9c1d04b7e6a1
+  litek8s alerts silence alertname=KubePodCrashLooping namespace=dev --for 4h --comment 'deploying'
+  litek8s alerts silences
+  litek8s alerts unsilence silence-x7k2p
+Rules, receivers (webhook, ntfy, Telegram) and silences are objects: see
+docs/observability.md (kubectl get alertrules,alertreceivers,silences).";
+
+const QUERY_AFTER_HELP: &str = "\
+Examples:
+  litek8s query 'topk(5, sum by (namespace, pod) (rate(container_cpu_usage_seconds_total[5m])))'
+  litek8s query 'container_memory_working_set_bytes{namespace=\"default\"}' --range 1h --step 5m
+Grafana: add a Prometheus data source with URL http://<server>:6443/prometheus.";
 
 const PROXY_AFTER_HELP: &str = "\
 Examples:
@@ -245,7 +266,7 @@ struct ObsArgs {
     obs_retention: String,
     #[arg(long, default_value = "24Mi", help = "Memory the metrics store may use for series and head chunks (new series beyond it are refused)")]
     obs_memory: String,
-    #[arg(long, default_value = "7d", value_parser = parse_duration, help = "How long logs of removed containers are kept on each node")]
+    #[arg(long, default_value = "7d", value_parser = |s: &str| crate::obs::tsdb::parse_duration(s).map_err(|e| e.to_string()), help = "How long logs of removed containers are kept on each node")]
     obs_log_retention: Duration,
     #[arg(long, default_value = "512Mi", help = "Most disk the log archive of removed containers may use on each node")]
     obs_log_max_size: String,
@@ -465,12 +486,19 @@ enum Command {
         help_template = HELP_TEMPLATE,
         after_help = LOGS_AFTER_HELP
     )]
-    Logs {
-        #[arg(help = "Deployment name")]
-        name: String,
-        #[arg(long, default_value_t = 100, help = "How many log lines to request")]
-        tail: usize,
-    },
+    Logs(crate::obs::cli::LogsArgs),
+    #[command(
+        about = "Alerts of the cluster: list, silence, acknowledge",
+        help_template = HELP_TEMPLATE,
+        after_help = ALERTS_AFTER_HELP
+    )]
+    Alerts(crate::obs::cli::AlertsArgs),
+    #[command(
+        about = "Run a PromQL query against the cluster's built-in metrics",
+        help_template = HELP_TEMPLATE,
+        after_help = QUERY_AFTER_HELP
+    )]
+    Query(crate::obs::cli::QueryArgs),
     #[command(
         about = "Open a local TCP proxy to a published deployment port",
         help_template = HELP_TEMPLATE,
@@ -1379,7 +1407,11 @@ pub async fn run() -> Result<()> {
             };
             print_response(response)
         }
-        Command::Logs { name, tail } => {
+        Command::Alerts(args) => crate::obs::cli::alerts(args).await,
+        Command::Query(args) => crate::obs::cli::query(args).await,
+        Command::Logs(args) if !args.legacy() => crate::obs::cli::logs(args).await,
+        Command::Logs(args) => {
+            let (name, tail) = (args.name.unwrap_or_default(), args.tail.unwrap_or(100));
             let response = endpoint.request(Request::Logs { name, tail }).await?;
             print_response(response)
         }

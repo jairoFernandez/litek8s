@@ -334,6 +334,17 @@ fn fingerprint(labels: &BTreeMap<String, String>) -> String {
     hex::encode(&h.finalize()[..8])
 }
 
+/// Four significant digits, as Go's `%.4g` (without the exponent form).
+fn sig4(x: f64) -> String {
+    if x == 0.0 || !x.is_finite() {
+        return super::promql::format_value(x);
+    }
+    let mag = x.abs().log10().floor() as i32;
+    let dec = (3 - mag).max(0) as usize;
+    let s = format!("{x:.dec$}");
+    if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s }
+}
+
 pub fn humanize(v: f64) -> String {
     if v == 0.0 || !v.is_finite() {
         return super::promql::format_value(v);
@@ -345,9 +356,7 @@ pub fn humanize(v: f64) -> String {
         x /= 1000.0;
         i += 1;
     }
-    let s = format!("{x:.4}");
-    let s = s.trim_end_matches('0').trim_end_matches('.');
-    format!("{s}{}", units[i])
+    format!("{}{}", sig4(x), units[i])
 }
 
 /// `{{ $labels.x }}`, `{{ $value }}` with optional `| humanize`,
@@ -361,7 +370,7 @@ pub fn expand(template: &str, labels: &BTreeMap<String, String>, value: f64) -> 
         }
         match c.get(3).map(|m| m.as_str()) {
             Some("humanize") => humanize(value),
-            Some("humanizePercentage") => format!("{}%", humanize(value * 100.0)),
+            Some("humanizePercentage") => format!("{}%", sig4(value * 100.0)),
             Some("humanize1024") => {
                 let units = ["", "Ki", "Mi", "Gi", "Ti"];
                 let (mut x, mut i) = (value, 0);
@@ -369,7 +378,7 @@ pub fn expand(template: &str, labels: &BTreeMap<String, String>, value: f64) -> 
                     x /= 1024.0;
                     i += 1;
                 }
-                format!("{:.4}{}", x, units[i]).replace(".0000", "")
+                format!("{}{}", sig4(x), units[i])
             }
             _ => super::promql::format_value(value),
         }
@@ -608,6 +617,8 @@ mod tests {
         assert_eq!(expand("{{ $labels.pod }} at {{ $value }}", &labels, 3.0), "web at 3");
         assert_eq!(expand("{{$value | humanize}}", &labels, 1_500_000.0), "1.5M");
         assert_eq!(expand("{{ $value | humanizePercentage }}", &labels, 0.051), "5.1%");
+        assert_eq!(expand("{{ $value | humanizePercentage }}", &labels, 0.053806), "5.381%");
+        assert_eq!(expand("{{ $value | humanize1024 }}", &labels, 3.0 * 1024.0 * 1024.0), "3Mi");
         assert_eq!(expand("{{ $labels.nope }}x", &labels, 0.0), "x");
     }
 

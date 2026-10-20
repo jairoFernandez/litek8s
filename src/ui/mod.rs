@@ -8,13 +8,14 @@
 //! same way. See docs/ui.md.
 
 pub mod app;
-mod client;
+pub(crate) mod client;
 mod clusters;
 mod ctx;
 mod docker;
 mod exec;
 mod home;
-mod kube;
+pub(crate) mod kube;
+mod obs;
 pub mod model;
 pub mod view;
 
@@ -105,10 +106,14 @@ pub async fn run(args: UiArgs) -> Result<()> {
     let active = Arc::new(Mutex::new(cluster.name.clone()));
     let clusters_visible = Arc::new(AtomicBool::new(false));
     let wake_clusters = Arc::new(Notify::new());
+    let obs_visible = Arc::new(AtomicBool::new(false));
+    let wake_obs = Arc::new(Notify::new());
+    let obs_ep: obs::Shared = Arc::new(Mutex::new(fixed.as_ref().map(|(ep, _)| ep.clone())));
     let docker_task = docker::spawn(docker_ep.clone(), tx.clone(), refresh.clone());
     let tasks = vec![
         home::spawn(tx.clone(), local, pace.clone(), wake_home.clone(), active.clone(), fixed.as_ref().filter(|_| !local).map(|(ep, _)| ep.clone())),
         clusters::spawn(tx.clone(), clusters_visible.clone(), wake_clusters.clone()),
+        obs::spawn(tx.clone(), obs_visible.clone(), wake_obs.clone(), obs_ep.clone()),
     ];
     let kube_watches = if fixed.is_some() { kube::spawn_watches(kube_ep.clone(), tx.clone()) } else { Vec::new() };
     if fixed.is_none() {
@@ -124,6 +129,9 @@ pub async fn run(args: UiArgs) -> Result<()> {
         active,
         clusters_visible,
         wake_clusters,
+        obs_visible,
+        wake_obs,
+        obs_ep,
         kube: kube_ep,
         follow_dev: fixed.is_none(),
         kube_port: None,
@@ -253,6 +261,10 @@ struct Runtime {
     active: Arc<Mutex<String>>,
     clusters_visible: Arc<AtomicBool>,
     wake_clusters: Arc<Notify>,
+    /// The Observe view samples only while shown.
+    obs_visible: Arc<AtomicBool>,
+    wake_obs: Arc<Notify>,
+    obs_ep: obs::Shared,
     kube: Endpoint,
     /// The Kubernetes API is the local dev cluster's, wherever it runs.
     follow_dev: bool,
@@ -354,6 +366,10 @@ impl Runtime {
             if self.clusters_visible.swap(on_clusters, Ordering::Relaxed) != on_clusters && on_clusters {
                 self.wake_clusters.notify_one();
             }
+            let on_obs = app.tab == Tab::Observe && app.logs.is_none();
+            if self.obs_visible.swap(on_obs, Ordering::Relaxed) != on_obs && on_obs {
+                self.wake_obs.notify_one();
+            }
             for e in effects {
                 if self.effect(e, terminal, app).await? {
                     return Ok(());
@@ -377,6 +393,7 @@ impl Runtime {
             }
             Msg::Home(_) => matches!(app.tab, Tab::Home | Tab::Space | Tab::Settings) && app.logs.is_none(),
             Msg::Clusters(_) => app.tab == Tab::Clusters && app.logs.is_none(),
+            Msg::Obs(_) => app.tab == Tab::Observe && app.logs.is_none(),
             Msg::LogLines(..) | Msg::LogEnd(..) => app.logs.is_some(),
             _ => true,
         }
@@ -394,6 +411,7 @@ impl Runtime {
         match e {
             Effect::Quit => return Ok(true),
             Effect::Refresh => {
+                self.wake_obs.notify_one();
                 self.refresh.notify_one();
                 self.wake_home.notify_one();
                 self.wake_clusters.notify_one();
@@ -407,6 +425,7 @@ impl Runtime {
                         t.abort();
                     }
                     app.apply(Msg::KubeDown(format!("connecting to {ctx}…")));
+                    *self.obs_ep.lock().unwrap() = Some(ep.clone());
                     self.kube = ep;
                     app.kube_endpoint = self.kube.display.clone();
                     app.kube_context = ctx;
@@ -474,6 +493,7 @@ impl Runtime {
                 self.log_task = Some(match source {
                     LogSource::Container { id: cid, .. } => tokio::spawn(docker::logs(docker, cid, id, tx)),
                     LogSource::Pod { namespace, name, container } => tokio::spawn(kube::logs(kube, namespace, name, container, id, tx)),
+                    LogSource::Search { namespace, pod, grep } => tokio::spawn(obs::search(kube, namespace, pod, grep, id, tx)),
                 });
             }
             Effect::StopLogs => {
@@ -555,6 +575,13 @@ impl Runtime {
             Effect::RestartDeployment { namespace, name } => {
                 tokio::spawn(async move { done(kube::restart(&kube, &namespace, &name).await) });
             }
+            Effect::AckAlerts(alerts) => {
+                let wake = self.wake_obs.clone();
+                tokio::spawn(async move {
+                    done(obs::ack(&kube, &alerts).await);
+                    wake.notify_one();
+                });
+            }
             Effect::DeletePod { namespace, name } => {
                 tokio::spawn(async move { done(kube::delete_pod(&kube, &namespace, &name).await) });
             }
@@ -620,10 +647,14 @@ impl Runtime {
         match port {
             Some(p) => {
                 self.kube = dev_endpoint(p);
+                *self.obs_ep.lock().unwrap() = Some(self.kube.clone());
                 app.kube_endpoint = self.kube.display.clone();
                 self.kube_watches = kube::spawn_watches(self.kube.clone(), self.tx.clone());
             }
-            None => app.apply(Msg::KubeDown(DEV_DOWN.into())),
+            None => {
+                *self.obs_ep.lock().unwrap() = None;
+                app.apply(Msg::KubeDown(DEV_DOWN.into()));
+            }
         }
     }
 

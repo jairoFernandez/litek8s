@@ -20,9 +20,10 @@ pub enum Tab {
     Space,
     Kube,
     Settings,
+    Observe,
 }
 
-pub const TABS: [Tab; 8] = [Tab::Home, Tab::Clusters, Tab::Containers, Tab::Images, Tab::Volumes, Tab::Space, Tab::Kube, Tab::Settings];
+pub const TABS: [Tab; 9] = [Tab::Home, Tab::Clusters, Tab::Containers, Tab::Images, Tab::Volumes, Tab::Space, Tab::Kube, Tab::Settings, Tab::Observe];
 
 impl Tab {
     pub fn title(self) -> &'static str {
@@ -35,6 +36,7 @@ impl Tab {
             Tab::Space => "Free space",
             Tab::Kube => "Kubernetes",
             Tab::Settings => "Settings",
+            Tab::Observe => "Observe",
         }
     }
 
@@ -110,6 +112,8 @@ impl DevOp {
 pub enum LogSource {
     Container { id: String, name: String },
     Pod { namespace: String, name: String, container: Option<String> },
+    /// A search across every pod (the API server's log search).
+    Search { namespace: Option<String>, pod: Option<String>, grep: String },
 }
 
 /// What the runtime is asked to do.
@@ -133,6 +137,8 @@ pub enum Effect {
     Scale { namespace: String, name: String, replicas: i64 },
     RestartDeployment { namespace: String, name: String },
     DeletePod { namespace: String, name: String },
+    /// Silence these alerts until they resolve.
+    AckAlerts(Vec<AlertRow>),
     PortForward { namespace: String, pod: String, local: u16, remote: u16 },
     StopForwards,
     SaveConfig(DevConfig),
@@ -169,6 +175,7 @@ pub enum Msg {
     Forwards(Vec<Forward>),
     Config(Result<DevConfig, String>),
     Clusters(Box<ClustersSample>),
+    Obs(Box<ObsSample>),
 }
 
 /// A local cluster in the Clusters view.
@@ -244,6 +251,53 @@ pub struct Contexts {
     pub kubeconfig: String,
 }
 
+/// A pod's CPU (cores) and memory (bytes) over the Observe view's window,
+/// one value per step (`None`: no sample then); the last is now.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PodUsage {
+    pub namespace: String,
+    pub name: String,
+    pub cpu: Vec<Option<f64>>,
+    pub mem: Vec<Option<f64>>,
+}
+
+impl PodUsage {
+    pub fn cpu_now(&self) -> f64 {
+        self.cpu.iter().rev().find_map(|v| *v).unwrap_or(0.0)
+    }
+
+    pub fn mem_now(&self) -> f64 {
+        self.mem.iter().rev().find_map(|v| *v).unwrap_or(0.0)
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AlertRow {
+    /// firing, pending
+    pub state: String,
+    pub name: String,
+    pub target: String,
+    pub severity: String,
+    /// Active since (unix seconds).
+    pub since: i64,
+    pub summary: String,
+    pub silenced: bool,
+    pub fingerprint: String,
+    /// (namespace, pod) when it is about a pod.
+    pub pod: Option<(String, String)>,
+    pub labels: std::collections::BTreeMap<String, String>,
+}
+
+/// One sample of the Observe view.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ObsSample {
+    pub pods: Vec<PodUsage>,
+    pub alerts: Vec<AlertRow>,
+    pub error: Option<String>,
+    /// When (unix seconds).
+    pub at: i64,
+}
+
 /// One sample of the dev cluster's state and use.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct HomeSample {
@@ -273,6 +327,8 @@ pub struct HomeSample {
 #[derive(Debug, Clone, PartialEq)]
 pub enum InputKind {
     Filter,
+    /// A regex for a log search across pods.
+    LogSearch,
     Scale { namespace: String, name: String },
     PortForward { namespace: String, pod: String },
     Setting(Field),
@@ -404,8 +460,11 @@ pub struct App {
     pub config_error: Option<String>,
     pub config_path: String,
 
-    pub selected: [usize; 8],
-    pub filters: [String; 8],
+    pub selected: [usize; TABS.len()],
+    pub filters: [String; TABS.len()],
+    /// The Observe view: pods' use and alerts; sorted by memory or CPU.
+    pub obs: ObsSample,
+    pub obs_by_mem: bool,
     pub space_checked: BTreeSet<Reclaim>,
     pub mouse: bool,
     /// Screen rows of the current list's first row and tab titles' spans
@@ -457,8 +516,10 @@ impl App {
             config: DevConfig::default(),
             config_error: None,
             config_path: crate::dev::config::path().display().to_string(),
-            selected: [0; 8],
+            selected: [0; TABS.len()],
             filters: Default::default(),
+            obs: ObsSample::default(),
+            obs_by_mem: false,
             space_checked: [Reclaim::StoppedContainers, Reclaim::DanglingImages, Reclaim::BuildCache].into_iter().collect(),
             mouse: false,
             list_top: std::cell::Cell::new(0),
@@ -582,7 +643,28 @@ impl App {
                 KubeView::Deployments => self.visible_deployments().len(),
             },
             Tab::Settings => SETTINGS.len(),
+            Tab::Observe => self.visible_obs_pods().len(),
         }
+    }
+
+    /// The Observe view's pods: filtered, top consumers first.
+    pub fn visible_obs_pods(&self) -> Vec<usize> {
+        let mut v: Vec<usize> = (0..self.obs.pods.len())
+            .filter(|&i| {
+                let p = &self.obs.pods[i];
+                self.namespace.as_ref().is_none_or(|n| *n == p.namespace) && self.matches(&[&p.name, &p.namespace])
+            })
+            .collect();
+        let key = |i: &usize| {
+            let p = &self.obs.pods[*i];
+            if self.obs_by_mem { p.mem_now() } else { p.cpu_now() }
+        };
+        v.sort_by(|a, b| key(b).partial_cmp(&key(a)).unwrap_or(std::cmp::Ordering::Equal));
+        v
+    }
+
+    pub fn selected_obs_pod(&self) -> Option<&PodUsage> {
+        self.visible_obs_pods().get(self.sel()).map(|i| &self.obs.pods[*i])
     }
 
     fn clamp(&mut self) {
@@ -790,6 +872,12 @@ impl App {
                 }
                 self.home = sample;
             }
+            Msg::Obs(sample) => {
+                self.obs = *sample;
+                if self.tab == Tab::Observe {
+                    self.clamp();
+                }
+            }
             Msg::Clusters(sample) => {
                 let mut sample = *sample;
                 if let Some(op) = &self.dev_busy {
@@ -897,6 +985,14 @@ impl App {
                 Some(c) => format!("logs: {namespace}/{name} [{c}]"),
                 None => format!("logs: {namespace}/{name}"),
             },
+            LogSource::Search { namespace, pod, grep } => {
+                let scope = match (namespace, pod) {
+                    (Some(n), Some(p)) => format!("{n}/{p} (every container, gone ones too)"),
+                    (Some(n), None) => format!("namespace {n}"),
+                    _ => "every pod".to_string(),
+                };
+                if grep.is_empty() { format!("logs: {scope}, last hour") } else { format!("logs matching /{grep}/: {scope}, last hour") }
+            }
         };
         let id = self.next_log;
         self.next_log += 1;
@@ -978,7 +1074,7 @@ impl App {
         match key.code {
             KeyCode::Char('q') => return vec![Effect::Quit],
             KeyCode::Char('?') | KeyCode::F(1) => self.overlay = Overlay::Help,
-            KeyCode::Char(c @ '1'..='8') => self.tab = TABS[c as usize - '1' as usize],
+            KeyCode::Char(c @ '1'..='9') => self.tab = TABS[c as usize - '1' as usize],
             KeyCode::Tab => self.tab = TABS[(self.tab.index() + 1) % TABS.len()],
             KeyCode::BackTab => self.tab = TABS[(self.tab.index() + TABS.len() - 1) % TABS.len()],
             KeyCode::Down | KeyCode::Char('j') => self.move_sel(1),
@@ -1121,6 +1217,57 @@ impl App {
             },
             Tab::Kube => return self.kube_key(code),
             Tab::Settings => return self.settings_key(code),
+            Tab::Observe => return self.obs_key(code),
+        }
+        Vec::new()
+    }
+
+    fn obs_key(&mut self, code: KeyCode) -> Vec<Effect> {
+        match code {
+            KeyCode::Char('s') => {
+                self.obs_by_mem = !self.obs_by_mem;
+                return Vec::new();
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') => {
+                let mut all: Vec<Option<String>> = vec![None];
+                all.extend(self.namespaces.iter().cloned().map(Some));
+                let pos = all.iter().position(|n| *n == self.namespace).unwrap_or(0);
+                let next = if code == KeyCode::Char('n') { (pos + 1) % all.len() } else { (pos + all.len() - 1) % all.len() };
+                self.namespace = all[next].clone();
+                self.clamp();
+                return Vec::new();
+            }
+            KeyCode::Char('L') => {
+                self.input("search logs of every pod, last hour (regex; empty: all lines)", String::new(), InputKind::LogSearch);
+                return Vec::new();
+            }
+            KeyCode::Char('A') => {
+                let firing: Vec<AlertRow> = self.obs.alerts.iter().filter(|a| !a.silenced).cloned().collect();
+                if firing.is_empty() {
+                    self.flash("no unacknowledged alerts", false);
+                } else {
+                    let lines = firing.iter().map(|a| format!("{} {}", a.name, a.target)).collect();
+                    self.confirm("Acknowledge every alert (silence each until it resolves)?", lines, Effect::AckAlerts(firing));
+                }
+                return Vec::new();
+            }
+            _ => {}
+        }
+        let Some(p) = self.selected_obs_pod().cloned() else { return Vec::new() };
+        match code {
+            KeyCode::Enter | KeyCode::Char('l') => {
+                return self.open_logs(LogSource::Search { namespace: Some(p.namespace), pod: Some(p.name), grep: String::new() });
+            }
+            KeyCode::Char('a') => {
+                let mine: Vec<AlertRow> = self.obs.alerts.iter().filter(|a| !a.silenced && a.pod.as_ref() == Some(&(p.namespace.clone(), p.name.clone()))).cloned().collect();
+                if mine.is_empty() {
+                    self.flash(format!("no unacknowledged alerts about {}/{}", p.namespace, p.name), false);
+                } else {
+                    let lines = mine.iter().map(|a| format!("{} {}", a.name, a.target)).collect();
+                    self.confirm("Acknowledge (silence until resolved)?", lines, Effect::AckAlerts(mine));
+                }
+            }
+            _ => {}
         }
         Vec::new()
     }
@@ -1420,6 +1567,12 @@ impl App {
         };
         match &kind {
             InputKind::Filter => Vec::new(),
+            InputKind::LogSearch => {
+                if let Err(e) = regex::Regex::new(value.trim()) {
+                    return fail(self, format!("not a regex: {e}"));
+                }
+                self.open_logs(LogSource::Search { namespace: self.namespace.clone(), pod: None, grep: value.trim().to_string() })
+            }
             InputKind::Scale { namespace, name } => match value.trim().parse::<i64>() {
                 Ok(n) if (0..=1000).contains(&n) => vec![Effect::Scale { namespace: namespace.clone(), name: name.clone(), replicas: n }],
                 _ => fail(self, "replicas: a number from 0 to 1000".into()),
