@@ -137,13 +137,13 @@ were removed (the walk is at most a minute old):
 │  objects                172 kB   Kubernetes objects, keys                    │
 │  other                  254 kB   metadata, IP allocations                    │
 │rest of the VM disk      2.3 MB   other clusters, filesystem                  │
-│deleted in the VM       83.2 MB   kept by disk.img (it never shrinks)         │
+│deleted in the VM       83.2 MB   disk.img gives it back within a minute      │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
 | line | what it is |
 |---|---|
-| litek8s itself | the `litek8s` binary; on macOS also the VM's kernel and initramfs and the signed copy of the binary the VM runs from |
+| litek8s itself | the `litek8s` binary; on macOS also the VM's kernel, root image and initrd and the signed copy of the binary the VM runs from |
 | images | the unpacked layers of every image and of the build cache: one content-addressed store per node, shared by pods, Docker and builds, each layer once |
 | container layers | what pod containers and Docker containers wrote (their overlay upper directories) |
 | volumes | Docker volumes (named and anonymous), pods' emptyDirs, local PVs, ConfigMap and Secret files |
@@ -153,7 +153,7 @@ were removed (the walk is at most a minute old):
 | other nodes | a multi-node cluster's workers (each with its own image store) |
 | other | metadata, IP allocations, staging |
 | rest of the VM disk (macOS) | the other clusters and the filesystem's own blocks |
-| deleted in the VM (macOS) | blocks the guest freed that `disk.img` still holds: it is sparse but never shrinks (no TRIM); deleting the last cluster removes it |
+| deleted in the VM (macOS) | blocks the guest freed that `disk.img` still holds: the guest trims its disk once it has been quiet for 30 s (at most once a minute), and Virtualization.framework punches the trimmed blocks out of the sparse image, so this goes back to about zero shortly after a prune |
 
 Where images, container layers and volumes have something to reclaim, the
 note says how much and points at the Free space view (6), which frees it:

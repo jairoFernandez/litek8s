@@ -182,6 +182,29 @@ comparison, OrbStack's VM (its own VMM) grew by 2.3 GB for the same 1 GiB
 container write and was back to where it started 30 s later: that, the
 framework does not allow. Details and the experiments behind this: [bench/RESULTS.md](../bench/RESULTS.md#the-macos-vms-memory-a-ceiling-instead-of-a-ratchet-2026-10-19).
 
+### Disk on macOS
+
+The VM's data disk is a sparse file, `vm-state/disk.img` in the dev data
+directory (64 GiB at most; only what the guest writes takes space). Unlike
+its memory, the framework does give disk space back: the virtio disk
+accepts discards (TRIM) and punches the discarded blocks out of the file.
+So the guest trims its filesystem (FITRIM on `/var/lib/litek8s`) at boot
+and then whenever the disk has been quiet for 30 s, at most once a minute;
+ext4 only discards block groups freed since the last trim, so an idle
+trim costs nothing. (Mounting with `discard` would discard on every
+delete, in the middle of pulls and container churn.) `docker rmi` and
+`docker image prune` free the image's layers at once (layers written in
+the last 10 minutes wait for the node's image GC, in case a pull still
+needs them), and the Mac has the space back within a minute or so:
+
+| `disk.img` on the Mac (`du`) | before | now |
+|---|---|---|
+| a container writes 1 GiB, then `docker rm` | stays at 2.6 GB | back to 1.3 GB 55 s later |
+| `docker rmi python:3.13` (1.1 GB unpacked) | stays at 1.54 GB | 1.29 → 0.78 GB within 3 min; 123 MB after the node's next image GC (9 min later) |
+| boot with 362 MB deleted from an older guest | – | given back by the first trim |
+
+`du` of `disk.img` is what counts; `ls` shows the image's 64 GiB size.
+
 ## Settings
 
 `dev up` takes its defaults from `~/.litek8s/config.yaml` (`$LITEK8S_CONFIG`),
@@ -291,8 +314,8 @@ clusters share:
 - the VM's CPUs and memory (macOS) or the sandbox's limits (Linux,
   `cpus`/`memory` in the settings): set for all of them, and one busy
   cluster slows the others (no per-cluster limits yet);
-- the VM's disk: deleting a cluster deletes its files but the sparse disk
-  image never shrinks (`dev delete` of the last cluster removes it);
+- the VM's disk: one sparse image for every cluster; what they delete goes
+  back to the Mac within a minute or so (see [Disk on macOS](#disk-on-macos));
 - on Linux, one user namespace: the same subordinate ids map to the same
   host ids in every cluster;
 - the host's ports: NodePorts, LoadBalancer ports and `docker run -p` ports
