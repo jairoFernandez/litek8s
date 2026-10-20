@@ -1147,10 +1147,10 @@ impl Inner {
             // downsample (the tier was added later): catch up.
             if ti + 1 < self.tiers.len() {
                 let pending: Vec<SealedBlock> = self.tiers[ti].sealed.iter().filter(|b| b.end > self.tiers[ti + 1].watermark).cloned().collect();
-                for b in pending {
-                    self.downsample_into(ti + 1, &b)?;
+                for b in &pending {
+                    self.downsample_into(ti + 1, b)?;
                 }
-                if !self.tiers[ti].sealed.is_empty() {
+                if !pending.is_empty() {
                     self.save_state(dir)?;
                 }
             }

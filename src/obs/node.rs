@@ -55,7 +55,9 @@ pub struct Collector {
     volumes: HashMap<PathBuf, (Instant, u64)>,
 }
 
-const DISK_EVERY: Duration = Duration::from_secs(300);
+/// The disk walk reads every file's metadata (an image store is a big
+/// tree): rarely.
+const DISK_EVERY: Duration = Duration::from_secs(900);
 const VOLUME_EVERY: Duration = Duration::from_secs(60);
 
 fn read(path: &Path) -> Option<String> {
