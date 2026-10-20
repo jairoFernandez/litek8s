@@ -530,12 +530,19 @@ where
 }
 
 pub async fn request(socket_path: &Path, request: Request) -> Result<Response> {
-    let mut stream = UnixStream::connect(socket_path)
-        .await
-        .with_context(|| format!("failed to connect to {}", socket_path.display()))?;
+    let mut stream = UnixStream::connect(socket_path).await.map_err(|e| {
+        let err = anyhow::Error::new(e).context(format!("failed to connect to {}", socket_path.display()));
+        // Most users run Kubernetes clusters, not the legacy daemon: say so.
+        err.context(NO_DAEMON_HINT)
+    })?;
     send_message(&mut stream, &request).await?;
     read_message(&mut stream).await
 }
+
+/// The error for a command of the legacy daemon (apply, get, tree, ...) when
+/// no daemon is running.
+const NO_DAEMON_HINT: &str = "no legacy litek8s daemon is running: this command belongs to the legacy daemon (`litek8s serve`). \
+For a Kubernetes cluster (litek8s dev, litek8s apiserver) use kubectl, litek8s ui, litek8s top or litek8s logs";
 
 pub async fn request_tcp(addr: &str, req: Request) -> Result<Response> {
     let mut stream = tokio::net::TcpStream::connect(addr)
