@@ -1,3 +1,6 @@
+# Runs on Gitea Actions and on GitHub Actions alike: a runner in the cluster
+# with the label lkdocker and litek8s's Docker API (act_runner mounts it into
+# the job's container; the GitHub runner has it itself).
 name: ci
 on:
   push:
@@ -8,28 +11,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # The runner mounts its Docker socket (litek8s's Docker API) into the job.
       - name: Docker CLI
         run: |
-          curl -fsSL "https://download.docker.com/linux/static/stable/$(uname -m)/docker-27.5.1.tgz" |
-            tar -xz -C /usr/local/bin --strip-components=1 docker/docker
+          command -v docker >/dev/null ||
+            curl -fsSL "https://download.docker.com/linux/static/stable/$(uname -m)/docker-27.5.1.tgz" |
+              tar -xz -C /usr/local/bin --strip-components=1 docker/docker
           docker version --format 'docker API {{.Server.APIVersion}}'
 
-      - name: Build into the cluster's image store
+      # Into the cluster's image store: the pods start from it, no registry.
+      - name: Build
         run: |
           tag="$(git rev-parse --short=12 HEAD)"
           sed -i "s/__VERSION__/$tag/" index.html
           DOCKER_BUILDKIT=0 docker build -t "metaphor:$tag" .
           echo "TAG=$tag" >> "$GITHUB_ENV"
 
+      # The new tag in the gitops repository; Argo CD rolls it out.
       - name: Deploy to development
         env:
           GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+          GITOPS_REPO: ${{ vars.GITOPS_REPO || 'gitops' }}
         run: |
           python3 - <<'PY'
           import base64, json, os, re, urllib.request
-          url = "%s/api/v1/repos/%s/gitops/contents/registry/environments/development/metaphor/kustomization.yaml" % (
-              os.environ["GITHUB_SERVER_URL"], os.environ["GITHUB_REPOSITORY_OWNER"])
+          api = os.environ.get("GITHUB_API_URL") or os.environ["GITHUB_SERVER_URL"] + "/api/v1"
+          url = "%s/repos/%s/%s/contents/registry/environments/development/metaphor/kustomization.yaml" % (
+              api, os.environ["GITHUB_REPOSITORY_OWNER"], os.environ["GITOPS_REPO"])
           auth = {"Authorization": "token " + os.environ["GITOPS_TOKEN"], "Content-Type": "application/json"}
           cur = json.load(urllib.request.urlopen(urllib.request.Request(url, headers=auth)))
           text = base64.b64decode(cur["content"]).decode()

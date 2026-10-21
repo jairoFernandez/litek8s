@@ -1,4 +1,4 @@
-# A self-hosted GitOps platform (Gitea + Argo CD)
+# A self-hosted GitOps platform (Gitea or GitHub + Argo CD)
 
 The stack of [kubefirst](https://github.com/konstructio/kubefirst)'s
 platform, built up in steps on your own cluster, with nothing outside it:
@@ -6,7 +6,7 @@ platform, built up in steps on your own cluster, with nothing outside it:
 webhooks, a container registry, Actions with GitHub Actions syntax run by
 [act_runner](https://gitea.com/gitea/act_runner)), a `gitops` repository in
 it, and [Argo CD](https://argo-cd.readthedocs.io) syncing that repository as
-an app of apps. Its layout and components follow kubefirst's
+an app of apps; or GitHub instead of Gitea (`GIT_PROVIDER=github`). Its layout and components follow kubefirst's
 [gitops-template](https://github.com/konstructio/gitops-template) (MIT,
 see [gitops/NOTICE.md](gitops/NOTICE.md)); this project is not affiliated
 with kubefirst or Konstruct.
@@ -15,10 +15,10 @@ with kubefirst or Konstruct.
 |---|---|
 | [`up.sh`](up.sh) | installs or updates everything; keeps its secrets and the repository on re-runs |
 | [`smoke.sh`](smoke.sh) | CI jobs per runner mode; every Argo CD Application Synced and Healthy on the repository's commit; Argo CD, Gitea and OpenBao over HTTPS with the platform's CA; a secret from OpenBao to a Kubernetes Secret through external-secrets; a two-step Argo Workflow; a push to the sample app served in development; a pull request that Atlantis plans and applies with OpenTofu against OpenBao, then undoes |
-| [`lib.sh`](lib.sh) | Gitea API and git over a port-forward, for both |
+| [`lib.sh`](lib.sh) | the Git provider (Gitea over a port-forward, or GitHub): API, git, repositories, Actions secrets and variables; for both |
 | [`gitea/`](gitea/) | the Gitea chart's values, act_runner per mode |
 | [`gitops/`](gitops/) | the repository's root: `atlantis.yaml`, `terraform/openbao` (OpenBao's policies in OpenTofu), `registry/environments/development` (the sample app) |
-| [`metaphor/`](metaphor/) | the sample app's repository: a static page, its Dockerfile and its CI (`.gitea/workflows/ci.yaml`) |
+| [`metaphor/`](metaphor/) | the sample app's repository: a static page, its Dockerfile and its CI (`.github/workflows/ci.yaml`, for Gitea Actions and GitHub Actions) |
 | [`gitops/cluster/`](gitops/cluster/) | what goes to `registry/clusters/<cluster>/` in the repository: one Argo CD Application per component, `registry.yaml` the app of apps, `components/argocd` Argo CD itself |
 
 What is in it so far:
@@ -83,32 +83,88 @@ cert-manager 176 MiB, external-secrets 164 MiB, Atlantis 123 MiB, OpenBao
 node 2.0 GiB (kubefirst's local mode asks Docker for 5 GiB, its cloud
 clusters 4 x 8 GiB).
 
-`up.sh` takes `CLUSTER_NAME` (default `mgmt`, the directory in the
-repository), `RUNNERS` (default `lkdocker`), `DOMAIN` (default `localhost`)
-and `HTTP_PORT`/`HTTPS_PORT` (default 80/443; another port when something
-on the machine holds them, e.g. `HTTPS_PORT=8443`, then the URLs carry it). The repository is
-`lkadmin/gitops` in Gitea; change the platform by pushing to it. `up.sh`
-writes it only when it is empty, or with `SEED=update` (a new commit with
-this checkout's `gitops/`).
+`up.sh` takes (the header of [`up.sh`](up.sh) has them all):
+
+| variable | default | |
+|---|---|---|
+| `GIT_PROVIDER` | `gitea` | `gitea` or `github` ([below](#on-github)) |
+| `PLATFORM_MODE` | `lk` | how CI images reach pods ([below](#platform-modes)) |
+| `GITOPS_REPO`, `APP_REPO` | `gitops`, `metaphor` | the repositories' names |
+| `CLUSTER_NAME` | `mgmt` | the directory under `registry/clusters/` |
+| `RUNNERS` | `lkdocker` | Gitea's act_runner modes ([below](#runner-modes-gitea)) |
+| `DOMAIN` | `localhost` | the UIs at `https://<app>.<DOMAIN>` |
+| `HTTP_PORT`, `HTTPS_PORT` | 80, 443 | the ingress's ports; another one when something on the machine holds them (`HTTPS_PORT=8443`, the URLs then carry it) |
+
+`up.sh` keeps what it chose in the ConfigMap `argocd/platform`, which
+`smoke.sh` reads. The gitops repository is `<owner>/gitops` in Gitea
+(`lkadmin`) or GitHub; change the platform by pushing to it. `up.sh` writes
+it only when it is empty, or with `SEED=update` (a new commit with this
+checkout's `gitops/`).
 
 Remove it all: `kubectl delete namespace argocd` first (or Argo CD puts
 things back), then the namespaces of the components, then
 `helm -n gitea uninstall gitea; kubectl delete namespace gitea`.
 
+## On GitHub
+
+`GIT_PROVIDER=github` keeps the repositories on GitHub instead of Gitea:
+no Gitea, no act_runner, and no Atlantis (it needs GitHub's webhooks, which
+cannot reach a cluster at home or on a laptop). What changes:
+
+- `up.sh` creates `<owner>/<GITOPS_REPO>` and `<owner>/<APP_REPO>` (private,
+  with `gh`) unless they exist, and pushes to them when empty.
+- Argo CD reads the gitops repository with the token, and polls it (3
+  minutes; there is no webhook into the cluster).
+- A self-hosted GitHub Actions runner (`ghcr.io/actions/actions-runner`,
+  label `lkdocker`, ephemeral: one job per registration) runs in the cluster
+  on litek8s's Docker API, so the sample app's CI works as with Gitea.
+
+It needs the `gh` CLI, logged in (repositories, Actions secrets and
+variables), and a fine-grained token for the two repositories with
+**Contents**, **Workflows** (to push the app's `.github/workflows`) and
+**Administration** (the runner gets its registration tokens with it), all
+read and write. The token goes to OpenBao's
+`platform/github`, where the runner's ExternalSecret reads it, to Argo CD's
+repository Secret, and to the app repository's secret `GITOPS_TOKEN`.
+
+```bash
+(umask 077; pbpaste > ~/.github-token)    # the token, not in your shell history
+GIT_PROVIDER=github GITOPS_REPO=platform-gitops APP_REPO=platform-app \
+  GITHUB_TOKEN_FILE=~/.github-token examples/platform/up.sh
+examples/platform/smoke.sh
+```
+
+## Platform modes
+
+How the images the CI builds reach the pods:
+
+- `PLATFORM_MODE=lk` (default): the runner builds with litek8s's Docker API,
+  into the cluster's own image store; pods start from it with
+  `imagePullPolicy: Never`. No registry. It needs that Docker API on the
+  node the runner and the app run on: a dev cluster, or a server started
+  with `litek8s apiserver --docker-socket`.
+- `PLATFORM_MODE=dind` (not yet): the runner builds in its own dockerd and
+  pushes to a registry (Gitea's), and nodes pull from it. That needs nodes
+  that trust the platform's CA and log in to the registry, which litek8s's
+  registry configuration is about to give them.
+
 ## The sample app: push to deploy
 
-`up.sh` puts [`metaphor/`](metaphor/) in Gitea as `lkadmin/metaphor` with
-the repository secret `GITOPS_TOKEN` (a token that can write to `gitops`).
-Every push to its `main`:
+`up.sh` puts [`metaphor/`](metaphor/) in the provider as
+`<owner>/<APP_REPO>` with the Actions secret `GITOPS_TOKEN` (a token that
+can write to the gitops repository) and the variable `GITOPS_REPO`. Every
+push to its `main`:
 
-1. Gitea Actions runs `.gitea/workflows/ci.yaml` on the `lkdocker` runner.
-   The runner mounts its Docker socket, litek8s's Docker API, into the job;
-   `docker build` puts `metaphor:<commit>` straight into the cluster's image
-   store, the one pods start from: no registry, nothing pushed or pulled.
+1. Gitea Actions or GitHub Actions runs `.github/workflows/ci.yaml` on a
+   runner in the cluster with the label `lkdocker`. With Gitea the runner
+   mounts its Docker socket, litek8s's Docker API, into the job; the GitHub
+   runner uses it itself. `docker build` puts `metaphor:<commit>` straight
+   into the cluster's image store, the one pods start from: no registry,
+   nothing pushed or pulled.
 2. The job sets `newTag: <commit>` in the gitops repository's
    `registry/environments/development/metaphor/kustomization.yaml`.
-3. Gitea's webhook tells Argo CD about the push (no 3-minute poll), and Argo
-   CD rolls out the new image (`imagePullPolicy: Never`, on the node with
+3. Gitea's webhook tells Argo CD about the push (on GitHub Argo CD polls,
+   up to 3 minutes), and Argo CD rolls out the new image (`imagePullPolicy: Never`, on the node with
    the Docker engine).
 
 `smoke.sh` changes the page with a commit and waits for
@@ -162,7 +218,7 @@ root: fine for a home lab or a dev cluster (kubefirst keeps Vault's unseal
 keys in a Secret too); with a cloud KMS or an HSM, replace the `static`
 seal in `gitops/cluster/openbao.yaml`.
 
-## Runner modes
+## Runner modes (Gitea)
 
 | mode | job containers | needs |
 |---|---|---|

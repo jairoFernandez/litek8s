@@ -1,0 +1,72 @@
+# A self-hosted GitHub Actions runner for <APP_REPOSITORY>, label lkdocker,
+# on litek8s's Docker API: `docker build` puts images straight into the
+# cluster's image store. Ephemeral: it registers, runs one job, deregisters
+# and registers again, so a job never sees the previous one's leftovers.
+# The token (OpenBao platform/github) needs Administration read/write on the
+# repository to get registration tokens.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: github-runner
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: github-runner}
+  template:
+    metadata:
+      labels: {app: github-runner}
+    spec:
+      # The node with litek8s's Docker engine.
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - {key: node-role.kubernetes.io/control-plane, operator: Exists}
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: runner
+          image: ghcr.io/actions/actions-runner:2.337.0
+          # The Docker socket is root's.
+          securityContext: {runAsUser: 0}
+          env:
+            - {name: RUNNER_ALLOW_RUNASROOT, value: "1"}
+            - {name: REPOSITORY, value: <APP_REPOSITORY>}
+            - name: GITHUB_TOKEN
+              valueFrom: {secretKeyRef: {name: github-runner, key: GITHUB_TOKEN}}
+          command: [bash, -c]
+          args:
+            - |
+              set -euo pipefail
+              cd /home/runner
+              gh_token() {
+                curl -fsS -X POST -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" \
+                  "https://api.github.com/repos/$REPOSITORY/actions/runners/$1" | jq -r .token
+              }
+              trap './config.sh remove --token "$(gh_token remove-token)" || true; exit 0' TERM INT
+              while :; do
+                rm -f .runner .credentials .credentials_rsaparams
+                ./config.sh --unattended --replace --ephemeral --labels lkdocker \
+                  --url "https://github.com/$REPOSITORY" --name "litek8s-$(hostname)" --token "$(gh_token registration-token)"
+                ./run.sh & wait $!
+              done
+          volumeMounts:
+            - {name: docker, mountPath: /var/run/docker.sock}
+      volumes:
+        - name: docker
+          hostPath: {path: /run/litek8s/docker.sock, type: Socket}
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: github-runner
+spec:
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: openbao-platform
+  target:
+    name: github-runner
+  dataFrom:
+    - extract:
+        key: github

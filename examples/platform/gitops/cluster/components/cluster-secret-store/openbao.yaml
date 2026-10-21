@@ -30,6 +30,7 @@ spec:
   conditions:
     - namespaces:
         - atlantis
+        - github-runner
   provider:
     vault:
       server: http://openbao.openbao.svc.cluster.local:8200

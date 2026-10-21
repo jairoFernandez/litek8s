@@ -5,7 +5,7 @@ metadata:
 data:
   # An Application is healthy when what it deploys is: the app of apps then
   # waits for each sync wave's Applications before the next wave (Argo CD
-  # stopped doing this by default in 1.8; kubefirst uses wait Jobs instead).
+  # stopped doing this by default in 1.8).
   resource.customizations.health.argoproj.io_Application: |
     hs = {}
     hs.status = "Progressing"
