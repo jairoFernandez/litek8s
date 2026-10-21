@@ -25,10 +25,16 @@ jobs:
           test "$(kubectl get pods -l app=web -o jsonpath='{.items[*].spec.nodeName}' | tr ' ' '\n' | sort -u | wc -l)" = 3
           test "$(kubectl get pods -l app=agent --field-selector=status.phase=Running -o name | wc -l)" = 3
 
+      # The overlay learns its peers a few seconds after the nodes join:
+      # give cross-node traffic up to a minute right after the cluster starts.
       - name: Reach the Service from every node
         run: |
           for pod in $(kubectl get pods -l app=agent -o name); do
-            kubectl exec "$pod" -- wget -qO- -T 5 http://web >/dev/null
+            for i in $(seq 30); do
+              kubectl exec "$pod" -- wget -qO- -T 3 http://web >/dev/null && break
+              [ "$i" = 30 ] && { echo "$pod cannot reach the web Service"; exit 1; }
+              sleep 2
+            done
           done
 
       - name: Drain a worker
