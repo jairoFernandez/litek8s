@@ -7,7 +7,7 @@
 <p align="center">
   <b>A whole Kubernetes in one binary.</b><br>
   A local cluster in about a second, your spare machines as one cluster,<br>
-  and about 20 MiB of memory at idle.
+  and a control plane that idles at 23 MiB.
 </p>
 
 <p align="center">
@@ -38,9 +38,11 @@ kubectl get nodes     # your kubectl, Helm and Argo CD work unchanged
 
 - **A cluster before you finish blinking.** `litek8s dev up` has a node
   Ready in 0.17 s on Linux and 1.28 s on macOS; kind takes 31.6 s and 34.3 s.
-- **Small enough to forget it's running.** The whole orchestrator with five
-  nginx pods uses 24.6 MiB where k3s needs 603 MiB; with Argo CD, 90 MiB
-  against 900 MiB.
+- **Small enough to forget it's running.** The whole control plane idles at
+  23 MiB where k3s needs 567 MiB, 33.5 MiB with five nginx pods (k3s: 579);
+  with Argo CD, 90 MiB against 900 MiB. On macOS a dev cluster runs in a
+  small Linux VM and Activity Monitor shows the whole VM: about 240 MiB
+  fresh, more once it has pulled and run images.
 - **Real Kubernetes, not a look-alike.** It serves the Kubernetes API, so
   kubectl, Helm and Argo CD just work: 119/119 on our compatibility corpus
   (47 Helm charts included) and 413/419 on the official v1.33 conformance suite.
@@ -117,7 +119,8 @@ Other options (cargo, releases, servers and nodes):
 | | litek8s | reference |
 |---|---|---|
 | `dev up` to node Ready, Linux / macOS | **0.17 s / 1.28 s** | kind 31.6 s / 34.3 s, k3d 11.1 s / 10.4 s |
-| Whole orchestrator, 5 nginx pods | **24.6 MiB** | k3s minimal 603 MiB |
+| Whole control plane, idle | **23.2 MiB** | k3s minimal 567 MiB |
+| Whole orchestrator, 5 nginx pods | **33.5 MiB** | k3s minimal 579 MiB |
 | Dev cluster idle memory, Linux | **47 MiB** | kind 526 MiB, k3d 398 MiB |
 | Metrics, logs and alerts | **+1.8 MiB** | kube-prometheus-stack + Loki 1,371 MiB |
 | Kubernetes v1.33 conformance | **413/419** | k3s 416/419 |

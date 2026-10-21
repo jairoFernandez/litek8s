@@ -1,0 +1,126 @@
+{
+ "buckets": {
+  "os/other": {
+   "rss_kib": 169248,
+   "pss_kib": 80361,
+   "procs": 18,
+   "comms": {
+    "systemd": 2,
+    "systemd-journal": 1,
+    "multipathd": 1,
+    "systemd-udevd": 1,
+    "systemd-resolve": 1,
+    "systemd-timesyn": 1,
+    "systemd-network": 1,
+    "cron": 1,
+    "dbus-daemon": 1,
+    "polkitd": 1,
+    "systemd-logind": 1,
+    "udisksd": 1,
+    "rsyslogd": 1,
+    "agetty": 2,
+    "ModemManager": 1,
+    "(sd-pam)": 1
+   }
+  },
+  "sshd": {
+   "rss_kib": 25844,
+   "pss_kib": 7913,
+   "procs": 3,
+   "comms": {
+    "sshd": 3
+   }
+  },
+  "litek8s-serve": {
+   "rss_kib": 26396,
+   "pss_kib": 24692,
+   "procs": 1,
+   "comms": {
+    "litek8s": 1
+   }
+  },
+  "crun-shim": {
+   "rss_kib": 17116,
+   "pss_kib": 7826,
+   "procs": 5,
+   "comms": {
+    "litek8s-shim": 5
+   }
+  },
+  "workload": {
+   "rss_kib": 61440,
+   "pss_kib": 18567,
+   "procs": 15,
+   "comms": {
+    "nginx": 15
+   }
+  }
+ },
+ "pods": {
+  "/litek8s/pod7bc125e0_be6b_4be8_81e6_3c3752663bfa": {
+   "kind": "workload",
+   "pss_kib": 3704,
+   "comms": [
+    "nginx"
+   ]
+  },
+  "/litek8s/pod5014439e_6343_4596_97d9_425937b0432f": {
+   "kind": "workload",
+   "pss_kib": 3713,
+   "comms": [
+    "nginx"
+   ]
+  },
+  "/litek8s/podcae668ae_9e65_4af7_bb06_ac9a69862ce8": {
+   "kind": "workload",
+   "pss_kib": 3714,
+   "comms": [
+    "nginx"
+   ]
+  },
+  "/litek8s/podee542bf1_4eb8_4e4d_80e9_ce7f7cd5cdba": {
+   "kind": "workload",
+   "pss_kib": 3733,
+   "comms": [
+    "nginx"
+   ]
+  },
+  "/litek8s/pod67911a48_3819_432a_8e8c_1549e25231f5": {
+   "kind": "workload",
+   "pss_kib": 3703,
+   "comms": [
+    "nginx"
+   ]
+  }
+ },
+ "categories": {
+  "os/other": {
+   "rss_kib": 169248,
+   "pss_kib": 80361
+  },
+  "node-agent": {
+   "rss_kib": 25844,
+   "pss_kib": 7913
+  },
+  "control-plane": {
+   "rss_kib": 26396,
+   "pss_kib": 24692
+  },
+  "runtime": {
+   "rss_kib": 17116,
+   "pss_kib": 7826
+  },
+  "workload": {
+   "rss_kib": 61440,
+   "pss_kib": 18567
+  }
+ },
+ "system": {
+  "mem_total_kib": 984184,
+  "mem_available_kib": 635196,
+  "mem_used_kib": 348988
+ },
+ "cgroup_memory_current_kib": {
+  "system.slice/litek8s.service": 90964
+ }
+}

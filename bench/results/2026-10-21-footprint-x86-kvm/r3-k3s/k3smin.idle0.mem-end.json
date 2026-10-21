@@ -1,0 +1,115 @@
+{
+ "buckets": {
+  "os/other": {
+   "rss_kib": 159808,
+   "pss_kib": 71022,
+   "procs": 18,
+   "comms": {
+    "systemd": 2,
+    "systemd-journal": 1,
+    "multipathd": 1,
+    "systemd-udevd": 1,
+    "systemd-resolve": 1,
+    "systemd-timesyn": 1,
+    "systemd-network": 1,
+    "cron": 1,
+    "dbus-daemon": 1,
+    "polkitd": 1,
+    "systemd-logind": 1,
+    "udisksd": 1,
+    "rsyslogd": 1,
+    "agetty": 2,
+    "ModemManager": 1,
+    "(sd-pam)": 1
+   }
+  },
+  "sshd": {
+   "rss_kib": 25828,
+   "pss_kib": 7885,
+   "procs": 3,
+   "comms": {
+    "sshd": 3
+   }
+  },
+  "k3s-server": {
+   "rss_kib": 462904,
+   "pss_kib": 401252,
+   "procs": 1,
+   "comms": {
+    "k3s-server": 1
+   }
+  },
+  "containerd": {
+   "rss_kib": 162792,
+   "pss_kib": 101140,
+   "procs": 1,
+   "comms": {
+    "containerd": 1
+   }
+  },
+  "containerd-shim": {
+   "rss_kib": 17232,
+   "pss_kib": 17228,
+   "procs": 1,
+   "comms": {
+    "containerd-shim": 1
+   }
+  },
+  "pod sandbox (pause)": {
+   "rss_kib": 752,
+   "pss_kib": 744,
+   "procs": 1,
+   "comms": {
+    "pause": 1
+   }
+  },
+  "k8s addon pods": {
+   "rss_kib": 61596,
+   "pss_kib": 61592,
+   "procs": 1,
+   "comms": {
+    "coredns": 1
+   }
+  }
+ },
+ "pods": {
+  "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod086cd061_b91b_41b6_bca8_d7f50848a58b.slice": {
+   "kind": "k8s addon pods",
+   "pss_kib": 61592,
+   "comms": [
+    "coredns"
+   ]
+  }
+ },
+ "categories": {
+  "os/other": {
+   "rss_kib": 159808,
+   "pss_kib": 71022
+  },
+  "node-agent": {
+   "rss_kib": 25828,
+   "pss_kib": 7885
+  },
+  "control-plane": {
+   "rss_kib": 462904,
+   "pss_kib": 401252
+  },
+  "runtime": {
+   "rss_kib": 180776,
+   "pss_kib": 119112
+  },
+  "addons": {
+   "rss_kib": 61596,
+   "pss_kib": 61592
+  }
+ },
+ "system": {
+  "mem_total_kib": 984184,
+  "mem_available_kib": 323540,
+  "mem_used_kib": 660644
+ },
+ "cgroup_memory_current_kib": {
+  "system.slice/k3s.service": 622748,
+  "kubepods.slice": 12904
+ }
+}

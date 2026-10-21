@@ -1,0 +1,162 @@
+{
+ "buckets": {
+  "os/other": {
+   "rss_kib": 155464,
+   "pss_kib": 68534,
+   "procs": 18,
+   "comms": {
+    "systemd": 2,
+    "systemd-journal": 1,
+    "multipathd": 1,
+    "systemd-udevd": 1,
+    "systemd-resolve": 1,
+    "systemd-timesyn": 1,
+    "systemd-network": 1,
+    "cron": 1,
+    "dbus-daemon": 1,
+    "polkitd": 1,
+    "systemd-logind": 1,
+    "udisksd": 1,
+    "rsyslogd": 1,
+    "agetty": 2,
+    "ModemManager": 1,
+    "(sd-pam)": 1
+   }
+  },
+  "sshd": {
+   "rss_kib": 25812,
+   "pss_kib": 7890,
+   "procs": 3,
+   "comms": {
+    "sshd": 3
+   }
+  },
+  "k3s-server": {
+   "rss_kib": 450536,
+   "pss_kib": 391592,
+   "procs": 1,
+   "comms": {
+    "k3s-server": 1
+   }
+  },
+  "containerd": {
+   "rss_kib": 167312,
+   "pss_kib": 108368,
+   "procs": 1,
+   "comms": {
+    "containerd": 1
+   }
+  },
+  "containerd-shim": {
+   "rss_kib": 93392,
+   "pss_kib": 41208,
+   "procs": 6,
+   "comms": {
+    "containerd-shim": 6
+   }
+  },
+  "pod sandbox (pause)": {
+   "rss_kib": 4512,
+   "pss_kib": 942,
+   "procs": 6,
+   "comms": {
+    "pause": 6
+   }
+  },
+  "k8s addon pods": {
+   "rss_kib": 48308,
+   "pss_kib": 48304,
+   "procs": 1,
+   "comms": {
+    "coredns": 1
+   }
+  },
+  "workload": {
+   "rss_kib": 59940,
+   "pss_kib": 18107,
+   "procs": 15,
+   "comms": {
+    "nginx": 15
+   }
+  }
+ },
+ "pods": {
+  "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod5622855e_e76d_4073_85ec_b8ff678c901f.slice": {
+   "kind": "k8s addon pods",
+   "pss_kib": 48304,
+   "comms": [
+    "coredns"
+   ]
+  },
+  "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-podb93948cc_979d_4d54_9719_094c51973770.slice": {
+   "kind": "workload",
+   "pss_kib": 3623,
+   "comms": [
+    "nginx"
+   ]
+  },
+  "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod4178a0aa_0d4a_4ac3_ad14_5ef3137de484.slice": {
+   "kind": "workload",
+   "pss_kib": 3605,
+   "comms": [
+    "nginx"
+   ]
+  },
+  "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-podc98ea734_22d6_4c2d_affe_7e97031590f8.slice": {
+   "kind": "workload",
+   "pss_kib": 3604,
+   "comms": [
+    "nginx"
+   ]
+  },
+  "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod99705bb8_b22b_4e8e_b133_42a765f201a3.slice": {
+   "kind": "workload",
+   "pss_kib": 3623,
+   "comms": [
+    "nginx"
+   ]
+  },
+  "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-podd4b9250f_535a_4e28_a7ea_6e97de294ab8.slice": {
+   "kind": "workload",
+   "pss_kib": 3652,
+   "comms": [
+    "nginx"
+   ]
+  }
+ },
+ "categories": {
+  "os/other": {
+   "rss_kib": 155464,
+   "pss_kib": 68534
+  },
+  "node-agent": {
+   "rss_kib": 25812,
+   "pss_kib": 7890
+  },
+  "control-plane": {
+   "rss_kib": 450536,
+   "pss_kib": 391592
+  },
+  "runtime": {
+   "rss_kib": 265216,
+   "pss_kib": 150518
+  },
+  "addons": {
+   "rss_kib": 48308,
+   "pss_kib": 48304
+  },
+  "workload": {
+   "rss_kib": 59940,
+   "pss_kib": 18107
+  }
+ },
+ "system": {
+  "mem_total_kib": 984184,
+  "mem_available_kib": 264516,
+  "mem_used_kib": 719668
+ },
+ "cgroup_memory_current_kib": {
+  "system.slice/k3s.service": 619588,
+  "kubepods.slice": 42536
+ }
+}

@@ -1,0 +1,115 @@
+{
+ "buckets": {
+  "os/other": {
+   "rss_kib": 168624,
+   "pss_kib": 79704,
+   "procs": 18,
+   "comms": {
+    "systemd": 2,
+    "systemd-journal": 1,
+    "multipathd": 1,
+    "systemd-udevd": 1,
+    "systemd-resolve": 1,
+    "systemd-timesyn": 1,
+    "systemd-network": 1,
+    "cron": 1,
+    "dbus-daemon": 1,
+    "polkitd": 1,
+    "systemd-logind": 1,
+    "udisksd": 1,
+    "rsyslogd": 1,
+    "agetty": 2,
+    "ModemManager": 1,
+    "(sd-pam)": 1
+   }
+  },
+  "sshd": {
+   "rss_kib": 25808,
+   "pss_kib": 7889,
+   "procs": 3,
+   "comms": {
+    "sshd": 3
+   }
+  },
+  "k3s-server": {
+   "rss_kib": 444636,
+   "pss_kib": 383780,
+   "procs": 1,
+   "comms": {
+    "k3s-server": 1
+   }
+  },
+  "containerd": {
+   "rss_kib": 161764,
+   "pss_kib": 100908,
+   "procs": 1,
+   "comms": {
+    "containerd": 1
+   }
+  },
+  "containerd-shim": {
+   "rss_kib": 17180,
+   "pss_kib": 17176,
+   "procs": 1,
+   "comms": {
+    "containerd-shim": 1
+   }
+  },
+  "pod sandbox (pause)": {
+   "rss_kib": 752,
+   "pss_kib": 744,
+   "procs": 1,
+   "comms": {
+    "pause": 1
+   }
+  },
+  "k8s addon pods": {
+   "rss_kib": 61408,
+   "pss_kib": 61404,
+   "procs": 1,
+   "comms": {
+    "coredns": 1
+   }
+  }
+ },
+ "pods": {
+  "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod5622855e_e76d_4073_85ec_b8ff678c901f.slice": {
+   "kind": "k8s addon pods",
+   "pss_kib": 61404,
+   "comms": [
+    "coredns"
+   ]
+  }
+ },
+ "categories": {
+  "os/other": {
+   "rss_kib": 168624,
+   "pss_kib": 79704
+  },
+  "node-agent": {
+   "rss_kib": 25808,
+   "pss_kib": 7889
+  },
+  "control-plane": {
+   "rss_kib": 444636,
+   "pss_kib": 383780
+  },
+  "runtime": {
+   "rss_kib": 179696,
+   "pss_kib": 118828
+  },
+  "addons": {
+   "rss_kib": 61408,
+   "pss_kib": 61404
+  }
+ },
+ "system": {
+  "mem_total_kib": 984184,
+  "mem_available_kib": 351140,
+  "mem_used_kib": 633044
+ },
+ "cgroup_memory_current_kib": {
+  "system.slice/k3s.service": 623916,
+  "kubepods.slice": 12860
+ }
+}
