@@ -1,13 +1,25 @@
 # Changelog
 
-## Unreleased
+## 0.2.2
 
+- **`litek8s ui`:** `W` in the Kubernetes view switches a cluster that is
+  not litek8s between read-only and read-write (confirm by typing the
+  context's name; a red WRITE badge while it lasts; "remember" adds it to
+  `writableContexts` in `ui.yaml`). Observe says when a cluster is not
+  litek8s instead of showing empty charts.
 - The API server publishes the OpenAPI definitions of the built-in types
   (Kubernetes 1.33) next to the CRDs' schemas, in `/openapi/v2` (JSON and
   protobuf) and `/openapi/v3`. Argo CD's `ServerSideApply=true` and
   `ServerSideDiff=true` work (they failed with `unable to resolve
   parseableType for GroupVersionKind`), and `kubectl explain` shows built-in
   types. Compat corpus case `argocd_ssa` (L4).
+- `examples/platform/`: a developer platform on one dev cluster (Gitea with
+  Actions, Argo CD GitOps, Argo Workflows, Atlantis with OpenTofu, OpenBao
+  with external-secrets, a sample app deployed on push).
+- Docs: [litek8s next to the Kubernetes you already run](docs/alongside.md);
+  [CI](docs/ci.md) measured against kind, the runner's dockerd and Docker
+  in Docker; memory re-measured on v0.2.1 (the whole control plane idles at
+  23.2 MiB, k3s minimal 567 MiB).
 
 ## 0.2.1
 
