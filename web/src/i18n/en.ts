@@ -103,6 +103,7 @@ export const en = {
   },
   strip: {
     label: 'Works with the tools you already use',
+    more: { label: 'Next to the clusters you already run, not instead of them', href: '/docs/alongside/' },
     items: ['kubectl', 'Helm', 'Argo CD', 'docker', 'docker compose', 'Dev Containers', 'Testcontainers', 'Grafana', 'Claude Code (MCP)'],
   },
   tagline: {
@@ -419,6 +420,7 @@ export const en = {
         title: 'Docs',
         links: [
           { label: 'Introduction', href: '/docs/' },
+          { label: 'Next to your clusters', href: '/docs/alongside/' },
           { label: 'Dev clusters', href: '/docs/dev/' },
           { label: 'Docker API', href: '/docs/docker/' },
           { label: 'Terminal UI', href: '/docs/ui/' },

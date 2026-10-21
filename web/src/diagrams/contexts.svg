@@ -1,0 +1,59 @@
+<svg viewBox="0 0 760 420" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="ctx-title ctx-desc" class="d d-contexts">
+  <title id="ctx-title">litek8s next to your other clusters</title>
+  <desc id="ctx-desc">kubectl, Helm, k9s or Lens, Argo CD and litek8s ui all read one kubeconfig, ~/.kube/config, and switch contexts with kubectl config use-context or kubectx. Some contexts point at litek8s clusters (litek8s-dev, litek8s-ci, a home cluster of a server and its nodes), others at the clusters you already run (EKS, GKE, Civo).</desc>
+  <defs>
+    <marker id="ctx-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1 9 5 0 9z" class="d-head"/></marker>
+  </defs>
+  <!-- your tools -->
+  <text class="d-fl" x="24" y="44">your tools</text>
+  <rect class="d-pill" x="24" y="60" width="176" height="44" rx="22"/>
+  <text class="d-t" x="112" y="87" text-anchor="middle">kubectl</text>
+  <rect class="d-pill" x="24" y="118" width="176" height="44" rx="22"/>
+  <text class="d-t" x="112" y="145" text-anchor="middle">Helm</text>
+  <rect class="d-pill" x="24" y="176" width="176" height="44" rx="22"/>
+  <text class="d-t" x="112" y="203" text-anchor="middle">k9s · Lens</text>
+  <rect class="d-pill" x="24" y="234" width="176" height="44" rx="22"/>
+  <text class="d-t" x="112" y="261" text-anchor="middle">Argo CD</text>
+  <rect class="d-pill d-box-accent" x="24" y="292" width="176" height="44" rx="22"/>
+  <text class="d-t" x="112" y="319" text-anchor="middle">litek8s ui</text>
+  <path class="d-edge" d="M200 82C240 82 236 186 268 192M200 140C236 140 240 190 268 196M200 198H268M200 256C236 256 240 206 268 202M200 314C240 314 236 210 268 206"/>
+  <path class="d-comet" pathLength="100" d="M200 82C240 82 236 186 268 192"/>
+  <path class="d-comet" pathLength="100" d="M200 314C240 314 236 210 268 206" style="--delay:-1.3s"/>
+  <!-- the kubeconfig -->
+  <rect class="d-box d-box-accent" x="270" y="158" width="190" height="80" rx="12"/>
+  <path class="d-store-lid" d="M286 174h14l6 6v20h-20z"/>
+  <text class="d-mono" x="314" y="192">~/.kube/config</text>
+  <text class="d-s" x="314" y="212">one file, many contexts</text>
+  <text class="d-l d-l-muted" x="365" y="266" text-anchor="middle">kubectl config use-context</text>
+  <text class="d-l d-l-muted" x="365" y="284" text-anchor="middle">or kubectx</text>
+  <!-- litek8s clusters -->
+  <rect class="d-frame d-frame-accent" x="520" y="24" width="216" height="176" rx="14"/>
+  <text class="d-fl" x="536" y="48">litek8s clusters</text>
+  <rect class="d-box" x="536" y="60" width="184" height="36" rx="10"/>
+  <circle class="d-ready d-pulse" cx="554" cy="78" r="5"/>
+  <text class="d-mono" x="568" y="83">litek8s-dev</text>
+  <rect class="d-box" x="536" y="104" width="184" height="36" rx="10"/>
+  <circle class="d-ready" cx="554" cy="122" r="5"/>
+  <text class="d-mono" x="568" y="127">litek8s-ci</text>
+  <rect class="d-box" x="536" y="148" width="184" height="36" rx="10"/>
+  <circle class="d-ready" cx="554" cy="166" r="5"/>
+  <text class="d-mono" x="568" y="171">home</text>
+  <text class="d-s" x="612" y="171">server + nodes</text>
+  <!-- clusters you already run -->
+  <rect class="d-frame" x="520" y="220" width="216" height="176" rx="14"/>
+  <text class="d-fl" x="536" y="244">your other clusters</text>
+  <rect class="d-box" x="536" y="256" width="184" height="36" rx="10"/>
+  <text class="d-t" x="554" y="279">EKS</text>
+  <rect class="d-box" x="536" y="300" width="184" height="36" rx="10"/>
+  <text class="d-t" x="554" y="323">GKE</text>
+  <rect class="d-box" x="536" y="344" width="184" height="36" rx="10"/>
+  <text class="d-t" x="554" y="367">Civo</text>
+  <path class="d-edge" d="M460 186C496 186 500 78 534 78" marker-end="url(#ctx-arrow)"/>
+  <path class="d-edge" d="M460 192C500 192 500 122 534 122" marker-end="url(#ctx-arrow)"/>
+  <path class="d-edge" d="M460 198C496 198 504 166 534 166" marker-end="url(#ctx-arrow)"/>
+  <path class="d-edge" d="M460 204C496 204 504 274 534 274" marker-end="url(#ctx-arrow)"/>
+  <path class="d-edge" d="M460 210C500 210 500 318 534 318" marker-end="url(#ctx-arrow)"/>
+  <path class="d-edge" d="M460 216C496 216 500 362 534 362" marker-end="url(#ctx-arrow)"/>
+  <path class="d-comet" pathLength="100" d="M460 186C496 186 500 78 534 78" style="--delay:-0.6s"/>
+  <path class="d-comet" pathLength="100" d="M460 210C500 210 500 318 534 318" style="--delay:-1.8s"/>
+</svg>

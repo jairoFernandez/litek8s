@@ -396,6 +396,10 @@ section { position: relative; scroll-margin-top: 64px; }
 
 /* ---------- strip ---------- */
 .strip { padding-block: clamp(40px, 7vw, 72px) 0; }
+.strip-more { text-align: center; margin-top: 18px; font-size: 0.9rem; }
+.strip-more a { display: inline-flex; align-items: center; gap: 6px; color: var(--accent); font-weight: 600; text-decoration: none; }
+.strip-more svg { width: 16px; height: 16px; transition: transform 0.3s var(--ease-fluid); }
+.strip-more a:hover svg { transform: translateX(3px); }
 .strip-label { text-align: center; color: var(--fg-3); font-size: 0.85rem; margin-bottom: 18px; }
 .marquee { display: flex; overflow: hidden; mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent); -webkit-mask-image: linear-gradient(90deg, transparent, #000 12%, #000 88%, transparent); }
 .marquee-track { display: flex; flex: none; gap: 12px; padding-right: 12px; list-style: none; margin: 0; padding-left: 0; }

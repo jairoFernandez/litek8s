@@ -15,6 +15,7 @@ export const groups = [
     label: 'Start here',
     pages: [
       { slug: '', label: 'Introduction', title: 'Introduction', source: 'docs/overview.md' },
+      { slug: 'alongside', label: 'Next to your clusters', source: 'docs/alongside.md' },
       { slug: 'install', label: 'Install', source: 'docs/install.md' },
       { slug: 'quickstart', label: 'Quickstart', source: 'docs/quickstart.md' },
       { slug: 'numbers', label: 'Numbers', source: 'docs/numbers.md' },
