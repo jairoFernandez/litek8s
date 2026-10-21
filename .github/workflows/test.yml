@@ -17,6 +17,9 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
+  # No debug info: a third of the compile time on Linux, half on macOS, and
+  # a smaller cache. Panics still name the functions in their backtraces.
+  CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
   cargo-test:
@@ -32,7 +35,97 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # Saved from main only: branches and pull requests start from main's
+      # cache, and their own would only push main's out of the 10 GB.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - name: cargo test
-        run: cargo test
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      # Every test in its own process and the test binaries side by side
+      # (tests/ha.rs alone took 38 s of cargo test's 65); .config/nextest.toml
+      # keeps the HA tests one at a time. There are no doctests.
+      - name: cargo nextest
+        run: cargo nextest run --profile ci
+
+  # The commit's litek8s binary for the jobs below.
+  build-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      # Dependencies optimized (image pulls hash and decompress in them),
+      # the crate itself not: a fraction of a release build's time.
+      - name: cargo build
+        run: cargo build --bin litek8s --config 'profile.dev.package."*".opt-level=2'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: litek8s-linux
+          path: target/debug/litek8s
+          retention-days: 3
+
+  # The compatibility corpus's API tiers (L0 discovery, L1 objects and CRDs:
+  # 50 cases) against `litek8s apiserver` on the runner: no node, no Docker.
+  compat:
+    needs: build-linux
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: litek8s-linux
+      - name: litek8s apiserver
+        run: |
+          chmod +x litek8s
+          ./litek8s apiserver --no-node --no-cluster-dns --in-cluster-port 0 --kubeconfig "$RUNNER_TEMP/kubeconfig" > "$RUNNER_TEMP/apiserver.log" 2>&1 &
+          for _ in $(seq 100); do curl -fs localhost:6443/readyz >/dev/null && break; sleep 0.1; done
+          echo "KUBECONFIG=$RUNNER_TEMP/kubeconfig" >> "$GITHUB_ENV"
+      - name: compat/run.sh --tiers L0,L1
+        run: |
+          compat/run.sh --tiers L0,L1 --target ci
+          res=$(ls -d compat/results/*-ci | tail -1)/results.jsonl
+          failed=$(jq -r 'select(.status != "pass") | "\(.id): \(.status) \(.detail)"' "$res")
+          [[ -z "$failed" ]] || { echo "::error::corpus cases failed:"; echo "$failed"; exit 1; }
+      - name: API server log
+        if: failure()
+        run: tail -n 300 "$RUNNER_TEMP/apiserver.log"
+
+  # The GitHub Actions examples, on the commit's binary through the local
+  # setup-litek8s action, so both keep working.
+  examples:
+    needs: build-linux
+    name: example (${{ matrix.example }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [helm, compose, multi-node]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: litek8s-linux
+          path: ${{ runner.temp }}/bin
+      - id: with
+        name: The example's inputs
+        run: |
+          nodes=$(yq '.jobs[].steps[] | select(.uses // "" | test("setup-litek8s")) | .with.nodes // 1' examples/github-actions/${{ matrix.example }}/workflow.yml)
+          echo "nodes=$nodes" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/setup-litek8s
+        with:
+          binary: ${{ runner.temp }}/bin/litek8s
+          nodes: ${{ steps.with.outputs.nodes }}
+      - name: examples/github-actions/run.sh ${{ matrix.example }}
+        run: examples/github-actions/run.sh ${{ matrix.example }}
+      - name: Diagnostics
+        if: failure()
+        run: litek8s-diagnose ci

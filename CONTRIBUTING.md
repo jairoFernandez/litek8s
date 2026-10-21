@@ -53,6 +53,7 @@ the Docker API ([docs/develop-without-docker.md](docs/develop-without-docker.md)
 
 ```bash
 cargo test                           # unit and API tests, no Docker needed
+cargo nextest run                    # the same, in parallel processes, as CI runs them
 cargo test discovery_and_default_objects        # one test
 cargo clippy --all-targets -- -D warnings
 cargo fmt
@@ -87,7 +88,9 @@ k3s (k3d) before it counts. The official conformance suite runs with
 
 - Keep each PR to one change, with tests where the code has them.
 - `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and
-  `cargo test` pass; CI runs them on Linux and macOS.
+  `cargo test` pass; CI runs them on Linux and macOS, plus the corpus's
+  L0/L1 tiers and the GitHub Actions examples on Linux
+  ([docs/ci.md](docs/ci.md#ci-of-litek8s-itself)).
 - Performance claims come with numbers and how they were measured; the
   harnesses are in [bench/](bench/).
 - Comments and docs say what the code does and why, in plain sentences.

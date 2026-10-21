@@ -1,0 +1,21 @@
+# cargo-nextest (CI): every test in its own process, test binaries in
+# parallel. `cargo test` still works and runs the same tests.
+
+[test-groups]
+# Each test of tests/ha.rs runs three servers with 100 ms Raft timers; two
+# at once on a 4 vCPU runner starve each other into spurious elections
+# (`cargo test` serializes them with a mutex inside the binary).
+ha = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = "binary(ha)"
+test-group = "ha"
+
+[profile.ci]
+fail-fast = false
+# Print the slowest tests, and stop a hung one after 5 minutes.
+slow-timeout = { period = "60s", terminate-after = 5 }
+final-status-level = "slow"
+
+[profile.ci.junit]
+path = "junit.xml"
