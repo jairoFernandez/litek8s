@@ -121,20 +121,25 @@ EOF
   }
 }
 
-# Start a pod of $IMAGE; wait until it runs or its pull fails, print
+# Start a pod of $IMAGE (a new name each time: the last one may still be
+# around from before a restart); wait until it runs or its pull fails, print
 # `Running` or the pull error.
+STEP=0
 try_pull() {
-  k -n "$NS" delete pod app --ignore-not-found --wait=true >/dev/null
-  k -n "$NS" run app --image="$IMAGE" --image-pull-policy=Always --restart=Never -- sleep 3600 >/dev/null
+  STEP=$((STEP + 1))
+  POD="app-$STEP"
+  k -n "$NS" delete pod -l run --ignore-not-found --wait=false >/dev/null
+  k -n "$NS" run "$POD" --image="$IMAGE" --image-pull-policy=Always --restart=Never -- sleep 3600 >/dev/null
   local msg=""
   for _ in $(seq 1 90); do
-    if [[ "$(k -n "$NS" get pod app -o jsonpath='{.status.phase}')" == Running ]]; then
+    if [[ "$(k -n "$NS" get pod "$POD" -o jsonpath='{.status.phase}')" == Running ]]; then
       echo Running
       return
     fi
-    msg="$(k -n "$NS" get pod app -o jsonpath='{.status.containerStatuses[0].state.waiting.message}')"
-    reason="$(k -n "$NS" get pod app -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}')"
-    if [[ "$reason" == ErrImagePull || "$reason" == ImagePullBackOff ]] && [[ -n "$msg" ]]; then
+    msg="$(k -n "$NS" get pod "$POD" -o jsonpath='{.status.containerStatuses[0].state.waiting.message}')"
+    reason="$(k -n "$NS" get pod "$POD" -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}')"
+    # After `dev up` the registry may start again once more: retries see it.
+    if [[ "$reason" == ErrImagePull || "$reason" == ImagePullBackOff ]] && [[ -n "$msg" && "$msg" != *"Connection refused"* ]]; then
       echo "$msg"
       return
     fi
@@ -145,7 +150,8 @@ try_pull() {
 
 expect() {
   local what="$1" want="$2" got
-  got="$(try_pull)"
+  try_pull >"$WORK/got"
+  got="$(cat "$WORK/got")"
   if [[ "$got" != *"$want"* ]]; then
     fail "$what: wanted \"$want\", got: $got"
   fi
@@ -178,7 +184,7 @@ sed -i.bak "s/password: wrong/password: $PASSWORD/" "$REGISTRIES"
 restart "the CA and the credentials"
 seed
 expect "the CA and the credentials" "Running"
-[[ "$(k -n "$NS" exec app -- busybox | head -1)" == BusyBox* ]] || fail "the pod does not run the registry's busybox"
+[[ "$(k -n "$NS" exec "app-$STEP" -- busybox | head -1)" == BusyBox* ]] || fail "the pod does not run the registry's busybox"
 
 log "PASS"
 if [[ "${E2E_KEEP:-}" != 1 ]]; then
