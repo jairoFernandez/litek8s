@@ -4,7 +4,7 @@
 terraform {
   backend "kubernetes" {
     secret_suffix     = "openbao"
-    namespace         = "atlantis"
+    namespace         = "<TOFU_STATE_NAMESPACE>"
     in_cluster_config = true
   }
   required_providers {

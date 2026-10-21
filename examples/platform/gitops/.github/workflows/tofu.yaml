@@ -1,0 +1,83 @@
+# Infrastructure as code without inbound webhooks (GIT_PROVIDER=github): a
+# pull request that changes terraform/ gets `tofu plan` as a comment; a merge
+# to main runs `tofu apply`. Both on the runner in the cluster with the label
+# lkiac, which reaches OpenBao and keeps OpenTofu's state in a Secret.
+name: tofu
+on:
+  pull_request:
+    paths: ["terraform/**"]
+  push:
+    branches: [main]
+    paths: ["terraform/**"]
+  workflow_dispatch: {}
+permissions:
+  contents: read
+  pull-requests: write
+# One run at a time: the state has a lock too, this keeps runs queued.
+concurrency:
+  group: tofu
+  cancel-in-progress: false
+env:
+  TOFU_VERSION: 1.12.8
+  # The registry can be slow from a home network (10 s by default).
+  TF_REGISTRY_CLIENT_TIMEOUT: "60"
+jobs:
+  openbao:
+    runs-on: lkiac
+    defaults:
+      run:
+        working-directory: terraform/openbao
+    steps:
+      - uses: actions/checkout@v4
+
+      # Downloaded once into the runner's cache (TOFU_CACHE), with the
+      # providers: slow home links pay for it once.
+      - name: OpenTofu
+        working-directory: .
+        run: |
+          cache="${TOFU_CACHE:-$RUNNER_TEMP}"
+          bin="$cache/tofu-$TOFU_VERSION"
+          if [[ ! -x $bin/tofu ]]; then
+            arch="$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')"
+            base="https://github.com/opentofu/opentofu/releases/download/v$TOFU_VERSION"
+            file="tofu_${TOFU_VERSION}_linux_$arch.tar.gz"
+            curl -fsSLO --retry 3 "$base/$file"
+            curl -fsSL --retry 3 "$base/tofu_${TOFU_VERSION}_SHA256SUMS" | grep " $file\$" | sha256sum -c -
+            mkdir -p "$bin.tmp" && tar -xzf "$file" -C "$bin.tmp" tofu && rm "$file" && mv "$bin.tmp" "$bin"
+          fi
+          mkdir -p "$cache/plugins"
+          echo "$bin" >> "$GITHUB_PATH"
+          echo "TF_PLUGIN_CACHE_DIR=$cache/plugins" >> "$GITHUB_ENV"
+
+      - name: Init
+        run: for i in 1 2 3; do tofu init -input=false -no-color && exit 0; sleep 10; done; exit 1
+
+      - name: Plan
+        if: github.event_name == 'pull_request'
+        run: |
+          set +e
+          tofu plan -input=false -no-color -lock-timeout=5m > "$RUNNER_TEMP/plan.txt" 2>&1
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/plan.txt"
+          python3 - "$code" <<'PY'
+          import json, os, sys, urllib.request
+          code = int(sys.argv[1])
+          plan = open(os.environ["RUNNER_TEMP"] + "/plan.txt").read()
+          if len(plan) > 60000:
+              plan = "...\n" + plan[-60000:]
+          head = "**tofu plan** for `terraform/openbao`" + (" failed" if code else "") + ", merge to apply."
+          body = head + "\n\n```\n" + plan + "\n```"
+          pr = json.load(open(os.environ["GITHUB_EVENT_PATH"]))["number"]
+          url = "%s/repos/%s/issues/%d/comments" % (os.environ["GITHUB_API_URL"], os.environ["GITHUB_REPOSITORY"], pr)
+          req = urllib.request.Request(url, data=json.dumps({"body": body}).encode(), method="POST", headers={
+              "Authorization": "Bearer " + os.environ["GITHUB_TOKEN"], "Accept": "application/vnd.github+json"})
+          urllib.request.urlopen(req)
+          sys.exit(code)
+          PY
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+      - name: Apply
+        if: github.event_name != 'pull_request'
+        run: tofu apply -input=false -no-color -auto-approve -lock-timeout=5m

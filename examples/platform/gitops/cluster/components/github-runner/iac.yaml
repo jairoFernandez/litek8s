@@ -1,0 +1,105 @@
+# The infrastructure runner: registered with the gitops repository
+# (<GITOPS_REPOSITORY>), label lkiac, for .github/workflows/tofu.yaml. Its
+# own namespace, apart from the app's runner (which runs whatever the app's
+# CI does): only this one holds an OpenBao token (VAULT_TOKEN, root: it
+# manages policies) and may touch OpenTofu's state, Secrets in github-iac.
+# Anyone who can push a branch to the gitops repository can run code here.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: github-iac
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: github-iac
+  namespace: github-iac
+---
+# OpenTofu's kubernetes backend: the state in a Secret, its lock in a Lease.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: tofu-state
+  namespace: github-iac
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: tofu-state
+  namespace: github-iac
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: tofu-state}
+subjects:
+  - {kind: ServiceAccount, name: github-iac, namespace: github-iac}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: github-iac
+  namespace: github-iac
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: github-iac}
+  template:
+    metadata:
+      labels: {app: github-iac}
+    spec:
+      serviceAccountName: github-iac
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: runner
+          image: ghcr.io/actions/actions-runner:2.337.0
+          env:
+            - {name: REPOSITORY, value: <GITOPS_REPOSITORY>}
+            - {name: VAULT_ADDR, value: "http://openbao.openbao.svc.cluster.local:8200"}
+            # tofu and its providers, kept between jobs (tofu.yaml).
+            - {name: TOFU_CACHE, value: /cache}
+            - name: GITHUB_TOKEN
+              valueFrom: {secretKeyRef: {name: github-iac, key: GITHUB_TOKEN}}
+            - name: VAULT_TOKEN
+              valueFrom: {secretKeyRef: {name: github-iac, key: VAULT_TOKEN}}
+          command: [bash, -c]
+          args:
+            - |
+              set -euo pipefail
+              cd /home/runner
+              gh_token() {
+                curl -fsS -X POST -H "Authorization: Bearer $GITHUB_TOKEN" -H "Accept: application/vnd.github+json" \
+                  "https://api.github.com/repos/$REPOSITORY/actions/runners/$1" | jq -r .token
+              }
+              trap './config.sh remove --token "$(gh_token remove-token)" || true; exit 0' TERM INT
+              while :; do
+                rm -f .runner .credentials .credentials_rsaparams
+                ./config.sh --unattended --replace --ephemeral --labels lkiac \
+                  --url "https://github.com/$REPOSITORY" --name "litek8s-$(hostname)" --token "$(gh_token registration-token)"
+                ./run.sh & wait $!
+              done
+          volumeMounts:
+            - {name: cache, mountPath: /cache}
+      securityContext: {fsGroup: 1001}
+      volumes:
+        - name: cache
+          emptyDir: {}
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: github-iac
+  namespace: github-iac
+spec:
+  refreshInterval: 1m
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: openbao-platform
+  target:
+    name: github-iac
+  dataFrom:
+    - extract:
+        key: github-iac

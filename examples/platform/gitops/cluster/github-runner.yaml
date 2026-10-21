@@ -1,4 +1,4 @@
-# A self-hosted GitHub Actions runner for the sample app (GIT_PROVIDER=github).
+# Self-hosted GitHub Actions runners in the cluster (GIT_PROVIDER=github): the sample app's CI and the gitops repository's OpenTofu.
 apiVersion: argoproj.io/v1alpha1
 kind: Application
 metadata:
