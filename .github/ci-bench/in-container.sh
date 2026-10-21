@@ -23,6 +23,8 @@ if [[ $engine == dind ]]; then
     -v "$PWD:/src" -w /src "${tools[@]}" \
     docker:27-dind infinity >/dev/null
   docker exec "$name" apk add -q bash bc curl >/dev/null
+  # The runner's kubectl is linked against glibc; Alpine needs the static one.
+  docker exec "$name" sh -c 'curl -fsSLo /usr/local/bin/kubectl.static https://dl.k8s.io/release/v1.33.0/bin/linux/amd64/kubectl && chmod +x /usr/local/bin/kubectl.static'
 else
   docker run -d --name "$name" --privileged --entrypoint sleep \
     -v "$PWD:/src" -w /src "${tools[@]}" \
@@ -41,6 +43,7 @@ engine=$1 example=$2
 now() { date +%s.%N; }
 start=$(now)
 if [[ $engine == dind ]]; then
+  mkdir -p /opt/bin && ln -sf /usr/local/bin/kubectl.static /opt/bin/kubectl && export PATH=/opt/bin:$PATH
   # What the docker:dind image's entrypoint does as a GitLab service.
   (dockerd-entrypoint.sh dockerd >/var/log/dockerd.log 2>&1 &)
   for _ in $(seq 120); do docker info >/dev/null 2>&1 && break; sleep 0.5; done
