@@ -623,6 +623,10 @@ pub async fn effect(run: &mut crate::ui::Runtime, e: KEffect, terminal: &mut cra
                 });
             }
         }
+        KEffect::RememberWritable { context, on } => match uiconfig::save_writable(&context, on) {
+            Ok(()) => app.kube.apply(KMsg::Config(uiconfig::load())),
+            Err(e) => app.flash(format!("cannot save writableContexts: {e}"), true),
+        },
         KEffect::SaveHistory(h) => {
             let p = uiconfig::history_path();
             if let Some(d) = p.parent() {

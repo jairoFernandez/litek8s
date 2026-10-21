@@ -67,6 +67,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         Overlay::Confirm(c) => confirm(f, c, t, area),
         Overlay::Input(i) => input(f, i, t, area),
         Overlay::Picker(p) => picker(f, p, t, area),
+        Overlay::WriteMode(w) => write_mode(f, ui, w, t, area),
     }
 }
 
@@ -117,6 +118,8 @@ fn header(f: &mut Frame, app: &App, area: Rect) {
     // Not a litek8s cluster (or readOnly: true): nothing changes from here.
     match ui.access() {
         Access::Writable => {}
+        // Another cluster with writes on: hard to miss.
+        Access::WriteMode => right.push(Span::styled(format!(" WRITE · {} ", trunc(&ui.context, 24)), t.bad.add_modifier(Modifier::REVERSED | Modifier::BOLD))),
         Access::Checking => right.push(Span::styled("read-only? ", t.dim)),
         _ => right.push(Span::styled(" read-only ", t.chip.patch(t.warn).add_modifier(Modifier::BOLD))),
     }
@@ -691,6 +694,28 @@ fn input(f: &mut Frame, i: &Input, t: &Theme, area: Rect) {
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(t.dialog(i.prompt.clone(), t.accent).padding(Padding::horizontal(1))), r);
 }
 
+/// `W`: type the context's name to allow changes to it.
+fn write_mode(f: &mut Frame, ui: &KubeUi, w: &WriteMode, t: &Theme, area: Rect) {
+    let ctx = &ui.context;
+    let mut lines = vec![
+        Line::raw(format!("{ctx} is not a litek8s cluster. With write mode on,")),
+        Line::raw("deletes, edits, scaling, rollouts, drains and shells go to it."),
+        Line::raw(""),
+        Line::from(vec![Span::raw("Type "), Span::styled(ctx.clone(), t.bold), Span::raw(" to turn it on:")]),
+        Line::from(vec![Span::styled("› ", t.accent), Span::styled(w.typed.clone(), t.bold), Span::styled("█", t.accent.remove_modifier(Modifier::BOLD))]),
+    ];
+    if let Some(e) = &w.error {
+        lines.push(Line::from(vec![Span::styled("✕ ", t.bad), Span::styled(e.clone(), t.bad)]));
+    }
+    lines.push(Line::from(vec![Span::styled(if w.remember { "[x]" } else { "[ ]" }, t.accent), Span::raw(" remember it (writableContexts in ui.yaml); else until the UI exits")]));
+    lines.push(Line::raw(""));
+    lines.push(Line::from(key_chips(t, &[("enter", "allow"), ("tab", "remember"), ("esc", "cancel")], 66)));
+    let r = centered(area, 74, lines.len() as u16 + 2);
+    f.render_widget(Clear, r);
+    let title = Line::from(vec![Span::styled("⚠ ", t.bad), Span::styled(format!("Write to {ctx}?"), t.bold)]);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(t.dialog(title, t.bad).padding(Padding::horizontal(1))), r);
+}
+
 fn picker(f: &mut Frame, p: &Picker, t: &Theme, area: Rect) {
     let shown = p.shown();
     let height = (shown.len() as u16 + 3).clamp(5, area.height.saturating_sub(2).max(5));
@@ -726,6 +751,7 @@ pub fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
             };
         }
         Overlay::Picker(_) => return vec![("enter", "choose"), ("↑↓", "move"), ("type", "filter"), ("esc", "cancel")],
+        Overlay::WriteMode(_) => return vec![("enter", "allow"), ("tab", "remember"), ("esc", "cancel")],
         Overlay::Confirm(_) | Overlay::Input(_) => return Vec::new(),
         Overlay::None => {}
     }
