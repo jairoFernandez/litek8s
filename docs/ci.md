@@ -1,5 +1,13 @@
 # litek8s in CI
 
+> **If your CI needs Kubernetes, use litek8s.** On GitHub's runners a
+> cluster is Ready in **~2.5 s instead of ~45 s**, a Helm or multi-node job
+> finishes **3–5× sooner** and the cluster takes **26–37× less memory**
+> than kind. In a privileged container (GitLab's `docker:dind` setup) a
+> Helm job is **1.8× faster** than kind in Docker in Docker, ready in 9 s
+> instead of 40 s. Same kubectl, Helm and manifests: only the setup step
+> changes.
+
 A CI job that needs a Kubernetes cluster usually starts kind (a Docker
 container per node, ~45 s on GitHub's runners before the nodes are Ready);
 one that needs Docker uses the runner's dockerd. litek8s gives both in
@@ -13,14 +21,14 @@ unchanged.
 
 | the job needs | instead of | what changes | measured |
 |---|---|---|---|
-| a Kubernetes cluster (kubectl, Helm, operators, e2e) | kind, k3d (Docker containers as nodes) | **3–5× faster jobs, 26–37× less memory**: ready in ~2.5 s instead of ~45 s | yes, [below](#numbers) |
-| Docker only (build, compose, Testcontainers) on GitHub's runners | the runner's dockerd | ~13 s less per compose job; dockerd needs no setup, litek8s ~2 s | yes, [below](#numbers) |
-| Docker inside a container job (GitLab's `docker:dind` service, runners in containers) | Docker in Docker | expected to be faster: dind starts dockerd and containerd inside the job and often stores layers on a slow driver; litek8s is one process. Both need a privileged container | not yet (litek8s alone: [28 s median](#other-ci-systems) to a rolled-out Deployment, apt included) |
+| the job needs | instead of | what changes | verdict |
+|---|---|---|---|
+| **a Kubernetes cluster** (kubectl, Helm, operators, e2e) on GitHub's runners | kind, k3d (Docker containers as nodes) | ready in ~2.5 s instead of ~45 s; **3–5× faster jobs, 26–37× less memory** | **switch** |
+| **a Kubernetes cluster** in a privileged container (GitLab, runners in containers) | kind in Docker in Docker (`docker:dind`) | ready in 9 s instead of 40 s; **Helm job 39 s instead of 70 s** | **switch** |
+| Docker only (build, compose, Testcontainers) on GitHub's runners | the runner's dockerd | ~10 s less per compose job; dockerd needs no setup | small gain |
+| Docker only in a privileged container | Docker in Docker | the same: compose job 40 s against 38 s; dind's dockerd starts in ~1 s | no gain |
 
-So: for Kubernetes in CI, switch; for plain Docker on GitHub's runners,
-the gain is small and dockerd is already there; for Docker in Docker,
-try it on your pipeline and compare (a measurement against `docker:dind`
-is planned for [ci-bench.yml](../.github/workflows/ci-bench.yml)).
+Numbers: [GitHub's runners](#numbers), [in a container](#in-a-container-docker-in-docker).
 
 ## GitHub Actions
 
@@ -135,6 +143,34 @@ Ranges over the 5 runs: litek8s time to ready 2.1 to 4.1 s, kind 40.8 to
   without the action) and k3d; a cluster image cached between runs. The
   litek8s numbers are for v0.2.0 with the action's defaults
   (slirp4netns).
+
+### In a container (Docker in Docker)
+
+Where a GitLab.com job runs: a privileged container on the same runner.
+Docker in Docker is the `docker:27-dind` image starting its own dockerd
+(plus kind v0.33.0 in it for helm); litek8s is
+[litek8s-ci.sh](../examples/ci/litek8s-ci.sh) in `ubuntu:24.04`, its apt
+packages and download included in the time to ready. The harness's own
+tools are in place before the clock starts.
+[in-container.sh](../.github/ci-bench/in-container.sh), the
+`in-container` job of [ci-bench.yml](../.github/workflows/ci-bench.yml),
+litek8s v0.2.1; medians of 5 runs (kind in dind: 4, one `helm test` pod
+failed inside kind).
+
+| example | engine | time to ready | example steps | job total | container memory peak |
+|---|---|---|---|---|---|
+| helm | **litek8s** | **9.2 s** | **12.5 s** | **39 s** | **356 MiB** |
+| helm | kind in dind | 40.0 s | 18.5 s | 70 s | 2,960 MiB |
+| compose | litek8s | 5.3 s | 19.3 s | 40 s | 353 MiB |
+| compose | dind | **1.0 s** | 21.0 s | **38 s** | 345 MiB |
+
+- With Kubernetes, litek8s is ready **4× sooner** and the Helm job is
+  **1.8× shorter**; kind in dind pulls its ~1 GB node image and runs a
+  whole node inside the job's container.
+- Docker only, it is a draw: dind's dockerd is up in about a second, and
+  compose runs at the same pace on both.
+- The memory peak is the job container's cgroup (`memory.peak`), page
+  cache included: kind's node image accounts for most of its 2.9 GiB.
 
 What the columns measure:
 

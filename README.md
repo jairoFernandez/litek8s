@@ -75,9 +75,11 @@ kubectl get nodes     # your kubectl, Helm and Argo CD work unchanged
 - **Drop Docker Desktop.** `docker`, `docker compose`, Dev Containers and
   Testcontainers run on the same cluster through its Docker Engine API.
   → [Docker API](https://litek8s.dev/docs/docker/)
-- **Test in CI without kind or dockerd.** One GitHub Actions step gives the
-  job a cluster and a Docker API in 2.5 s instead of kind's 45 s, and a
-  Helm end-to-end job takes 21 s instead of 79 s. → [CI](https://litek8s.dev/docs/ci/)
+- **Kubernetes in CI: the fastest setup step.** One GitHub Actions step
+  gives the job a cluster (and a Docker API) Ready in 2.5 s instead of
+  kind's 45 s; Helm and multi-node jobs finish 3–5× sooner with 26–37× less
+  memory, and 1.8× sooner than kind in Docker in Docker on GitLab-style
+  container jobs. → [CI](https://litek8s.dev/docs/ci/)
 - **Turn spare machines into a cluster.** Install a server and its nodes
   over SSH, or declare the whole cluster in one file and run
   `litek8s cluster apply -f cluster.yaml`.

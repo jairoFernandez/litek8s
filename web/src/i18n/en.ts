@@ -248,6 +248,18 @@ export const en = {
         ],
       },
       {
+        id: 'ci',
+        title: 'Kubernetes in CI',
+        body: 'If your pipeline needs a cluster, this is the setup step to use: Ready in ~2.5 s instead of kind\'s ~45 s on GitHub\'s runners, Helm and multi-node jobs 3–5× shorter with 26–37× less memory, and 1.8× faster than kind in Docker in Docker on GitLab-style container jobs.',
+        href: '/docs/ci/',
+        code: [
+          '<span class="dim"># .github/workflows/e2e.yml</span>',
+          '- uses: jairoFernandez/litek8s/.github/actions/setup-litek8s@v0.2.1',
+          '- run: helm install hello ./chart --wait && helm test hello',
+          '<span class="dim"># cluster Ready in ~2.5 s, job 21 s (kind: 79 s)</span>',
+        ],
+      },
+      {
         id: 'ui',
         title: 'Terminal UI',
         body: 'litek8s ui: cluster state, a k9s-style Kubernetes view, containers by compose project with logs and shells, images, volumes, disk cleanup. Keyboard-driven, works over SSH.',
