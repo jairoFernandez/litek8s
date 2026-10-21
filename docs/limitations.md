@@ -12,6 +12,9 @@ Honest list; more in [skills/litek8s/references/differences.md](../skills/litek8
 - Not every kubelet behavior: no `Unhealthy`/`BackOff` events, a memory
   `emptyDir` is one tmpfs per container mount; ValidatingAdmissionPolicy
   and webhook `matchConditions` are accepted but not enforced.
+- Pods' `imagePullSecrets` are not used: nodes pull with the credentials of
+  their registry configuration ([registries.md](registries.md)), and the
+  Docker API cannot `docker push` yet.
 - Metrics cover containers, nodes and cluster state; application
   `/metrics` endpoints are not scraped (point a Prometheus at them).
 - The macOS VM never returns memory to macOS once touched (a

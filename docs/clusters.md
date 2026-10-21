@@ -130,9 +130,10 @@ All the fields:
 | `apiAddress` | where this machine reaches the API (`host[:port]`; default: the first server's SSH host) |
 | `joinUrl` | where agents and other servers join (default: the first server's node IP, `https://<ip>:6443`) |
 | `binary`, `release` | the binary to install (as `--binary` / `--release`, which override them) |
+| `registries` | a registry configuration (mirrors, CAs, credentials; relative to the cluster file) every machine gets as `/etc/litek8s/registries.yaml` ([registries.md](registries.md)) |
 
 `args` may not set `--token`, `--join`, `--server`, `--cluster-init`,
-`--node-name` or `--node-ip`: `apply` sets them from the fields. Unknown
+`--node-name`, `--node-ip` or `--registries`: `apply` sets them from the fields. Unknown
 fields are errors, and `apply` lists every problem of a file at once.
 
 ### Networks

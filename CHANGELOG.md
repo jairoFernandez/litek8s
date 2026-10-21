@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **Private registries and mirrors:** a registry configuration in k3s's
+  `registries.yaml` format (a k3s file works as is): mirrors per registry or
+  `"*"` (tried in order before the registry, with rewrites), and per host a
+  CA (`ca_file`, or `ca` inline), a client certificate,
+  `insecure_skip_verify`, credentials (`username`/`password`, `auth`,
+  `identitytoken`) and plain HTTP. Pod pulls and the Docker API's pulls use
+  it. `litek8s apiserver` / `agent` read `/etc/litek8s/registries.yaml` (or
+  `--registry-config FILE`) at start; `litek8s install ... --registries FILE`
+  (also over `--ssh`) and `registries:` in cluster files install it;
+  `litek8s dev up` gives its clusters `~/.litek8s/registries.yaml`.
+  [docs/registries.md](docs/registries.md). Credentials a registry refuses
+  now say so instead of `registry answered 401`.
+
 - The API server publishes the OpenAPI definitions of the built-in types
   (Kubernetes 1.33) next to the CRDs' schemas, in `/openapi/v2` (JSON and
   protobuf) and `/openapi/v3`. Argo CD's `ServerSideApply=true` and
