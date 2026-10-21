@@ -25,7 +25,7 @@ pub fn endpoint(context: Option<&str>) -> Result<Endpoint> {
 
 #[derive(Debug, clap::Args)]
 pub struct LogsArgs {
-    /// A regex on pod names (or, with the legacy daemon, a deployment name).
+    /// A regex on pod names.
     pub name: Option<String>,
     #[arg(short = 'n', long, help = "Only this namespace (default: all)")]
     pub namespace: Option<String>,
@@ -55,29 +55,6 @@ pub struct LogsArgs {
     pub output: Option<String>,
     #[arg(long, help = "kubeconfig context")]
     pub context: Option<String>,
-    /// Legacy daemon: how many lines.
-    #[arg(long, hide = true)]
-    pub tail: Option<usize>,
-}
-
-impl LogsArgs {
-    /// Whether this is the legacy daemon's `logs <deployment>`.
-    pub fn legacy(&self) -> bool {
-        self.tail.is_some()
-            || (self.name.is_some()
-                && self.namespace.is_none()
-                && !self.all_namespaces
-                && self.selector.is_none()
-                && self.container.is_none()
-                && self.since.is_none()
-                && self.until.is_none()
-                && self.grep.is_none()
-                && !self.follow
-                && self.limit.is_none()
-                && self.node.is_none()
-                && self.context.is_none()
-                && crate::config::default_socket_path().exists())
-    }
 }
 
 const COLORS: [&str; 6] = ["36", "33", "35", "32", "34", "31"];
@@ -414,11 +391,11 @@ pub async fn query(a: QueryArgs) -> Result<()> {
     Ok(())
 }
 
-/// `litek8s top` against a Kubernetes API server (no legacy daemon, or
-/// `--context`): nodes and pods from the resource metrics API.
+/// `litek8s top` against a Kubernetes API server: nodes and pods from the
+/// resource metrics API.
 #[derive(Debug, Clone, clap::Args)]
 pub struct TopArgs {
-    #[arg(long, help = "kubeconfig context (top of a Kubernetes cluster rather than the legacy daemon)")]
+    #[arg(long, help = "kubeconfig context (default: the current one)")]
     pub context: Option<String>,
     #[arg(short = 'n', long, help = "Only pods of this namespace (default: all)")]
     pub namespace: Option<String>,

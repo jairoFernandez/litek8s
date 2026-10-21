@@ -12,7 +12,7 @@ use x25519_dalek::{PublicKey as X25519Public, StaticSecret};
 
 const KEY_LEN: usize = 32;
 
-/// Base64-encoded WireGuard public key. Safe to share, persist, replicate via raft.
+/// Base64-encoded WireGuard public key. Safe to share and persist.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct PublicKey(String);
 
@@ -94,6 +94,24 @@ impl std::fmt::Debug for KeyPair {
             .field("secret", &"<redacted>")
             .finish()
     }
+}
+
+/// The key pair kept at `path` (0600), made on first use.
+pub fn load_or_generate_keypair_at(path: &std::path::Path) -> Result<KeyPair> {
+    use std::os::unix::fs::PermissionsExt;
+    if path.exists() {
+        let raw = std::fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+        return KeyPair::from_secret_base64(raw.trim());
+    }
+    let pair = KeyPair::generate();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, pair.secret_base64()).with_context(|| format!("failed to write {}", tmp.display()))?;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).with_context(|| format!("failed to set permissions on {}", tmp.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("failed to rename {} to {}", tmp.display(), path.display()))?;
+    Ok(pair)
 }
 
 #[cfg(test)]

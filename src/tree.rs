@@ -1,7 +1,7 @@
 //! `litek8s tree` on a Kubernetes cluster: nodes, then each namespace's
 //! workloads down their ownerReferences (Deployment → ReplicaSet → Pod,
 //! StatefulSet/DaemonSet/Job → Pod, CronJob → Job → Pod) and its Services
-//! with the pods they select. The legacy daemon's tree is in cli.rs.
+//! with the pods they select.
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -15,7 +15,7 @@ use crate::ui::client::Endpoint;
 
 #[derive(Debug, clap::Args)]
 pub struct TreeArgs {
-    #[arg(long, help = "kubeconfig context (tree of a Kubernetes cluster rather than the legacy daemon)")]
+    #[arg(long, help = "kubeconfig context (default: the current one)")]
     pub context: Option<String>,
     #[arg(short = 'n', long, help = "Only this namespace (default: all)")]
     pub namespace: Option<String>,

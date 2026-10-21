@@ -51,6 +51,30 @@ const SANDBOX_IMAGE: &str = "busybox:1.36";
 const PROXY_IMAGE: &str = "rancher/klipper-lb:v0.4.13";
 const PROXY_CONTAINER: &str = "litek8s-service-proxy";
 
+/// The local Docker (or Podman's Docker API): `$DOCKER_HOST`, else the
+/// first socket of OrbStack, Docker Desktop or `/var/run/docker.sock` that
+/// exists.
+pub fn connect_docker() -> Result<Docker> {
+    if let Some(host) = std::env::var("DOCKER_HOST").ok().filter(|h| !h.is_empty()) {
+        if let Some(path) = host.strip_prefix("unix://") {
+            return Docker::connect_with_unix(path, 120, bollard::API_DEFAULT_VERSION).with_context(|| format!("failed to connect to Docker on {host}"));
+        }
+        if host.starts_with("tcp://") || host.starts_with("http://") || host.starts_with("https://") {
+            return Docker::connect_with_http(&host, 120, bollard::API_DEFAULT_VERSION).with_context(|| format!("failed to connect to Docker on {host}"));
+        }
+        bail!("unsupported DOCKER_HOST scheme in `{host}`");
+    }
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let candidates = home.iter().flat_map(|h| [h.join(".orbstack/run/docker.sock"), h.join(".docker/run/docker.sock")]).chain([std::path::PathBuf::from("/var/run/docker.sock")]);
+    for candidate in candidates {
+        if candidate.exists() {
+            return Docker::connect_with_unix(&candidate.to_string_lossy(), 120, bollard::API_DEFAULT_VERSION)
+                .with_context(|| format!("failed to connect to Docker on {}", candidate.display()));
+        }
+    }
+    bail!("failed to locate a usable Docker socket; set DOCKER_HOST or ensure Docker is running")
+}
+
 #[derive(Debug, Clone)]
 pub enum MountSource {
     /// A directory or file on the node.
