@@ -807,3 +807,66 @@ fn kubectl_verbs_that_change_things() {
         assert!(!kubectl_mutates(a), "{a}");
     }
 }
+
+#[test]
+fn t_opens_the_tree_on_the_selected_object_and_back() {
+    let mut app = app();
+    // Shown in the footer and in an empty list's tip.
+    let s = render(&app, 80, 24);
+    assert!(s.lines().last().unwrap().contains("t") && s.lines().last().unwrap().contains("tree"), "{s}");
+    app.key(key(':'));
+    typing(&mut app, "deploy -n shop");
+    app.key(code(KeyCode::Enter));
+    app.apply(Msg::Kube(KMsg::Data(wk("apps/v1/deployments", Some("shop")), test_snapshot(&[("Name", 0), ("Ready", 0)], Vec::new()))));
+    assert!(render(&app, 80, 24).contains("t: the tree of the namespace"));
+    let rows = vec![obj_row("shop", "api", "d1", None, &["api", "1/2", "2", "1", ""], Health::Warn, json!({}))];
+    app.apply(Msg::Kube(KMsg::Data(wk("apps/v1/deployments", Some("shop")), test_snapshot(&[("Name", 0), ("Ready", 0), ("Up-to-date", 0), ("Available", 0), ("Age", 0)], rows))));
+    app.key(key('t'));
+    tree_data(&mut app, Some("shop"));
+    let View::Tree(tv) = app.kube.top() else { panic!() };
+    assert_eq!(tv.ns.as_deref(), Some("shop"));
+    assert_eq!(tv.selected().unwrap().key(), "Deployment/shop/api");
+    let s = render(&app, 80, 24);
+    assert!(s.contains("Deployment api  1/2 ready") && s.contains("t/esc") && s.contains("back"), "{s}");
+    // t again: back to the list.
+    app.key(key('t'));
+    assert_eq!(app.kube.top_table().unwrap().res.plural, "deployments");
+    // On a CronJob t is the tree too; T runs it (asks first).
+    app.key(key(':'));
+    typing(&mut app, "cj -n shop");
+    app.key(code(KeyCode::Enter));
+    let rows = vec![obj_row("shop", "tick", "c1", None, &["tick", "*/5 * * * *", "False", "0", "", ""], Health::Ok, json!({}))];
+    app.apply(Msg::Kube(KMsg::Data(wk("batch/v1/cronjobs", Some("shop")), test_snapshot(&[("Name", 0), ("Schedule", 0), ("Suspend", 0), ("Active", 0), ("Last Schedule", 0), ("Age", 0)], rows))));
+    app.key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT));
+    assert!(matches!(&app.kube.overlay, Overlay::Confirm(c) if c.title.contains("Trigger")), "{:?}", app.kube.overlay);
+    app.key(code(KeyCode::Esc));
+    app.key(key('t'));
+    assert!(matches!(app.kube.top(), View::Tree(_)));
+}
+
+#[test]
+fn services_without_a_selector_column_come_as_objects() {
+    let mut app = app();
+    app.key(key(':'));
+    typing(&mut app, "tree shop");
+    app.key(code(KeyCode::Enter));
+    tree_data(&mut app, Some("shop"));
+    app.kube.take_effects();
+    // An older litek8s: its Service Table has no Selector column.
+    let svc = vec![obj_row("shop", "api", "s1", None, &["api", "ClusterIP", "10.43.0.9", "<none>", "80/TCP", ""], Health::Ok, json!({}))];
+    app.apply(Msg::Kube(KMsg::Data(wk("v1/services", Some("shop")), test_snapshot(&[("Name", 0), ("Type", 0), ("Cluster-IP", 0), ("External-IP", 0), ("Port(s)", 0), ("Age", 0)], svc))));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("Service api  ClusterIP 10.43.0.9 80") && !s.contains("→"), "{s}");
+    // The tree asks for the services as objects …
+    let pending = app.kube.take_effects();
+    let Some(KEffect::Watch(w)) = pending.iter().rev().find(|e| matches!(e, KEffect::Watch(_))) else { panic!("{pending:?}") };
+    assert!(w.iter().any(|(_, k)| k.res == "v1/services#objects"), "{w:?}");
+    // … and from their spec gets the selector, as `litek8s tree` does.
+    let doc = json!({"kind": "ServiceList", "items": [{"metadata": {"name": "api", "namespace": "shop", "uid": "s1"}, "spec": {"type": "ClusterIP", "clusterIP": "10.43.0.9", "ports": [{"port": 80, "protocol": "TCP"}], "selector": {"app": "api"}}}]});
+    let list: super::table::ListDoc = serde_json::from_value(doc).unwrap();
+    let cols = super::table::plain_columns_for("Service");
+    let rows = list.into_rows(&cols, "Service");
+    let snap = std::sync::Arc::new(super::table::Snapshot { columns: std::sync::Arc::new(cols), rows: rows.into_iter().map(std::sync::Arc::new).collect(), synced: true, error: None });
+    app.apply(Msg::Kube(KMsg::Data(wk("v1/services#objects", Some("shop")), snap)));
+    assert!(render(&app, 80, 24).contains("Service api  ClusterIP 10.43.0.9 80 → 1/2 pods"));
+}

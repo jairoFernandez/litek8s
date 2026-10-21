@@ -566,7 +566,7 @@ list. On the Mac, with a 3-node cluster and a stopped one:
 ╰──────────────────────────────────────────────────────────────────────────────╯
  All clusters share one VM (its CPUs and memory: Settings).
 
-  n  new   u  up   d  down   D  delete   enter  use                     ?  help
+  n  new   u  up   d  down   D  delete   t  tree   enter  use         ?  help
 ```
 
 `›` marks the cluster the other views show; `●` up, `◐` starting or
@@ -813,9 +813,9 @@ as numbers, `2/3` by its counts, `512Mi` and `250m` by size.
 | `r` / `u` / `H` | deploy (`r`: sts, ds too) | rollout restart / undo (to the previous revision) / history and status |
 | `F` | pod, svc, deploy, sts, rs | port-forward (a service's or workload's goes to one of its ready pods) |
 | `f` | | the port-forwards (`d` stops one) |
-| `T` | | the tree of the table's namespace |
+| `t` | anything | the [tree](#tree) of the namespace, the cursor on this object (`t` again: back) |
 | `c` / `u` / `r` | node | cordon / uncordon / drain (evictions, honoring PodDisruptionBudgets; DaemonSet pods stay) |
-| `t` | cronjob | run it now (a Job from its template) |
+| `T` | cronjob | run it now (a Job from its template) |
 | `x` | secret / workloads | decode its data / its xray tree |
 | `o` / `J` / `E` | pod / anything owned / anything | its node / its owner / its events |
 | `c` / `C` | anything | copy the name / the YAML (OSC 52, so it works over SSH) |
@@ -897,7 +897,8 @@ object (on a container row: its logs and shell); `ctrl-r` reloads it.
 
 ### tree
 
-`:tree` (or `T` on a table) shows what `litek8s tree --context <ctx>`
+`t` on any list (or `:tree`, or `t` on a cluster in the Clusters view)
+shows what `litek8s tree --context <ctx>`
 prints, and keeps it current: nodes, then each namespace's workloads down
 their controllers (CronJob → Job → Pod, Deployment → ReplicaSet → Pod,
 StatefulSet, DaemonSet and Job → Pod, pods with no owner) and its services
@@ -925,7 +926,7 @@ most once a second while pods keep changing).
 │    │  └─ ◐ Pod once-927zc  Pending                                           │
 │    └─ ◐ Service api  ClusterIP 10.43.0.11 80 → 0/3 pods                      │
 ╰──────────────────────────────────────────────────────────────────────────────╯
- esc back  space fold  enter describe  / filter  l logs  0 all ns       ?  help
+ t/esc back  space fold  enter describe  / filter  l logs  0 all ns     ?  help
 ```
 
 Each line has its state's glyph and color (running and ready green,
@@ -936,8 +937,14 @@ says what it hides), `→` unfolds, `←` folds or goes up to the parent;
 `l` `s` `F` `c` `ctrl-d` act on it as in the tables; `/` keeps the
 matching lines with what they are under; `0` switches between the
 namespace and all of them, `H` shows the old ReplicaSets, `ctrl-r` lists
-everything again. A list the cluster refuses (`nodes is forbidden`) says
-so at the top and the rest still shows.
+everything again, `t` (or `esc`) goes back to the list. Opened with `t`
+on a deployment, pod, job…, the cursor starts on that object. A cluster in
+tree mode stays in it when you switch context. A list the cluster refuses
+(`nodes is forbidden`) says so at the top and the rest still shows. On an
+older litek8s whose Service Table has no Selector column, the tree reads
+the services as objects, so they still show `→ ready/total pods` as
+`litek8s tree` does. Your `ui.yaml` hotkeys and plugins come before the
+built-in keys: one bound to `t` takes it.
 
 ### `ui.yaml`
 
@@ -989,11 +996,11 @@ selects rows with a click and scrolls with the wheel.
 
 | where | keys |
 |---|---|
-| tables | `:` command, `/` filter, `!` kubectl, `?` help, `m` actions, `enter` open, `esc` back, `n` namespace, `0` all namespaces, `space` mark, `<` `>` `O` `N` `A` `S` sort, `ctrl-w` wide, `ctrl-z` faults, `ctrl-r` reload, `f` port-forwards, and [the actions](#acting-on-objects) |
+| tables | `:` command, `/` filter, `t` tree, `!` kubectl, `?` help, `m` actions, `enter` open, `esc` back, `n` namespace, `0` all namespaces, `space` mark, `<` `>` `O` `N` `A` `S` sort, `ctrl-w` wide, `ctrl-z` faults, `ctrl-r` reload, `f` port-forwards, and [the actions](#acting-on-objects) |
 | pagers (describe, YAML, kubectl, help) | `/` search, `n`/`N` next/previous match, `w` wrap, `←→` scroll sideways, `e` edit, `y`/`d` YAML/describe, `m` managedFields, `c` copy, `ctrl-s` save, `esc` back |
 | logs | `f` follow/pause, `/` filter, `t` timestamps, `w` wrap, `p` previous, `c` copy, `x` clear, `ctrl-s` save, `esc` back |
 | xray | `enter` fold, `d` `y` `e` `l` `s` `ctrl-d` on the row, `ctrl-r` reload |
-| tree | `space` fold, `←` `→` fold/up and unfold, `enter` describe, `d` `y` `e` `l` `s` `F` `c` `ctrl-d` on the row, `/` filter, `0` all namespaces, `H` old ReplicaSets, `ctrl-r` reload |
+| tree | `t`/`esc` back, `space` fold, `←` `→` fold/up and unfold, `enter` describe, `d` `y` `e` `l` `s` `F` `c` `ctrl-d` on the row, `/` filter, `0` all namespaces, `H` old ReplicaSets, `ctrl-r` reload |
 
 `1`-`8` and `tab` still switch views, `q` quits.
 
@@ -1187,7 +1194,7 @@ stripped macOS arm64 binary (33.41 MB on main c620693, 35.43 MB with it;
 |---|---|
 | everywhere | `1`-`9`/`tab`/`shift-tab` views, `↑↓`/`jk`/`PgUp`/`PgDn`/`g`/`G` move, `/` filter the list (`esc` clears), `ctrl-r` refresh, `?` help, `q` or `ctrl-c` quit |
 | Home | `u` up, `d` down (asks), `R` delete the cluster (asks), `b` the next breakdown (memory, CPU, disk) |
-| Clusters | `n` new (`tab` between name and nodes), `u` up, `d` down (asks), `D`/`del` delete (asks), `enter` show it (a local cluster: every view, then asks about `kubectl`/`docker`; another context: the Kubernetes view) |
+| Clusters | `n` new (`tab` between name and nodes), `u` up, `d` down (asks), `D`/`del` delete (asks), `enter` show it (a local cluster: every view, then asks about `kubectl`/`docker`; another context: the Kubernetes view), `t` straight into its tree |
 | Containers | `l`/`enter` logs, `s` shell, `u` start, `x` stop (asks), `r` restart (asks), `d`/`del` remove (asks), `space` fold a project |
 | Images, Volumes | `d`/`del` remove (asks) |
 | Free space | `space` select a category, `p`/`enter` free the selected (asks) |

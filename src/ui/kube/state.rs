@@ -741,10 +741,16 @@ impl KubeUi {
         self.catalog = Catalog::new(builtins());
         self.namespace = namespace;
         let res = top.and_then(|n| self.catalog.find(&n).cloned()).unwrap_or_else(|| self.catalog.find("pods").cloned().unwrap_or_default());
+        let tree = self.views.iter().any(|v| matches!(v, View::Tree(_)));
         self.views = vec![View::Table(TableView::new(res, self.namespace.clone()))];
         self.overlay = Overlay::None;
         self.watched.clear();
         self.pending.push(KEffect::Discover);
+        // In tree mode it stays so on the new cluster.
+        if tree {
+            let ns = self.namespace.clone();
+            self.open_tree(ns, false);
+        }
         self.sync_watches();
     }
 
@@ -822,10 +828,24 @@ impl KubeUi {
     }
 
     fn open_tree(&mut self, ns: Option<String>, all: bool) {
+        self.open_tree_at(ns, all, None);
+    }
+
+    /// The tree, with the cursor on `focus` (a tree row key) once it shows.
+    fn open_tree_at(&mut self, ns: Option<String>, all: bool, focus: Option<String>) {
         let mut tv = TreeView::new(ns);
         tv.all = all;
+        tv.focus = focus;
         self.push(View::Tree(tv));
         self.refresh_tree();
+    }
+
+    /// The Clusters view's `t`: the tree of the namespace, on top of the
+    /// root table (kept through the context switch that follows).
+    pub fn tree_mode(&mut self) {
+        self.views.truncate(1);
+        let ns = self.namespace.clone();
+        self.open_tree(ns, false);
     }
 
     /// Ask the runtime for the informers the views need, when that changed.
@@ -891,7 +911,11 @@ impl KubeUi {
                 // Only what is on screen is recomputed now; the rest when shown.
                 match self.views.last() {
                     Some(View::Table(_)) => self.refresh_top(),
-                    Some(View::Tree(_)) => self.refresh_tree(),
+                    Some(View::Tree(_)) => {
+                        self.refresh_tree();
+                        // Its lists may change (services as objects).
+                        self.sync_watches();
+                    }
                     _ => {}
                 }
             }
@@ -1852,7 +1876,7 @@ impl KubeUi {
                 v.push(act("x", "xray", KeyCode::Char('x'), N));
             }
             "CronJob" => {
-                v.push(act("t", "trigger now", KeyCode::Char('t'), N));
+                v.push(act("T", "trigger now", KeyCode::Char('T'), N));
                 v.push(act("x", "xray", KeyCode::Char('x'), N));
             }
             "Service" => {
@@ -1871,6 +1895,7 @@ impl KubeUi {
         if kind != "Container" && kind != "Node" {
             v.push(act("c", "copy name", KeyCode::Char('c'), N));
         }
+        v.push(act("t", "tree, on this one", KeyCode::Char('t'), N));
         v.push(act("C", "copy YAML", KeyCode::Char('C'), N));
         v.push(act("E", "related events", KeyCode::Char('E'), N));
         if t.selected().is_some_and(|r| r.owners.iter().any(|o| o.controller)) {
@@ -1986,10 +2011,16 @@ impl KubeUi {
                 self.push(View::Forwards { sel: 0 });
                 return Some(Vec::new());
             }
-            KeyCode::Char('T') => {
-                // The tree of this view's namespace.
+            KeyCode::Char('t') | KeyCode::Char('T') if !ctrl && !(key.code == KeyCode::Char('T') && res.kind == "CronJob") => {
+                // The tree of this view's namespace, on the selected object.
                 let ns = if res.namespaced { t.ns.clone() } else { self.namespace.clone() };
-                self.open_tree(ns, false);
+                let focus = row.as_ref().and_then(|r| tree_kind(&res).map(|k| crate::tree::Row { depth: 0, kind: Some(k), ns: r.ns.clone(), name: r.name.clone(), detail: String::new(), health: Health::Ok }.key()));
+                let ns = match (&ns, &row) {
+                    // All namespaces: just the selected object's one.
+                    (None, Some(r)) if res.namespaced && focus.is_some() => Some(r.ns.clone()),
+                    _ => ns,
+                };
+                self.open_tree_at(ns, false, focus);
                 return Some(Vec::new());
             }
             _ => {}
@@ -2112,7 +2143,7 @@ impl KubeUi {
                 });
                 Vec::new()
             }
-            (KeyCode::Char('t'), false, "CronJob") => {
+            (KeyCode::Char('T'), false, "CronJob") => {
                 if self.read_only() {
                     return Some(Vec::new());
                 }
@@ -2556,7 +2587,7 @@ impl KubeUi {
             return Some(Vec::new());
         }
         match key.code {
-            KeyCode::Esc | KeyCode::Char('q') => {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('t') => {
                 if key.code == KeyCode::Esc && tv.filter.is_some() {
                     tv.filter = None;
                     tv.refresh();
@@ -2705,6 +2736,14 @@ impl KubeUi {
 
 fn plural(n: usize, what: &str) -> String {
     if n == 1 { format!("1 {what}") } else { format!("{n} {what}s") }
+}
+
+/// The tree's kind of a resource type (`None`: not in a tree).
+fn tree_kind(res: &Resource) -> Option<TreeKind> {
+    if !(res.group.is_empty() || res.group == "apps" || res.group == "batch") {
+        return None;
+    }
+    TreeKind::ALL.iter().copied().find(|k| k.name() == res.kind)
 }
 
 /// Types whose Enter shows the pods they run.
@@ -2906,7 +2945,8 @@ fn help_lines(ui: &KubeUi) -> Vec<String> {
             ("< > O", "sort column left/right, reverse;  N A S: name, age, status"),
             ("ctrl-w", "wide columns;  ctrl-z: faults only;  ctrl-r: reload"),
             ("m", "actions of the selected row"),
-            ("f", "port-forwards;  T tree of the namespace;  ! kubectl;  ? this help"),
+            ("t", "the tree of the namespace, on the selected object (t again: back)"),
+            ("f", "port-forwards;  ! kubectl;  ? this help"),
         ],
     );
     section(
@@ -2926,12 +2966,12 @@ fn help_lines(ui: &KubeUi) -> Vec<String> {
     );
     section("Pagers (describe, YAML, kubectl)", &[("/ n N", "search, next, previous"), ("w", "wrap;  ← → scroll sideways"), ("e", "edit;  y YAML;  d describe;  m managedFields"), ("c", "copy;  ctrl-s save to a file")]);
     section(
-        "Tree (:tree, T)",
+        "Tree (t, :tree)",
         &[
             ("space ← →", "fold, fold or go up, unfold;  enter on a namespace folds it"),
             ("enter d y e", "describe, YAML, edit the object;  l logs  s shell  F forward"),
             ("/", "keep matching lines (and what they are under)"),
-            ("0", "all namespaces and back;  H old ReplicaSets;  ctrl-d delete"),
+            ("0", "all namespaces and back;  H old ReplicaSets;  ctrl-d delete;  t back"),
         ],
     );
     section("Logs", &[("f", "follow / pause"), ("/", "show matching lines"), ("t w", "timestamps, wrap"), ("p", "previous containers' logs"), ("c x", "copy, clear;  ctrl-s save")]);

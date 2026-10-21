@@ -1389,6 +1389,14 @@ impl App {
         let row = match sel {
             Ok(row) => row.clone(),
             Err((context, _)) => {
+                if code == KeyCode::Char('t') {
+                    // Straight into its tree.
+                    let context = context.clone();
+                    self.context_override = Some(context.clone());
+                    self.kube.tree_mode();
+                    self.tab = Tab::Kube;
+                    return vec![Effect::UseContext(context)];
+                }
                 if code == KeyCode::Enter {
                     let context = context.clone();
                     self.context_override = Some(context.clone());
@@ -1403,6 +1411,14 @@ impl App {
         };
         let idle = self.dev_busy.is_none();
         match code {
+            KeyCode::Char('t') => {
+                // Its tree, without touching kubectl's or docker's context.
+                self.context_override = None;
+                self.cluster = row.name.clone();
+                self.kube.tree_mode();
+                self.tab = Tab::Kube;
+                return vec![Effect::UseCluster(row.name.clone())];
+            }
             KeyCode::Enter => {
                 self.context_override = None;
                 let switch = self.cluster != row.name;

@@ -226,7 +226,7 @@ fn footer(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
         } else {
             match app.tab {
                 Tab::Home => &[("u", "up"), ("d", "down"), ("R", "delete"), ("b", "breakdown"), ("2", "clusters")],
-                Tab::Clusters => &[("n", "new"), ("u", "up"), ("d", "down"), ("D", "delete"), ("enter", "use")],
+                Tab::Clusters => &[("n", "new"), ("u", "up"), ("d", "down"), ("D", "delete"), ("t", "tree"), ("enter", "use")],
                 Tab::Containers => &[("l", "logs"), ("s", "shell"), ("u", "start"), ("x", "stop"), ("r", "restart"), ("d", "remove"), ("/", "filter")],
                 Tab::Images | Tab::Volumes => &[("d", "remove"), ("/", "filter"), ("6", "free space")],
                 Tab::Space => &[("space", "select"), ("p", "free selected")],
