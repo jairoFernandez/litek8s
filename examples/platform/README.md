@@ -109,7 +109,8 @@ things back), then the namespaces of the components, then
 
 `GIT_PROVIDER=github` keeps the repositories on GitHub instead of Gitea:
 no Gitea, no act_runner, and no Atlantis (it needs GitHub's webhooks, which
-cannot reach a cluster at home or on a laptop). What changes:
+cannot reach a cluster at home or on a laptop); OpenTofu runs on GitHub
+Actions instead ([below](#infrastructure-as-code-on-github)). What changes:
 
 - `up.sh` creates `<owner>/<GITOPS_REPO>` and `<owner>/<APP_REPO>` (private,
   with `gh`) unless they exist, and pushes to them when empty.
@@ -134,10 +135,31 @@ GIT_PROVIDER=github GITOPS_REPO=platform-gitops APP_REPO=platform-app \
 examples/platform/smoke.sh
 ```
 
-Checked from a new dev cluster with two private repositories: `up.sh` 92 s
-(after the repositories exist), then `smoke.sh` 466 s, most of it the
-waves and the runner's first registration; the app's CI job on GitHub
-Actions takes 13 s, Argo CD picks up its commit on the next poll.
+### Infrastructure as code on GitHub
+
+The same flow as Atlantis, without a webhook into the cluster: the gitops
+repository's `.github/workflows/tofu.yaml` runs on a second runner in the
+cluster (`github-iac`, label `lkiac`, registered with the gitops repository
+only).
+
+- A pull request that changes `terraform/` gets `tofu plan` as a comment.
+- Merging it to `main` runs `tofu apply` (and so does a direct push to
+  `main` that changes `terraform/`, or running the workflow by hand).
+- OpenTofu 1.12.8 (checked against its SHA256SUMS), state and lock in the
+  namespace `github-iac` (the `kubernetes` backend), OpenBao reached with the
+  root token from OpenBao's `platform/github-iac`.
+
+The two runners are kept apart on purpose: the app's runner runs whatever
+the app's CI does and has litek8s's Docker API; the infrastructure runner has
+no Docker socket and is the only one with OpenBao's root token and the state.
+Anyone who can push a branch to the gitops repository can run code on it,
+as with Atlantis: keep the repository private, collaborators trusted.
+
+`smoke.sh` opens a pull request adding a policy, waits for the plan comment,
+merges it, waits for the apply and finds the policy in OpenBao, then removes
+it on `main` and waits for that apply too. The runner keeps `tofu` and the
+providers in `/cache` between jobs: the first job downloads them (3 min on a
+slow home link, ~40 KB/s from GitHub's releases), the next ones take ~20 s.
 
 ## Platform modes
 

@@ -97,14 +97,17 @@ rm -rf "$render/cluster"
 cp -R "$dir/gitops/cluster/." "$render/registry/clusters/$cluster/"
 c="$render/registry/clusters/$cluster"
 if [[ $git_provider == gitea ]]; then
-  rm -rf "$c/github-runner.yaml" "$c/components/github-runner"
+  rm -rf "$c/github-runner.yaml" "$c/components/github-runner" "$render/.github"
+  tofu_state_ns=atlantis
 else
   rm -f "$c/atlantis.yaml" "$render/atlantis.yaml"
+  tofu_state_ns=github-iac
 fi
 https_suffix=""; [[ $https_port == 443 ]] || https_suffix=":$https_port"
-find "$render" -name '*.yaml' -exec perl -pi -e "s#<CLUSTER_NAME>#$cluster#g; s#<GITOPS_REPO_URL>#$repo_url#g;
+find "$render" \( -name '*.yaml' -o -name '*.tf' \) -exec perl -pi -e "s#<CLUSTER_NAME>#$cluster#g; s#<GITOPS_REPO_URL>#$repo_url#g;
   s#<DOMAIN_NAME>#$domain#g; s#<INGRESS_HTTP_PORT>#$http_port#g; s#<INGRESS_HTTPS_PORT>#$https_port#g;
-  s#<INGRESS_HTTPS_SUFFIX>#$https_suffix#g; s#<APP_REPOSITORY>#$owner/$app_repo#g" {} +
+  s#<INGRESS_HTTPS_SUFFIX>#$https_suffix#g; s#<APP_REPOSITORY>#$owner/$app_repo#g;
+  s#<GITOPS_REPOSITORY>#$owner/$gitops_repo#g; s#<TOFU_STATE_NAMESPACE>#$tofu_state_ns#g" {} +
 
 scm_ensure_repo "$gitops_repo"
 empty=false; scm_repo_empty "$gitops_repo" && empty=true
@@ -269,9 +272,12 @@ if [[ $git_provider == gitea ]]; then
     echo "atlantis: Gitea user, token and webhook; credentials in OpenBao platform/atlantis"
   fi
 else
-  # The GitHub runner registers itself with the token (OpenBao platform/github).
+  # The runners register themselves with the token; the infrastructure
+  # runner also applies OpenTofu to OpenBao with the root token (it manages
+  # policies), as Atlantis does with Gitea.
   printf '%s' "$SCM_PASS" | bao kv put platform/github GITHUB_TOKEN=- >/dev/null
-  echo "github: token in OpenBao platform/github for the runner"
+  printf '%s' "$SCM_PASS" | bao kv put platform/github-iac GITHUB_TOKEN=- VAULT_TOKEN="$root" >/dev/null
+  echo "github: tokens in OpenBao platform/github (app runner) and platform/github-iac (OpenTofu runner)"
 fi
 
 port=""; [[ $https_port == 443 ]] || port=":$https_port"
@@ -285,6 +291,7 @@ EOF
 else
   cat <<EOF
 GitHub:  https://github.com/$owner/$gitops_repo and https://github.com/$owner/$app_repo
+         (pull requests to $gitops_repo that change terraform/: tofu plan as a comment, apply on merge)
 EOF
 fi
 cat <<EOF

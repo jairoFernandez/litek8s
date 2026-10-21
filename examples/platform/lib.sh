@@ -48,12 +48,16 @@ scm_connect() {
 scm_disconnect() { [[ -n ${scm_pf:-} ]] && { kill "$scm_pf" 2>/dev/null; wait "$scm_pf" 2>/dev/null; } || true; }
 
 # The provider's API; credentials go to curl on stdin, not on its command line.
+# Reads are retried (home networks drop a request now and then); writes are
+# not, so nothing is created twice.
 scm() {
+  local retry=(--retry 4 --retry-all-errors --retry-delay 2 --max-time 30)
+  [[ " $* " == *" -X "* && " $* " != *" -X GET "* ]] && retry=(--max-time 60)
   if [[ $git_provider == gitea ]]; then
     printf 'user = "%s:%s"\n' "$SCM_USER" "$SCM_PASS"
   else
     printf 'header = "Authorization: Bearer %s"\nheader = "Accept: application/vnd.github+json"\n' "$SCM_PASS"
-  fi | curl -fsS -K - -H 'Content-Type: application/json' "$@"
+  fi | curl -fsS "${retry[@]}" -K - -H 'Content-Type: application/json' "$@"
 }
 
 # git with the provider's credentials from the environment.

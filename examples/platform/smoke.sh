@@ -15,12 +15,7 @@ gitops_repo="$(platform_get gitops_repo)"; gitops_repo="${gitops_repo:-gitops}"
 app_repo="$(platform_get app_repo)"; app_repo="${app_repo:-metaphor}"
 domain="$(platform_get domain)"; domain="${domain:-${DOMAIN:-localhost}}"
 if [[ $git_provider == github && -z ${GITHUB_TOKEN:-} && -z ${GITHUB_TOKEN_FILE:-} ]]; then
-  # Argo CD and external-secrets make it (wave 50) after up.sh returns.
-  deadline=$((SECONDS + timeout))
-  until GITHUB_TOKEN="$(secret_value github-runner github-runner GITHUB_TOKEN 2>/dev/null)" && [[ -n $GITHUB_TOKEN ]]; do
-    if [[ $SECONDS -ge $deadline ]]; then echo "github: no Secret github-runner/github-runner (timeout)"; exit 1; fi
-    sleep 5
-  done
+  GITHUB_TOKEN="$(secret_value github-runner github-runner GITHUB_TOKEN)"
 fi
 ca="$(mktemp)"
 trap 'scm_disconnect; rm -f "$ca"' EXIT
@@ -82,9 +77,19 @@ until [[ $(kubectl -n argocd get application registry -o jsonpath='{.status.sync
   if [[ $SECONDS -ge $deadline ]]; then echo "gitops: registry not on $head (timeout)"; exit 1; fi
   sleep 3
 done
+# Every Application that reads the gitops repository on that commit too
+# (without a webhook each polls on its own), then all Synced and Healthy.
+stale() {
+  kubectl -n argocd get applications -o json | json "' '.join(a['metadata']['name'] for a in d['items']
+    if a['spec'].get('source',{}).get('repoURL','').rstrip('/').removesuffix('.git').endswith('/$gitops_repo')
+    and a.get('status',{}).get('sync',{}).get('revision') != '$head')"
+}
 while :; do
+  # The app's CI may commit meanwhile: the repository's commit of now.
+  head="$(scm "$api/repos/$owner/$gitops_repo/branches/main" | json 'd["commit"].get("id") or d["commit"]["sha"]')"
+  for a in $(stale); do kubectl -n argocd annotate application "$a" argocd.argoproj.io/refresh=normal --overwrite >/dev/null; done
   out="$(apps)"
-  grep -qv ' Synced  *Healthy$' <<<"$out" || break
+  [[ -z $(stale) ]] && ! grep -qv ' Synced  *Healthy$' <<<"$out" && break
   if [[ $SECONDS -ge $deadline ]]; then echo "gitops: timeout"; sed 's/^/  /' <<<"$out"; exit 1; fi
   sleep 5
 done
@@ -199,6 +204,49 @@ if kubectl -n argocd get application development >/dev/null 2>&1; then
     sleep 5
   done
   echo "app: $url serves $commit (built by $git_provider's CI on a runner in the cluster, deployed by Argo CD)"
+fi
+
+# ---- OpenTofu on GitHub Actions: a pull request plans, its merge applies --------
+
+if [[ $git_provider == github ]]; then
+  R="$owner/$gitops_repo"
+  name="smoke-$RANDOM"
+  file="terraform/openbao/$name.tf"
+  bao_root() { kubectl -n openbao exec openbao-0 -c openbao -- env BAO_ADDR=http://127.0.0.1:8200 BAO_TOKEN="$(secret_value openbao openbao-init root-token)" bao "$@"; }
+  # Wait for the tofu workflow's run on commit $1 and fail unless it succeeds.
+  tofu_run() {
+    local deadline=$((SECONDS + timeout)) out
+    while :; do
+      out="$(gh run list --repo "$R" --workflow tofu.yaml --commit "$1" --json status,conclusion --jq '.[0] | "\(.status) \(.conclusion)"' 2>/dev/null || true)"
+      case "$out" in
+        "completed success") return ;;
+        completed*) echo "iac: run on $1: $out"; gh run view --repo "$R" "$(gh run list --repo "$R" --workflow tofu.yaml --commit "$1" --json databaseId --jq '.[0].databaseId')" --log-failed | tail -20; exit 1 ;;
+      esac
+      if [[ $SECONDS -ge $deadline ]]; then echo "iac: no finished run on $1 (timeout; $out)"; exit 1; fi
+      sleep 5
+    done
+  }
+  main_sha="$(gh api "repos/$R/git/ref/heads/main" --jq .object.sha)"
+  gh api -X POST "repos/$R/git/refs" -f ref="refs/heads/$name" -f sha="$main_sha" >/dev/null
+  content="$(printf 'resource "vault_policy" "%s" {\n  name   = "%s"\n  policy = "path \\"secret/data/%s/*\\" { capabilities = [\\"read\\"] }"\n}\n' "$name" "$name" "$name" | base64 | tr -d '\n')"
+  head="$(gh api -X PUT "repos/$R/contents/$file" -f message="$name: add a policy" -f branch="$name" -f content="$content" --jq .commit.sha)"
+  pr="$(gh pr create --repo "$R" --head "$name" --base main --title "$name" --body "smoke.sh" | grep -o '[0-9]*$')"
+  echo "iac: opened pull request #$pr ($file)"
+  tofu_run "$head"
+  gh api "repos/$R/issues/$pr/comments" --jq '.[].body' | grep -q "tofu plan.*merge to apply" || { echo "iac: no plan comment on #$pr"; exit 1; }
+  gh api "repos/$R/issues/$pr/comments" --jq '.[].body' | grep -q "to add" || { echo "iac: the plan adds nothing"; exit 1; }
+  echo "iac: planned (comment on #$pr)"
+  gh pr merge "$pr" --repo "$R" --squash --delete-branch >/dev/null
+  merged="$(gh pr view "$pr" --repo "$R" --json mergeCommit --jq .mergeCommit.oid)"
+  tofu_run "$merged"
+  bao_root policy read "$name" >/dev/null || { echo "iac: policy $name not in OpenBao"; exit 1; }
+  echo "iac: merged and applied, policy $name is in OpenBao"
+  # Undo on main, so the repository and OpenBao end as they began.
+  sha="$(gh api "repos/$R/contents/$file" --jq .sha)"
+  removed="$(gh api -X DELETE "repos/$R/contents/$file" -f message="$name: remove it" -f sha="$sha" --jq .commit.sha)"
+  tofu_run "$removed"
+  if bao_root policy read "$name" >/dev/null 2>&1; then echo "iac: policy $name still in OpenBao"; exit 1; fi
+  echo "iac: removed again (applied from main)"
 fi
 
 # ---- Atlantis: a pull request plans and applies OpenTofu against OpenBao -------
