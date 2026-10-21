@@ -21,3 +21,6 @@ __pycache__/
 web/node_modules/
 web/dist/
 .astro/
+
+# Local Terraform state from the removed `litek8s infra` scaffold: never commit it
+infra/
