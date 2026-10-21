@@ -87,6 +87,7 @@ objc2-virtualization = "0.3"
 
 [dev-dependencies]
 prost = "0.14"
+protox = "0.10.0"
 tempfile = "3.18.0"
 
 # lto/codegen-units=1 give a few % more for a much slower build; opt-level 3
@@ -95,4 +96,6 @@ tempfile = "3.18.0"
 opt-level = 3
 
 [build-dependencies]
+flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 protox = "0.10.0"
+serde_json = "1.0.140"

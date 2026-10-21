@@ -85,6 +85,43 @@ containers with nested containerd in the litek8s dev VM) and
 removing a conflicting release left on the cluster by hand); each
 directory's README has the details.
 
+## OpenAPI definitions and Argo CD server-side apply (2026-10-21, 120 cases)
+
+New L4 case `argocd_ssa`: Argo CD (chart 10.10.5, v3.5.5) syncs a Helm chart
+(podinfo 6.15.0 with a ServiceAccount) with `ServerSideApply=true` and
+`ServerSideDiff=true` to Synced/Healthy, and the ServiceAccount's
+managedFields show `argocd-controller` with `Apply`. Before, litek8s answered
+client-go's `OpenAPISchema()` (`/openapi/v2` in protobuf) with an empty
+document and Argo CD failed with `unable to resolve parseableType for
+GroupVersionKind: /v1, Kind=ServiceAccount`. Now the API server publishes
+upstream's 1.33 definitions of the built-in types (`openapi/swagger.json`)
+next to the CRDs' schemas, in v2 (JSON and protobuf) and per group version in
+v3 (`kubectl explain` works for built-in types).
+
+| run | result |
+|---|---|
+| k3s via k3d on litek8s's Docker API, `argocd_ssa` | 1/1 (`results/20261021-023440-k3d-on-litek8s-argocd-ssa/`) |
+| litek8s dev, macOS VM, `argocd_ssa` | 1/1 (60 s; `results/20261021-023218-litek8s-dev-vm-argocd-ssa/`, final build `results/20261021-025049-litek8s-dev-vm-final/`) |
+| litek8s dev, macOS VM, `helm_argo_cd` then `argocd_ssa` (CRDs left by the first) | 2/2 (`results/20261021-023955-litek8s-dev-vm-argo-cd-then-ssa/`) |
+| litek8s dev, macOS VM, L0–L3 | 73/73 (`results/20261021-023658-litek8s-dev-vm-openapi-l0-l3/`) |
+| `litek8s apiserver` on the host, L0–L1 | 50/50 (`results/20261021-022346-litek8s-host-openapi-l0l1/`) |
+
+Cost (release, macOS arm64): binary +577 KB (40,687,728 → 41,278,448 B;
+the definitions are embedded gzipped twice, 193 KB as JSON and 220 KB as
+protobuf). Nothing stays in memory: idle RSS unchanged (16.4 MB with
+`--no-node`), each document is inflated and built per request (3–5 ms;
+v2 1.1 MB, v3 core 400 KB, apps 260 KB), one at a time on the blocking
+pool, so RSS after one request of each is +6 MB (allocator high-water mark)
+and after 3 bursts of 20 parallel v3 requests 29 MB vs 18 MB before. v3
+documents asked for with the current hash are served `Cache-Control: public,
+max-age=31536000, immutable` (the hash covers the embedded definitions and
+the CRDs), so kubectl's disk cache keeps them.
+
+One visible change, as against any upstream API server (which serves the
+same schemas): for `kind: List` kubectl validates the items client-side
+against the v2 schemas, so an unknown field there is rejected by kubectl
+instead of reaching the server's field validation.
+
 ## What the 27 new charts exposed (fixed)
 
 - **Protobuf from client-go**: `SelfSubjectAccessReview` (prometheus-operator)
@@ -242,10 +279,13 @@ Found by running real kubectl against the server, not from the spec:
   which every client accepts.
 - **Aggregated discovery** (`apidiscovery.k8s.io/v2`): kubectl discovers
   everything in 2 requests instead of one per group version.
-- **`/openapi/v3`** with paths that advertise `fieldValidation`, so kubectl
-  leaves validation to the server instead of downloading schemas. For
-  `kind: List` kubectl falls back to `/openapi/v2` in protobuf, which gets a
-  valid empty document.
+- **OpenAPI** with upstream's 1.33 definitions of the built-in types plus the
+  CRDs' schemas: `/openapi/v2` in JSON and in the gnostic protobuf that
+  client-go's `OpenAPISchema()` decodes (Argo CD builds its server-side
+  apply and diff types from it; without the built-in kinds it fails with
+  `unable to resolve parseableType`), and `/openapi/v3` per group version for
+  `kubectl explain`. The v3 write paths advertise `fieldValidation`, so
+  kubectl leaves validation to the server.
 - **Server-side Table printing**, so `kubectl get` shows the real columns, and
   watch events as Table rows for `kubectl get -w`.
 

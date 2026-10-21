@@ -1,0 +1,4 @@
+{"id": "openapi_v3", "tier": "L0", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "apply_server_side", "tier": "L1", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "crd_roundtrip", "tier": "L1", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "argocd_ssa", "tier": "L4", "status": "pass", "seconds": 18, "detail": ""}

@@ -46,7 +46,7 @@ checkout() { profile "${LITEK8S_HOME:-$HOME/.litek8s-dev}" "$TARGET/release/lite
 
 # Rebuild when the binary is missing or older than anything it is built from.
 ensure_built() {
-  if [[ -x "$BIN" ]] && [[ -z "$(cd "$ROOT" && find src proto build.rs Cargo.toml Cargo.lock -newer "$BIN" -print -quit 2>/dev/null)" ]]; then
+  if [[ -x "$BIN" ]] && [[ -z "$(cd "$ROOT" && find src proto openapi build.rs Cargo.toml Cargo.lock -newer "$BIN" -print -quit 2>/dev/null)" ]]; then
     return
   fi
   echo "dev/lk: building $(git -C "$ROOT" rev-parse --short=12 HEAD 2>/dev/null) (release, $CARGO_BUILD_JOBS jobs)" >&2

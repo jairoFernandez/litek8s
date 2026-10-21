@@ -2,12 +2,21 @@
 //! the API server embeds to decode protobuf request bodies, which kubectl
 //! sends for built-in types. protox is pure Rust, so no protoc is needed.
 //!
+//! Also prepares the built-in OpenAPI definitions (`openapi/swagger.json`)
+//! for `src/kube/openapi.rs`: compact JSON and the gnostic protobuf form,
+//! gzipped, plus a hash of them for the OpenAPI v3 cache-busting URLs.
+//!
 //! Also sets `LITEK8S_VERSION`: the plain version for a release build
 //! (`LITEK8S_RELEASE=1`, what the release workflow sets, or a build without
 //! git, as from crates.io), else `<version> DEV <commit>` so a build from a
 //! checkout never passes for the release.
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
+
+#[path = "src/kube/openapi_pb.rs"]
+#[allow(dead_code)]
+mod openapi_pb;
 
 fn collect(dir: &Path, root: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).expect("read proto dir") {
@@ -51,8 +60,32 @@ fn version() {
     println!("cargo:rustc-env=LITEK8S_VERSION={full}");
 }
 
+fn gzip(data: &[u8]) -> Vec<u8> {
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+    enc.write_all(data).expect("gzip");
+    enc.finish().expect("gzip")
+}
+
+fn openapi(out_dir: &Path) {
+    let src = Path::new("openapi/swagger.json");
+    println!("cargo:rerun-if-changed={}", src.display());
+    let text = std::fs::read_to_string(src).expect("read openapi/swagger.json");
+    let swagger: serde_json::Value = serde_json::from_str(&text).expect("parse openapi/swagger.json");
+    let defs = swagger.get("definitions").and_then(|d| d.as_object()).expect("openapi/swagger.json: no definitions");
+    let json = serde_json::to_vec(defs).unwrap();
+    let pb = openapi_pb::definitions(defs);
+    std::fs::write(out_dir.join("openapi-v2-definitions.json.gz"), gzip(&json)).expect("write openapi json");
+    std::fs::write(out_dir.join("openapi-v2-definitions.pb.gz"), gzip(&pb)).expect("write openapi pb");
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    json.hash(&mut h);
+    println!("cargo:rustc-env=LITEK8S_OPENAPI_HASH={:016X}", h.finish());
+}
+
 fn main() {
     version();
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    openapi(&out_dir);
     let root = Path::new("proto");
     println!("cargo:rerun-if-changed=proto");
     let mut files = Vec::new();
@@ -63,6 +96,6 @@ fn main() {
     compiler
         .open_files(&files)
         .unwrap_or_else(|e| panic!("failed to compile Kubernetes protos: {e}"));
-    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("k8s-descriptors.bin");
+    let out = out_dir.join("k8s-descriptors.bin");
     std::fs::write(&out, compiler.encode_file_descriptor_set()).expect("write descriptor set");
 }
