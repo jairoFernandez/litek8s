@@ -1,0 +1,59 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: argo-workflows
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: '50'
+spec:
+  project: default
+  source:
+    repoURL: https://argoproj.github.io/argo-helm
+    chart: argo-workflows
+    targetRevision: 2.0.12
+    helm:
+      valuesObject:
+        controller:
+          workflowNamespaces:
+            - argo
+        # The service account workflows in namespace argo run as.
+        workflow:
+          serviceAccount:
+            create: true
+            name: argo-workflow
+          rbac:
+            create: true
+        server:
+          # Log in with a Kubernetes token (README).
+          authModes:
+            - client
+          ingress:
+            enabled: true
+            annotations:
+              cert-manager.io/cluster-issuer: platform-ca
+            hosts:
+              - argo.<DOMAIN_NAME>
+            paths:
+              - /
+            pathType: Prefix
+            tls:
+              - secretName: argo-workflows-tls
+                hosts:
+                  - argo.<DOMAIN_NAME>
+  destination:
+    name: in-cluster
+    namespace: argo
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        maxDuration: 5m0s
+        factor: 2

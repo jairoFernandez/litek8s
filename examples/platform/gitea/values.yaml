@@ -23,9 +23,15 @@ gitea:
     cache: {ADAPTER: memory}
     queue: {TYPE: level}
     actions: {ENABLED: true}
-    # What runners and job containers clone from (the default
-    # git.example.com breaks actions/checkout).
+    # Webhooks to in-cluster services (Atlantis); Gitea's default only
+    # allows external hosts.
+    webhook: {ALLOWED_HOST_LIST: "*.svc.cluster.local"}
+    # What runners, job containers and Atlantis clone from (the default
+    # git.example.com breaks actions/checkout). `never`: links and webhook
+    # payloads always carry ROOT_URL, not the Host of whoever triggered them
+    # (a browser on gitea.<domain>, a port-forward), which pods cannot reach.
     server:
       ROOT_URL: http://gitea-http.gitea.svc.cluster.local:3000/
+      PUBLIC_URL_DETECTION: never
       DOMAIN: gitea-http.gitea.svc.cluster.local
       SSH_DOMAIN: gitea-ssh.gitea.svc.cluster.local

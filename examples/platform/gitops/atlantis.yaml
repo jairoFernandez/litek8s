@@ -1,0 +1,9 @@
+# Atlantis plans every pull request that changes these directories and
+# applies on an `atlantis apply` comment (OpenTofu, state in Kubernetes).
+version: 3
+projects:
+  - name: openbao
+    dir: terraform/openbao
+    autoplan:
+      enabled: true
+      when_modified: ["*.tf", "*.tfvars"]

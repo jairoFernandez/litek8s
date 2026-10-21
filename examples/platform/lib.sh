@@ -16,7 +16,7 @@ gitea_connect() {
   export GITEA_USER GITEA_PASS
   kubectl -n "$ns" port-forward svc/gitea-http "$gitea_port:3000" >/dev/null 2>&1 &
   gitea_pf=$!
-  trap 'kill $gitea_pf 2>/dev/null; wait $gitea_pf 2>/dev/null' EXIT
+  trap 'kill $gitea_pf 2>/dev/null; wait $gitea_pf 2>/dev/null || true' EXIT
   for _ in $(seq 50); do curl -fs "$api/version" >/dev/null 2>&1 && return; sleep 0.2; done
   echo "gitea: no answer on $gitea_url" >&2
   return 1

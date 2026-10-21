@@ -14,9 +14,10 @@ with kubefirst or Konstruct.
 | file | what |
 |---|---|
 | [`up.sh`](up.sh) | installs or updates everything; keeps its secrets and the repository on re-runs |
-| [`smoke.sh`](smoke.sh) | CI jobs per runner mode; every Argo CD Application Synced and Healthy on the repository's commit; Argo CD, Gitea and OpenBao over HTTPS with the platform's CA; a secret from OpenBao to a Kubernetes Secret through external-secrets |
+| [`smoke.sh`](smoke.sh) | CI jobs per runner mode; every Argo CD Application Synced and Healthy on the repository's commit; Argo CD, Gitea and OpenBao over HTTPS with the platform's CA; a secret from OpenBao to a Kubernetes Secret through external-secrets; a two-step Argo Workflow; a pull request that Atlantis plans and applies with OpenTofu against OpenBao, then undoes |
 | [`lib.sh`](lib.sh) | Gitea API and git over a port-forward, for both |
 | [`gitea/`](gitea/) | the Gitea chart's values, act_runner per mode |
+| [`gitops/`](gitops/) | the repository's root: `atlantis.yaml`, `terraform/openbao` (OpenBao's policies in OpenTofu) |
 | [`gitops/cluster/`](gitops/cluster/) | what goes to `registry/clusters/<cluster>/` in the repository: one Argo CD Application per component, `registry.yaml` the app of apps, `components/argocd` Argo CD itself |
 
 What is in it so far:
@@ -29,19 +30,21 @@ What is in it so far:
 | 20 | `cert-issuers` | the platform's own CA (`platform-ca`, self-signed root) and its ClusterIssuer |
 | 20 | `openbao` | chart 0.30.3 (OpenBao v2.7.1, the open-source fork of Vault): standalone, unseals itself with a static key |
 | 30 | `external-secrets-operator` | 2.13.0 |
-| 40 | `cluster-secret-store` | ClusterSecretStore `openbao`: ExternalSecrets in any namespace read OpenBao's KV `secret/` |
+| 40 | `cluster-secret-store` | ClusterSecretStore `openbao`: ExternalSecrets in any namespace read OpenBao's KV `secret/`; `openbao-platform` reads `platform/`, for the `atlantis` namespace only |
+| 50 | `argo-workflows` | chart 2.0.12 (v4.1.5), workflows in namespace `argo`, UI with token login |
+| 50 | `atlantis` | chart 6.16.1 (v0.48.1) on Gitea, OpenTofu, state in Kubernetes Secrets; its credentials from OpenBao |
 | 60 | `reloader` | 2.2.18 |
 | 100 | `argocd` | v3.5.5, managing itself |
 
-Argo CD, Gitea and OpenBao are at `https://argocd.<DOMAIN>`,
-`https://gitea.<DOMAIN>` and `https://openbao.<DOMAIN>`, with certificates
+Argo CD, Gitea, OpenBao, Argo Workflows and Atlantis are at
+`https://{argocd,gitea,openbao,argo,atlantis}.<DOMAIN>`, with certificates
 the platform's CA signs.
 kubefirst's ingress-nginx is retired upstream (no releases since March
 2026); Traefik takes its place.
 
-Next: Argo Workflows, Atlantis with OpenTofu on Gitea (OpenBao's policies,
-auth and users as code, as kubefirst does with Terraform), the sample app's
-CI/CD across environments.
+Next: the sample app's CI/CD across environments (kubefirst's metaphor:
+image built by Gitea Actions, pushed to Gitea's registry, promoted through
+development, staging and production by Argo CD), and single sign-on.
 
 ## On a dev cluster
 
@@ -70,11 +73,12 @@ kubectl -n cert-manager get secret platform-ca -o jsonpath='{.data.ca\.crt}' | b
 On real machines, set `DOMAIN` to a name whose `*.` records point at a node
 (a home DNS server or router), and the ports stay 80/443.
 
-From a new dev cluster on a Mac (VM with 4 CPUs, 4 GiB): `up.sh` 1 min 47 s,
-then `smoke.sh` 1 min 56 s until everything above passes (image pulls
-included). Memory: Argo CD 552 MiB, Gitea and the lkdocker runner 215 MiB,
-external-secrets 126 MiB, cert-manager 119 MiB, OpenBao 89 MiB, Traefik
-46 MiB, reloader 15 MiB; the whole node 1.5 GiB.
+From a new dev cluster on a Mac (VM with 4 CPUs, 4 GiB): `up.sh` 115 s,
+then `smoke.sh` 210 s until everything above passes (image pulls
+included). Memory: Argo CD 448 MiB, Gitea and the lkdocker runner 273 MiB,
+cert-manager 149 MiB, external-secrets 117 MiB, Atlantis 104 MiB, Argo
+Workflows 86 MiB, OpenBao 49 MiB, Traefik 37 MiB, reloader 22 MiB; the
+whole node 1.6 GiB (kubefirst's local mode asks Docker for 5 GiB).
 
 `up.sh` takes `CLUSTER_NAME` (default `mgmt`, the directory in the
 repository), `RUNNERS` (default `lkdocker`), `DOMAIN` (default `localhost`)
@@ -87,6 +91,22 @@ this checkout's `gitops/`).
 Remove it all: `kubectl delete namespace argocd` first (or Argo CD puts
 things back), then the namespaces of the components, then
 `helm -n gitea uninstall gitea; kubectl delete namespace gitea`.
+
+## Infrastructure as code: Atlantis and OpenTofu
+
+The repository's `terraform/openbao` holds OpenBao's policies (`admin`,
+`developer`) in OpenTofu. Change them in a pull request on Gitea: Atlantis
+(the user `atlantis`, write access to the repository, webhook from it)
+comments the plan; comment `atlantis apply` to apply, then `atlantis unlock`,
+then merge (Atlantis v0.48 reads Gitea's "closed" event, sent on close and
+on merge, as "other" and keeps the project locked otherwise; the lock can
+also be deleted in Atlantis's UI). The state
+is a Secret in the namespace `atlantis` (OpenTofu's `kubernetes` backend),
+so there is no bucket to run. Atlantis reaches OpenBao with the root token
+(it manages policies), its Gitea token and webhook secret: `up.sh` puts the
+three in OpenBao's `platform/atlantis`, and an ExternalSecret through the
+store `openbao-platform` (limited to the namespace `atlantis`) makes them
+its Secret. kubefirst does the same with Terraform, Vault and GitHub.
 
 ## Secrets
 
@@ -147,5 +167,12 @@ seal in `gitops/cluster/openbao.yaml`.
 - **Gitea's own links** (clone URLs in its UI) show the in-cluster address:
   runners and job containers clone from Gitea's `ROOT_URL`, which must be
   reachable from inside the cluster, where `*.localhost` is the pod itself.
+- **Gitea's URLs**: `PUBLIC_URL_DETECTION: never`, so webhook payloads and
+  links always carry `ROOT_URL`; with Gitea's default (`auto`, the request's
+  Host) a pull request opened from a browser would send Atlantis a clone URL
+  it cannot reach.
+- **Atlantis after an undo**: a pull request that adds and then removes a
+  file no longer differs from main, so nothing is autoplanned; comment
+  `atlantis plan` to plan the removal.
 - Runners keep their registration in an `emptyDir`: a new pod registers again
   and Gitea lists the old one as offline.

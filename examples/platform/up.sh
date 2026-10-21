@@ -56,15 +56,18 @@ done
 gitea_connect
 repo_url="$gitea_internal/$GITEA_USER/gitops.git"
 work="$(mktemp -d)"
-trap 'kill $gitea_pf 2>/dev/null; wait $gitea_pf 2>/dev/null; rm -rf "$work"' EXIT
+trap 'kill $gitea_pf 2>/dev/null; wait $gitea_pf 2>/dev/null || true; rm -rf "$work"' EXIT
 
 # gitops/ with the tokens filled in, as the repository holds it.
 render="$work/render"
 mkdir -p "$render/registry/clusters/$cluster"
-cp "$dir/gitops/NOTICE.md" "$render/"
+cp -R "$dir/gitops/." "$render/"
+rm -rf "$render/cluster"
 cp -R "$dir/gitops/cluster/." "$render/registry/clusters/$cluster/"
+https_suffix=""; [[ $https_port == 443 ]] || https_suffix=":$https_port"
 find "$render" -name '*.yaml' -exec perl -pi -e "s#<CLUSTER_NAME>#$cluster#g; s#<GITOPS_REPO_URL>#$repo_url#g;
-  s#<DOMAIN_NAME>#$domain#g; s#<INGRESS_HTTP_PORT>#$http_port#g; s#<INGRESS_HTTPS_PORT>#$https_port#g" {} +
+  s#<DOMAIN_NAME>#$domain#g; s#<INGRESS_HTTP_PORT>#$http_port#g; s#<INGRESS_HTTPS_PORT>#$https_port#g;
+  s#<INGRESS_HTTPS_SUFFIX>#$https_suffix#g" {} +
 
 gitea -X POST "$api/user/repos" -d '{"name":"gitops","private":true,"default_branch":"main"}' >/dev/null 2>&1 || true
 empty="$(gitea "$api/repos/$GITEA_USER/gitops" | json 'd["empty"]')"
@@ -151,7 +154,39 @@ bao write auth/kubernetes/role/external-secrets \
   bound_service_account_names=external-secrets-operator \
   bound_service_account_namespaces=external-secrets-operator \
   policies=external-secrets ttl=1h >/dev/null
-echo "openbao: ready (KV secret/, Kubernetes auth for external-secrets)"
+# platform/: the platform's own credentials, through the ClusterSecretStore
+# openbao-platform only (limited to the namespaces it lists).
+bao secrets list -format=json | json '"platform/" in d' | grep -q True || bao secrets enable -path=platform kv-v2 >/dev/null
+bao policy write external-secrets-platform - >/dev/null <<EOF
+path "platform/data/*" { capabilities = ["read"] }
+path "platform/metadata/*" { capabilities = ["read", "list"] }
+EOF
+bao write auth/kubernetes/role/external-secrets-platform \
+  bound_service_account_names=external-secrets-operator \
+  bound_service_account_namespaces=external-secrets-operator \
+  policies=external-secrets-platform ttl=1h >/dev/null
+echo "openbao: ready (KV secret/ and platform/, Kubernetes auth for external-secrets)"
+
+# ---- Atlantis ----------------------------------------------------------------
+
+# Its Gitea user (write access to the gitops repository, a token), the
+# repository's webhook to it, and its credentials in OpenBao's platform/,
+# where its ExternalSecret reads them. Once.
+if ! bao kv get -format=json platform/atlantis >/dev/null 2>&1; then
+  apass="$(openssl rand -hex 16)"
+  gitea -X POST "$api/admin/users" -d "{\"username\":\"atlantis\",\"email\":\"atlantis@lk.test\",\"password\":\"$apass\",\"must_change_password\":false}" >/dev/null 2>&1 ||
+    gitea -X PATCH "$api/admin/users/atlantis" -d "{\"login_name\":\"atlantis\",\"source_id\":0,\"password\":\"$apass\",\"must_change_password\":false}" >/dev/null
+  gitea -X PUT "$api/repos/$GITEA_USER/gitops/collaborators/atlantis" -d '{"permission":"write"}' >/dev/null
+  atoken="$(printf 'user = "atlantis:%s"\n' "$apass" | curl -fsS -K - -H 'Content-Type: application/json' \
+    -X POST "$api/users/atlantis/tokens" -d "{\"name\":\"atlantis-$(date +%s)\",\"scopes\":[\"write:repository\",\"write:issue\",\"read:user\"]}" | json 'd["sha1"]')"
+  hook_secret="$(openssl rand -hex 20)"
+  gitea -X POST "$api/repos/$GITEA_USER/gitops/hooks" -d "{\"type\":\"gitea\",\"active\":true,
+    \"config\":{\"url\":\"http://atlantis.atlantis.svc.cluster.local/events\",\"content_type\":\"json\",\"secret\":\"$hook_secret\"},
+    \"events\":[\"pull_request\",\"pull_request_sync\",\"pull_request_comment\",\"issue_comment\"]}" >/dev/null
+  # OpenTofu manages OpenBao's policies through Atlantis: the root token.
+  bao kv put platform/atlantis gitea_token="$atoken" gitea_secret="$hook_secret" VAULT_TOKEN="$root" >/dev/null
+  echo "atlantis: Gitea user, token and webhook; credentials in OpenBao platform/atlantis"
+fi
 
 port=""; [[ $https_port == 443 ]] || port=":$https_port"
 cat <<EOF
@@ -160,6 +195,9 @@ Gitea:   https://gitea.$domain$port   user lkadmin, password:
            kubectl -n $ns get secret gitea-admin -o jsonpath='{.data.password}' | base64 -d
 Argo CD: https://argocd.$domain$port  user admin, password:
            kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
+Argo Workflows: https://argo.$domain$port  token:
+           kubectl -n argo create token argo-workflows-server --duration 12h   (paste as "Bearer <token>")
+Atlantis: https://atlantis.$domain$port  (pull requests to $GITEA_USER/gitops in Gitea)
 OpenBao: https://openbao.$domain$port root token:
            kubectl -n openbao get secret openbao-init -o jsonpath='{.data.root-token}' | base64 -d
 CA:      kubectl -n cert-manager get secret platform-ca -o jsonpath='{.data.ca\.crt}' | base64 -d > platform-ca.crt

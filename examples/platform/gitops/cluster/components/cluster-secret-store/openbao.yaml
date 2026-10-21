@@ -18,3 +18,27 @@ spec:
           serviceAccountRef:
             name: external-secrets-operator
             namespace: external-secrets-operator
+---
+# The platform's own credentials (Atlantis's Gitea token, its OpenBao token)
+# live in OpenBao's KV `platform/`, readable only through this store and only
+# from the namespaces listed here (role external-secrets-platform).
+apiVersion: external-secrets.io/v1
+kind: ClusterSecretStore
+metadata:
+  name: openbao-platform
+spec:
+  conditions:
+    - namespaces:
+        - atlantis
+  provider:
+    vault:
+      server: http://openbao.openbao.svc.cluster.local:8200
+      path: platform
+      version: v2
+      auth:
+        kubernetes:
+          mountPath: kubernetes
+          role: external-secrets-platform
+          serviceAccountRef:
+            name: external-secrets-operator
+            namespace: external-secrets-operator

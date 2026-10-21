@@ -81,7 +81,7 @@ sed 's/^/  /' <<<"$out"
 domain="${DOMAIN:-localhost}"
 port="$(kubectl -n traefik get svc traefik -o jsonpath='{.spec.ports[?(@.name=="websecure")].port}')"
 ca="$(mktemp)"
-trap 'kill $gitea_pf 2>/dev/null; wait $gitea_pf 2>/dev/null; rm -f "$ca"' EXIT
+trap 'kill $gitea_pf 2>/dev/null; wait $gitea_pf 2>/dev/null || true; rm -f "$ca"' EXIT
 secret_value cert-manager platform-ca 'ca\.crt' >"$ca"
 deadline=$((SECONDS + timeout))
 urls=("https://argocd.$domain:$port/healthz" "https://gitea.$domain:$port/api/healthz")
@@ -128,3 +128,93 @@ until [[ $(secret_value platform-smoke smoke value 2>/dev/null) == "$value" ]]; 
   sleep 2
 done
 echo "secrets: OpenBao secret/smoke -> ExternalSecret -> Secret platform-smoke/smoke"
+
+# ---- Argo Workflows: a workflow runs to completion -----------------------------
+
+if kubectl get namespace argo >/dev/null 2>&1; then
+  wf="$(kubectl create -o name -f - <<YAML
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: smoke-
+  namespace: argo
+spec:
+  serviceAccountName: argo-workflow
+  entrypoint: main
+  templates:
+    - name: main
+      steps:
+        - - name: hello
+            template: echo
+            arguments: {parameters: [{name: msg, value: hello}]}
+        - - name: world
+            template: echo
+            arguments: {parameters: [{name: msg, value: world}]}
+    - name: echo
+      inputs: {parameters: [{name: msg}]}
+      container:
+        image: busybox:1.37
+        command: [echo, "{{inputs.parameters.msg}}"]
+YAML
+)"
+  deadline=$((SECONDS + timeout))
+  until phase="$(kubectl -n argo get "$wf" -o jsonpath='{.status.phase}')" && [[ $phase == Succeeded || $phase == Failed || $phase == Error ]]; do
+    if [[ $SECONDS -ge $deadline ]]; then echo "workflows: $wf timeout ($phase)"; exit 1; fi
+    sleep 3
+  done
+  [[ $phase == Succeeded ]] || { echo "workflows: $wf $phase"; kubectl -n argo get "$wf" -o jsonpath='{.status.message}'; echo; exit 1; }
+  echo "workflows: $wf Succeeded (2 steps)"
+  kubectl -n argo delete "$wf" >/dev/null
+fi
+
+# ---- Atlantis: a pull request plans and applies OpenTofu against OpenBao -------
+
+kubectl get namespace atlantis >/dev/null 2>&1 || exit 0
+name="smoke-$RANDOM"
+file="terraform/openbao/$name.tf"
+r="$api/repos/$GITEA_USER/gitops"
+b64() { printf '%s' "$1" | base64 | tr -d '\n'; }
+# Wait for the atlantis comment number $1 (counting from 1) and print it.
+atlantis_comment() {
+  local n=$1 deadline=$((SECONDS + timeout)) out
+  while :; do
+    out="$(gitea "$r/issues/$pr/comments" | json "'\n'.join(c['body'] for c in [c for c in d if c['user']['login']=='atlantis'][$((n - 1)):$n])" 2>/dev/null || true)"
+    [[ -n $out ]] && { printf '%s\n' "$out"; return; }
+    if [[ $SECONDS -ge $deadline ]]; then echo "atlantis: no comment $n (timeout)" >&2; return 1; fi
+    sleep 5
+  done
+}
+expect() { grep -q "$1" <<<"$2" || { echo "atlantis: expected '$1' in:"; printf '%s\n' "$2" | head -40; exit 1; }; }
+bao_root() { kubectl -n openbao exec openbao-0 -c openbao -- env BAO_ADDR=http://127.0.0.1:8200 BAO_TOKEN="$(secret_value openbao openbao-init root-token)" bao "$@"; }
+
+gitea -X POST "$r/contents/$file" -d "{\"branch\":\"main\",\"new_branch\":\"$name\",\"message\":\"$name: add a policy\",
+  \"content\":\"$(b64 "resource \"vault_policy\" \"$name\" {
+  name   = \"$name\"
+  policy = \"path \\\"secret/data/$name/*\\\" { capabilities = [\\\"read\\\"] }\"
+}
+")\"}" >/dev/null
+pr="$(gitea -X POST "$r/pulls" -d "{\"head\":\"$name\",\"base\":\"main\",\"title\":\"$name\"}" | json 'd["number"]')"
+echo "atlantis: opened pull request #$pr ($file)"
+
+c="$(atlantis_comment 1)"; expect "Ran Plan" "$c"; expect "to add" "$c"
+echo "atlantis: planned"
+gitea -X POST "$r/issues/$pr/comments" -d '{"body":"atlantis apply -p openbao"}' >/dev/null
+c="$(atlantis_comment 2)"; expect "Apply complete" "$c"
+bao_root policy read "$name" >/dev/null || { echo "atlantis: policy $name not in OpenBao"; exit 1; }
+echo "atlantis: applied, policy $name is in OpenBao"
+
+# Undo on the same branch, so the state matches main again, then close it.
+sha="$(gitea "$r/contents/$file?ref=$name" | json 'd["sha"]')"
+gitea -X DELETE "$r/contents/$file" -d "{\"branch\":\"$name\",\"sha\":\"$sha\",\"message\":\"$name: remove it\"}" >/dev/null
+# No autoplan now: the pull request no longer differs from main.
+sleep 5
+gitea -X POST "$r/issues/$pr/comments" -d '{"body":"atlantis plan -p openbao"}' >/dev/null
+c="$(atlantis_comment 3)"; expect "1 to destroy" "$c"
+gitea -X POST "$r/issues/$pr/comments" -d '{"body":"atlantis apply -p openbao"}' >/dev/null
+c="$(atlantis_comment 4)"; expect "Apply complete" "$c"
+# Atlantis does not release its lock when Gitea closes or merges (README).
+gitea -X POST "$r/issues/$pr/comments" -d '{"body":"atlantis unlock"}' >/dev/null
+c="$(atlantis_comment 5)"; expect "unlocked" "$c"
+gitea -X PATCH "$r/pulls/$pr" -d '{"state":"closed"}' >/dev/null
+gitea -X DELETE "$r/branches/$name" >/dev/null
+echo "atlantis: removed again and closed #$pr"
