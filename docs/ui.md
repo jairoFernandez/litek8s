@@ -733,6 +733,14 @@ drain, running a CronJob, shells, `:kubectl` commands that change things
 plugins not marked `mutates: false` are refused, with a message saying how
 to allow it. The header shows ` read-only ` for such a context.
 
+`W` turns writing on for the context shown: it asks you to type the
+context's name (as GitHub does for dangerous actions), and from then on the
+header shows a red ` WRITE · <context> `. `tab` in that dialog also saves
+it to `writableContexts` in `ui.yaml`; without it, write mode lasts until
+the UI exits. `W` again goes back to read-only at once (and takes the
+context out of `writableContexts` if it was there). `W` is reserved: your
+hotkeys cannot take it.
+
 A context counts as litek8s when it is one of `litek8s dev`'s clusters
 (`litek8s-<name>`, `lkdev-<name>` with `$LITEK8S_HOME`, checked against the
 clusters on disk) or its API server says so (`/version` reports
@@ -743,7 +751,28 @@ here, list it in `ui.yaml`:
 writableContexts: [staging, home]
 ```
 
-`readOnly: true` makes every cluster read-only, litek8s's included.
+`readOnly: true` makes every cluster read-only, litek8s's included; `W`
+then says so.
+
+### On other Kubernetes clusters
+
+The Kubernetes view speaks only the standard API, so it works the same on
+EKS, GKE, AKS, Civo, k3s, kind or any conformant cluster: discovery
+(aggregated, else per group), server-side Tables, list+watch, describe,
+YAML, edit with a server dry run, logs, exec (WebSocket `v5`/`v4`),
+port-forward (SPDY), the tree and xray, `:kubectl`. Credentials come from
+the kubeconfig as kubectl's do (exec plugins, tokens, client certificates,
+`tls-server-name`); nothing impersonates anyone. What is litek8s's own, and
+what you see elsewhere:
+
+| | on litek8s | on another cluster |
+|---|---|---|
+| changes (delete, edit, scale, shells, …) | allowed | read-only until `W` or `writableContexts` |
+| CPU and MEM columns | from `metrics.k8s.io` when served | the same: shown when the cluster has metrics-server, absent otherwise |
+| Observe (9): pod CPU/memory history, alerts, log search | the API server's built-in metrics, alerts and log store | not there: the view says the cluster is not litek8s (logs: `l` on a pod or workload) |
+| Home (1) with `--context`: node memory, CPU, disk | litek8s's node endpoints | dashes |
+| Docker views (3-6) | the cluster's Docker socket | whatever `--docker-host` points at, independent of the context |
+| the tree's Services → pods | from the Service Table's Selector column | the same (kubectl's wide column; older servers: read as objects) |
 
 ### Command mode (`:`)
 
@@ -981,7 +1010,7 @@ skin:                           # names, 0-255 or #rrggbb, over the theme's colo
   bad: red
 logs: {tail: 100, buffer: 10000, timestamps: false, wrap: false, maxStreams: 30}
 readOnly: false                 # true: no deletes, edits, scaling, shells, anywhere
-writableContexts: []            # other clusters that may be changed (see Read-only clusters)
+writableContexts: []            # other clusters that may be changed (W with "remember" adds here)
 showOtherContexts: true         # false: Clusters lists litek8s's clusters only
 kubectl: kubectl                # which kubectl `:kubectl` runs
 ```
@@ -996,7 +1025,7 @@ selects rows with a click and scrolls with the wheel.
 
 | where | keys |
 |---|---|
-| tables | `:` command, `/` filter, `t` tree, `!` kubectl, `?` help, `m` actions, `enter` open, `esc` back, `n` namespace, `0` all namespaces, `space` mark, `<` `>` `O` `N` `A` `S` sort, `ctrl-w` wide, `ctrl-z` faults, `ctrl-r` reload, `f` port-forwards, and [the actions](#acting-on-objects) |
+| tables | `:` command, `/` filter, `t` tree, `W` write mode, `!` kubectl, `?` help, `m` actions, `enter` open, `esc` back, `n` namespace, `0` all namespaces, `space` mark, `<` `>` `O` `N` `A` `S` sort, `ctrl-w` wide, `ctrl-z` faults, `ctrl-r` reload, `f` port-forwards, and [the actions](#acting-on-objects) |
 | pagers (describe, YAML, kubectl, help) | `/` search, `n`/`N` next/previous match, `w` wrap, `←→` scroll sideways, `e` edit, `y`/`d` YAML/describe, `m` managedFields, `c` copy, `ctrl-s` save, `esc` back |
 | logs | `f` follow/pause, `/` filter, `t` timestamps, `w` wrap, `p` previous, `c` copy, `x` clear, `ctrl-s` save, `esc` back |
 | xray | `enter` fold, `d` `y` `e` `l` `s` `ctrl-d` on the row, `ctrl-r` reload |

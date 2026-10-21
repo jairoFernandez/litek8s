@@ -170,6 +170,8 @@ pub enum KEffect {
     SaveHistory(Vec<String>),
     /// Find out whether a context is a litek8s cluster.
     Identify(String),
+    /// Add a context to (or take it out of) writableContexts in ui.yaml.
+    RememberWritable { context: String, on: bool },
 }
 
 impl KEffect {
@@ -190,13 +192,22 @@ impl KEffect {
 /// How the shown context may be used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Access {
+    /// A litek8s cluster.
     Writable,
+    /// Another cluster, writable: `W` this session, or `writableContexts`.
+    WriteMode,
     /// `readOnly: true` in ui.yaml.
     ReadOnlyEverywhere,
     /// Another cluster, not in `writableContexts`.
     NotLitek8s,
     /// Not known yet (a moment after switching).
     Checking,
+}
+
+impl Access {
+    pub fn writable(self) -> bool {
+        matches!(self, Access::Writable | Access::WriteMode)
+    }
 }
 
 /// Whether a kubectl command line can change the cluster: anything but
@@ -624,6 +635,16 @@ pub enum Overlay {
     Confirm(Confirm),
     Input(Input),
     Picker(Picker),
+    /// `W` on another cluster: type its name to allow changes.
+    WriteMode(WriteMode),
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct WriteMode {
+    pub typed: String,
+    /// Also add it to writableContexts in ui.yaml.
+    pub remember: bool,
+    pub error: Option<String>,
 }
 
 /// An action of the `m` menu: its key, what it says, and the key event it
@@ -647,6 +668,8 @@ pub struct KubeUi {
     pub context: String,
     /// Contexts known to be litek8s clusters (or not).
     litek8s: HashMap<String, bool>,
+    /// Other clusters `W` made writable, until the UI exits.
+    session_writable: BTreeSet<String>,
     pub catalog: Catalog,
     pub discovered: bool,
     pub discovery_error: Option<String>,
@@ -721,6 +744,7 @@ impl KubeUi {
             mode: Mode::Substring,
             context: String::new(),
             litek8s: HashMap::new(),
+            session_writable: BTreeSet::new(),
         };
         ui.views.push(View::Table(TableView::new(pods, namespace)));
         ui
@@ -1233,6 +1257,12 @@ impl KubeUi {
             Overlay::Confirm(c) => return Some(self.confirm_key(c, key)),
             Overlay::Input(i) => return Some(self.input_key(i, key)),
             Overlay::Picker(p) => return Some(self.picker_key(p, key)),
+            Overlay::WriteMode(w) => return Some(self.write_mode_key(w, key)),
+        }
+        // W: write mode (reserved: before the user's hotkeys, it is a
+        // safety switch).
+        if key.code == KeyCode::Char('W') && !key.modifiers.contains(KeyModifiers::CONTROL) {
+            return Some(self.toggle_write());
         }
         // The user's hotkeys and plugins first: they may take any key.
         if let Some(cmd) = self.config.hotkeys.iter().find(|(spec, _)| key_matches(spec, &key)).map(|(_, c)| c.clone()) {
@@ -1769,11 +1799,83 @@ impl KubeUi {
         Vec::new()
     }
 
+    // ---- write mode ----
+
+    /// `W`: read-only ↔ write mode for this context. Turning writes on for
+    /// another cluster asks for its name; off is one key.
+    fn toggle_write(&mut self) -> Vec<Effect> {
+        match self.access() {
+            Access::ReadOnlyEverywhere => {
+                let why = format!("{} — remove readOnly from it to allow writes", self.refusal(Access::ReadOnlyEverywhere));
+                self.say(why, true);
+                Vec::new()
+            }
+            Access::Writable => {
+                let ctx = self.context.clone();
+                self.say(format!("{ctx} is a litek8s cluster: changes are always allowed (readOnly: true in ui.yaml turns them off)"), false);
+                Vec::new()
+            }
+            Access::WriteMode => {
+                let ctx = self.context.clone();
+                self.session_writable.remove(&ctx);
+                let remembered = self.config.writable_contexts.iter().any(|c| *c == ctx);
+                self.config.writable_contexts.retain(|c| *c != ctx);
+                if remembered {
+                    self.say(format!("{ctx} is read-only again (and no longer in writableContexts)"), false);
+                    vec![k(KEffect::RememberWritable { context: ctx, on: false })]
+                } else {
+                    self.say(format!("{ctx} is read-only again"), false);
+                    Vec::new()
+                }
+            }
+            Access::NotLitek8s | Access::Checking => {
+                self.overlay = Overlay::WriteMode(WriteMode::default());
+                Vec::new()
+            }
+        }
+    }
+
+    fn write_mode_key(&mut self, mut w: WriteMode, key: KeyEvent) -> Vec<Effect> {
+        match key.code {
+            KeyCode::Esc => return Vec::new(),
+            KeyCode::Tab | KeyCode::BackTab => w.remember = !w.remember,
+            KeyCode::Backspace => {
+                w.typed.pop();
+            }
+            KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => w.typed.clear(),
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => w.typed.push(c),
+            KeyCode::Enter => {
+                if w.typed != self.context {
+                    w.error = Some(format!("type {} exactly", self.context));
+                    self.overlay = Overlay::WriteMode(w);
+                    return Vec::new();
+                }
+                let ctx = self.context.clone();
+                self.session_writable.insert(ctx.clone());
+                if w.remember {
+                    if !self.config.writable_contexts.contains(&ctx) {
+                        self.config.writable_contexts.push(ctx.clone());
+                    }
+                    self.say(format!("write mode on {ctx}, remembered in writableContexts (W turns it off)"), false);
+                    return vec![k(KEffect::RememberWritable { context: ctx, on: true })];
+                }
+                self.say(format!("write mode on {ctx} until the UI exits (W turns it off)"), false);
+                return Vec::new();
+            }
+            _ => {}
+        }
+        if key.code != KeyCode::Enter {
+            w.error = None;
+        }
+        self.overlay = Overlay::WriteMode(w);
+        Vec::new()
+    }
+
     // ---- tables ----
 
     fn read_only(&mut self) -> bool {
         match self.access() {
-            Access::Writable => false,
+            Access::Writable | Access::WriteMode => false,
             a => {
                 let why = self.refusal(a);
                 self.say(why, true);
@@ -1789,8 +1891,10 @@ impl KubeUi {
         if self.config.read_only {
             return Access::ReadOnlyEverywhere;
         }
-        if self.config.writable_contexts.iter().any(|c| *c == self.context) {
-            return Access::Writable;
+        match self.litek8s.get(&self.context) {
+            Some(true) => return Access::Writable,
+            _ if self.config.writable_contexts.iter().any(|c| *c == self.context) || self.session_writable.contains(&self.context) => return Access::WriteMode,
+            _ => {}
         }
         match self.litek8s.get(&self.context) {
             Some(true) => Access::Writable,
@@ -1809,7 +1913,7 @@ impl KubeUi {
         match a {
             Access::ReadOnlyEverywhere => format!("read-only: readOnly: true in {file}"),
             Access::Checking => format!("read-only until {} is known to be a litek8s cluster (checking)", self.context),
-            _ => format!("read-only: {} is not a litek8s cluster; to change it from here, add it to writableContexts in {file}", self.context),
+            _ => format!("read-only: {} is not a litek8s cluster; W turns on writing to it (you type its name), or list it in writableContexts in {file}", self.context),
         }
     }
 
@@ -1818,7 +1922,7 @@ impl KubeUi {
     /// this is the net under every path: confirmations, pickers, hotkeys.)
     fn guard(&mut self, effects: Vec<Effect>) -> Vec<Effect> {
         let a = self.access();
-        if a == Access::Writable {
+        if a.writable() {
             return effects;
         }
         let before = effects.len();
@@ -2651,7 +2755,7 @@ impl KubeUi {
         };
         let Some(res) = self.catalog.find(kind.plural()).cloned() else { return Some(Vec::new()) };
         let obj = ObjRef { res, ns: row.ns.clone(), name: row.name.clone() };
-        let ro = self.access() != Access::Writable;
+        let ro = !self.access().writable();
         Some(match (key.code, ctrl, kind) {
             (KeyCode::Enter | KeyCode::Char('d'), false, _) => self.describe(obj),
             (KeyCode::Char('y'), false, _) => self.yaml(obj),
@@ -2946,6 +3050,7 @@ fn help_lines(ui: &KubeUi) -> Vec<String> {
             ("ctrl-w", "wide columns;  ctrl-z: faults only;  ctrl-r: reload"),
             ("m", "actions of the selected row"),
             ("t", "the tree of the namespace, on the selected object (t again: back)"),
+            ("W", "write mode on another cluster (asks for its name) / back to read-only"),
             ("f", "port-forwards;  ! kubectl;  ? this help"),
         ],
     );

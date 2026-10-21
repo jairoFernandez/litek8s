@@ -35,7 +35,10 @@ pub fn spawn(tx: UnboundedSender<Msg>, visible: Arc<AtomicBool>, wake: Arc<Notif
             }
             let endpoint = ep.lock().unwrap().clone();
             let sample = match endpoint {
-                Some(ep) => sample(&ep).await.unwrap_or_else(|e| ObsSample { error: Some(explain(format!("{e:#}"))), ..Default::default() }),
+                Some(ep) => match sample(&ep).await {
+                    Ok(s) => s,
+                    Err(e) => ObsSample { error: Some(explain(&ep, format!("{e:#}")).await), ..Default::default() },
+                },
                 None => ObsSample { error: Some("the cluster is not running".into()), ..Default::default() },
             };
             if tx.send(Msg::Obs(Box::new(sample))).is_err() {
@@ -49,13 +52,19 @@ pub fn spawn(tx: UnboundedSender<Msg>, visible: Arc<AtomicBool>, wake: Arc<Notif
     })
 }
 
-/// A server without the Prometheus API answers 404: one started before
+/// A server without the Prometheus API answers 404: another Kubernetes
+/// (EKS, GKE, k3s…: these are litek8s's own), or a litek8s started before
 /// observability existed (a dev VM still on an older guest).
-fn explain(e: String) -> String {
-    if e.contains("could not find the requested resource") {
-        "this cluster's API server has no metrics API: it predates observability; restart the cluster on the new binary (litek8s dev down --all && litek8s dev up)".into()
-    } else {
+async fn explain(ep: &Endpoint, e: String) -> String {
+    // Others answer 404 or 403 (a path RBAC does not know): ask what it is.
+    let version = ep.json(Method::GET, "/version", None).await.ok().and_then(|v| v["gitVersion"].as_str().map(str::to_string)).unwrap_or_default();
+    if version.contains("+litek8s") || version.is_empty() {
+        if e.contains("could not find the requested resource") || e.contains("404") {
+            return "this cluster's API server has no metrics API: it predates observability; restart the cluster on the new binary (litek8s dev down --all && litek8s dev up)".into();
+        }
         e
+    } else {
+        format!("Observe reads litek8s's built-in metrics, alerts and logs; this cluster ({version}) is not litek8s, so they are not here. The Kubernetes view (7) works on it; CPU and memory columns there come from metrics.k8s.io when the cluster has it.")
     }
 }
 
@@ -150,6 +159,10 @@ pub async fn search(ep: Endpoint, namespace: Option<String>, pod: Option<String>
     }
     let resp = match ep.send(Method::GET, &format!("/litek8s/v1/logs?{}", q.join("&")), None, Vec::new()).await {
         Ok(r) if r.status().is_success() => r,
+        Ok(r) if r.status() == hyper::StatusCode::NOT_FOUND => {
+            let _ = tx.send(Msg::LogEnd(id, Some("log search needs a litek8s cluster (its log store); on others, l on a pod or workload in the Kubernetes view follows its logs".into())));
+            return;
+        }
         Ok(r) => {
             let _ = tx.send(Msg::LogEnd(id, Some(format!("log search failed: {}", r.status()))));
             return;

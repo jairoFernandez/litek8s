@@ -287,9 +287,65 @@ pub fn load() -> Result<UiConfig, String> {
     }
 }
 
+/// `text` (a ui.yaml) with `context` added to or taken out of
+/// writableContexts; the rest of the file (comments included) kept.
+pub fn with_writable(text: &str, context: &str, on: bool) -> Result<String, String> {
+    let current: UiConfig = if text.trim().is_empty() { UiConfig::default() } else { serde_yaml::from_str(text).map_err(|e| format!("{}: {e}", path().display()))? };
+    let mut list = current.writable_contexts;
+    list.retain(|c| c != context);
+    if on {
+        list.push(context.to_string());
+    }
+    let quote = |c: &String| if c.chars().all(|ch| ch.is_ascii_alphanumeric() || "-_.@:/".contains(ch)) { c.clone() } else { format!("{c:?}") };
+    let line = format!("writableContexts: [{}]", list.iter().map(quote).collect::<Vec<_>>().join(", "));
+    // Replace the key's line and its block items, if it is there.
+    let mut out: Vec<String> = Vec::new();
+    let mut lines = text.lines().peekable();
+    let mut done = false;
+    while let Some(l) = lines.next() {
+        if !done && (l.starts_with("writableContexts:") || l.starts_with("writable_contexts:")) {
+            while lines.peek().is_some_and(|n| n.starts_with(' ') || n.starts_with('\t') || n.starts_with('-')) {
+                lines.next();
+            }
+            out.push(line.clone());
+            done = true;
+        } else {
+            out.push(l.to_string());
+        }
+    }
+    if !done {
+        out.push(line);
+    }
+    Ok(out.join("\n") + "\n")
+}
+
+/// Save it in ui.yaml (`W`'s "remember").
+pub fn save_writable(context: &str, on: bool) -> Result<(), String> {
+    let p = path();
+    let text = std::fs::read_to_string(&p).unwrap_or_default();
+    let new = with_writable(&text, context, on)?;
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    std::fs::write(&p, new).map_err(|e| format!("{}: {e}", p.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn writable_contexts_edited_in_place() {
+        let text = "# my settings\naliases: {cp: pods}\nwritableContexts:\n  - staging\n# keep me\nreadOnly: false\n";
+        let t = with_writable(text, "prod-eu", true).unwrap();
+        assert_eq!(t, "# my settings\naliases: {cp: pods}\nwritableContexts: [staging, prod-eu]\n# keep me\nreadOnly: false\n");
+        let t = with_writable(&t, "staging", false).unwrap();
+        assert!(t.contains("writableContexts: [prod-eu]") && t.contains("# keep me"), "{t}");
+        assert_eq!(with_writable("", "x y", true).unwrap(), "writableContexts: [\"x y\"]\n");
+        let c: UiConfig = serde_yaml::from_str(&with_writable("", "x y", true).unwrap()).unwrap();
+        assert_eq!(c.writable_contexts, vec!["x y"]);
+        assert!(with_writable("nope: 1", "a", true).is_err());
+    }
 
     #[test]
     fn parses_the_file_and_keys() {

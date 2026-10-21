@@ -870,3 +870,61 @@ fn services_without_a_selector_column_come_as_objects() {
     app.apply(Msg::Kube(KMsg::Data(wk("v1/services#objects", Some("shop")), snap)));
     assert!(render(&app, 80, 24).contains("Service api  ClusterIP 10.43.0.9 80 → 1/2 pods"));
 }
+
+#[test]
+fn w_turns_on_write_mode_after_typing_the_context_name() {
+    let mut app = foreign(&[]);
+    assert!(render(&app, 80, 24).contains(" read-only "));
+    // W asks for the name; a wrong one is refused.
+    assert!(app.key(key('W')).is_empty());
+    let s = render(&app, 80, 24);
+    assert!(s.contains("Write to work-prod?") && s.contains("Type work-prod to turn it on") && s.contains("remember"), "{s}");
+    for l in s.lines() {
+        assert_eq!(l.chars().count(), 80);
+    }
+    typing(&mut app, "work-pro");
+    app.key(code(KeyCode::Enter));
+    assert!(render(&app, 80, 24).contains("type work-prod exactly"));
+    typing(&mut app, "d");
+    assert!(kube_effects(app.key(code(KeyCode::Enter))).is_empty());
+    assert_eq!(app.kube.access(), Access::WriteMode);
+    let s = render(&app, 80, 24);
+    assert!(s.contains("WRITE · work-prod") && !s.contains(" read-only "), "{s}");
+    // Changes go through now.
+    app.key(ctrl('d'));
+    assert!(matches!(app.kube.overlay, Overlay::Confirm(_)));
+    assert!(matches!(&kube_effects(app.key(key('y')))[..], [KEffect::Delete { .. }]));
+    // W again: read-only, no question.
+    app.key(key('W'));
+    assert_eq!(app.kube.overlay, Overlay::None);
+    assert_eq!(app.kube.access(), Access::NotLitek8s);
+    assert!(render(&app, 80, 24).contains(" read-only "));
+    app.key(ctrl('d'));
+    assert_eq!(app.kube.overlay, Overlay::None);
+    assert!(app.status.as_ref().is_some_and(|(m, _)| m.contains("W turns on writing")));
+}
+
+#[test]
+fn w_remembers_in_ui_yaml_and_explains_where_it_cannot() {
+    let mut app = foreign(&[]);
+    app.key(key('W'));
+    app.key(code(KeyCode::Tab));
+    assert!(render(&app, 80, 24).contains("[x] remember"));
+    typing(&mut app, "work-prod");
+    assert_eq!(kube_effects(app.key(code(KeyCode::Enter))), vec![KEffect::RememberWritable { context: "work-prod".into(), on: true }]);
+    assert_eq!(app.kube.config.writable_contexts, vec!["work-prod"]);
+    // Off takes it out of the file too.
+    assert_eq!(kube_effects(app.key(key('W'))), vec![KEffect::RememberWritable { context: "work-prod".into(), on: false }]);
+    assert!(app.kube.config.writable_contexts.is_empty());
+    // readOnly: true wins, and says so.
+    let cfg: super::uiconfig::UiConfig = serde_yaml::from_str("readOnly: true").unwrap();
+    app.apply(Msg::Kube(KMsg::Config(Ok(cfg))));
+    app.key(key('W'));
+    assert_eq!(app.kube.overlay, Overlay::None);
+    assert!(app.status.as_ref().is_some_and(|(m, _)| m.contains("readOnly: true") && m.contains("remove readOnly")), "{:?}", app.status);
+    // A litek8s cluster is always writable.
+    let mut app = self::app();
+    app.key(key('W'));
+    assert_eq!(app.kube.overlay, Overlay::None);
+    assert!(app.status.as_ref().is_some_and(|(m, _)| m.contains("is a litek8s cluster")));
+}
