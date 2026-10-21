@@ -607,6 +607,22 @@ pub async fn effect(run: &mut crate::ui::Runtime, e: KEffect, terminal: &mut cra
                 }
             }
         }
+        KEffect::Identify(context) => {
+            // One of litek8s dev's own clusters, by its context; else what
+            // the API server says it is (`v1.33.0+litek8s`).
+            let local = crate::dev::dev_home().ok().is_some_and(|h| crate::dev::cluster::list(&h).iter().any(|c| c.context() == context));
+            if local {
+                app.kube.apply(KMsg::Identified { context, litek8s: true });
+            } else {
+                rt.spawn(async move {
+                    // Unreachable: not cached, so the next switch asks again.
+                    if let Ok(v) = ep.json(Method::GET, "/version", None).await {
+                        let litek8s = v["gitVersion"].as_str().is_some_and(|g| g.contains("+litek8s"));
+                        let _ = tx.send(Msg::Kube(KMsg::Identified { context, litek8s }));
+                    }
+                });
+            }
+        }
         KEffect::SaveHistory(h) => {
             let p = uiconfig::history_path();
             if let Some(d) = p.parent() {

@@ -150,7 +150,8 @@ pub async fn run(args: UiArgs) -> Result<()> {
     }
 
     if fixed.is_some() {
-        app.kube.reset(start_ns);
+        let ctx = app.kube_context.clone();
+        app.kube.reset(start_ns, ctx);
     }
     // The look: ui.yaml's theme in this terminal's colors, its background
     // asked once before the input reader starts (see probe_background).
@@ -610,7 +611,8 @@ impl Runtime {
                     app.kube_context = ctx;
                     self.kube_watches = kube::spawn_watches(self.kube.clone(), self.tx.clone());
                     self.kube_rt.reset(self.kube.clone());
-                    app.kube.reset(ns);
+                    let ctx = app.kube_context.clone();
+                    app.kube.reset(ns, ctx);
                 }
                 Err(e) => app.flash(format!("{e:#}"), true),
             },
@@ -827,7 +829,8 @@ impl Runtime {
                 self.kube_watches = kube::spawn_watches(self.kube.clone(), self.tx.clone());
                 self.kube_rt.reset(self.kube.clone());
                 let ns = app.kube.namespace.clone();
-                app.kube.reset(ns);
+                let ctx = app.kube_context.clone();
+                app.kube.reset(ns, ctx);
             }
             None => {
                 *self.obs_ep.lock().unwrap() = None;
