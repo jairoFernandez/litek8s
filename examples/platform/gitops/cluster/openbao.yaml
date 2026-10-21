@@ -1,0 +1,82 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: openbao
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: '20'
+spec:
+  project: default
+  source:
+    repoURL: https://openbao.github.io/openbao-helm
+    chart: openbao
+    targetRevision: 0.30.3
+    helm:
+      valuesObject:
+        injector:
+          enabled: false
+        ui:
+          enabled: true
+        server:
+          # Ready while sealed or uninitialized too: up.sh initializes it
+          # after it starts (the chart's default probe would hold the
+          # sync waves forever).
+          readinessProbe:
+            enabled: true
+            path: /v1/sys/health?standbyok=true&sealedcode=204&uninitcode=204
+          dataStorage:
+            size: 1Gi
+          # The static seal's key (Secret openbao-unseal-key, made by up.sh):
+          # OpenBao unseals itself on every start.
+          volumes:
+            - name: unseal-key
+              secret:
+                secretName: openbao-unseal-key
+          volumeMounts:
+            - name: unseal-key
+              mountPath: /openbao/unseal
+              readOnly: true
+          standalone:
+            enabled: true
+            config: |
+              ui = true
+              listener "tcp" {
+                tls_disable     = 1
+                address         = "[::]:8200"
+                cluster_address = "[::]:8201"
+              }
+              storage "pebbledb" {
+                path = "/openbao/data/pebbledb"
+              }
+              seal "static" {
+                current_key_id = "platform-1"
+                current_key    = "file:///openbao/unseal/key"
+              }
+          ingress:
+            enabled: true
+            annotations:
+              cert-manager.io/cluster-issuer: platform-ca
+            hosts:
+              - host: openbao.<DOMAIN_NAME>
+                paths: []
+            tls:
+              - secretName: openbao-tls
+                hosts:
+                  - openbao.<DOMAIN_NAME>
+  destination:
+    name: in-cluster
+    namespace: openbao
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        maxDuration: 5m0s
+        factor: 2

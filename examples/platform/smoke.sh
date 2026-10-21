@@ -84,10 +84,47 @@ ca="$(mktemp)"
 trap 'kill $gitea_pf 2>/dev/null; wait $gitea_pf 2>/dev/null; rm -f "$ca"' EXIT
 secret_value cert-manager platform-ca 'ca\.crt' >"$ca"
 deadline=$((SECONDS + timeout))
-for url in "https://argocd.$domain:$port/healthz" "https://gitea.$domain:$port/api/healthz"; do
+urls=("https://argocd.$domain:$port/healthz" "https://gitea.$domain:$port/api/healthz")
+kubectl -n openbao get ingress openbao >/dev/null 2>&1 && urls+=("https://openbao.$domain:$port/v1/sys/health")
+for url in "${urls[@]}"; do
   until code="$(curl -s -o /dev/null -w '%{http_code}' --cacert "$ca" "$url")" && [[ $code == 200 ]]; do
     if [[ $SECONDS -ge $deadline ]]; then echo "https: $url -> $code (timeout)"; exit 1; fi
     sleep 5
   done
   echo "https: $url 200 (certificate from platform-ca)"
 done
+
+# ---- Secrets: OpenBao -> external-secrets -> a Kubernetes Secret ---------------
+
+kubectl -n openbao get secret openbao-init >/dev/null 2>&1 || { echo "secrets: no OpenBao, skipped"; exit 0; }
+value="smoke-$RANDOM$RANDOM"
+kubectl -n openbao exec openbao-0 -c openbao -- env BAO_ADDR=http://127.0.0.1:8200 \
+  BAO_TOKEN="$(secret_value openbao openbao-init root-token)" bao kv put secret/smoke value="$value" >/dev/null
+kubectl create namespace platform-smoke --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+kubectl apply -f - >/dev/null <<YAML
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata:
+  name: smoke
+  namespace: platform-smoke
+spec:
+  refreshInterval: 10s
+  secretStoreRef:
+    kind: ClusterSecretStore
+    name: openbao
+  target:
+    name: smoke
+  data:
+    - secretKey: value
+      remoteRef:
+        key: smoke
+        property: value
+YAML
+deadline=$((SECONDS + 120))
+until [[ $(secret_value platform-smoke smoke value 2>/dev/null) == "$value" ]]; do
+  if [[ $SECONDS -ge $deadline ]]; then
+    echo "secrets: FAILED"; kubectl -n platform-smoke get externalsecret smoke -o jsonpath='{.status.conditions}'; echo; exit 1
+  fi
+  sleep 2
+done
+echo "secrets: OpenBao secret/smoke -> ExternalSecret -> Secret platform-smoke/smoke"
