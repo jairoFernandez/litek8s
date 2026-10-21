@@ -33,5 +33,6 @@ pub mod service;
 pub mod store;
 #[cfg(feature = "llm")]
 pub mod transformer;
+pub mod tree;
 pub mod ui;
 pub mod vpn;

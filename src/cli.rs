@@ -52,6 +52,7 @@ Kubernetes:
   agent          Run a node agent that joins a litek8s API server
   server         List or remove the API servers of a highly available control plane
   lb             A TCP load balancer in front of the API servers of an HA control plane
+  tree           A tree of the cluster: nodes, workloads down their owners, services (the legacy daemon's when it runs)
   install        Run litek8s on this Linux server as a systemd service (server or agent)
   uninstall      Stop and remove the litek8s systemd service and its pods
 
@@ -72,7 +73,6 @@ Legacy daemon (litek8s.dev/v1alpha1 manifests, started with `litek8s serve`):
   describe       Show a single deployment in detail
   delete         Delete a deployment or service by name or manifest
   events         Show recent control-plane events
-  tree           Show a relationship tree of the control plane, nodes, deployments, and services
   proxy          Open a local TCP proxy to a published deployment port
   service        Manage stable local service listeners backed by deployments
   node           Register a remote node reachable over ssh
@@ -281,9 +281,14 @@ Examples:
   litek8s pipeline run -f examples/pipeline-demo.yaml --show-output";
 
 const TREE_AFTER_HELP: &str = "\
+Without a legacy daemon: the current kube context's cluster, nodes and then
+each namespace's workloads down their owners (Deployment, ReplicaSet, Pod),
+and its Services with the pods they select.
+
 Examples:
   litek8s tree
-  litek8s tree --watch
+  litek8s tree -n argocd
+  litek8s tree --context litek8s-dev2 --watch
   litek8s tree --watch --interval-secs 1";
 
 const GET_AFTER_HELP: &str = "\
@@ -754,7 +759,7 @@ enum Command {
         kube: crate::obs::cli::TopArgs,
     },
     #[command(
-        about = "Show a relationship tree of the control plane, nodes, deployments, and services",
+        about = "A tree of the cluster: nodes, workloads down their owners, services (the legacy daemon's when it runs)",
         help_template = HELP_TEMPLATE,
         after_help = TREE_AFTER_HELP
     )]
@@ -763,6 +768,8 @@ enum Command {
         watch: bool,
         #[arg(long, default_value_t = 2, help = "Refresh interval in seconds")]
         interval_secs: u64,
+        #[command(flatten)]
+        kube: crate::tree::TreeArgs,
     },
     #[command(
         about = "Register a remote node reachable over ssh",
@@ -1850,10 +1857,20 @@ pub async fn run() -> Result<()> {
                 run_kube_top(kube, watch, Duration::from_secs(interval_secs)).await
             }
         }
-        Command::Tree {
-            watch,
-            interval_secs,
-        } => run_tree(&endpoint, watch, Duration::from_secs(interval_secs)).await,
+        Command::Tree { watch, interval_secs, kube } => {
+            // The legacy daemon when one answers; else the kube context's
+            // cluster, as `top` does.
+            let daemon = kube.context.is_none()
+                && match &endpoint {
+                    DaemonEndpoint::Tcp(_) => true,
+                    DaemonEndpoint::Unix(path) => std::os::unix::net::UnixStream::connect(path).is_ok(),
+                };
+            if daemon {
+                run_tree(&endpoint, watch, Duration::from_secs(interval_secs)).await
+            } else {
+                run_kube_tree(kube, watch, Duration::from_secs(interval_secs)).await
+            }
+        }
         Command::Node { command } => match command {
             NodeCommand::Add {
                 name,
@@ -3845,6 +3862,29 @@ async fn run_kube_top(args: crate::obs::cli::TopArgs, watch: bool, interval: Dur
     loop {
         let body = tokio::select! {
             frame = crate::obs::cli::top_frame(&ep, &args) => frame.unwrap_or_else(|e| format_error_body(&format!("{e:#}"))),
+            _ = &mut ctrl_c => return Ok(()),
+        };
+        display.render_frame(&body)?;
+        tokio::select! {
+            _ = tokio::time::sleep(interval) => {}
+            _ = &mut ctrl_c => return Ok(()),
+        }
+    }
+}
+
+async fn run_kube_tree(args: crate::tree::TreeArgs, watch: bool, interval: Duration) -> Result<()> {
+    let ep = crate::obs::cli::endpoint(args.context.as_deref())?;
+    if !watch || args.once {
+        print!("{}", crate::tree::frame(&ep, &args).await?);
+        return Ok(());
+    }
+    let banner = format!("{}  {}", build_watch_banner("tree", interval, None, None), muted(&ep.display));
+    let mut display = WatchDisplay::new(banner)?;
+    let ctrl_c = tokio::signal::ctrl_c();
+    tokio::pin!(ctrl_c);
+    loop {
+        let body = tokio::select! {
+            frame = crate::tree::frame(&ep, &args) => frame.unwrap_or_else(|e| format_error_body(&format!("{e:#}"))),
             _ = &mut ctrl_c => return Ok(()),
         };
         display.render_frame(&body)?;
