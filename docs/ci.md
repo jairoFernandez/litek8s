@@ -9,6 +9,19 @@ scheduler, cluster DNS, node agents on crun, a Docker Engine API), so
 kubectl, Helm, `docker`, `docker compose` and Testcontainers work
 unchanged.
 
+## When it pays off
+
+| the job needs | instead of | what changes | measured |
+|---|---|---|---|
+| a Kubernetes cluster (kubectl, Helm, operators, e2e) | kind, k3d (Docker containers as nodes) | **3–5× faster jobs, 26–37× less memory**: ready in ~2.5 s instead of ~45 s | yes, [below](#numbers) |
+| Docker only (build, compose, Testcontainers) on GitHub's runners | the runner's dockerd | ~13 s less per compose job; dockerd needs no setup, litek8s ~2 s | yes, [below](#numbers) |
+| Docker inside a container job (GitLab's `docker:dind` service, runners in containers) | Docker in Docker | expected to be faster: dind starts dockerd and containerd inside the job and often stores layers on a slow driver; litek8s is one process. Both need a privileged container | not yet (litek8s alone: [28 s median](#other-ci-systems) to a rolled-out Deployment, apt included) |
+
+So: for Kubernetes in CI, switch; for plain Docker on GitHub's runners,
+the gain is small and dockerd is already there; for Docker in Docker,
+try it on your pipeline and compare (a measurement against `docker:dind`
+is planned for [ci-bench.yml](../.github/workflows/ci-bench.yml)).
+
 ## GitHub Actions
 
 ```yaml
