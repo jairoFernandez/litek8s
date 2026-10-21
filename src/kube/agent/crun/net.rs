@@ -179,12 +179,15 @@ iptables -t nat -A $c -m addrtype --dst-type LOCAL -j LITEK8S-HOSTPORTS; done";
 pub(crate) fn pod_link_commands(host_if: &str, ip: Ipv4Addr, subnet: &Subnet, mtu: u32) -> String {
     format!(
         "link set lo up\n\
-link add eth0 mtu {mtu} type veth peer name {host_if} mtu {mtu} netns 1\n\
+link add eth0 mtu {mtu} type veth peer name {host_if} mtu {mtu} netns {agent}\n\
 addr add {ip}/{prefix} dev eth0\n\
 link set eth0 up\n\
 route add default via {gw} dev eth0\n",
         prefix = subnet.prefix,
-        gw = subnet.gateway()
+        gw = subnet.gateway(),
+        // The agent's own network namespace (not PID 1's: the agent may
+        // run in another one, behind a NAT of its own).
+        agent = std::process::id()
     )
 }
 
@@ -253,7 +256,7 @@ mod tests {
         assert!(r.contains("-A LITEK8S-HOSTPORTS -p tcp -m tcp --dport 8080 -j DNAT --to-destination 10.42.0.5:80\n"));
         assert!(r.contains("-A LITEK8S-HOSTPORTS -d 192.168.1.7/32 -p udp -m udp --dport 53 -j DNAT --to-destination 10.42.0.6:53\n"));
         let cmds = pod_link_commands("lk1234", Ipv4Addr::new(10, 42, 0, 5), &s, 1420);
-        assert!(cmds.contains("link add eth0 mtu 1420 type veth peer name lk1234 mtu 1420 netns 1\n"));
+        assert!(cmds.contains(&format!("link add eth0 mtu 1420 type veth peer name lk1234 mtu 1420 netns {}\n", std::process::id())));
         assert!(cmds.contains("addr add 10.42.0.5/24 dev eth0\n") && cmds.contains("route add default via 10.42.0.1 dev eth0\n"));
     }
 }

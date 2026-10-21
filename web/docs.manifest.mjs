@@ -29,6 +29,7 @@ export const groups = [
       { slug: 'docker', label: 'Docker API', source: 'docs/docker.md' },
       { slug: 'ui', label: 'Terminal UI', source: 'docs/ui.md' },
       { slug: 'observability', label: 'Metrics, logs, alerts', source: 'docs/observability.md' },
+      { slug: 'networking', label: 'Networking across NATs', source: 'docs/networking.md' },
       { slug: 'ha', label: 'HA control plane', source: 'docs/ha.md' },
       { slug: 'crds', label: 'CRDs and server-side apply', source: 'docs/crds.md' },
       { slug: 'agents', label: 'MCP and LLM agents', source: 'docs/agents.md' },

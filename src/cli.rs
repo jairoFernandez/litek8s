@@ -545,6 +545,8 @@ enum Command {
         wireguard_port: u16,
         #[arg(long, help = "Do not set up the WireGuard pod overlay (single node)")]
         no_wireguard: bool,
+        #[arg(long, help = "Public address of this server's node when its own is private (a cloud VM): the overlay endpoint other nodes use")]
+        node_external_ip: Option<std::net::IpAddr>,
         #[arg(long, help = "Also serve the Docker Engine API on this Unix socket (crun runtime; published ports bind on 127.0.0.1)")]
         docker_socket: Option<PathBuf>,
         #[arg(long, requires = "data_dir", help = "Start a highly available control plane with this server as its first member (a single server's objects move into it)")]
@@ -644,6 +646,8 @@ enum Command {
         wireguard_port: u16,
         #[arg(long, help = "Do not join the WireGuard pod overlay")]
         no_wireguard: bool,
+        #[arg(long, help = "Public address of this node when its own is private (a cloud VM with a public IP): the overlay endpoint other nodes use")]
+        node_external_ip: Option<std::net::IpAddr>,
         #[arg(long, value_parser = parse_duration, help = "Heartbeat grace for this node when longer than the cluster's (e.g. 15m for a laptop that sleeps)")]
         node_grace_period: Option<Duration>,
         /// Without --join: the legacy daemon's SSH node agent. With this
@@ -1581,6 +1585,7 @@ pub async fn run() -> Result<()> {
             default_unreachable_toleration_seconds,
             wireguard_port,
             no_wireguard,
+            node_external_ip,
             docker_socket,
             cluster_init,
             server,
@@ -1616,6 +1621,7 @@ pub async fn run() -> Result<()> {
                 in_cluster_port: (in_cluster_port != 0).then_some(in_cluster_port),
                 runtime,
                 node_ip,
+                node_external_ip,
                 advertise_address,
                 network: crate::kube::join::ClusterNetwork { cluster_cidr, node_mask: node_cidr_mask_size },
                 token,
@@ -1701,7 +1707,7 @@ pub async fn run() -> Result<()> {
             }
         }
         Command::Skill { reference, list, install } => skill(reference, list, install),
-        Command::Agent { join: Some(join), token, node_name, node_ip, node_dir, runtime, wireguard_port, no_wireguard, node_grace_period, .. } => {
+        Command::Agent { join: Some(join), token, node_name, node_ip, node_dir, runtime, wireguard_port, no_wireguard, node_external_ip, node_grace_period, .. } => {
             let token = token.context("--token is required with --join")?;
             let node_name = node_name.unwrap_or_else(crate::kube::agent::default_node_name);
             let node_dir = node_dir.unwrap_or_else(crate::kube::agent::default_root_dir);
@@ -1724,6 +1730,7 @@ pub async fn run() -> Result<()> {
                 cluster_cidr: joined.cluster_cidr,
                 node_ip: node_ip.map(|ip| ip.to_string()).unwrap_or_else(crate::kube::agent::local_ip),
                 wireguard_port: (!no_wireguard).then_some(wireguard_port),
+                external_ip: node_external_ip.map(|ip| ip.to_string()),
             };
             let agent = crate::kube::agent::node_agent_with(runtime, Some(node_name), Some(node_dir), network, node_grace_period).await?;
             crate::kube::metrics::spawn_memory_trim();

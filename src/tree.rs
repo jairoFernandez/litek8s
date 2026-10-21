@@ -190,6 +190,8 @@ pub struct Item {
     pub history: bool,
     /// A node's pod CIDR.
     pub cidr: String,
+    /// A node's overlay peers it does not reach directly: `b via s`.
+    pub overlay: String,
 }
 
 /// A line of a tree, in order: `depth` 0 for the `nodes` and `namespace
@@ -303,6 +305,12 @@ impl Item {
                 it.detail = ready.into();
                 it.health = if ready == "Ready" { Health::Ok } else { Health::Bad };
                 it.cidr = s(o, "/spec/podCIDR").into();
+                let indirect: Vec<String> = crate::kube::agent::relay::routes_of(o)
+                    .into_iter()
+                    .filter(|(_, r)| *r != crate::kube::agent::relay::Route::Direct)
+                    .map(|(peer, r)| format!("{peer} {}", r.text()))
+                    .collect();
+                it.overlay = indirect.join(", ");
             }
         }
         it
@@ -373,6 +381,9 @@ pub fn build(items: &[Item], all: bool, namespace: Option<&str>) -> Vec<Row> {
             let mut detail = format!("{}, {}{scope}", n.detail, plural(count, "pod"));
             if !n.cidr.is_empty() {
                 detail.push_str(&format!(", pods {}", n.cidr));
+            }
+            if !n.overlay.is_empty() {
+                detail.push_str(&format!(", overlay: {}", n.overlay));
             }
             out.push(Row { detail, ..row(n, 1) });
         }
@@ -487,7 +498,10 @@ mod tests {
     #[test]
     fn draws_owner_chains_services_and_nodes() {
         let o = Objects {
-            nodes: vec![json!({"metadata": {"name": "n1"}, "spec": {"podCIDR": "10.42.0.0/24"}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}})],
+            nodes: vec![
+                json!({"metadata": {"name": "n1"}, "spec": {"podCIDR": "10.42.0.0/24"}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}}),
+                json!({"metadata": {"name": "n2", "annotations": {"litek8s.dev/wireguard-routes": r#"{"n1":"direct","n3":"via n1"}"#}}, "spec": {"podCIDR": "10.42.1.0/24"}, "status": {"conditions": [{"type": "Ready", "status": "True"}]}}),
+            ],
             deployments: vec![owned("Deployment", "api", "d1", None, json!({"spec": {"replicas": 2}, "status": {"readyReplicas": 1}}))],
             replicasets: vec![
                 owned("ReplicaSet", "api-abc", "r1", Some("d1"), json!({"spec": {"replicas": 2}, "status": {"replicas": 2, "readyReplicas": 1}})),
@@ -507,7 +521,8 @@ mod tests {
             out,
             "cluster http://127.0.0.1:6443
 ├─ nodes
-│  └─ Node n1  Ready, 2 pods, pods 10.42.0.0/24
+│  ├─ Node n1  Ready, 2 pods, pods 10.42.0.0/24
+│  └─ Node n2  Ready, 0 pods, pods 10.42.1.0/24, overlay: n3 via n1
 └─ namespace web
    ├─ Deployment api  1/2 ready
    │  └─ ReplicaSet api-abc  1/2 ready

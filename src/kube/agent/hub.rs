@@ -23,6 +23,7 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
 
 use super::overlay::{ANNOTATION_ENDPOINT, ANNOTATION_PUBLIC_KEY, NodePeer};
+use super::relay::{self, MeshNode, Route};
 use super::protocol::{Frame, Message, read_frame, write_frame};
 use crate::kube::controllers::util;
 use crate::kube::server::ApiState;
@@ -225,6 +226,7 @@ impl AgentHub {
                 api_port,
                 cluster_dns: api.cluster_dns.load(std::sync::atomic::Ordering::Relaxed),
                 obs: api.obs.get().filter(|_| features.iter().any(|f| f == "metrics")).map(|o| o.settings()),
+                overlay_status: features.iter().any(|f| f == super::OVERLAY_STATUS_FEATURE),
             }))
             .await;
         let feed_task = tokio::spawn(feed_pods(api.clone(), node_name.clone(), tx.clone()));
@@ -252,6 +254,7 @@ impl AgentHub {
                             obs.ingest_node(&node_name, ts, series, values, &mut metric_ids);
                         }
                     }
+                    Frame::Control(Message::OverlayStatus { peers }) => overlay_report(&api, &node_name, &peers),
                     Frame::Control(msg) => handle_message(&api, &tx, &streams, msg).await,
                     Frame::Data { stream, channel, bytes } => {
                         let sender = streams.lock().unwrap().get(&stream).cloned();
@@ -385,25 +388,72 @@ fn ensure_ready(api: &ApiState, node: &str, announced: &Value) -> bool {
     util::write_status(api, "", "nodes", &current, status).is_ok()
 }
 
-/// Every node of the WireGuard overlay (with its key, endpoint and CIDR).
-fn overlay_peers(api: &ApiState) -> Vec<NodePeer> {
+/// The overlay as `node` should set it up: every other node (key,
+/// endpoints, CIDR, and the relay to go through when there is no direct
+/// path), and whether `node` relays for others.
+fn overlay_peers(api: &ApiState, node: &str) -> (Vec<NodePeer>, bool) {
     let (nodes, _) = api.store().list("", "nodes", None);
-    nodes
+    let members: Vec<&Value> = nodes.iter().filter(|n| !util::s(n, "/spec/podCIDR").is_empty()).collect();
+    let mesh: Vec<MeshNode> = members.iter().filter_map(|n| MeshNode::from_node(n)).collect();
+    let routes = relay::routes_for(&mesh, node);
+    let relays = mesh.iter().find(|m| m.name == node).is_some_and(|m| m.relay);
+    let peers = members
         .iter()
         .filter_map(|n| {
             let annotation = |k: &str| n.pointer("/metadata/annotations").and_then(|a| a.get(k)).and_then(Value::as_str).map(str::to_string);
-            let pod_cidr = util::s(n, "/spec/podCIDR");
-            if pod_cidr.is_empty() {
-                return None;
-            }
+            let name = util::name(n);
+            let via = match routes.get(&name) {
+                Some(Route::Via(r)) => Some(r.clone()),
+                _ => None,
+            };
             Some(NodePeer {
-                name: util::name(n),
                 public_key: annotation(ANNOTATION_PUBLIC_KEY)?,
                 endpoint: annotation(ANNOTATION_ENDPOINT)?,
-                pod_cidr: pod_cidr.to_string(),
+                pod_cidr: util::s(n, "/spec/podCIDR").to_string(),
+                endpoints: relay::observed_endpoints(&mesh, &name),
+                via,
+                server: mesh.iter().any(|m| m.name == name && m.server),
+                name,
             })
         })
-        .collect()
+        .collect();
+    (peers, relays)
+}
+
+/// Set an annotation of a Node unless it already has that value.
+fn annotate_node(api: &ApiState, node: &str, key: &str, value: &str) {
+    for attempt in 0..5 {
+        let Some(mut obj) = api.get_object("", "nodes", "", node) else { return };
+        if obj.pointer("/metadata/annotations").and_then(|a| a.get(key)).and_then(Value::as_str) == Some(value) {
+            return;
+        }
+        if !obj["metadata"]["annotations"].is_object() {
+            obj["metadata"]["annotations"] = json!({});
+        }
+        obj["metadata"]["annotations"][key] = json!(value);
+        match api.update_object("", "nodes", obj) {
+            Ok(_) => return,
+            Err(e) if e.is_conflict() && attempt < 4 => continue,
+            Err(e) => return eprintln!("apiserver: could not annotate node {node}: {e}"),
+        }
+    }
+}
+
+/// An agent's report of its overlay peers: kept on its Node, and the
+/// routes of every node written where they changed (agents get theirs from
+/// the Node change).
+fn overlay_report(api: &ApiState, node: &str, report: &relay::Reports) {
+    let Some(current) = api.get_object("", "nodes", "", node) else { return };
+    let merged = relay::merge_reports(&relay::reports_of(&current), report);
+    annotate_node(api, node, relay::ANNOTATION_PEERS, &serde_json::to_string(&merged).unwrap_or_default());
+    let (nodes, _) = api.store().list("", "nodes", None);
+    let mesh: Vec<MeshNode> = nodes.iter().filter(|n| !util::s(n, "/spec/podCIDR").is_empty()).filter_map(MeshNode::from_node).collect();
+    for (m, n) in mesh.iter().filter_map(|m| Some((m, nodes.iter().find(|n| util::name(n) == m.name)?))) {
+        let routes = relay::routes_for(&mesh, &m.name);
+        if relay::routes_of(n) != routes {
+            annotate_node(api, &m.name, relay::ANNOTATION_ROUTES, &relay::routes_text(&routes));
+        }
+    }
 }
 
 /// The part of a pod the agent acts on; status changes are not resent.
@@ -424,8 +474,8 @@ async fn feed_pods(api: Arc<ApiState>, node: String, tx: mpsc::Sender<Frame>) {
         let mut sent: HashMap<String, Value> = HashMap::new();
         // Pods on this node per namespace, to forward only relevant changes.
         let mut namespaces: HashMap<String, usize> = HashMap::new();
-        let mut peers = overlay_peers(&api);
-        if tx.send(Frame::Control(Message::Peers { peers: peers.clone() })).await.is_err() {
+        let mut peers = overlay_peers(&api, &node);
+        if tx.send(Frame::Control(Message::Peers { peers: peers.0.clone(), relay: peers.1 })).await.is_err() {
             return;
         }
         let (pods, _) = api.store().list("", "pods", None);
@@ -490,12 +540,12 @@ async fn feed_pods(api: Arc<ApiState>, node: String, tx: mpsc::Sender<Frame>) {
                 }
                 ("", "services" | "endpoints") => service_update(&api, &event.key.namespace, &event.key.name),
                 ("", "nodes") => {
-                    let now = overlay_peers(&api);
+                    let now = overlay_peers(&api, &node);
                     if now == peers {
                         continue;
                     }
                     peers = now;
-                    Message::Peers { peers: peers.clone() }
+                    Message::Peers { peers: peers.0.clone(), relay: peers.1 }
                 }
                 ("", resource @ ("configmaps" | "secrets")) if event.event != EventType::Deleted => {
                     let ns = &event.key.namespace;
