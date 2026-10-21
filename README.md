@@ -207,7 +207,7 @@ flowchart TB
         pi["Raspberry Pi"] ~~~ old["old laptop"] ~~~ ec2["cheap cloud VM"]
     end
     nodes -->|"join token · HTTPS"| s
-    wg["pods talk across nodes over a WireGuard mesh<br/>10.42.0.0/16, one /24 per node"]
+    wg["pods talk across nodes over a WireGuard mesh<br/>10.42.0.0/16, one /24 per node<br/>relayed by the server across NATs"]
     nodes -.- wg
 ```
 
@@ -239,7 +239,11 @@ litek8s agent --join https://192.168.1.10:6443 --token K10<hash>::<secret> --nod
 ```
 
 Every node gets a `/24` of `10.42.0.0/16`; Services and DNS work
-cluster-wide. A node that stops goes `NotReady` after 40 s and its pods are
+cluster-wide. Nodes behind NAT need no VPN or port forwarding: two homes
+reach each other directly when their routers allow it, and a pair with no
+direct path goes through a relay, by default the server (a cloud VM with a
+public address: `--node-external-ip`), with the data path in the kernel
+([docs/networking.md](docs/networking.md)). A node that stops goes `NotReady` after 40 s and its pods are
 rescheduled after their `tolerationSeconds`; laptops that sleep can join
 with a longer `--node-grace-period`. Three servers make the control plane
 highly available: `install.sh | sh -s -- server --cluster-init` on the first,

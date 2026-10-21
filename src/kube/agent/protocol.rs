@@ -58,6 +58,10 @@ pub enum Message {
         series: Vec<(u32, Vec<(String, String)>)>,
         values: Vec<(u32, f64)>,
     },
+    /// How this node's WireGuard peers get through (peer name → state;
+    /// `crate::kube::agent::relay`), sent when it changes and after each
+    /// (re)connection, only to servers whose `Welcome` asked for it.
+    OverlayStatus { peers: super::relay::Reports },
     /// A stream finished; for exec, with the command's exit code.
     StreamDone {
         stream: u32,
@@ -80,10 +84,19 @@ pub enum Message {
         /// archive this way. Absent: send none.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         obs: Option<crate::obs::ObsSettings>,
+        /// Send `OverlayStatus` reports (the agent announced `overlay-status`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        overlay_status: bool,
     },
     HeartbeatAck,
-    /// The other nodes of the pod overlay (all of them, each time).
-    Peers { peers: Vec<super::overlay::NodePeer> },
+    /// The other nodes of the pod overlay (all of them, each time), with
+    /// the relay to use for those this node has no direct path to.
+    /// `relay`: this node forwards between nodes that have none.
+    Peers {
+        peers: Vec<super::overlay::NodePeer>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        relay: bool,
+    },
     /// The server lost track of this node for a while (its pods were marked
     /// not ready): report every pod's status again.
     Resync,

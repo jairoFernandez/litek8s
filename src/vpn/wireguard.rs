@@ -6,8 +6,9 @@
 //! node. The message layout follows `include/uapi/linux/wireguard.h`.
 //!
 //! Only what the pod overlay needs is implemented: set the device (private
-//! key, listen port, the full peer list) and read peers back (handshake
-//! times and byte counters).
+//! key, listen port, the full peer list), change some peers in place (their
+//! sessions survive) and read peers back (handshake times, endpoints and
+//! byte counters).
 
 #![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 
@@ -75,6 +76,7 @@ const WGPEER_A_LAST_HANDSHAKE_TIME: u16 = 6;
 const WGPEER_A_RX_BYTES: u16 = 7;
 const WGPEER_A_TX_BYTES: u16 = 8;
 const WGPEER_A_ALLOWEDIPS: u16 = 9;
+const WGPEER_F_REMOVE_ME: u32 = 1;
 const WGPEER_F_REPLACE_ALLOWEDIPS: u32 = 2;
 const WGALLOWEDIP_A_FAMILY: u16 = 1;
 const WGALLOWEDIP_A_IPADDR: u16 = 2;
@@ -164,6 +166,41 @@ fn parse_sockaddr(data: &[u8]) -> Option<SocketAddrV4> {
     Some(SocketAddrV4::new(Ipv4Addr::new(data[4], data[5], data[6], data[7]), port))
 }
 
+/// A change to one peer, for [`update`]: added or changed (allowed IPs
+/// replaced; the endpoint only when given, so one the kernel learned from
+/// the peer's packets is kept), or removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PeerUpdate {
+    pub peer: Peer,
+    pub remove: bool,
+}
+
+fn peer_attrs(m: &mut MsgBuf, peer: &Peer, remove: bool) -> Result<()> {
+    let p = m.begin_nested(0);
+    m.attr(WGPEER_A_PUBLIC_KEY, &decode_key(&peer.public_key)?);
+    if remove {
+        m.attr(WGPEER_A_FLAGS, &WGPEER_F_REMOVE_ME.to_ne_bytes());
+        m.end_nested(p);
+        return Ok(());
+    }
+    m.attr(WGPEER_A_FLAGS, &WGPEER_F_REPLACE_ALLOWEDIPS.to_ne_bytes());
+    if let Some(ep) = &peer.endpoint {
+        m.attr(WGPEER_A_ENDPOINT, &sockaddr_in(ep));
+    }
+    m.attr(WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL, &peer.keepalive.to_ne_bytes());
+    let ips = m.begin_nested(WGPEER_A_ALLOWEDIPS);
+    for (ip, prefix) in &peer.allowed_ips {
+        let a = m.begin_nested(0);
+        m.attr(WGALLOWEDIP_A_FAMILY, &AF_INET.to_ne_bytes());
+        m.attr(WGALLOWEDIP_A_IPADDR, &ip.octets());
+        m.attr(WGALLOWEDIP_A_CIDR_MASK, &[*prefix]);
+        m.end_nested(a);
+    }
+    m.end_nested(ips);
+    m.end_nested(p);
+    Ok(())
+}
+
 fn set_device_message(family: u16, ifname: &str, key: &KeyPair, listen_port: u16, peers: &[Peer]) -> Result<Vec<u8>> {
     let mut m = MsgBuf::new(family, NLM_F_REQUEST | NLM_F_ACK, WG_CMD_SET_DEVICE);
     let mut name = ifname.as_bytes().to_vec();
@@ -174,23 +211,20 @@ fn set_device_message(family: u16, ifname: &str, key: &KeyPair, listen_port: u16
     m.attr(WGDEVICE_A_FLAGS, &WGDEVICE_F_REPLACE_PEERS.to_ne_bytes());
     let list = m.begin_nested(WGDEVICE_A_PEERS);
     for peer in peers {
-        let p = m.begin_nested(0);
-        m.attr(WGPEER_A_PUBLIC_KEY, &decode_key(&peer.public_key)?);
-        m.attr(WGPEER_A_FLAGS, &WGPEER_F_REPLACE_ALLOWEDIPS.to_ne_bytes());
-        if let Some(ep) = &peer.endpoint {
-            m.attr(WGPEER_A_ENDPOINT, &sockaddr_in(ep));
-        }
-        m.attr(WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL, &peer.keepalive.to_ne_bytes());
-        let ips = m.begin_nested(WGPEER_A_ALLOWEDIPS);
-        for (ip, prefix) in &peer.allowed_ips {
-            let a = m.begin_nested(0);
-            m.attr(WGALLOWEDIP_A_FAMILY, &AF_INET.to_ne_bytes());
-            m.attr(WGALLOWEDIP_A_IPADDR, &ip.octets());
-            m.attr(WGALLOWEDIP_A_CIDR_MASK, &[*prefix]);
-            m.end_nested(a);
-        }
-        m.end_nested(ips);
-        m.end_nested(p);
+        peer_attrs(&mut m, peer, false)?;
+    }
+    m.end_nested(list);
+    Ok(m.finish())
+}
+
+fn update_message(family: u16, ifname: &str, updates: &[PeerUpdate]) -> Result<Vec<u8>> {
+    let mut m = MsgBuf::new(family, NLM_F_REQUEST | NLM_F_ACK, WG_CMD_SET_DEVICE);
+    let mut name = ifname.as_bytes().to_vec();
+    name.push(0);
+    m.attr(WGDEVICE_A_IFNAME, &name);
+    let list = m.begin_nested(WGDEVICE_A_PEERS);
+    for u in updates {
+        peer_attrs(&mut m, &u.peer, u.remove)?;
     }
     m.end_nested(list);
     Ok(m.finish())
@@ -339,6 +373,23 @@ pub fn configure(ifname: &str, key: &KeyPair, listen_port: u16, peers: &[Peer]) 
     Ok(())
 }
 
+/// Change some peers, leaving the others (and their sessions) alone.
+#[cfg(target_os = "linux")]
+pub fn update(ifname: &str, updates: &[PeerUpdate]) -> Result<()> {
+    if updates.is_empty() {
+        return Ok(());
+    }
+    let socket = sys::Socket::open()?;
+    let family = family_id(&socket)?;
+    // Netlink messages are limited to 64 KiB: a few peers at a time.
+    for chunk in updates.chunks(64) {
+        socket
+            .request(&update_message(family, ifname, chunk)?)
+            .with_context(|| format!("failed to update the peers of WireGuard device {ifname}"))?;
+    }
+    Ok(())
+}
+
 /// The device's peers as the kernel sees them.
 #[cfg(target_os = "linux")]
 pub fn peers(ifname: &str) -> Result<Vec<PeerStatus>> {
@@ -357,6 +408,11 @@ pub fn peers(ifname: &str) -> Result<Vec<PeerStatus>> {
 
 #[cfg(not(target_os = "linux"))]
 pub fn configure(_ifname: &str, _key: &KeyPair, _listen_port: u16, _peers: &[Peer]) -> Result<()> {
+    bail!("kernel WireGuard needs Linux")
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn update(_ifname: &str, _updates: &[PeerUpdate]) -> Result<()> {
     bail!("kernel WireGuard needs Linux")
 }
 
@@ -397,6 +453,25 @@ mod tests {
         let ip = attrs(ips[0].1);
         assert_eq!(ip[1], (WGALLOWEDIP_A_IPADDR, &[10u8, 42, 1, 0][..]));
         assert_eq!(ip[2], (WGALLOWEDIP_A_CIDR_MASK, &[24u8][..]));
+    }
+
+    #[test]
+    fn update_message_keeps_the_device_and_removes_peers() {
+        let changed = Peer { public_key: KeyPair::generate().public(), endpoint: None, allowed_ips: vec![], keepalive: 25 };
+        let gone = Peer { public_key: KeyPair::generate().public(), endpoint: None, allowed_ips: vec![(Ipv4Addr::new(10, 42, 2, 0), 24)], keepalive: 25 };
+        let msg = update_message(30, "litek8s-wg", &[PeerUpdate { peer: changed.clone(), remove: false }, PeerUpdate { peer: gone, remove: true }]).unwrap();
+        let top = attrs(&msg[20..]);
+        // No key, port or replace-peers flag: other peers stay as they are.
+        assert_eq!(top.iter().map(|(k, _)| *k).collect::<Vec<_>>(), vec![WGDEVICE_A_IFNAME, WGDEVICE_A_PEERS]);
+        let peers = attrs(top[1].1);
+        let first = attrs(peers[0].1);
+        assert!(first.iter().all(|(k, _)| *k != WGPEER_A_ENDPOINT), "no endpoint given: the kernel's is kept");
+        assert_eq!(first.iter().find(|(k, _)| *k == WGPEER_A_FLAGS).unwrap().1, WGPEER_F_REPLACE_ALLOWEDIPS.to_ne_bytes());
+        let ips = attrs(first.iter().find(|(k, _)| *k == WGPEER_A_ALLOWEDIPS).unwrap().1);
+        assert!(ips.is_empty());
+        let second = attrs(peers[1].1);
+        assert_eq!(second.iter().map(|(k, _)| *k).collect::<Vec<_>>(), vec![WGPEER_A_PUBLIC_KEY, WGPEER_A_FLAGS]);
+        assert_eq!(second[1].1, WGPEER_F_REMOVE_ME.to_ne_bytes());
     }
 
     #[test]

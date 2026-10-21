@@ -27,6 +27,7 @@ mod pod;
 pub(crate) mod probe;
 pub mod protocol;
 mod proxy;
+pub mod relay;
 pub mod runtime;
 mod volumes;
 
@@ -167,6 +168,8 @@ pub struct Agent<R: PodRuntime> {
     gateway_ip: tokio::sync::OnceCell<Option<String>>,
     proxy: Arc<proxy::Proxy>,
     overlay: Option<Arc<overlay::Overlay>>,
+    /// The server takes `OverlayStatus` reports on this connection.
+    overlay_reports: std::sync::atomic::AtomicBool,
     /// pod uid → its persistent volume claims (volume metrics).
     claims: Mutex<HashMap<String, Vec<crate::obs::node::ClaimRef>>>,
     /// Observability settings from the server, and the sampler task.
@@ -199,6 +202,7 @@ impl<R: PodRuntime> Agent<R> {
             gateway_ip: tokio::sync::OnceCell::new(),
             proxy: Arc::new(proxy::Proxy::default()),
             overlay: overlay.map(Arc::new),
+            overlay_reports: Default::default(),
             claims: Mutex::default(),
             obs: Mutex::default(),
         });
@@ -216,6 +220,9 @@ impl<R: PodRuntime> Agent<R> {
         });
         let _ = agent.proxy.in_pod.set(in_pod);
         agent.proxy.direct.store(agent.rt.reaches_pods_directly(), Ordering::Relaxed);
+        if agent.overlay.is_some() {
+            tokio::spawn(overlay_loop(agent.clone()));
+        }
         tokio::spawn(proxy::run(agent.proxy.clone(), agent.rt.clone()));
         let exits = agent.clone();
         tokio::spawn(async move {
@@ -415,7 +422,10 @@ impl<R: PodRuntime> Agent<R> {
                 }
             }
         });
-        let features = crate::obs::AGENT_FEATURES.iter().map(|f| f.to_string()).collect();
+        let mut features: Vec<String> = crate::obs::AGENT_FEATURES.iter().map(|f| f.to_string()).collect();
+        if self.overlay.is_some() {
+            features.push(OVERLAY_STATUS_FEATURE.into());
+        }
         tx.send(Frame::Control(Message::Hello { node: self.config.node.clone(), features }))
             .await
             .ok()
@@ -482,8 +492,9 @@ impl<R: PodRuntime> Agent<R> {
 
     async fn handle(self: &Arc<Self>, link: &Arc<Link>, msg: Message) {
         match msg {
-            Message::Welcome { api_host, api_port, cluster_dns, obs, .. } => {
+            Message::Welcome { api_host, api_port, cluster_dns, obs, overlay_status, .. } => {
                 *self.api.lock().unwrap() = Some(ApiEndpoint { host: api_host, port: api_port, cluster_dns });
+                self.overlay_reports.store(overlay_status, Ordering::Relaxed);
                 self.link.send_replace(Some(link.clone()));
                 obs::configure(self, obs);
             }
@@ -491,10 +502,10 @@ impl<R: PodRuntime> Agent<R> {
             Message::Resync => {
                 self.link.send_replace(Some(link.clone()));
             }
-            Message::Peers { peers } => {
+            Message::Peers { peers, relay } => {
                 if let Some(overlay) = self.overlay.clone() {
                     tokio::spawn(async move {
-                        if let Err(e) = overlay.apply(&peers).await {
+                        if let Err(e) = overlay.apply(&peers, relay).await {
                             eprintln!("node-agent: WireGuard peers not applied: {e:#}");
                         }
                     });
@@ -898,6 +909,9 @@ pub struct NodeNetwork {
     pub node_ip: String,
     /// UDP port of the WireGuard overlay; `None` runs without one.
     pub wireguard_port: Option<u16>,
+    /// This node's public address (behind 1:1 NAT, e.g. a cloud VM): the
+    /// overlay endpoint other nodes use, and the Node's ExternalIP.
+    pub external_ip: Option<String>,
 }
 
 /// The pod CIDR this node had at its last join (kept in `join.json`).
@@ -960,7 +974,13 @@ pub async fn node_agent_with(
     let mut node = describe_node(&rt, &node_name, &node_ip, &network.pod_cidr).await?;
     if let Some(o) = &overlay {
         node["metadata"]["annotations"][overlay::ANNOTATION_PUBLIC_KEY] = json!(o.public_key());
-        node["metadata"]["annotations"][overlay::ANNOTATION_ENDPOINT] = json!(format!("{node_ip}:{}", o.port()));
+        let host = network.external_ip.as_deref().unwrap_or(&node_ip);
+        node["metadata"]["annotations"][overlay::ANNOTATION_ENDPOINT] = json!(format!("{host}:{}", o.port()));
+    }
+    if let Some(ip) = &network.external_ip {
+        if let Some(addresses) = node.pointer_mut("/status/addresses").and_then(Value::as_array_mut) {
+            addresses.insert(1, json!({"type": "ExternalIP", "address": ip}));
+        }
     }
     if let Some(grace) = grace_period {
         node["metadata"]["annotations"][ANNOTATION_GRACE_PERIOD] = json!(grace.as_secs().to_string());
@@ -976,6 +996,47 @@ pub async fn node_agent_with(
     let agent = Agent::with_overlay(rt, AgentConfig { node_name, root_dir, node, node_ip }, overlay);
     tokio::spawn(kubelet::serve(agent.clone(), kubelet::PORT));
     Ok(agent)
+}
+
+/// The `Hello` feature of agents that report their overlay peers.
+pub(crate) const OVERLAY_STATUS_FEATURE: &str = "overlay-status";
+
+/// Watch the overlay's peers and report changes to the server (each new
+/// connection gets the whole report again, and it is repeated now and then
+/// so the server recomputes routes after changes no report shows, such as
+/// a relay label).
+async fn overlay_loop<R: PodRuntime>(agent: Arc<Agent<R>>) {
+    const RESEND: Duration = Duration::from_secs(300);
+    let Some(overlay) = agent.overlay.clone() else { return };
+    let mut sent: Option<(usize, relay::Reports, tokio::time::Instant)> = None;
+    let mut failing = false;
+    loop {
+        tokio::time::sleep(overlay::TICK).await;
+        let reports = match overlay.tick().await {
+            Ok(r) => {
+                failing = false;
+                r
+            }
+            Err(e) => {
+                if !failing {
+                    eprintln!("node-agent: cannot read the WireGuard peers: {e:#}");
+                }
+                failing = true;
+                continue;
+            }
+        };
+        if !agent.overlay_reports.load(Ordering::Relaxed) {
+            continue;
+        }
+        let Some(link) = agent.link() else { continue };
+        let id = Arc::as_ptr(&link) as usize;
+        if sent.as_ref().is_some_and(|(l, r, at)| *l == id && *r == reports && at.elapsed() < RESEND) {
+            continue;
+        }
+        if link.send(Message::OverlayStatus { peers: reports.clone() }).await {
+            sent = Some((id, reports, tokio::time::Instant::now()));
+        }
+    }
 }
 
 /// Run an agent inside the API server process, connected by a pipe.
@@ -1003,6 +1064,9 @@ pub async fn run_remote<R: PodRuntime>(agent: Arc<Agent<R>>, mut client: crate::
                 backoff = Duration::from_millis(500);
                 failures = 0;
                 eprintln!("node-agent: connected to {}", client.server_host());
+                if let Some(overlay) = &agent.overlay {
+                    overlay.set_server_host(client.server_host()).await;
+                }
                 let session = agent.session(io);
                 tokio::pin!(session);
                 let mut probe = tokio::time::interval(Duration::from_secs(2));

@@ -18,6 +18,11 @@ litek8s agent --join https://192.168.1.10:6443 --token K10<sha256 of CA>::<secre
   pins the server's CA by that hash, checks a per-node password and gets a
   pod CIDR; pods talk across nodes over a WireGuard overlay (UDP 51820,
   `--wireguard-port`; `--no-wireguard` to skip).
+- Nodes behind NAT work as they are: pairs with no direct path are relayed
+  by a server (or nodes labeled `litek8s.dev/relay=true`). A cloud VM whose
+  own address is private: `--node-external-ip <public>`. Routes per node:
+  annotation `litek8s.dev/wireguard-routes` (`direct` / `via <relay>`),
+  `litek8s tree`, metrics `litek8s_overlay_*` (docs/networking.md).
 - `--node-grace-period 15m` for a node that sleeps (a laptop).
 - `--runtime auto|crun|docker` (auto: crun on Linux as root when installed).
 - Node heartbeats renew Leases in `kube-node-lease`; a node silent past the

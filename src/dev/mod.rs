@@ -1374,6 +1374,7 @@ async fn inner_apiserver(o: InnerOptions) -> Result<()> {
         in_cluster_port: Some(443),
         runtime: crate::kube::agent::RuntimeChoice::Crun,
         node_ip: None,
+        node_external_ip: None,
         advertise_address: None,
         network: crate::kube::join::ClusterNetwork::default(),
         token: None,

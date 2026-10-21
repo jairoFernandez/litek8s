@@ -87,6 +87,10 @@ async fn sample_loop<R: PodRuntime>(agent: Arc<Agent<R>>) {
             return;
         };
         collector = Some(c);
+        let mut samples = samples;
+        if let Some(overlay) = &agent.overlay {
+            samples.extend(overlay.metrics(&node));
+        }
         let (series, values) = ids.encode(samples);
         let _ = link.send(Message::Metrics { ts: next, series, values }).await;
 

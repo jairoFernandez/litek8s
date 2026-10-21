@@ -83,6 +83,9 @@ pub struct ApiServerConfig {
     /// The local node's address (default: the source address of the
     /// default route).
     pub node_ip: Option<std::net::IpAddr>,
+    /// The local node's public address (its overlay endpoint; behind 1:1
+    /// NAT such as a cloud VM's).
+    pub node_external_ip: Option<std::net::IpAddr>,
     /// The address joining nodes use for this server (default: `node_ip`),
     /// for the printed join command.
     pub advertise_address: Option<String>,
@@ -543,6 +546,7 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
             cluster_cidr: state.network.cluster_cidr.clone(),
             node_ip: node_ip.clone(),
             wireguard_port: config.wireguard_port,
+            external_ip: config.node_external_ip.map(|ip| ip.to_string()),
         };
         match super::agent::node_agent(config.runtime, Some(node_name), node_dir, network).await {
             Ok(agent) => Some(agent),

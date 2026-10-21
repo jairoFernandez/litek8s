@@ -27,6 +27,7 @@ pub const DOCS: &[Doc] = &[
     Doc { path: "docker.md", description: "The Docker Engine API on litek8s", text: include_str!("../../docs/docker.md") },
     Doc { path: "observability.md", description: "Built-in metrics, PromQL subset, log search, alerts", text: include_str!("../../docs/observability.md") },
     Doc { path: "ha.md", description: "HA control plane with Raft", text: include_str!("../../docs/ha.md") },
+    Doc { path: "networking.md", description: "The pod overlay across nodes: NAT, relays, routes, overlay metrics", text: include_str!("../../docs/networking.md") },
     Doc { path: "crds.md", description: "CRDs: schemas, CEL, server-side apply", text: include_str!("../../docs/crds.md") },
     Doc { path: "ui.md", description: "litek8s ui, the terminal UI", text: include_str!("../../docs/ui.md") },
     Doc { path: "CONFORMANCE.md", description: "Kubernetes conformance score and what fails", text: include_str!("../../compat/CONFORMANCE.md") },
