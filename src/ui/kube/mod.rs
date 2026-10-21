@@ -103,6 +103,9 @@ pub fn endpoint_for(cfg: &serde_yaml::Value, context: &str, dir: &Path) -> Resul
         None
     };
     let mut ep = Endpoint::parse_http(server, tls)?;
+    if let (Some(name), super::client::Transport::Tls { server_name, .. }) = (cluster["tls-server-name"].as_str(), &mut ep.transport) {
+        *server_name = name.to_string();
+    }
     ep.creds = creds;
     let user_dir = user["x-litek8s-dir"].as_str().map(std::path::PathBuf::from).unwrap_or_else(|| dir.to_path_buf());
     let token = match (user["token"].as_str(), user["tokenFile"].as_str()) {
@@ -391,6 +394,14 @@ mod tests {
         let ep = endpoint_for(&cfg, "gke", dir.path()).unwrap();
         assert!(ep.creds.is_some() && ep.headers.is_empty());
         assert!(endpoint_for(&cfg, "nope", dir.path()).is_err());
+        // `tls-server-name`: the name checked, not the host connected to.
+        let cfg: serde_yaml::Value = serde_yaml::from_str(
+            "clusters:\n- name: home\n  cluster: {server: 'https://192.168.1.10:6443', insecure-skip-tls-verify: true, tls-server-name: kubernetes.default.svc}\n\
+             contexts:\n- name: home\n  context: {cluster: home, user: home}\nusers:\n- name: home\n  user: {}\n",
+        )
+        .unwrap();
+        let ep = endpoint_for(&cfg, "home", dir.path()).unwrap();
+        assert!(matches!(&ep.transport, super::super::client::Transport::Tls { addr, server_name, .. } if addr == "192.168.1.10:6443" && server_name == "kubernetes.default.svc"));
     }
 }
 

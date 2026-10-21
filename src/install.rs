@@ -7,8 +7,10 @@
 //! `litek8s-agent.service` (`litek8s agent --join`) with sensible defaults
 //! filled in, keeps the join token in /etc/litek8s/<role>.env (0600, never on
 //! a command line), enables and (re)starts the unit and waits until the
-//! server answers /readyz or the agent's Node is Ready. Re-running it
-//! replaces the flags and restarts the service.
+//! server answers /readyz or the agent's Node is Ready. Re-running it with
+//! other flags (or another binary) replaces them and restarts the service;
+//! with the same ones it leaves the service alone. `remote.rs` runs it on
+//! another machine over SSH.
 //!
 //! The units use KillMode=process: restarting or upgrading litek8s leaves
 //! the crun shims and the containers they run alone (they live in
@@ -121,7 +123,7 @@ fn has_flag(args: &[String], names: &[&str]) -> bool {
 }
 
 /// Remove `--name value` / `--name=value` from `args`, returning the value.
-fn take_flag(args: &mut Vec<String>, name: &str) -> Result<Option<String>> {
+pub fn take_flag(args: &mut Vec<String>, name: &str) -> Result<Option<String>> {
     let mut value = None;
     let mut i = 0;
     while i < args.len() {
@@ -428,17 +430,17 @@ fn write_file(path: &Path, contents: &str, mode: u32) -> Result<()> {
 }
 
 /// Put the running binary at /usr/local/bin/litek8s (the units run that
-/// path), unless it is already there.
-fn ensure_binary() -> Result<()> {
+/// path), unless it is already there. Whether it changed.
+fn ensure_binary() -> Result<bool> {
     use std::os::unix::fs::PermissionsExt;
     let exe = std::env::current_exe().context("cannot find the running binary")?.canonicalize()?;
     let target = Path::new(BIN);
     if target.canonicalize().ok().as_deref() == Some(exe.as_path()) {
-        return Ok(());
+        return Ok(false);
     }
     if let (Ok(a), Ok(b)) = (std::fs::metadata(&exe), std::fs::metadata(target)) {
         if a.len() == b.len() && std::fs::read(&exe)? == std::fs::read(target)? {
-            return Ok(());
+            return Ok(false);
         }
     }
     std::fs::create_dir_all(target.parent().expect("has a parent"))?;
@@ -448,7 +450,7 @@ fn ensure_binary() -> Result<()> {
     std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))?;
     std::fs::rename(&tmp, target)?;
     println!("installed {} (from {})", target.display(), exe.display());
-    Ok(())
+    Ok(true)
 }
 
 pub struct InstallOptions {
@@ -493,29 +495,40 @@ pub async fn install(mut o: InstallOptions) -> Result<()> {
             bail!("this machine is not ready for litek8s (--skip-checks to go on anyway):\n  - {}", problems.join("\n  - "));
         }
     }
-    ensure_binary()?;
-    std::fs::create_dir_all(ETC_DIR)?;
-    match &plan.token {
-        Some(token) => write_file(Path::new(role.env_file()), &render_env(token), 0o600)?,
-        None => {
-            let _ = std::fs::remove_file(role.env_file());
+    let unit = render_unit(&plan, svc.wireguard);
+    let env_file = plan.token.as_deref().map(render_env);
+    let same_unit = std::fs::read_to_string(role.unit_path()).ok().as_deref() == Some(unit.as_str());
+    let same_env = std::fs::read_to_string(role.env_file()).ok() == env_file;
+    let new_binary = ensure_binary()?;
+    // Nothing to do when the same binary already runs the same flags: a
+    // re-run (`litek8s cluster apply`) leaves the service alone.
+    let changed = new_binary || !same_unit || !same_env || !unit_active(role);
+    if changed {
+        std::fs::create_dir_all(ETC_DIR)?;
+        match &env_file {
+            Some(text) => write_file(Path::new(role.env_file()), text, 0o600)?,
+            None => {
+                let _ = std::fs::remove_file(role.env_file());
+            }
         }
-    }
-    if let Some(kubeconfig) = &svc.kubeconfig {
-        // The server rewrites it on every start; an existing file keeps
-        // its mode.
-        if let Some(parent) = kubeconfig.parent() {
-            std::fs::create_dir_all(parent)?;
+        if let Some(kubeconfig) = &svc.kubeconfig {
+            // The server rewrites it on every start; an existing file keeps
+            // its mode.
+            if let Some(parent) = kubeconfig.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let _ = std::fs::OpenOptions::new().write(true).create(true).truncate(false).mode(0o600).open(kubeconfig);
+            std::fs::set_permissions(kubeconfig, std::fs::Permissions::from_mode(0o600))?;
         }
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let _ = std::fs::OpenOptions::new().write(true).create(true).truncate(false).mode(0o600).open(kubeconfig);
-        std::fs::set_permissions(kubeconfig, std::fs::Permissions::from_mode(0o600))?;
+        write_file(&role.unit_path(), &unit, 0o644)?;
+        systemctl(&["daemon-reload"])?;
+        systemctl(&["enable", "--quiet", role.unit()])?;
+        systemctl(&["restart", role.unit()])?;
+        println!("started {} (logs: journalctl -u {} -f)", role.unit(), role.unit().trim_end_matches(".service"));
+    } else {
+        println!("{} already runs this binary with these flags: nothing to change", role.unit());
     }
-    write_file(&role.unit_path(), &render_unit(&plan, svc.wireguard), 0o644)?;
-    systemctl(&["daemon-reload"])?;
-    systemctl(&["enable", "--quiet", role.unit()])?;
-    systemctl(&["restart", role.unit()])?;
-    println!("started {} (logs: journalctl -u {} -f)", role.unit(), role.unit().trim_end_matches(".service"));
     let ready = match role {
         Role::Server => wait_server(&svc, o.timeout).await,
         Role::Agent => wait_agent(&svc, plan.token.as_deref().unwrap_or_default(), o.timeout).await,
@@ -535,7 +548,54 @@ pub async fn install(mut o: InstallOptions) -> Result<()> {
             println!("node {node} joined {} and is Ready", svc.join.as_deref().unwrap_or_default());
         }
     }
+    if std::env::var(RESULT_ENV).is_ok_and(|v| v == "1") {
+        print_result(role, &svc, changed).await;
+    }
     Ok(())
+}
+
+/// Set by `litek8s install --ssh` (and `cluster apply`) on the remote
+/// install: it then ends with one [`RESULT_MARKER`] line of JSON
+/// ([`InstallResult`]) for the machine that ran it.
+pub const RESULT_ENV: &str = "LITEK8S_INSTALL_RESULT";
+pub const RESULT_MARKER: &str = "@@litek8s-install-result@@";
+
+/// What a remote install reports back.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallResult {
+    /// Whether the binary, the unit or the token changed (the service was
+    /// (re)started).
+    pub changed: bool,
+    /// The node it runs (empty for a server with --no-node).
+    #[serde(default)]
+    pub node: String,
+    pub version: String,
+    /// Server: the URL nodes and servers join.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Server: the join token.
+    #[serde(default)]
+    pub token: Option<String>,
+    /// Server: the cluster CA (PEM), checked against the token.
+    #[serde(default)]
+    pub ca: Option<String>,
+}
+
+async fn print_result(role: Role, svc: &ServiceArgs, changed: bool) {
+    let node = if role == Role::Agent || svc.run_node { svc.node_name.clone().unwrap_or_else(crate::kube::agent::default_node_name) } else { String::new() };
+    let mut result = InstallResult { changed, node, version: crate::config::VERSION.to_string(), ..Default::default() };
+    if role == Role::Server {
+        let token = svc.data_dir.as_ref().and_then(|d| std::fs::read_to_string(d.join("join-token")).ok()).map(|t| t.trim().to_string());
+        if let Some(t) = &token
+            && let Ok(parsed) = crate::kube::join::Token::parse(t)
+        {
+            result.ca = crate::kube::join::fetch_ca(&loopback(svc).to_string(), &parsed).await.ok();
+        }
+        result.url = Some(join_url(svc));
+        result.token = token;
+    }
+    println!("{RESULT_MARKER} {}", serde_json::to_string(&result).unwrap_or_default());
 }
 
 fn print_server_summary(svc: &ServiceArgs) {
@@ -568,13 +628,18 @@ async fn http_status(addr: SocketAddr, path: &str) -> Result<u16> {
     line.split_whitespace().nth(1).and_then(|s| s.parse().ok()).context("not an HTTP answer")
 }
 
-async fn wait_server(svc: &ServiceArgs, timeout: Duration) -> Result<()> {
+/// Where this machine reaches the server it runs.
+fn loopback(svc: &ServiceArgs) -> SocketAddr {
     let listen = svc.listen.unwrap_or_else(|| SocketAddr::from(([127, 0, 0, 1], 6443)));
-    let addr = match listen.ip() {
+    match listen.ip() {
         IpAddr::V4(ip) if ip.is_unspecified() => SocketAddr::from(([127, 0, 0, 1], listen.port())),
         IpAddr::V6(ip) if ip.is_unspecified() => SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), listen.port()),
         _ => listen,
-    };
+    }
+}
+
+async fn wait_server(svc: &ServiceArgs, timeout: Duration) -> Result<()> {
+    let addr = loopback(svc);
     let started = Instant::now();
     println!("waiting for the API server to be ready (http://{addr}/readyz)");
     loop {

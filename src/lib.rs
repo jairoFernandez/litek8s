@@ -1,8 +1,6 @@
 #![recursion_limit = "256"]
 pub mod cli;
 pub mod cluster;
-pub mod cluster_manifest;
-pub mod cluster_orchestrator;
 pub mod config;
 pub mod control_plane;
 #[cfg(feature = "llm")]
@@ -28,6 +26,7 @@ pub mod obs;
 pub mod protocol;
 pub mod proxy;
 pub mod reconciler;
+pub mod remote;
 pub mod runtime;
 pub mod service;
 pub mod store;

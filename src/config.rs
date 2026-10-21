@@ -32,7 +32,6 @@ const HOME_PREFIX: &str = "lkdev-";
 /// $LITEK8S_HOME/kubeconfig                          (else ~/.kube/config)
 /// $LITEK8S_HOME/data/{dev,vm,vpn,node-agent,...}    (else the data dir)
 /// $LITEK8S_HOME/run/{daemon,agent}.sock             (else $XDG_RUNTIME_DIR/litek8s)
-/// $LITEK8S_HOME/clusters                            (else ~/.litek8s/clusters)
 /// ```
 ///
 /// The variables for a single path (`LITEK8S_DEV_HOME`,
@@ -59,8 +58,6 @@ pub struct Paths {
     pub agent_socket: PathBuf,
     /// `litek8s node-agent`'s default `--node-dir`.
     pub node_agent_dir: PathBuf,
-    /// `litek8s cluster` (Docker-backed clusters of the legacy daemon).
-    pub docker_clusters_dir: PathBuf,
     /// What local clusters' kubeconfig contexts start with.
     pub context_prefix: String,
 }
@@ -117,7 +114,6 @@ impl Paths {
                 None => var("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|| env::temp_dir().join(APP_DIR)).join(APP_DIR).join(SOCKET_FILE),
             },
             agent_socket: run_dir.join("agent.sock"),
-            docker_clusters_dir: user_dir.join("clusters"),
             home,
             user_dir,
             data_dir,
@@ -246,7 +242,6 @@ mod tests {
             ("daemon_socket", p.daemon_socket.clone()),
             ("agent_socket", p.agent_socket.clone()),
             ("node_agent_dir", p.node_agent_dir.clone()),
-            ("docker_clusters_dir", p.docker_clusters_dir.clone()),
             ("state file", p.data_dir.clone().unwrap().join(STATE_FILE)),
             // What the rest of litek8s derives from them.
             ("vm assets", crate::dev::default_vm_assets_dir(&dev_home)),
@@ -275,7 +270,6 @@ mod tests {
         assert_eq!(p.kubeconfig, Path::new("/Users/me/.kube/config"));
         assert_eq!(p.daemon_socket, Path::new("/run/user/501/litek8s/daemon.sock"));
         assert_eq!(p.agent_socket, Path::new("/run/user/501/litek8s/agent.sock"));
-        assert_eq!(p.docker_clusters_dir, Path::new("/Users/me/.litek8s/clusters"));
         assert_eq!(p.context_prefix, "litek8s-");
         // A variable for one path wins over $LITEK8S_HOME.
         let vars = [("LITEK8S_HOME", "/h"), ("KUBECONFIG", "/k/a:/k/b"), ("LITEK8S_DOCKER_SOCKET", "/s.sock"), ("LITEK8S_DEV_HOME", "/d")];
