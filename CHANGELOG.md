@@ -2,6 +2,11 @@
 
 ## 0.2.3
 
+- **Cluster DNS on multi-node clusters:** a node that joined while the API
+  server was still starting was told there was no cluster DNS, and its pods
+  resolved Service names on the Internet (e.g. `web` → 127.0.53.53). The
+  server now welcomes agents only once DNS and the overlay are ready, and
+  ClusterFirst pods get the cluster DNS alone, never the node's resolvers.
 - **`litek8s ui`:** the Home breakdown bars agree with their numbers. Each
   bar is its row's value against a scale the box names (CPU: 1 CPU; memory:
   the VM's or sandbox's limit; disk: the total), not against the largest
