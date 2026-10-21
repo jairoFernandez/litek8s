@@ -1,0 +1,38 @@
+# Helm chart end-to-end test on litek8s, in place of helm/kind-action.
+# Copy to .github/workflows/ and point the paths at your chart.
+name: helm-e2e
+on: [push, pull_request]
+
+jobs:
+  e2e:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # A one-node cluster in about a second; kubectl and Helm (both on
+      # GitHub's runners) use it through KUBECONFIG.
+      - uses: jairoFernandez/litek8s/.github/actions/setup-litek8s@main
+
+      - name: Install the chart
+        run: |
+          helm lint ./chart
+          helm install hello ./chart --wait --timeout 3m
+          kubectl get pods,svc -o wide
+
+      - name: helm test
+        run: helm test hello --timeout 2m --logs
+
+      - name: Upgrade and roll back
+        run: |
+          helm upgrade hello ./chart --set message="hello again" --wait --timeout 2m
+          # The Service's endpoints follow the rollout within a few seconds.
+          for i in $(seq 10); do
+            kubectl exec deploy/hello -- wget -qO- -T 3 http://hello | grep -q "hello again" && break
+            [ "$i" -lt 10 ] && sleep 2 || exit 1
+          done
+          helm rollback hello 1 --wait --timeout 2m
+          helm history hello
+
+      - name: Diagnostics
+        if: failure()
+        run: litek8s-diagnose

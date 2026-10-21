@@ -1,0 +1,203 @@
+name: ci-bench
+
+# The examples in examples/github-actions/ on litek8s and on what they
+# replace, on the same kind of runner: kind (helm/kind-action) for the
+# Kubernetes ones, the runner's own dockerd for docker compose. Each job
+# records its time to a ready cluster, the time of the example's steps and
+# the peak memory the cluster and the workload took; the report job adds
+# every job's total time and writes a table to the run's summary.
+# Numbers in docs/ci.md.
+
+on:
+  workflow_dispatch:
+    inputs:
+      litek8s-version:
+        description: litek8s release (or latest)
+        default: latest
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  bench:
+    name: ${{ matrix.example }} on ${{ matrix.engine }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {example: helm, engine: litek8s}
+          - {example: helm, engine: kind}
+          - {example: compose, engine: litek8s}
+          - {example: compose, engine: docker}
+          - {example: multi-node, engine: litek8s}
+          - {example: multi-node, engine: kind}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start the clock
+        run: echo "SETUP_START=$(date +%s.%N)" >> "$GITHUB_ENV"
+
+      - name: litek8s
+        if: matrix.engine == 'litek8s'
+        uses: ./.github/actions/setup-litek8s
+        with:
+          version: ${{ inputs.litek8s-version || 'latest' }}
+          nodes: ${{ matrix.example == 'multi-node' && '3' || '1' }}
+
+      - name: kind config
+        if: matrix.engine == 'kind'
+        run: |
+          if [[ "${{ matrix.example }}" == multi-node ]]; then
+            printf 'kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnodes:\n- role: control-plane\n- role: worker\n- role: worker\n' > "$RUNNER_TEMP/kind.yaml"
+          else
+            printf 'kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\n' > "$RUNNER_TEMP/kind.yaml"
+          fi
+
+      - name: kind
+        if: matrix.engine == 'kind'
+        uses: helm/kind-action@v1
+        with:
+          config: ${{ runner.temp }}/kind.yaml
+
+      - name: Wait for every node to be Ready
+        if: matrix.engine != 'docker'
+        run: |
+          kubectl wait --for=condition=Ready nodes --all --timeout=180s
+          # kind keeps pods off its control plane; litek8s's runs them too.
+          # The same three schedulable nodes on both.
+          if [[ "${{ matrix.engine }}" == kind ]]; then
+            kubectl taint nodes --all node-role.kubernetes.io/control-plane:NoSchedule- || true
+          fi
+
+      - name: Time to ready
+        run: |
+          ready=$(echo "$(date +%s.%N) - $SETUP_START" | bc)
+          echo "READY_SECONDS=$(printf '%.1f' "$ready")" >> "$GITHUB_ENV"
+          echo "ready after ${ready}s"
+
+      - name: Start the memory sampler
+        run: |
+          # Every 200 ms, cgroup memory.current - inactive_file (what
+          # `docker stats` shows) of what the engine runs: litek8s's whole
+          # sandbox (API server, controllers, node agents, slirp4netns, pods,
+          # Docker API containers), or every Docker container (kind's nodes
+          # with everything in them, compose's services). dockerd and
+          # containerd run on the runner either way and are not counted.
+          if [[ "${{ matrix.engine }}" == litek8s ]]; then
+            pid=$(litek8s dev list -o json | jq -r .environment.pid)
+            # The delegated scope `dev up` started (the supervisor sits in
+            # <scope>/supervisor, the rest below <scope>/sandbox).
+            cgs=/sys/fs/cgroup$(cut -d: -f3 "/proc/$pid/cgroup" | sed -E 's#(/litek8s-dev-[^/]*\.scope).*#\1#')
+          else
+            cgs="/sys/fs/cgroup/system.slice/docker-*.scope"
+          fi
+          cat > "$RUNNER_TEMP/sample.sh" <<SAMPLE
+          max=0; first=""
+          while :; do
+            sum=0
+            for cg in $cgs; do
+              [ -f "\$cg/memory.current" ] || continue
+              sum=\$(( sum + \$(cat "\$cg/memory.current") - \$(awk '/^inactive_file /{print \$2}' "\$cg/memory.stat") ))
+            done
+            mib=\$(( sum / 1048576 ))
+            [ -n "\$first" ] || { first=\$mib; echo \$mib > "$RUNNER_TEMP/mem-idle"; }
+            (( mib > max )) && { max=\$mib; echo \$max > "$RUNNER_TEMP/mem-peak"; }
+            sleep 0.2
+          done
+          SAMPLE
+          nohup bash "$RUNNER_TEMP/sample.sh" >/dev/null 2>&1 &
+          sleep 1; echo "idle: $(cat "$RUNNER_TEMP/mem-idle") MiB"
+
+      - name: Run the example's steps
+        run: |
+          set -o pipefail
+          examples/github-actions/run.sh ${{ matrix.example }} | tee "$RUNNER_TEMP/steps.log"
+          grep -o 'STEP_SECONDS=.*' "$RUNNER_TEMP/steps.log" >> "$GITHUB_ENV"
+
+      - name: Diagnostics
+        if: failure() && matrix.engine == 'litek8s'
+        run: litek8s-diagnose ci
+
+      - name: Diagnostics
+        if: failure() && matrix.engine == 'kind'
+        run: |
+          kubectl get nodes,pods -A -o wide; kubectl get events -A --sort-by=.lastTimestamp | tail -n 60
+
+      - name: Record
+        if: always()
+        run: |
+          idle=$(cat "$RUNNER_TEMP/mem-idle" 2>/dev/null); peak=$(cat "$RUNNER_TEMP/mem-peak" 2>/dev/null)
+          jq -n --arg example "${{ matrix.example }}" --arg engine "${{ matrix.engine }}" \
+            --arg ready "${READY_SECONDS:-}" --arg steps "${STEP_SECONDS:-}" --arg idle "$idle" --arg peak "$peak" \
+            '{example: $example, engine: $engine, ready_seconds: $ready, steps_seconds: $steps, idle_mib: $idle, peak_mib: $peak}' |
+            tee "$RUNNER_TEMP/result.json"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-${{ matrix.example }}-${{ matrix.engine }}
+          path: ${{ runner.temp }}/result.json
+
+  report:
+    needs: bench
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bench-*
+      - name: Table
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=50" \
+            --jq '.jobs[] | select(.name | test(" on ")) | {name, seconds: ((.completed_at | fromdate) - (.started_at | fromdate))}' > jobs.json
+          {
+            echo "| example | engine | time to ready (s) | example steps (s) | job total (s) | memory idle (MiB) | memory peak (MiB) |"
+            echo "|---|---|---|---|---|---|---|"
+            for f in bench-*/result.json; do
+              jq -r --slurpfile jobs jobs.json '
+                . as $r | ($jobs | map(select(.name == "\($r.example) on \($r.engine)")) | .[0].seconds // "") as $total |
+                "| \(.example) | \(.engine) | \(.ready_seconds) | \(.steps_seconds) | \($total) | \(.idle_mib) | \(.peak_mib) |"' "$f"
+            done
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # docs/ci.md's script for other CI systems, as written: on the runner as
+  # a user with sudo, and as root in a privileged ubuntu:24.04 container
+  # (what a GitLab.com job with the Docker executor is).
+  other-ci:
+    name: examples/ci/litek8s-ci.sh (${{ matrix.where }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        where: [shell, privileged-container]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run it
+        run: |
+          cat > "$RUNNER_TEMP/job.sh" <<'JOB'
+          set -eu
+          start=$(date +%s.%N)
+          eval "$(sh examples/ci/litek8s-ci.sh)"
+          echo "cluster after $(echo "$(date +%s.%N) - $start" | bc) s"
+          kubectl get nodes -o wide
+          kubectl create deployment web --image=nginx:1.27-alpine
+          kubectl rollout status deployment/web --timeout=120s || { bash .github/actions/setup-litek8s/diagnose.sh ci; exit 1; }
+          curl -fsS --unix-socket "${DOCKER_HOST#unix://}" http://docker/version; echo
+          echo "done after $(echo "$(date +%s.%N) - $start" | bc) s"
+          JOB
+          if [[ "${{ matrix.where }}" == shell ]]; then
+            # litek8s 0.2.0 ignores LITEK8S_DEV_NETWORK and uses pasta when it
+            # is installed (docs/ci.md); not needed from 0.2.1 on.
+            sudo mv /usr/bin/pasta /usr/bin/pasta.off
+            bash "$RUNNER_TEMP/job.sh"
+          else
+            docker run --rm --privileged -v "$PWD:/src" -w /src \
+              -v /usr/bin/kubectl:/usr/local/bin/kubectl:ro -v "$RUNNER_TEMP/job.sh:/job.sh:ro" \
+              ubuntu:24.04 bash -c 'apt-get update -qq && apt-get install -y -qq bc curl >/dev/null && bash /job.sh'
+          fi

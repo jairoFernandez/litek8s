@@ -1310,18 +1310,7 @@ fn parse_url(url: &str) -> Result<Url> {
 
 pub(crate) async fn send(method: hyper::Method, url: &str, headers: &[(&str, String)]) -> Result<hyper::Response<hyper::body::Incoming>> {
     let u = parse_url(url)?;
-    let tcp = tokio::time::timeout(Duration::from_secs(30), tokio::net::TcpStream::connect((dial_host(&u.host), u.port)))
-        .await
-        .with_context(|| format!("timed out connecting to {}", u.host))?
-        .with_context(|| format!("failed to connect to {}", u.host))?;
-    let _ = tcp.set_nodelay(true);
-    let io: Box<dyn Io> = if u.https {
-        let name = rustls::pki_types::ServerName::try_from(u.host.clone())?;
-        let tls = tokio_rustls::TlsConnector::from(tls_config()).connect(name, tcp).await.with_context(|| format!("TLS handshake with {} failed", u.host))?;
-        Box::new(tls)
-    } else {
-        Box::new(tcp)
-    };
+    let io = open(&u).await?;
     let (mut sender, conn) = hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(io)).await?;
     tokio::spawn(async move {
         let _ = conn.await;
@@ -1340,6 +1329,56 @@ pub(crate) async fn send(method: hyper::Method, url: &str, headers: &[(&str, Str
         .await
         .context("registry did not answer")?
         .map_err(Into::into)
+}
+
+/// A connection to the registry, TLS included. Each address the name
+/// resolves to gets a short try, the way Docker's and containerd's Go
+/// dialers do: a registry host often has several addresses, and one that
+/// does not answer (or a flow a userspace network such as pasta dropped
+/// without a reset, which looks connected) must not hang the pull.
+async fn open(u: &Url) -> Result<Box<dyn Io>> {
+    const CONNECT: Duration = Duration::from_secs(10);
+    const HANDSHAKE: Duration = Duration::from_secs(15);
+    let host = dial_host(&u.host);
+    let addrs: Vec<std::net::SocketAddr> = tokio::time::timeout(Duration::from_secs(30), tokio::net::lookup_host((host.as_str(), u.port)))
+        .await
+        .with_context(|| format!("timed out resolving {}", u.host))?
+        .with_context(|| format!("failed to resolve {}", u.host))?
+        .collect();
+    let mut last = anyhow::anyhow!("{} has no address", u.host);
+    for addr in addrs.iter().take(4) {
+        let tcp = match tokio::time::timeout(CONNECT, tokio::net::TcpStream::connect(addr)).await {
+            Ok(Ok(tcp)) => tcp,
+            Ok(Err(e)) => {
+                last = anyhow::Error::new(e).context(format!("failed to connect to {} ({addr})", u.host));
+                continue;
+            }
+            Err(_) => {
+                last = anyhow::anyhow!("timed out connecting to {} ({addr})", u.host);
+                continue;
+            }
+        };
+        let _ = tcp.set_nodelay(true);
+        if !u.https {
+            return Ok(Box::new(tcp));
+        }
+        let name = rustls::pki_types::ServerName::try_from(u.host.clone())?;
+        match tokio::time::timeout(HANDSHAKE, tokio_rustls::TlsConnector::from(tls_config()).connect(name, tcp)).await {
+            Ok(Ok(tls)) => return Ok(Box::new(tls)),
+            Ok(Err(e)) => last = anyhow::Error::new(e).context(format!("TLS handshake with {} ({addr}) failed", u.host)),
+            Err(_) => last = anyhow::anyhow!("timed out in the TLS handshake with {} ({addr})", u.host),
+        }
+    }
+    Err(last)
+}
+
+/// A small response body (a token, a manifest, a config), read whole within
+/// a minute.
+async fn small_body(resp: hyper::Response<hyper::body::Incoming>) -> Result<Bytes> {
+    Ok(tokio::time::timeout(Duration::from_secs(60), resp.into_body().collect())
+        .await
+        .context("registry stopped sending")??
+        .to_bytes())
 }
 
 /// Where to connect for `host`. In the dev sandbox (and the dev VM) the
@@ -1492,7 +1531,7 @@ impl Session {
         if !resp.status().is_success() {
             bail!("token request to {realm} failed: {}", resp.status());
         }
-        let body = resp.into_body().collect().await?.to_bytes();
+        let body = small_body(resp).await?;
         let json: Value = serde_json::from_slice(&body)?;
         json.get("token")
             .or_else(|| json.get("access_token"))
@@ -1505,7 +1544,7 @@ impl Session {
         let url = self.url("manifests", r);
         let resp = self.get(hyper::Method::GET, &url, Some(MANIFEST_TYPES)).await?;
         let status = resp.status();
-        let body = resp.into_body().collect().await?.to_bytes();
+        let body = small_body(resp).await?;
         if status == hyper::StatusCode::NOT_FOUND {
             bail!("{}: not found", self.reference.canonical());
         }
@@ -1564,7 +1603,7 @@ impl Session {
     }
 
     async fn blob_bytes(&mut self, digest: &str) -> Result<Bytes> {
-        let body = self.blob(digest).await?.into_body().collect().await?.to_bytes();
+        let body = small_body(self.blob(digest).await?).await?;
         Ok(body)
     }
 }

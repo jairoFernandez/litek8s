@@ -11,6 +11,7 @@ A lightweight Kubernetes in one Rust binary, aimed at local development, home la
 ```bash
 cargo build                    # build
 cargo test                     # unit + in-process API tests (no Docker needed)
+cargo nextest run              # the same as CI runs them (.config/nextest.toml; CI also runs compat L0/L1 and examples/github-actions, docs/ci.md)
 cargo run -- apiserver --kubeconfig /tmp/litek8s.kubeconfig   # API server + controllers + a local node
 KUBECONFIG=/tmp/litek8s.kubeconfig kubectl create deployment web --image=nginx
 ```

@@ -28,6 +28,7 @@ export const groups = [
     pages: [
       { slug: 'dev', label: 'Dev clusters', source: 'docs/dev.md' },
       { slug: 'docker', label: 'Docker API', source: 'docs/docker.md' },
+      { slug: 'ci', label: 'CI (GitHub Actions)', source: 'docs/ci.md' },
       { slug: 'ui', label: 'Terminal UI', source: 'docs/ui.md' },
       { slug: 'observability', label: 'Metrics, logs, alerts', source: 'docs/observability.md' },
       { slug: 'clusters', label: 'Clusters over SSH', source: 'docs/clusters.md' },

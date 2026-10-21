@@ -1,0 +1,6 @@
+apiVersion: v2
+name: hello
+description: A small web app with a Service, a ConfigMap and a Helm test
+type: application
+version: 0.1.0
+appVersion: "1.27"

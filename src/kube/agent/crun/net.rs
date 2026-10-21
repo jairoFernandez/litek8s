@@ -191,11 +191,14 @@ route add default via {gw} dev eth0\n",
     )
 }
 
-/// The bridge, its address and forwarding; idempotent.
+/// The bridge, its address and forwarding; idempotent. A fixed MAC, so a
+/// new pod's veth never changes the gateway's (see
+/// [`crate::docker::network::bridge_commands`]).
 pub(crate) fn bridge_commands(subnet: &Subnet) -> String {
     format!(
         "ip link show {BRIDGE} >/dev/null 2>&1 || ip link add {BRIDGE} type bridge; \
-ip addr replace {gw}/{prefix} dev {BRIDGE}; ip link set {BRIDGE} up",
+ip link set {BRIDGE} address {mac}; ip addr replace {gw}/{prefix} dev {BRIDGE}; ip link set {BRIDGE} up",
+        mac = crate::docker::network::mac_for(subnet.gateway()),
         gw = subnet.gateway(),
         prefix = subnet.prefix
     )

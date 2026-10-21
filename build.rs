@@ -37,7 +37,10 @@ fn version() {
     if commit.is_none() && Path::new(".git").exists() {
         commit = git(&["rev-parse", "--short=12", "HEAD"]);
         // Rebuild when HEAD moves: HEAD itself, the branch it names, packed refs.
-        for path in [git(&["rev-parse", "--git-path", "HEAD"]), git(&["rev-parse", "--symbolic-full-name", "HEAD"]).and_then(|r| git(&["rev-parse", "--git-path", &r])), git(&["rev-parse", "--git-path", "packed-refs"])].into_iter().flatten() {
+        // Only files that exist: cargo reruns the script (and rebuilds the
+        // crate) on every build for a missing one, such as packed-refs in
+        // a fresh CI checkout.
+        for path in [git(&["rev-parse", "--git-path", "HEAD"]), git(&["rev-parse", "--symbolic-full-name", "HEAD"]).and_then(|r| git(&["rev-parse", "--git-path", &r])), git(&["rev-parse", "--git-path", "packed-refs"])].into_iter().flatten().filter(|p| Path::new(p).exists()) {
             println!("cargo:rerun-if-changed={path}");
         }
     }

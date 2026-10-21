@@ -1,0 +1,230 @@
+name: Set up litek8s
+description: >-
+  A Kubernetes cluster (and a Docker Engine API) on a GitHub-hosted Linux
+  runner in about a second: installs litek8s, starts `litek8s dev up` and
+  points kubectl, Helm and docker at it. Replaces helm/kind-action and the
+  runner's dockerd for tests.
+author: Jairo Fernandez
+branding:
+  icon: box
+  color: blue
+
+inputs:
+  version:
+    description: >-
+      litek8s release to install (a tag such as v0.2.1), or `latest`. Ignored
+      when `binary` is set.
+    default: latest
+  binary:
+    description: >-
+      Path to a Linux litek8s binary to use instead of a release (one built
+      earlier in the job, for instance).
+    default: ""
+  cluster-name:
+    description: Cluster name; the kube context is `litek8s-<name>`.
+    default: ci
+  nodes:
+    description: >-
+      Nodes: the control plane plus N-1 workers, each joined like a real
+      node (own network, kubelet-like agent and pod CIDR).
+    default: "1"
+  docker:
+    description: >-
+      Export DOCKER_HOST to later steps, so docker, docker compose, buildx
+      and Testcontainers use litek8s's Docker API instead of the runner's
+      dockerd.
+    default: "true"
+  builder:
+    description: >-
+      What `docker build` and compose builds use: `litek8s` (litek8s's own
+      builder, the fastest: exports DOCKER_BUILDKIT=0 and COMPOSE_BAKE=false)
+      or `buildkit` (buildx starts a BuildKit container on litek8s; for
+      secrets, SSH mounts, cache export, multi-platform).
+    default: litek8s
+  network:
+    description: >-
+      Pods' way out of the sandbox: `slirp4netns` (default here) or `pasta`
+      (litek8s's default on desktops). On GitHub's runners pasta now and then
+      drops a TCP flow to a registry without resetting it; slirp4netns did
+      not in our runs (docs/ci.md).
+    default: slirp4netns
+  wait:
+    description: Seconds to wait for every node to be Ready.
+    default: "120"
+  publish:
+    description: >-
+      Where NodePorts and published ports listen: `localhost` (default) or
+      `all` (every address of the runner, for service containers).
+    default: localhost
+
+outputs:
+  version:
+    description: The litek8s version that runs (`litek8s --version`).
+    value: ${{ steps.up.outputs.version }}
+  context:
+    description: The kube context of the cluster (also the current context).
+    value: ${{ steps.up.outputs.context }}
+  kubeconfig:
+    description: The kubeconfig file holding the context (also exported as KUBECONFIG).
+    value: ${{ steps.up.outputs.kubeconfig }}
+  api-url:
+    description: The API server's URL, e.g. https://127.0.0.1:6443.
+    value: ${{ steps.up.outputs.api-url }}
+  docker-socket:
+    description: The Docker API's Unix socket.
+    value: ${{ steps.up.outputs.docker-socket }}
+  docker-host:
+    description: The same as a DOCKER_HOST value (unix://...).
+    value: ${{ steps.up.outputs.docker-host }}
+  ready-seconds:
+    description: Seconds from the start of `litek8s dev up` until every node was Ready.
+    value: ${{ steps.up.outputs.ready-seconds }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install litek8s
+      id: install
+      shell: bash
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+        INPUT_BINARY: ${{ inputs.binary }}
+        ACTION_PATH: ${{ github.action_path }}
+      run: |
+        set -euo pipefail
+        if [[ "$RUNNER_OS" != Linux ]]; then
+          echo "::error::setup-litek8s runs on Linux runners (ubuntu-*). On macOS, litek8s's dev cluster is a VM, and GitHub's macOS runners do not allow nested virtualization."
+          exit 1
+        fi
+        # The runner's disk is slow on first read: the first `kubectl` of a
+        # job spent 3-10 s paging its binary in. Read the clients the next
+        # steps use while litek8s downloads.
+        for tool in kubectl helm docker; do
+          command -v "$tool" >/dev/null && (cat "$(command -v "$tool")" >/dev/null 2>&1 &)
+        done
+        dir="$RUNNER_TEMP/litek8s/bin"
+        mkdir -p "$dir"
+        if [[ -n "$INPUT_BINARY" ]]; then
+          install -m 755 "$INPUT_BINARY" "$dir/litek8s"
+        else
+          # install.sh (next to this action) downloads the release archive
+          # for this architecture and checks it against SHA256SUMS.
+          version="$INPUT_VERSION"
+          [[ "$version" == latest ]] && version=""
+          LITEK8S_VERSION="$version" LITEK8S_INSTALL_DIR="$dir" sh "$ACTION_PATH/../../../install.sh" 2>&1 | grep -v '^$' || exit 1
+        fi
+        # For later steps' `if: failure()`: litek8s-diagnose [cluster-name]
+        install -m 755 "$ACTION_PATH/diagnose.sh" "$dir/litek8s-diagnose"
+        echo "$dir" >> "$GITHUB_PATH"
+        "$dir/litek8s" --version
+
+    - name: Prepare the runner for rootless clusters
+      shell: bash
+      env:
+        NETWORK: ${{ inputs.network }}
+      run: |
+        set -euo pipefail
+        # crun runs the containers, newuidmap/newgidmap map the user's
+        # subordinate ids, pasta gives pods egress; what `litek8s dev setup`
+        # checks. Most are on GitHub's Ubuntu images already (Podman).
+        missing=()
+        command -v crun >/dev/null || missing+=(crun)
+        command -v newuidmap >/dev/null || missing+=(uidmap)
+        if [[ "$NETWORK" == slirp4netns ]]; then
+          command -v slirp4netns >/dev/null || missing+=(slirp4netns)
+        else
+          command -v pasta >/dev/null || missing+=(passt)
+        fi
+        command -v iptables-restore >/dev/null || missing+=(iptables)
+        if (( ${#missing[@]} )); then
+          echo "installing ${missing[*]}"
+          export DEBIAN_FRONTEND=noninteractive
+          sudo -E apt-get install -y -qq --no-install-recommends "${missing[@]}" >/dev/null 2>&1 ||
+            { sudo -E apt-get update -qq >/dev/null && sudo -E apt-get install -y -qq --no-install-recommends "${missing[@]}" >/dev/null; }
+        fi
+        user="$(id -un)"
+        for f in /etc/subuid /etc/subgid; do
+          if ! grep -q "^$user:" "$f" 2>/dev/null; then
+            sudo usermod --add-subuids 100000-165535 --add-subgids 100000-165535 "$user"
+            break
+          fi
+        done
+        if [[ "$NETWORK" == slirp4netns ]]; then
+          echo "LITEK8S_DEV_NETWORK=slirp4netns" >> "$GITHUB_ENV"
+          # litek8s <= 0.2.0 always prefers pasta when it is installed and
+          # does not read LITEK8S_DEV_NETWORK: move it aside (the runner is
+          # thrown away after the job).
+          v="$(litek8s --version | awk '{print $2}')"
+          if [[ "$(litek8s --version | wc -w)" == 2 && "$(printf '%s\n' "$v" 0.2.0 | sort -V | tail -1)" == 0.2.0 && -x /usr/bin/pasta ]]; then
+            sudo mv /usr/bin/pasta /usr/bin/pasta.off
+            echo "litek8s $v: moved /usr/bin/pasta to /usr/bin/pasta.off so it uses slirp4netns"
+          fi
+        fi
+        # Ubuntu >= 23.10 restricts unprivileged user namespaces with
+        # AppArmor; this installs a profile for the litek8s binary.
+        sudo "$(command -v litek8s)" dev setup
+        # The cluster's cgroup is a delegated systemd scope of the user's
+        # manager; runners have no login session, so start one.
+        uid="$(id -u)"
+        if ! systemctl --user show-environment >/dev/null 2>&1; then
+          sudo loginctl enable-linger "$user"
+          for _ in $(seq 100); do [[ -S /run/user/$uid/bus ]] && break; sleep 0.1; done
+          echo "XDG_RUNTIME_DIR=/run/user/$uid" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$uid/bus" >> "$GITHUB_ENV"
+        fi
+        out="$(litek8s dev setup)"
+        echo "$out"
+        [[ "$out" == ready* ]] || { echo "::error::the runner lacks what litek8s dev up needs (above)"; exit 1; }
+
+    - name: Start the cluster
+      id: up
+      shell: bash
+      env:
+        NAME: ${{ inputs.cluster-name }}
+        NODES: ${{ inputs.nodes }}
+        DOCKER: ${{ inputs.docker }}
+        BUILDER: ${{ inputs.builder }}
+        WAIT: ${{ inputs.wait }}
+        PUBLISH: ${{ inputs.publish }}
+      run: |
+        set -euo pipefail
+        uid="$(id -u)"
+        export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$uid}"
+        export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$uid/bus}"
+        kubeconfig="${KUBECONFIG:-$HOME/.kube/config}"
+        kubeconfig="${kubeconfig%%:*}"
+        export KUBECONFIG="$kubeconfig"
+        start=$(date +%s.%N)
+        litek8s dev up --name "$NAME" --nodes "$NODES" --timeout "$WAIT" --publish "$PUBLISH"
+        ready=$(echo "$(date +%s.%N) - $start" | bc)
+        status="$(litek8s dev status --name "$NAME" -o json)"
+        context="$(jq -r .context <<<"$status")"
+        server="$(jq -r .server <<<"$status")"
+        socket="$(jq -r .docker_socket <<<"$status")"
+        {
+          echo "version=$(litek8s --version | awk '{print $2}')"
+          echo "context=$context"
+          echo "kubeconfig=$kubeconfig"
+          echo "api-url=$server"
+          echo "docker-socket=$socket"
+          echo "docker-host=unix://$socket"
+          echo "ready-seconds=$(printf '%.2f' "$ready")"
+        } >> "$GITHUB_OUTPUT"
+        echo "KUBECONFIG=$kubeconfig" >> "$GITHUB_ENV"
+        if [[ "$DOCKER" == true ]]; then
+          echo "DOCKER_HOST=unix://$socket" >> "$GITHUB_ENV"
+          if [[ "$BUILDER" == litek8s ]]; then
+            echo "DOCKER_BUILDKIT=0" >> "$GITHUB_ENV"
+            echo "COMPOSE_BAKE=false" >> "$GITHUB_ENV"
+          fi
+        fi
+        echo "litek8s $context ready in ${ready}s: $server, docker unix://$socket"
+        kubectl get nodes -o wide
+
+    - name: Diagnostics
+      if: failure()
+      shell: bash
+      env:
+        NAME: ${{ inputs.cluster-name }}
+      run: '"$RUNNER_TEMP/litek8s/bin/litek8s-diagnose" "$NAME"'
+
