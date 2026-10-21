@@ -64,6 +64,9 @@ kubectl get nodes     # your kubectl, Helm and Argo CD work unchanged
 
 ## What you can do
 
+- **Keep the clusters you have.** litek8s only adds contexts to your
+  kubeconfig, next to EKS, GKE or Civo; same manifests, same charts, and
+  going back is deleting it. → [Next to your clusters](https://litek8s.dev/docs/alongside/)
 - **Develop locally.** As many clusters as you like, each with as many
   nodes, NodePorts on `localhost` and your code mounted at the same path.
   → [Dev clusters](https://litek8s.dev/docs/dev/)
@@ -141,7 +144,7 @@ Feedback and issues are very welcome.
 ## Learn more
 
 - [litek8s.dev](https://litek8s.dev): the tour
-- [Documentation](https://litek8s.dev/docs/): [how it works](https://litek8s.dev/docs/#how-it-works),
+- [Documentation](https://litek8s.dev/docs/): [next to your clusters](https://litek8s.dev/docs/alongside/), [how it works](https://litek8s.dev/docs/#how-it-works),
   [platforms](https://litek8s.dev/docs/platforms/), [multi-node and HA](https://litek8s.dev/docs/multi-node/),
   [CRDs](https://litek8s.dev/docs/crds/)
 - [Contributing](https://github.com/jairoFernandez/litek8s/blob/main/CONTRIBUTING.md) · [Security](https://github.com/jairoFernandez/litek8s/blob/main/SECURITY.md)

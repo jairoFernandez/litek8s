@@ -201,6 +201,7 @@ function rewriteLinks(body, source) {
 
 // A README Mermaid block -> the SVG that replaces it, picked by what it draws.
 const diagramFor = [
+  [/subgraph cloud/, 'contexts'],
   [/subgraph env/, 'local'],
   [/subgraph bin/, 'architecture'],
   [/WireGuard/, 'multinode'],

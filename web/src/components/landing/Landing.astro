@@ -130,6 +130,7 @@ const hl = (i: number) => i >= from && i <= to && !['the', 'and'].includes(words
           <ul class="marquee-track">{t.strip.items.map((s) => <li>{s}</li>)}</ul>
           <ul class="marquee-track" aria-hidden="true">{t.strip.items.map((s) => <li>{s}</li>)}</ul>
         </div>
+        <p class="strip-more"><a href={t.strip.more.href}>{t.strip.more.label}<Icon name="arrow" class="arrow" /></a></p>
       </section>
 
       <section class="tagline" data-scrub>
