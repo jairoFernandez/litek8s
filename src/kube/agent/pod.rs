@@ -677,39 +677,18 @@ impl<R: PodRuntime> Worker<R> {
                 }
             }
         }
-        let mut dns_servers = Vec::new();
-        let mut dns_search = Vec::new();
-        let mut dns_options = Vec::new();
-        let policy = s(&self.pod, "/spec/dnsPolicy");
-        let cluster_first = policy == "ClusterFirstWithHostNet" || (policy != "Default" && policy != "None" && !self.host_network());
-        if let (true, Some(api)) = (cluster_first, endpoint.as_ref().filter(|e| e.cluster_dns)) {
-            if let Some(dns) = self.agent.resolve_host(&api.host).await {
-                dns_servers.push(dns.clone());
-                let domain = crate::kube::dns::DOMAIN;
-                dns_search.extend([format!("{}.svc.{domain}", self.ns), format!("svc.{domain}"), domain.to_string()]);
-                dns_options.push("ndots:5".to_string());
-                for name in ["kube-dns.kube-system.svc.cluster.local", "kube-dns.kube-system.svc", "kube-dns.kube-system"] {
-                    extra_hosts.push(format!("{name}:{dns}"));
-                }
+        let cluster_dns = match endpoint.as_ref().filter(|e| e.cluster_dns) {
+            None => ClusterDns::Off,
+            Some(api) => match self.agent.resolve_host(&api.host).await {
+                Some(ip) => ClusterDns::At(ip),
+                None => ClusterDns::Unresolved(api.host.clone()),
+            },
+        };
+        let PodDns { servers: dns_servers, search: dns_search, options: dns_options, kube_dns } = pod_dns(&self.pod, &self.ns, self.host_network(), &cluster_dns)?;
+        if let Some(dns) = kube_dns {
+            for name in ["kube-dns.kube-system.svc.cluster.local", "kube-dns.kube-system.svc", "kube-dns.kube-system"] {
+                extra_hosts.push(format!("{name}:{dns}"));
             }
-        }
-        if policy == "None" {
-            for ns in self.pod.pointer("/spec/dnsConfig/nameservers").and_then(Value::as_array).into_iter().flatten() {
-                dns_servers.extend(ns.as_str().map(str::to_string));
-            }
-        }
-        for sr in self.pod.pointer("/spec/dnsConfig/searches").and_then(Value::as_array).into_iter().flatten() {
-            dns_search.extend(sr.as_str().map(str::to_string));
-        }
-        for opt in self.pod.pointer("/spec/dnsConfig/options").and_then(Value::as_array).into_iter().flatten() {
-            let name = s(opt, "/name");
-            let entry = match opt.get("value").and_then(Value::as_str) {
-                Some(v) if !v.is_empty() => format!("{name}:{v}"),
-                _ => name.to_string(),
-            };
-            let key = entry.split(':').next().unwrap_or_default().to_string();
-            dns_options.retain(|o| o.split(':').next() != Some(key.as_str()));
-            dns_options.push(entry);
         }
         // The sandbox mounts the pod's runtime volumes to prepare them.
         let mut mounts = Vec::new();
@@ -1694,9 +1673,108 @@ fn expand(input: &str, env: &[(String, String)]) -> String {
     out
 }
 
+/// The cluster DNS as the server described it to this node.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ClusterDns {
+    /// The server serves none: ClusterFirst falls back to the node's
+    /// resolver, as the kubelet does without `clusterDNS`.
+    Off,
+    At(String),
+    /// Served, but its address does not resolve here (yet).
+    Unresolved(String),
+}
+
+/// A pod's resolver: nameservers, search domains, options, and the address
+/// `kube-dns` names stand for. Empty: the runtime gives the node's own.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct PodDns {
+    pub servers: Vec<String>,
+    pub search: Vec<String>,
+    pub options: Vec<String>,
+    pub kube_dns: Option<String>,
+}
+
+/// What the kubelet puts in a pod's resolv.conf for its `dnsPolicy` and
+/// `dnsConfig`. With a cluster DNS, ClusterFirst gets that server alone and
+/// never the node's resolvers too: cluster names must not leak to the
+/// Internet when the cluster DNS does not answer (a public resolver answers
+/// `web` with 127.0.53.53).
+pub(crate) fn pod_dns(pod: &Value, ns: &str, host_network: bool, cluster: &ClusterDns) -> anyhow::Result<PodDns> {
+    let mut out = PodDns::default();
+    let policy = s(pod, "/spec/dnsPolicy");
+    let cluster_first = policy == "ClusterFirstWithHostNet" || (policy != "Default" && policy != "None" && !host_network);
+    if cluster_first {
+        match cluster {
+            ClusterDns::Off => {}
+            ClusterDns::Unresolved(host) => anyhow::bail!("the cluster DNS address {host} does not resolve on this node"),
+            ClusterDns::At(dns) => {
+                out.servers.push(dns.clone());
+                let domain = crate::kube::dns::DOMAIN;
+                out.search.extend([format!("{ns}.svc.{domain}"), format!("svc.{domain}"), domain.to_string()]);
+                out.options.push("ndots:5".to_string());
+                out.kube_dns = Some(dns.clone());
+            }
+        }
+    }
+    if policy == "None" {
+        for n in pod.pointer("/spec/dnsConfig/nameservers").and_then(Value::as_array).into_iter().flatten() {
+            out.servers.extend(n.as_str().map(str::to_string));
+        }
+    }
+    for sr in pod.pointer("/spec/dnsConfig/searches").and_then(Value::as_array).into_iter().flatten() {
+        out.search.extend(sr.as_str().map(str::to_string));
+    }
+    for opt in pod.pointer("/spec/dnsConfig/options").and_then(Value::as_array).into_iter().flatten() {
+        let name = s(opt, "/name");
+        let entry = match opt.get("value").and_then(Value::as_str) {
+            Some(v) if !v.is_empty() => format!("{name}:{v}"),
+            _ => name.to_string(),
+        };
+        let key = entry.split(':').next().unwrap_or_default().to_string();
+        out.options.retain(|o| o.split(':').next() != Some(key.as_str()));
+        out.options.push(entry);
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cluster_first_gets_the_cluster_dns_alone() {
+        let pod = json!({"spec": {"containers": []}});
+        let dns = pod_dns(&pod, "web", false, &ClusterDns::At("10.42.0.1".into())).unwrap();
+        assert_eq!(dns.servers, vec!["10.42.0.1".to_string()]);
+        assert_eq!(dns.search, vec!["web.svc.cluster.local", "svc.cluster.local", "cluster.local"]);
+        assert_eq!(dns.options, vec!["ndots:5"]);
+        assert_eq!(dns.kube_dns.as_deref(), Some("10.42.0.1"));
+        // Not resolvable yet: the sandbox fails (and is retried) rather than
+        // getting the node's resolvers.
+        assert!(pod_dns(&pod, "web", false, &ClusterDns::Unresolved("host-gateway".into())).is_err());
+        // No cluster DNS at all: the node's resolver, as the kubelet does.
+        assert_eq!(pod_dns(&pod, "web", false, &ClusterDns::Off).unwrap(), PodDns::default());
+        // Host network: Default unless ClusterFirstWithHostNet.
+        assert!(pod_dns(&pod, "web", true, &ClusterDns::At("10.42.0.1".into())).unwrap().servers.is_empty());
+        let hostnet = json!({"spec": {"dnsPolicy": "ClusterFirstWithHostNet"}});
+        assert_eq!(pod_dns(&hostnet, "web", true, &ClusterDns::At("10.42.0.1".into())).unwrap().servers, vec!["10.42.0.1".to_string()]);
+    }
+
+    #[test]
+    fn dns_policies_and_config() {
+        let at = ClusterDns::At("10.42.0.1".into());
+        let default = json!({"spec": {"dnsPolicy": "Default"}});
+        assert_eq!(pod_dns(&default, "web", false, &at).unwrap(), PodDns::default());
+        let none = json!({"spec": {"dnsPolicy": "None", "dnsConfig": {"nameservers": ["1.1.1.1"], "searches": ["example.com"], "options": [{"name": "ndots", "value": "2"}, {"name": "edns0"}]}}});
+        let dns = pod_dns(&none, "web", false, &at).unwrap();
+        assert_eq!(dns.servers, vec!["1.1.1.1".to_string()]);
+        assert_eq!(dns.search, vec!["example.com".to_string()]);
+        assert_eq!(dns.options, vec!["ndots:2".to_string(), "edns0".to_string()]);
+        assert_eq!(dns.kube_dns, None);
+        // dnsConfig options override the cluster default (ndots).
+        let tuned = json!({"spec": {"dnsConfig": {"options": [{"name": "ndots", "value": "1"}]}}});
+        assert_eq!(pod_dns(&tuned, "web", false, &at).unwrap().options, vec!["ndots:1".to_string()]);
+    }
 
     #[test]
     fn expands_variables() {

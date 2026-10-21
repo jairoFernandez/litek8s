@@ -148,6 +148,10 @@ pub struct ApiState {
     pub(crate) hub: Arc<AgentHub>,
     /// Cluster DNS is being served (pods get it as their resolver).
     pub(crate) cluster_dns: std::sync::atomic::AtomicBool,
+    /// What node agents are told when they connect (cluster DNS, where pods
+    /// reach this server) is settled. `serve` starts listening before its
+    /// local node and DNS are up, and agents that dial in meanwhile wait.
+    pub(crate) agents_welcome: tokio::sync::watch::Sender<bool>,
     /// Serves `https://` on the same port when set (in-cluster clients).
     tls: Option<tls::ServerTls>,
     /// ClusterIPs and nodePorts handed out but maybe not stored yet. Helm
@@ -217,6 +221,7 @@ impl ApiState {
             log_requests,
             hub: Arc::new(AgentHub::default()),
             cluster_dns: std::sync::atomic::AtomicBool::new(false),
+            agents_welcome: tokio::sync::watch::Sender::new(true),
             tls,
             allocated: std::sync::Mutex::default(),
             join_secret: join::server_secret(data_dir, None)?,
@@ -435,6 +440,7 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
     state.node_port_offset = config.node_port_offset;
     state.disk_root = config.disk_root.clone().or_else(|| config.data_dir.clone());
     state.lifecycle = config.lifecycle.clone();
+    state.agents_welcome.send_replace(false);
     let state = Arc::new(state);
     let token = state.join_token();
     if let Some(dir) = &config.data_dir {
@@ -631,6 +637,8 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
     } else if let Err(e) = state.publish_api_endpoints(&api_ip, pod_port) {
         eprintln!("apiserver: failed to publish the kubernetes endpoints: {e:#}");
     }
+    // Cluster DNS, the overlay endpoint and the pod port are known.
+    state.agents_welcome.send_replace(true);
     if let Some(agent) = agent {
         eprintln!("apiserver: running local node {}", agent.config().node_name);
         let rt = agent.runtime().clone();
@@ -1715,21 +1723,22 @@ fn self_get(state: &ApiState, key: &ObjectKey, rt: &ResourceType, name: &str) ->
     state.store.get(key).ok_or_else(|| ApiError::from_store(StoreError::NotFound, rt, name))
 }
 
-/// A node agent dialing in: upgrade the connection to the agent protocol.
-fn agent_connect(state: &Arc<ApiState>, req: &Req) -> Result<Response<Body>, ApiError> {
-    if !req.header("upgrade").eq_ignore_ascii_case(super::agent::protocol::PROTOCOL_VERSION) {
-        return Err(ApiError::bad_request(format!("expected Upgrade: {}", super::agent::protocol::PROTOCOL_VERSION)));
+/// Until `serve` has settled what agents are told (bounded: a server whose
+/// startup hangs still takes its nodes).
+pub(crate) async fn wait_agents_welcome(state: &ApiState) {
+    let mut rx = state.agents_welcome.subscribe();
+    if tokio::time::timeout(Duration::from_secs(60), rx.wait_for(|ready| *ready)).await.is_err() {
+        eprintln!("apiserver: welcoming a node before cluster DNS and the overlay endpoint are known");
     }
-    let node = req.q("node").unwrap_or_default().to_string();
-    join::authorize(state, req.header("authorization"), &node, req.header(join::PASSWORD_HEADER))?;
-    let on_upgrade = req.take_upgrade().ok_or_else(|| ApiError::bad_request("connection cannot be upgraded"))?;
-    // Pods on that node reach this server over the pod overlay when there is
-    // one, else at the address the agent used.
-    let host_header = req.header("host").to_string();
+}
+
+/// Where pods on an agent's node reach this server: over the pod overlay
+/// when there is one, else at the address the agent dialed (`Host`).
+fn agent_api_endpoint(state: &ApiState, host_header: &str) -> (String, u16) {
     let (mut api_host, mut api_port) = match (state.overlay_endpoint.get(), host_header.rsplit_once(':')) {
         (Some((host, port)), _) => (host.clone(), *port),
         (None, Some((h, p))) => (h.trim_matches(['[', ']']).to_string(), p.parse().unwrap_or(6443)),
-        (None, None) => (host_header.clone(), 80),
+        (None, None) => (host_header.to_string(), 80),
     };
     // An agent on this host (dialing loopback): its pods reach the server
     // the way the local node's do, at the runtime's host gateway.
@@ -1738,10 +1747,27 @@ fn agent_connect(state: &Arc<ApiState>, req: &Req) -> Result<Response<Body>, Api
         api_host = "host-gateway".into();
         api_port = pod_port;
     }
+    (api_host, api_port)
+}
+
+/// A node agent dialing in: upgrade the connection to the agent protocol.
+fn agent_connect(state: &Arc<ApiState>, req: &Req) -> Result<Response<Body>, ApiError> {
+    if !req.header("upgrade").eq_ignore_ascii_case(super::agent::protocol::PROTOCOL_VERSION) {
+        return Err(ApiError::bad_request(format!("expected Upgrade: {}", super::agent::protocol::PROTOCOL_VERSION)));
+    }
+    let node = req.q("node").unwrap_or_default().to_string();
+    join::authorize(state, req.header("authorization"), &node, req.header(join::PASSWORD_HEADER))?;
+    let on_upgrade = req.take_upgrade().ok_or_else(|| ApiError::bad_request("connection cannot be upgraded"))?;
+    let host_header = req.header("host").to_string();
     let servers = join::server_list(state);
     let state = state.clone();
     tokio::spawn(async move {
         let Ok(upgraded) = on_upgrade.await else { return };
+        // What the agent is told (and, from it, every pod it starts: their
+        // resolver, where they reach the API) must not be what this server
+        // looked like before its DNS was up.
+        wait_agents_welcome(&state).await;
+        let (api_host, api_port) = agent_api_endpoint(&state, &host_header);
         if let Err(e) = AgentHub::serve_agent(state, TokioIo::new(upgraded), api_host, api_port, Some(node)).await {
             eprintln!("apiserver: agent connection failed: {e:#}");
         }
@@ -4335,6 +4361,36 @@ mod tests {
         assert_eq!(q["labelSelector"], "app=web,tier in (a)");
         assert_eq!(q["watch"], "true");
         assert_eq!(q["x"], "");
+    }
+
+    #[tokio::test]
+    async fn agents_are_welcomed_with_the_settled_dns_and_endpoint() {
+        // An agent that dials in while `serve` is still starting its local
+        // node and DNS waits, then learns the overlay endpoint and that
+        // cluster DNS is served (CI: a worker joined before the server's
+        // DNS was up, its pods got the node's resolvers for good).
+        let api = Arc::new(ApiState::open(None, "127.0.0.1:0".into(), false).unwrap());
+        api.agents_welcome.send_replace(false);
+        let waiting = {
+            let api = api.clone();
+            tokio::spawn(async move {
+                wait_agents_welcome(&api).await;
+                (agent_api_endpoint(&api, "10.231.0.2:45771"), api.cluster_dns.load(std::sync::atomic::Ordering::Relaxed))
+            })
+        };
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished(), "welcomed before the server settled");
+        api.cluster_dns.store(true, std::sync::atomic::Ordering::Relaxed);
+        let _ = api.overlay_endpoint.set(("10.42.0.1".into(), 6443));
+        api.agents_welcome.send_replace(true);
+        let ((host, port), dns) = tokio::time::timeout(Duration::from_secs(5), waiting).await.unwrap().unwrap();
+        assert_eq!((host.as_str(), port, dns), ("10.42.0.1", 6443, true));
+        // Without an overlay: the address the agent dialed; loopback means
+        // this host, reached at the runtime's gateway.
+        let plain = ApiState::open(None, "127.0.0.1:0".into(), false).unwrap();
+        assert_eq!(agent_api_endpoint(&plain, "192.168.1.10:6443"), ("192.168.1.10".to_string(), 6443));
+        plain.pod_port.store(6444, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(agent_api_endpoint(&plain, "127.0.0.1:6443"), ("host-gateway".to_string(), 6444));
     }
 
     #[test]
