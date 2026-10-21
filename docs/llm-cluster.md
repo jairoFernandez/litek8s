@@ -76,7 +76,7 @@ curl -s localhost:$PORT/v1/chat/completions -H 'Content-Type: application/json' 
 
 All three nodes of a dev cluster share one VM or sandbox, so this shows the
 mechanics, not the memory win. On real machines, join them first
-([Multi-node](../README.md#multi-node-and-ha)), then label the ones that
+([Multi-node](multi-node.md)), then label the ones that
 should hold layers and set the model in
 [`00-config.yaml`](../examples/llm-rpc/00-config.yaml):
 

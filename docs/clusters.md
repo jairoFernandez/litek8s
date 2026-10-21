@@ -41,7 +41,7 @@ What happens, one `ssh` command per step, its output streamed back:
 3. **Packages**: crun and iptables from the machine's package manager when
    they are missing and the node will run pods with crun.
 4. **Install**: `sudo litek8s install server|agent <flags>` on the machine,
-   exactly as [the local install](../README.md#multi-node-and-ha) would run
+   exactly as [the local install](multi-node.md) would run
    it: the same defaults, checks and systemd unit. The join token goes in a
    0600 file (then `/etc/litek8s/<role>.env`), never on a command line.
 5. **Kubeconfig** (server): the context is added to your kubeconfig

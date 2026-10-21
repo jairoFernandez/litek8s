@@ -2,9 +2,10 @@
 // scripts/sync-docs.mjs (to generate src/content/docs/) and by
 // astro.config.mjs (for the sidebar), so the two never disagree.
 //
-// `source` is a path relative to the repository root. For README.md,
-// `sections` lists the `## ` headings that go on the page ("" is the text
-// before the first heading); every other README section is left out.
+// `source` is a path relative to the repository root. README.md is the
+// project's landing page and is not synced; a page can still take some of
+// its sections with `source: 'README.md', sections: ['## heading', ...]`
+// ("" is the text before the first heading).
 
 export const REPO = 'https://github.com/jairoFernandez/litek8s';
 export const BRANCH = 'main';
@@ -13,13 +14,13 @@ export const groups = [
   {
     label: 'Start here',
     pages: [
-      { slug: '', label: 'Introduction', title: 'Introduction', source: 'README.md', sections: ['', "What's in the binary", 'How it works', 'The legacy daemon', 'License'] },
-      { slug: 'install', label: 'Install', source: 'README.md', sections: ['Install'] },
-      { slug: 'quickstart', label: 'Quickstart', source: 'README.md', sections: ['Quickstart'] },
-      { slug: 'numbers', label: 'Numbers', source: 'README.md', sections: ['Numbers'] },
-      { slug: 'platforms', label: 'Platforms', source: 'README.md', sections: ['Platforms'] },
-      { slug: 'multi-node', label: 'Multi-node and HA', source: 'README.md', sections: ['Multi-node and HA'] },
-      { slug: 'limitations', label: 'Limitations', source: 'README.md', sections: ['Limitations'] },
+      { slug: '', label: 'Introduction', title: 'Introduction', source: 'docs/overview.md' },
+      { slug: 'install', label: 'Install', source: 'docs/install.md' },
+      { slug: 'quickstart', label: 'Quickstart', source: 'docs/quickstart.md' },
+      { slug: 'numbers', label: 'Numbers', source: 'docs/numbers.md' },
+      { slug: 'platforms', label: 'Platforms', source: 'docs/platforms.md' },
+      { slug: 'multi-node', label: 'Multi-node and HA', source: 'docs/multi-node.md' },
+      { slug: 'limitations', label: 'Limitations', source: 'docs/limitations.md' },
     ],
   },
   {

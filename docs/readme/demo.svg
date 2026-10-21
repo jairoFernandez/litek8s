@@ -1,0 +1,306 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 440" width="880" height="440" role="img" aria-label="litek8s dev up starts a cluster in 1.28 seconds, kubectl get nodes shows the node Ready, litek8s ui opens the terminal UI">
+<style>
+text{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono',monospace;font-size:15px}
+@keyframes v0{0%,1.846%{opacity:0}1.923%,95.385%{opacity:1}97.692%,100%{opacity:0}}.v0{opacity:0;animation:v0 13s infinite}@keyframes t1{0%,4.615%{transform:translateX(0);animation-timing-function:steps(14,end)}11.077%,100%{transform:translateX(126px)}}.t1{animation:t1 13s infinite}@keyframes c2{0%,20.308%{opacity:1}20.385%,100%{opacity:0}}.c2{animation:c2 13s infinite}@keyframes v3{0%,11.385%{opacity:0}11.462%,20.923%{opacity:1}21.000%,100%{opacity:0}}.v3{opacity:0;animation:v3 13s infinite}@keyframes v4{0%,20.846%{opacity:0}20.923%,95.385%{opacity:1}97.692%,100%{opacity:0}}.v4{opacity:0;animation:v4 13s infinite}@keyframes v5{0%,20.846%{opacity:0}20.923%,95.385%{opacity:1}97.692%,100%{opacity:0}}.v5{opacity:0;animation:v5 13s infinite}@keyframes v6{0%,23.538%{opacity:0}23.615%,95.385%{opacity:1}97.692%,100%{opacity:0}}.v6{opacity:0;animation:v6 13s infinite}@keyframes t7{0%,26.308%{transform:translateX(0);animation-timing-function:steps(17,end)}32.846%,100%{transform:translateX(153px)}}.t7{animation:t7 13s infinite}@keyframes c8{0%,36.615%{opacity:1}36.692%,100%{opacity:0}}.c8{animation:c8 13s infinite}@keyframes v9{0%,35.077%{opacity:0}35.154%,95.385%{opacity:1}97.692%,100%{opacity:0}}.v9{opacity:0;animation:v9 13s infinite}@keyframes v10{0%,35.077%{opacity:0}35.154%,95.385%{opacity:1}97.692%,100%{opacity:0}}.v10{opacity:0;animation:v10 13s infinite}@keyframes v11{0%,38.538%{opacity:0}38.615%,95.385%{opacity:1}97.692%,100%{opacity:0}}.v11{opacity:0;animation:v11 13s infinite}@keyframes t12{0%,41.308%{transform:translateX(0);animation-timing-function:steps(10,end)}45.923%,100%{transform:translateX(90px)}}.t12{animation:t12 13s infinite}@keyframes c13{0%,95.308%{opacity:1}95.385%,100%{opacity:0}}.c13{animation:c13 13s infinite}@keyframes u14{0%,49.385%{opacity:0;transform:translateY(10px) scale(.985)}53.231%,95.385%{opacity:1;transform:none}97.692%,100%{opacity:0}}.u14{opacity:0;transform-origin:center;animation:u14 13s infinite}@keyframes h15{0%,49.385%{opacity:1}51.692%,100%{opacity:0}}.h15{animation:h15 13s infinite}
+@media (prefers-reduced-motion:reduce){*{animation:none!important}}
+</style>
+<rect width="880" height="440" rx="14" fill="#1e1e2e"/>
+<rect x=".5" y=".5" width="879" height="439" rx="13.5" fill="none" stroke="#ffffff" stroke-opacity=".08"/>
+<circle cx="22" cy="19" r="6" fill="#ff5f57"/><circle cx="42" cy="19" r="6" fill="#febc2e"/><circle cx="62" cy="19" r="6" fill="#28c840"/>
+<text x="440" y="24" fill="#8b90a5" text-anchor="middle" style="font-size:13px">litek8s</text>
+<text class="v3" x="856" y="24" fill="#8b90a5" text-anchor="end" style="font-size:13px">waiting for the node…</text>
+<text class="v4" x="856" y="24" fill="#4ade80" text-anchor="end" style="font-size:13px">node Ready in 1.28 s</text>
+<line x1="0" y1="38" x2="880" y2="38" stroke="#ffffff" stroke-opacity=".07"/>
+<g class="h15">
+<g class="v0"><text x="24" y="74" fill="#a78bfa" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve">$</text><text x="42" y="74" fill="#e4e4ec" textLength="126" lengthAdjust="spacingAndGlyphs" xml:space="preserve">litek8s dev up</text>
+<g class="t1"><rect x="42" y="55" width="138" height="26" fill="#1e1e2e"/><rect class="c2" x="42" y="58" width="9" height="20" fill="#a78bfa"/></g></g>
+<g class="v5"><text x="24" y="101" fill="#4ade80" textLength="234" lengthAdjust="spacingAndGlyphs" xml:space="preserve">litek8s-dev ready in 1.28s</text><text x="267" y="101" fill="#8b90a5" textLength="504" lengthAdjust="spacingAndGlyphs" xml:space="preserve">(vm, http://127.0.0.1:6443, kubectl context litek8s-dev)</text></g>
+<g class="v6"><text x="24" y="128" fill="#a78bfa" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve">$</text><text x="42" y="128" fill="#e4e4ec" textLength="153" lengthAdjust="spacingAndGlyphs" xml:space="preserve">kubectl get nodes</text>
+<g class="t7"><rect x="42" y="109" width="165" height="26" fill="#1e1e2e"/><rect class="c8" x="42" y="112" width="9" height="20" fill="#a78bfa"/></g></g>
+<g class="v9"><text x="24" y="155" fill="#8b90a5" textLength="468" lengthAdjust="spacingAndGlyphs" xml:space="preserve">NAME          STATUS   ROLES           AGE   VERSION</text></g>
+<g class="v10"><text x="24" y="182" fill="#e4e4ec" textLength="99" lengthAdjust="spacingAndGlyphs" xml:space="preserve">litek8s-dev</text><text x="150" y="182" fill="#4ade80" textLength="45" lengthAdjust="spacingAndGlyphs" xml:space="preserve">Ready</text><text x="231" y="182" fill="#e4e4ec" textLength="333" lengthAdjust="spacingAndGlyphs" xml:space="preserve">control-plane   3s    v1.33.0+litek8s</text></g>
+<g class="v11"><text x="24" y="209" fill="#a78bfa" textLength="9" lengthAdjust="spacingAndGlyphs" xml:space="preserve">$</text><text x="42" y="209" fill="#e4e4ec" textLength="90" lengthAdjust="spacingAndGlyphs" xml:space="preserve">litek8s ui</text>
+<g class="t12"><rect x="42" y="190" width="102" height="26" fill="#1e1e2e"/><rect class="c13" x="42" y="193" width="9" height="20" fill="#a78bfa"/></g></g>
+</g>
+<g class="u14"><svg x="155" y="44" width="570" height="388" viewBox="0 0 1028 700">
+<rect width="100%" height="100%" rx="8" fill="#1e1e2e"/>
+<text x="10.0" y="23" fill="#585d75" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs">╭─ </text>
+<text x="35.2" y="23" fill="#a78bfa" font-weight="bold" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs">litek8s</text>
+<text x="94.0" y="23" fill="#585d75" xml:space="preserve" textLength="604.8" lengthAdjust="spacingAndGlyphs"> ────────────────────────────────────────────────────────────────────── </text>
+<text x="698.8" y="23" fill="#4ade80" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">● </text>
+<text x="715.6" y="23" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">ui-design</text>
+<text x="791.2" y="23" fill="#8b90a5" xml:space="preserve" textLength="201.6" lengthAdjust="spacingAndGlyphs"> · macOS VM · up 26m 23s</text>
+<text x="992.8" y="23" fill="#585d75" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs"> ─╮</text>
+<rect x="26.8" y="27" width="67.7" height="17" fill="#7c3aed"/>
+<text x="10.0" y="40" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="26.8" y="40" fill="#ffffff" font-weight="bold" xml:space="preserve" textLength="67.2" lengthAdjust="spacingAndGlyphs"> 1 Home </text>
+<text x="94.0" y="40" fill="#a78bfa" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs"> 2</text>
+<text x="110.8" y="40" fill="#d4d4d8" xml:space="preserve" textLength="84.0" lengthAdjust="spacingAndGlyphs"> Clusters </text>
+<text x="194.8" y="40" fill="#a78bfa" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs"> 3</text>
+<text x="211.6" y="40" fill="#d4d4d8" xml:space="preserve" textLength="100.8" lengthAdjust="spacingAndGlyphs"> Containers </text>
+<text x="312.4" y="40" fill="#a78bfa" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs"> 4</text>
+<text x="329.2" y="40" fill="#d4d4d8" xml:space="preserve" textLength="67.2" lengthAdjust="spacingAndGlyphs"> Images </text>
+<text x="396.4" y="40" fill="#a78bfa" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs"> 5</text>
+<text x="413.2" y="40" fill="#d4d4d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs"> Volumes </text>
+<text x="488.8" y="40" fill="#a78bfa" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs"> 6</text>
+<text x="505.6" y="40" fill="#d4d4d8" xml:space="preserve" textLength="100.8" lengthAdjust="spacingAndGlyphs"> Free space </text>
+<text x="606.4" y="40" fill="#a78bfa" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs"> 7</text>
+<text x="623.2" y="40" fill="#d4d4d8" xml:space="preserve" textLength="100.8" lengthAdjust="spacingAndGlyphs"> Kubernetes </text>
+<text x="724.0" y="40" fill="#a78bfa" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs"> 8</text>
+<text x="740.8" y="40" fill="#d4d4d8" xml:space="preserve" textLength="268.8" lengthAdjust="spacingAndGlyphs"> Settings                       </text>
+<text x="1009.6" y="40" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="57" fill="#585d75" xml:space="preserve" textLength="1008.0" lengthAdjust="spacingAndGlyphs">╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</text>
+<text x="10.0" y="74" fill="#585d75" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs">╭─ </text>
+<text x="35.2" y="74" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs">cpu</text>
+<text x="60.4" y="74" fill="#8b90a5" xml:space="preserve" textLength="142.8" lengthAdjust="spacingAndGlyphs"> · the VM process</text>
+<text x="203.2" y="74" fill="#585d75" xml:space="preserve" textLength="336.0" lengthAdjust="spacingAndGlyphs"> ───────────────────────────────────╮╭─ </text>
+<text x="539.2" y="74" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">memory</text>
+<text x="589.6" y="74" fill="#8b90a5" xml:space="preserve" textLength="378.0" lengthAdjust="spacingAndGlyphs"> · what macOS charges; VM ceiling 1.0/4.0 GiB</text>
+<text x="967.6" y="74" fill="#585d75" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs"> ────╮</text>
+<text x="10.0" y="91" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="26.8" y="91" fill="#f97e64" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">          █▆▄▆▄▄▂▄  ▁▃  ▃▄▄  ▂ ▄▆ ▁        ▃            </text>
+<text x="505.6" y="91" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="1009.6" y="91" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="108" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="26.8" y="108" fill="#fa984b" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">         ▇████████▃▂███▄████▅████▄█▄▁█▇▆▃▅▆█            </text>
+<text x="505.6" y="108" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="1009.6" y="108" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="125" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="26.8" y="125" fill="#fbb231" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">▂▁▁▁ ▂ ▁▂███████████████████████████████████▇           </text>
+<text x="505.6" y="125" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="1009.6" y="125" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="142" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="26.8" y="142" fill="#dec433" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">█████████████████████████████████████████████▂▃▃▂▄▂▁▁▃▃▂</text>
+<text x="505.6" y="142" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="1009.6" y="142" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="159" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="26.8" y="159" fill="#a3cf52" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">████████████████████████████████████████████████████████</text>
+<text x="505.6" y="159" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="1009.6" y="159" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="176" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="26.8" y="176" fill="#68d971" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">████████████████████████████████████████████████████████</text>
+<text x="505.6" y="176" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="530.8" y="176" fill="#68d971" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃</text>
+<text x="1009.6" y="176" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="193" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="26.8" y="193" fill="#50dd7d" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">█</text>
+<text x="35.2" y="193" fill="#5ddb76" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">▉</text>
+<text x="43.6" y="193" fill="#474b5e" xml:space="preserve" textLength="218.4" lengthAdjust="spacingAndGlyphs">░░░░░░░░░░░░░░░░░░░░░░░░░░</text>
+<text x="262.0" y="193" fill="#62da74" font-weight="bold" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">   7% </text>
+<text x="312.4" y="193" fill="#d4d4d8" xml:space="preserve" textLength="193.2" lengthAdjust="spacingAndGlyphs">of 4 CPUs · 27% of one </text>
+<text x="505.6" y="193" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="530.8" y="193" fill="#94a3b8" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">█</text>
+<text x="539.2" y="193" fill="#8b90a5" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">▒</text>
+<text x="547.6" y="193" fill="#474b5e" xml:space="preserve" textLength="126.0" lengthAdjust="spacingAndGlyphs">░░░░░░░░░░░░░░░</text>
+<text x="673.6" y="193" fill="#4ade80" font-weight="bold" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">   6% </text>
+<text x="724.0" y="193" fill="#d4d4d8" xml:space="preserve" textLength="285.6" lengthAdjust="spacingAndGlyphs">0.2 GiB in use · VM limit 4.0 GiB </text>
+<text x="1009.6" y="193" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="210" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="210" fill="#d4d4d8" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs"> litek8s (ui-design) </text>
+<text x="245.2" y="210" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">     0.0%</text>
+<text x="320.8" y="210" fill="#8b90a5" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs">  API server, contro…</text>
+<text x="505.6" y="210" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="522.4" y="210" fill="#d4d4d8" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs"> litek8s (ui-design) </text>
+<text x="698.8" y="210" fill="#a78bfa" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">▏     </text>
+<text x="749.2" y="210" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">  11.1 MB</text>
+<text x="824.8" y="210" fill="#8b90a5" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs">  API server, contro…</text>
+<text x="1009.6" y="210" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="227" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="227" fill="#d4d4d8" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs"> pods &amp; containers   </text>
+<text x="194.8" y="227" fill="#a78bfa" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">█████▉</text>
+<text x="245.2" y="227" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">    26.0%</text>
+<text x="505.6" y="227" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="522.4" y="227" fill="#d4d4d8" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs"> pods &amp; containers   </text>
+<text x="698.8" y="227" fill="#a78bfa" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">▎     </text>
+<text x="749.2" y="227" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">  14.9 MB</text>
+<text x="1009.6" y="227" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="244" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="244" fill="#8b90a5" xml:space="preserve" textLength="226.8" lengthAdjust="spacingAndGlyphs">   pod default/burn… ██    </text>
+<text x="245.2" y="244" fill="#d4d4d8" xml:space="preserve" textLength="260.4" lengthAdjust="spacingAndGlyphs">     8.8%                      </text>
+<text x="505.6" y="244" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="522.4" y="244" fill="#d4d4d8" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs"> Linux kernel + base </text>
+<text x="698.8" y="244" fill="#a78bfa" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">██▊   </text>
+<text x="749.2" y="244" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">   212 MB</text>
+<text x="824.8" y="244" fill="#8b90a5" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs">  fixed cost: kernel…</text>
+<text x="1009.6" y="244" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="261" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="261" fill="#8b90a5" xml:space="preserve" textLength="226.8" lengthAdjust="spacingAndGlyphs">   pod default/burn… ██    </text>
+<text x="245.2" y="261" fill="#d4d4d8" xml:space="preserve" textLength="260.4" lengthAdjust="spacingAndGlyphs">     8.6%                      </text>
+<text x="505.6" y="261" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="522.4" y="261" fill="#d4d4d8" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs"> cache               </text>
+<text x="698.8" y="261" fill="#a78bfa" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">██▏   </text>
+<text x="749.2" y="261" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">   167 MB</text>
+<text x="824.8" y="261" fill="#8b90a5" xml:space="preserve" textLength="109.2" lengthAdjust="spacingAndGlyphs">  reclaimable</text>
+<text x="1009.6" y="261" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="278" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="278" fill="#8b90a5" xml:space="preserve" textLength="226.8" lengthAdjust="spacingAndGlyphs">   pod default/burn… ██    </text>
+<text x="245.2" y="278" fill="#d4d4d8" xml:space="preserve" textLength="260.4" lengthAdjust="spacingAndGlyphs">     8.6%                      </text>
+<text x="505.6" y="278" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="522.4" y="278" fill="#d4d4d8" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs"> freed, still charg… </text>
+<text x="698.8" y="278" fill="#a78bfa" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">▉     </text>
+<text x="749.2" y="278" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">  67.6 MB</text>
+<text x="824.8" y="278" fill="#8b90a5" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs">  macOS keeps it unt…</text>
+<text x="1009.6" y="278" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="295" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="295" fill="#d4d4d8" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs"> guest kernel &amp; oth… </text>
+<text x="245.2" y="295" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">     0.0%</text>
+<text x="320.8" y="295" fill="#8b90a5" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs">  interrupts, networ…</text>
+<text x="505.6" y="295" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="1009.6" y="295" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="312" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="312" fill="#d4d4d8" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs"> VM overhead         </text>
+<text x="194.8" y="312" fill="#a78bfa" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">▏     </text>
+<text x="245.2" y="312" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">     0.5%</text>
+<text x="320.8" y="312" fill="#8b90a5" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs">  virtual devices, v…</text>
+<text x="505.6" y="312" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="1009.6" y="312" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="329" fill="#585d75" xml:space="preserve" textLength="1008.0" lengthAdjust="spacingAndGlyphs">╰──────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯</text>
+<text x="10.0" y="346" fill="#585d75" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs">╭─ </text>
+<text x="35.2" y="346" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="33.6" lengthAdjust="spacingAndGlyphs">disk</text>
+<text x="68.8" y="346" fill="#8b90a5" xml:space="preserve" textLength="218.4" lengthAdjust="spacingAndGlyphs"> · litek8s and its VM disk</text>
+<text x="287.2" y="346" fill="#585d75" xml:space="preserve" textLength="252.0" lengthAdjust="spacingAndGlyphs"> ─────────────────────────╮╭─ </text>
+<text x="539.2" y="346" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">workloads</text>
+<text x="614.8" y="346" fill="#585d75" xml:space="preserve" textLength="403.2" lengthAdjust="spacingAndGlyphs"> ──────────────────────────────────────────────╮</text>
+<text x="10.0" y="363" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="26.8" y="363" fill="#51dd7c" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">▏</text>
+<text x="35.2" y="363" fill="#474b5e" xml:space="preserve" textLength="193.2" lengthAdjust="spacingAndGlyphs">░░░░░░░░░░░░░░░░░░░░░░░</text>
+<text x="228.4" y="363" fill="#4cde7f" font-weight="bold" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">   1% </text>
+<text x="278.8" y="363" fill="#d4d4d8" xml:space="preserve" textLength="226.8" lengthAdjust="spacingAndGlyphs">293 MB used · 48.4 GB free </text>
+<text x="505.6" y="363" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="522.4" y="363" fill="#8b90a5" xml:space="preserve" textLength="109.2" lengthAdjust="spacingAndGlyphs"> pods        </text>
+<text x="631.6" y="363" fill="#4ade80" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">● </text>
+<text x="648.4" y="363" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">6</text>
+<text x="656.8" y="363" fill="#d4d4d8" xml:space="preserve" textLength="92.4" lengthAdjust="spacingAndGlyphs"> running   </text>
+<text x="749.2" y="363" fill="#fbbf24" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">◐ </text>
+<text x="766.0" y="363" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">1</text>
+<text x="774.4" y="363" fill="#d4d4d8" xml:space="preserve" textLength="92.4" lengthAdjust="spacingAndGlyphs"> pending   </text>
+<text x="866.8" y="363" fill="#f87171" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">✕ </text>
+<text x="883.6" y="363" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">1</text>
+<text x="892.0" y="363" fill="#d4d4d8" xml:space="preserve" textLength="117.6" lengthAdjust="spacingAndGlyphs"> crashloop    </text>
+<text x="1009.6" y="363" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="380" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="380" fill="#d4d4d8" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs"> litek8s itself      </text>
+<text x="194.8" y="380" fill="#a78bfa" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">███▋  </text>
+<text x="245.2" y="380" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">   179 MB</text>
+<text x="320.8" y="380" fill="#8b90a5" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs">  binary, VM kernel …</text>
+<text x="505.6" y="380" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="631.6" y="380" fill="#94a3b8" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">○ </text>
+<text x="648.4" y="380" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">1</text>
+<text x="656.8" y="380" fill="#d4d4d8" xml:space="preserve" textLength="352.8" lengthAdjust="spacingAndGlyphs"> completed                                </text>
+<text x="1009.6" y="380" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="397" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="397" fill="#d4d4d8" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs"> cluster ui-design   </text>
+<text x="194.8" y="397" fill="#a78bfa" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">█▌    </text>
+<text x="245.2" y="397" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">  73.9 MB</text>
+<text x="505.6" y="397" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="522.4" y="397" fill="#8b90a5" xml:space="preserve" textLength="109.2" lengthAdjust="spacingAndGlyphs"> containers  </text>
+<text x="631.6" y="397" fill="#4ade80" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">● </text>
+<text x="648.4" y="397" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs">2/3</text>
+<text x="673.6" y="397" fill="#d4d4d8" xml:space="preserve" textLength="92.4" lengthAdjust="spacingAndGlyphs"> running   </text>
+<text x="766.0" y="397" fill="#94a3b8" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">○ </text>
+<text x="782.8" y="397" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">1</text>
+<text x="791.2" y="397" fill="#d4d4d8" xml:space="preserve" textLength="218.4" lengthAdjust="spacingAndGlyphs"> exited                   </text>
+<text x="1009.6" y="397" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="414" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="414" fill="#8b90a5" xml:space="preserve" textLength="226.8" lengthAdjust="spacingAndGlyphs">   images            █▌    </text>
+<text x="245.2" y="414" fill="#d4d4d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">  70.2 MB</text>
+<text x="320.8" y="414" fill="#8b90a5" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs">  8.5 MB reclaimable…</text>
+<text x="505.6" y="414" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="522.4" y="414" fill="#8b90a5" xml:space="preserve" textLength="109.2" lengthAdjust="spacingAndGlyphs"> images      </text>
+<text x="631.6" y="414" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">3</text>
+<text x="640.0" y="414" fill="#d4d4d8" xml:space="preserve" textLength="369.6" lengthAdjust="spacingAndGlyphs"> · 62.3 MB                                  </text>
+<text x="1009.6" y="414" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="431" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="431" fill="#8b90a5" xml:space="preserve" textLength="226.8" lengthAdjust="spacingAndGlyphs">   container layers  ▏     </text>
+<text x="245.2" y="431" fill="#d4d4d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">   807 kB</text>
+<text x="320.8" y="431" fill="#8b90a5" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs">  what containers wr…</text>
+<text x="505.6" y="431" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="522.4" y="431" fill="#8b90a5" xml:space="preserve" textLength="109.2" lengthAdjust="spacingAndGlyphs"> volumes     </text>
+<text x="631.6" y="431" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">0</text>
+<text x="640.0" y="431" fill="#d4d4d8" xml:space="preserve" textLength="369.6" lengthAdjust="spacingAndGlyphs"> · 0 B                                      </text>
+<text x="1009.6" y="431" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="448" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="448" fill="#8b90a5" xml:space="preserve" textLength="226.8" lengthAdjust="spacingAndGlyphs">   volumes           ▏     </text>
+<text x="245.2" y="448" fill="#d4d4d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">   328 kB</text>
+<text x="320.8" y="448" fill="#8b90a5" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs">  Docker volumes, em…</text>
+<text x="505.6" y="448" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="1009.6" y="448" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="465" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="465" fill="#8b90a5" xml:space="preserve" textLength="226.8" lengthAdjust="spacingAndGlyphs">   logs              ▏     </text>
+<text x="245.2" y="465" fill="#d4d4d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">  28.7 kB</text>
+<text x="320.8" y="465" fill="#8b90a5" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs">  pods and container…</text>
+<text x="505.6" y="465" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="1009.6" y="465" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="482" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="482" fill="#8b90a5" xml:space="preserve" textLength="226.8" lengthAdjust="spacingAndGlyphs">   objects           ▏     </text>
+<text x="245.2" y="482" fill="#d4d4d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">   1.4 MB</text>
+<text x="320.8" y="482" fill="#8b90a5" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs">  Kubernetes objects…</text>
+<text x="505.6" y="482" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="1009.6" y="482" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="499" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="499" fill="#8b90a5" xml:space="preserve" textLength="226.8" lengthAdjust="spacingAndGlyphs">   other             ▏     </text>
+<text x="245.2" y="499" fill="#d4d4d8" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">   1.1 MB</text>
+<text x="320.8" y="499" fill="#8b90a5" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs">  metadata, IP alloc…</text>
+<text x="505.6" y="499" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="1009.6" y="499" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="516" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="516" fill="#d4d4d8" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs"> rest of the VM disk </text>
+<text x="194.8" y="516" fill="#a78bfa" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">▏     </text>
+<text x="245.2" y="516" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">   2.2 MB</text>
+<text x="320.8" y="516" fill="#8b90a5" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs">  other clusters, fi…</text>
+<text x="505.6" y="516" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="1009.6" y="516" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="533" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="533" fill="#d4d4d8" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs"> deleted in the VM   </text>
+<text x="194.8" y="533" fill="#a78bfa" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">▊     </text>
+<text x="245.2" y="533" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">  38.3 MB</text>
+<text x="320.8" y="533" fill="#8b90a5" xml:space="preserve" textLength="176.4" lengthAdjust="spacingAndGlyphs">  kept by disk.img (…</text>
+<text x="505.6" y="533" fill="#585d75" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">││</text>
+<text x="1009.6" y="533" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="550" fill="#585d75" xml:space="preserve" textLength="1008.0" lengthAdjust="spacingAndGlyphs">╰──────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯</text>
+<text x="10.0" y="567" fill="#585d75" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs">╭─ </text>
+<text x="35.2" y="567" fill="#d4d4d8" font-weight="bold" xml:space="preserve" textLength="277.2" lengthAdjust="spacingAndGlyphs">connections · your tools point at</text>
+<text x="312.4" y="567" fill="#585d75" xml:space="preserve" textLength="705.6" lengthAdjust="spacingAndGlyphs"> ──────────────────────────────────────────────────────────────────────────────────╮</text>
+<text x="10.0" y="584" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="584" fill="#8b90a5" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs"> API     </text>
+<text x="94.0" y="584" fill="#d4d4d8" xml:space="preserve" textLength="403.2" lengthAdjust="spacingAndGlyphs">http://127.0.0.1:59023                          </text>
+<text x="497.2" y="584" fill="#8b90a5" xml:space="preserve" textLength="159.6" lengthAdjust="spacingAndGlyphs">✗ docker context   </text>
+<text x="656.8" y="584" fill="#d4d4d8" xml:space="preserve" textLength="352.8" lengthAdjust="spacingAndGlyphs">default                                   </text>
+<text x="1009.6" y="584" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="601" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="601" fill="#8b90a5" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs"> Docker  </text>
+<text x="94.0" y="601" fill="#d4d4d8" xml:space="preserve" textLength="420.0" lengthAdjust="spacingAndGlyphs">~/.litek8s/ui-design/docker.sock                  </text>
+<text x="514.0" y="601" fill="#8b90a5" xml:space="preserve" textLength="184.8" lengthAdjust="spacingAndGlyphs">DOCKER_HOST      unset</text>
+<text x="1009.6" y="601" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="618" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="618" fill="#8b90a5" xml:space="preserve" textLength="243.6" lengthAdjust="spacingAndGlyphs"> Engine  API 27.5.1 (aarch64)</text>
+<text x="497.2" y="618" fill="#4ade80" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">✓ </text>
+<text x="514.0" y="618" fill="#8b90a5" xml:space="preserve" textLength="142.8" lengthAdjust="spacingAndGlyphs">kubectl context  </text>
+<text x="656.8" y="618" fill="#d4d4d8" xml:space="preserve" textLength="352.8" lengthAdjust="spacingAndGlyphs">litek8s-ui-design                         </text>
+<text x="1009.6" y="618" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="635" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="635" fill="#8b90a5" xml:space="preserve" textLength="184.8" lengthAdjust="spacingAndGlyphs"> VM IP   192.168.64.39</text>
+<text x="514.0" y="635" fill="#8b90a5" xml:space="preserve" textLength="495.6" lengthAdjust="spacingAndGlyphs">kubeconfig       ~/.kube/config                            </text>
+<text x="1009.6" y="635" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="652" fill="#585d75" xml:space="preserve" textLength="1008.0" lengthAdjust="spacingAndGlyphs">╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</text>
+<text x="10.0" y="669" fill="#8b90a5" xml:space="preserve" textLength="487.2" lengthAdjust="spacingAndGlyphs"> Switch docker/kubectl to litek8s in Settings (8). Help: ?</text>
+<rect x="18.4" y="673" width="25.7" height="17" fill="#2b2740"/>
+<rect x="85.6" y="673" width="25.7" height="17" fill="#2b2740"/>
+<rect x="169.6" y="673" width="25.7" height="17" fill="#2b2740"/>
+<rect x="270.4" y="673" width="25.7" height="17" fill="#2b2740"/>
+<rect x="396.4" y="673" width="25.7" height="17" fill="#2b2740"/>
+<rect x="942.4" y="673" width="25.7" height="17" fill="#2b2740"/>
+<text x="18.4" y="686" fill="#a78bfa" font-weight="bold" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs"> u </text>
+<text x="43.6" y="686" fill="#8b90a5" xml:space="preserve" textLength="42.0" lengthAdjust="spacingAndGlyphs"> up  </text>
+<text x="85.6" y="686" fill="#a78bfa" font-weight="bold" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs"> d </text>
+<text x="110.8" y="686" fill="#8b90a5" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs"> down  </text>
+<text x="169.6" y="686" fill="#a78bfa" font-weight="bold" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs"> R </text>
+<text x="194.8" y="686" fill="#8b90a5" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs"> delete  </text>
+<text x="270.4" y="686" fill="#a78bfa" font-weight="bold" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs"> b </text>
+<text x="295.6" y="686" fill="#8b90a5" xml:space="preserve" textLength="100.8" lengthAdjust="spacingAndGlyphs"> breakdown  </text>
+<text x="396.4" y="686" fill="#a78bfa" font-weight="bold" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs"> 2 </text>
+<text x="421.6" y="686" fill="#8b90a5" xml:space="preserve" textLength="92.4" lengthAdjust="spacingAndGlyphs"> clusters  </text>
+<text x="942.4" y="686" fill="#a78bfa" font-weight="bold" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs"> ? </text>
+<text x="967.6" y="686" fill="#8b90a5" xml:space="preserve" textLength="42.0" lengthAdjust="spacingAndGlyphs"> help</text>
+</svg></g>
+</svg>

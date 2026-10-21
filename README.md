@@ -1,353 +1,149 @@
-# litek8s
+<p align="center">
+  <a href="https://litek8s.dev"><img src="https://raw.githubusercontent.com/jairoFernandez/litek8s/main/web/public/brand/litek8s-mark.svg" width="88" height="88" alt="litek8s"></a>
+</p>
 
-**[litek8s.dev](https://litek8s.dev)** · [docs](https://litek8s.dev/docs/) ·
-[releases](https://github.com/jairoFernandez/litek8s/releases)
+<h1 align="center">litek8s</h1>
 
-**A lightweight Kubernetes in one binary**, for local development, home
-labs and the edge. It serves the real Kubernetes API, so `kubectl`, Helm
-and Argo CD work unchanged, but the whole control plane, scheduler,
-controllers, DNS, service proxy and node agent are one Rust process that
-idles at about 20 MiB.
+<p align="center">
+  <b>A whole Kubernetes in one binary.</b><br>
+  A local cluster in about a second, your spare machines as one cluster,<br>
+  and about 20 MiB of memory at idle.
+</p>
+
+<p align="center">
+  <a href="https://github.com/jairoFernandez/litek8s/releases"><img src="https://img.shields.io/github/v/release/jairoFernandez/litek8s?color=8b5cf6&label=release" alt="Latest release"></a>
+  <a href="https://crates.io/crates/litek8s"><img src="https://img.shields.io/crates/v/litek8s?color=8b5cf6" alt="crates.io"></a>
+  <a href="https://github.com/jairoFernandez/litek8s/actions/workflows/test.yml"><img src="https://github.com/jairoFernandez/litek8s/actions/workflows/test.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/jairoFernandez/litek8s/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-8b5cf6" alt="License: Apache-2.0"></a>
+</p>
+
+<p align="center">
+  <a href="https://litek8s.dev"><b>Website</b></a> ·
+  <a href="https://litek8s.dev/docs/"><b>Docs</b></a> ·
+  <a href="https://litek8s.dev/docs/quickstart/">Quickstart</a> ·
+  <a href="https://github.com/jairoFernandez/litek8s/releases">Releases</a>
+</p>
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/jairoFernandez/litek8s/main/docs/readme/demo.svg" width="880" alt="litek8s dev up starts a cluster in 1.28 seconds, kubectl get nodes shows it Ready, litek8s ui opens the terminal UI">
+</p>
 
 ```bash
-litek8s dev up        # a local cluster: ~0.2 s on Linux, ~1.3 s on macOS
-kubectl get nodes     # context litek8s-dev, merged into ~/.kube/config
-litek8s ui            # terminal UI for the cluster, containers and images
+brew install jairoFernandez/tap/litek8s
+litek8s dev up        # a cluster, Ready in ~1 s
+kubectl get nodes     # your kubectl, Helm and Argo CD work unchanged
 ```
 
-> **Status: early preview (v0.x).** Built and tested by one person; expect
-> rough edges. There is no client authentication yet: keep the API on
-> localhost or a trusted network ([Limitations](#limitations)).
-> Feedback and issues are very welcome.
+## Why litek8s
+
+- **A cluster before you finish blinking.** `litek8s dev up` has a node
+  Ready in 0.17 s on Linux and 1.28 s on macOS; kind takes 31.6 s and 34.3 s.
+- **Small enough to forget it's running.** The whole orchestrator with five
+  nginx pods uses 24.6 MiB where k3s needs 603 MiB; with Argo CD, 90 MiB
+  against 900 MiB.
+- **Real Kubernetes, not a look-alike.** It serves the Kubernetes API, so
+  kubectl, Helm and Argo CD just work: 119/119 on our compatibility corpus
+  (47 Helm charts included) and 413/419 on the official v1.33 conformance suite.
+- **Batteries included.** A Docker-compatible API, a terminal UI, metrics,
+  log search and alerts (+1.8 MiB, instead of 1.3 GiB for
+  kube-prometheus-stack and Loki) and an MCP server for AI agents, all in
+  the same binary.
+- **No Docker Desktop, no VM to babysit.** On macOS one small VM it manages
+  itself, no sudo; on Linux a rootless sandbox.
+- **From laptop to rack.** The same binary turns a Raspberry Pi, an old
+  laptop and a cheap cloud VM into one cluster, across NATs, with a highly
+  available control plane when you want one.
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/jairoFernandez/litek8s/main/docs/ui/kube-light.svg">
+    <img src="https://raw.githubusercontent.com/jairoFernandez/litek8s/main/docs/ui/kube-dark.svg" width="820" alt="litek8s ui: the Kubernetes view, a k9s-style list of pods with their status">
+  </picture>
+  <br><sub><code>litek8s ui</code>: your clusters, pods, containers, images and logs in one keyboard-driven terminal UI.</sub>
+</p>
+
+## What you can do
+
+- **Develop locally.** As many clusters as you like, each with as many
+  nodes, NodePorts on `localhost` and your code mounted at the same path.
+  → [Dev clusters](https://litek8s.dev/docs/dev/)
+- **Drop Docker Desktop.** `docker`, `docker compose`, Dev Containers and
+  Testcontainers run on the same cluster through its Docker Engine API.
+  → [Docker API](https://litek8s.dev/docs/docker/)
+- **Turn spare machines into a cluster.** Install a server and its nodes
+  over SSH, or declare the whole cluster in one file and run
+  `litek8s cluster apply -f cluster.yaml`.
+  → [Clusters over SSH](https://litek8s.dev/docs/clusters/)
+- **Span homes and clouds.** Pods talk across nodes over a WireGuard mesh
+  litek8s sets up itself, relayed when two machines sit behind NATs: no VPN,
+  no port forwarding. → [Networking](https://litek8s.dev/docs/networking/)
+- **Run one LLM across all your machines.** A model too big for any one of
+  them runs on several with llama.cpp's RPC backend, as a DaemonSet behind
+  one OpenAI-compatible endpoint. → [One LLM across machines](https://litek8s.dev/docs/llm-cluster/)
+- **Stay up when a server dies.** Three API servers share the store through
+  Raft, no etcd; any one can fail without losing a write.
+  → [HA control plane](https://litek8s.dev/docs/ha/)
+- **Let AI agents operate it.** `litek8s mcp` gives Claude Code and other
+  MCP clients your clusters, pod diagnosis, logs and metrics, with
+  guardrails. → [Agents](https://litek8s.dev/docs/agents/)
+- **See what's happening.** Prometheus-compatible metrics (Grafana works),
+  log search across every pod and alerts to a webhook, ntfy or Telegram.
+  → [Observability](https://litek8s.dev/docs/observability/)
 
 ## Install
 
-macOS (Apple silicon) and Linux (x86_64, aarch64), with Homebrew:
+macOS (Apple silicon) and Linux (x86_64, aarch64):
 
 ```bash
 brew install jairoFernandez/tap/litek8s
 ```
 
-or with the install script:
+or
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jairoFernandez/litek8s/main/install.sh | sh
 ```
 
-The script downloads the latest release for your OS and architecture, checks its
-SHA-256, and installs `litek8s` to `~/.local/bin` (on macOS also the dev
-VM's guest kernel and root image to `~/.local/share/litek8s/vm`). Options:
-`LITEK8S_VERSION=v0.1.0`, `LITEK8S_INSTALL_DIR=/usr/local/bin`. Or
-download an archive from the [releases page](https://github.com/jairoFernandez/litek8s/releases)
-and check it against `SHA256SUMS`.
+On Linux, `litek8s dev setup` checks what rootless clusters need. A server
+for your other machines is one command too: `install.sh | sh -s -- server`.
+Other options (cargo, releases, servers and nodes):
+[Install](https://litek8s.dev/docs/install/).
 
-On Linux, dev clusters run rootless and need `crun`, `uidmap`, `passt`
-(or `slirp4netns`), `iproute2` and `iptables`: `litek8s dev setup` checks
-everything and says what is missing ([docs/dev.md](docs/dev.md#what-it-needs)).
-macOS needs nothing else: no Docker Desktop, no Lima, no sudo.
+## How it compares
 
-Shell completion: Homebrew installs it; otherwise `litek8s completion zsh`
-(or bash, fish, powershell, elvish) prints the script, e.g. `source <(litek8s
-completion zsh)` in `~/.zshrc`.
+| | litek8s | reference |
+|---|---|---|
+| `dev up` to node Ready, Linux / macOS | **0.17 s / 1.28 s** | kind 31.6 s / 34.3 s, k3d 11.1 s / 10.4 s |
+| Whole orchestrator, 5 nginx pods | **24.6 MiB** | k3s minimal 603 MiB |
+| Dev cluster idle memory, Linux | **47 MiB** | kind 526 MiB, k3d 398 MiB |
+| Metrics, logs and alerts | **+1.8 MiB** | kube-prometheus-stack + Loki 1,371 MiB |
+| Kubernetes v1.33 conformance | **413/419** | k3s 416/419 |
 
-From source: `cargo install litek8s` (crates.io) or `cargo install --git
-https://github.com/jairoFernandez/litek8s` (Rust ≥ 1.90; macOS also needs the
-guest, see [docs/dev.md](docs/dev.md)).
-
-## Quickstart
-
-```bash
-litek8s dev up
-kubectl create deployment web --image=nginx
-kubectl expose deployment web --type=NodePort --port 80
-curl localhost:$(kubectl get svc web -o jsonpath='{.spec.ports[0].nodePort}')
-
-litek8s ui                                   # browse it all
-export DOCKER_HOST=unix://$HOME/.litek8s/docker.sock
-docker run --rm hello-world                  # the same cluster speaks the Docker API
-
-litek8s dev up --name ci --nodes 3           # another cluster, three nodes
-litek8s dev down                             # stop; objects and images are kept
-litek8s dev delete                           # remove everything
-```
-
-Every cluster, and every node of a multi-node cluster, runs in one small
-VM on macOS or one rootless sandbox on Linux, started with the first
-cluster and stopped with the last. Each cluster gets its own API port,
-kubectl context and Docker socket:
-
-```mermaid
-flowchart LR
-    subgraph host["your machine"]
-        you["kubectl · docker · litek8s ui"]
-        subgraph env["one VM / sandbox"]
-            subgraph dev["cluster dev"]
-                d1["node"]
-            end
-            subgraph ci["cluster ci, 3 nodes"]
-                c1["node 1<br/>API server"]
-                c2["node 2"]
-                c3["node 3"]
-                c2 & c3 -->|join| c1
-            end
-        end
-    end
-    you -->|"127.0.0.1:6443<br/>context litek8s-dev"| d1
-    you -->|"127.0.0.1:port<br/>context litek8s-ci"| c1
-    you -.->|"docker.sock"| d1
-```
-
-## Numbers
-
-Measured against k3s, kind and k3d with the scripts in this repository; the
-linked files have the setup, raw data and caveats.
-
-| | litek8s | reference | source |
-|---|---|---|---|
-| Whole orchestrator, 5 nginx pods (PSS, 1 GiB arm64 VM) | **24.6 MiB** | k3s minimal: 603 MiB | [bench/RESULTS.md](bench/RESULTS.md#the-kubernetes-path-on-crun-without-docker-2026-10-17) |
-| Argo CD + one synced app, orchestrator memory | **90 MiB** | k3s minimal: 900 MiB | [bench/RESULTS.md](bench/RESULTS.md#argo-cd-on-k3s-and-on-litek8s-2026-10-19-x86_64kvm) |
-| `dev up` → node Ready, Linux / macOS | **0.17 s / 1.28 s** | kind 31.6 s / 34.3 s, k3d 11.1 s / 10.4 s | [bench/RESULTS.md](bench/RESULTS.md#local-dev-cluster-litek8s-dev-vs-kind-and-k3d-2026-10-18) |
-| Dev cluster idle memory, Linux | **47 MiB** | kind 526 MiB, k3d 398 MiB | same |
-| Metrics, logs and alerts, added memory | **+1.8 MiB** | kube-prometheus-stack + Loki: 1,371 MiB | [bench/RESULTS.md](bench/RESULTS.md#observability-built-in-vs-kube-prometheus-stack--loki-2026-10-20-x86_64kvm) |
-| Compatibility corpus (kubectl, CRDs, workloads, networking, 47 Helm charts) | **119/119** | k3s: 119/119 | [compat/RESULTS.md](compat/RESULTS.md#without-docker-2026-10-19-119-cases) |
-| Kubernetes v1.33 conformance (419 specs) | **413/419** | k3s: 416/419 | [compat/CONFORMANCE.md](compat/CONFORMANCE.md) |
-
-The 6 conformance failures: 5 are macOS-only (TCP DNS on port 53, a
-hostPort binding) and pass on Linux; 1 was a watch fixed since. A 3-server
-HA control plane stays linearizable under leader kills and partitions
-([bench/HA.md](bench/HA.md)); a 3-node cluster ran 21 h under churn with no
-leak ([bench/SOAK.md](bench/SOAK.md)).
-
-## What's in the binary
-
-- **Dev clusters** (`litek8s dev`): kind/k3d/minikube without Docker. As
-  many clusters as you like, each with as many nodes, in one rootless
-  sandbox (Linux) or one small Virtualization.framework VM (macOS) that
-  grows its memory on demand. NodePorts on `localhost`, your home directory mounted
-  at the same path, `litek8s dev load` for local images. [docs/dev.md](docs/dev.md)
-- **Docker Engine API** on `~/.litek8s/docker.sock`: `docker`,
-  `docker compose`, `docker build`, Dev Containers and Testcontainers run
-  on the dev cluster, next to (not instead of) Docker or OrbStack.
-  [docs/docker.md](docs/docker.md)
-- **Terminal UI** (`litek8s ui`): cluster state, a k9s-style Kubernetes
-  view, containers by compose project with logs and shells, images,
-  volumes, disk cleanup; keyboard-driven, works over SSH. [docs/ui.md](docs/ui.md)
-- **Built-in observability**: an embedded time-series store with a
-  Prometheus-compatible API (Grafana works), log search across every pod
-  and node, alert rules to a webhook, ntfy or Telegram; `kubectl top`.
-  [docs/observability.md](docs/observability.md)
-- **Real servers and nodes**: `litek8s apiserver` on a box, more machines
-  join with `litek8s agent --join ... --token ...` (k3s-style token that
-  pins the CA), pods talk across nodes over a WireGuard mesh litek8s sets
-  up itself. Pods run on crun directly: no containerd, no pause containers.
-  [Multi-node](#multi-node-and-ha)
-- **HA control plane**: 3 or 5 API servers share the store through Raft;
-  no etcd. [docs/ha.md](docs/ha.md)
-- **For LLM agents**: `litek8s mcp` is an MCP server (dev clusters, objects,
-  pod diagnosis, logs, PromQL, alerts) with guardrails, and `litek8s skill`
-  installs an agent skill: `claude mcp add litek8s -- litek8s mcp`.
-  [docs/agents.md](docs/agents.md)
-- **CRDs done properly**: OpenAPI schema validation, CEL rules type-checked
-  and cost-estimated, ratcheting, server-side apply with managedFields.
-  [docs/crds.md](docs/crds.md)
-
-Use case: **one LLM across all your machines**. A model too big for any
-one of them runs on several with llama.cpp's RPC backend (a DaemonSet of
-workers, one OpenAI-compatible server):
-[examples/llm-rpc](examples/llm-rpc/README.md), [docs/llm-cluster.md](docs/llm-cluster.md).
-
-## How it works
-
-One process does what a Kubernetes distribution splits across etcd, the
-API server, the controller manager, the scheduler, CoreDNS, kube-proxy,
-the kubelet and containerd, plus a Docker-compatible API and a metrics,
-logs and alerts stack:
-
-```mermaid
-flowchart TB
-    k8s["kubectl · Helm · Argo CD · litek8s ui · MCP agents"]
-    dk["docker · compose · Dev Containers · Testcontainers"]
-    subgraph bin["litek8s · one process"]
-        api["Kubernetes API server<br/>CRDs + CEL · server-side apply · watch"]
-        dockerapi["Docker Engine API"]
-        store[("object store<br/>WAL, or Raft in HA")]
-        ctrl["controllers<br/>+ scheduler"]
-        net["DNS +<br/>service proxy"]
-        obs["metrics · logs<br/>alerts"]
-        agent["node agent"]
-        api --- store
-        api <--> ctrl & net & obs & agent
-    end
-    k8s -->|":6443"| api
-    dk -->|"docker.sock"| dockerapi
-    agent --> crun["crun: containers<br/>no containerd, no pause containers"]
-    dockerapi --> crun
-```
-
-## Platforms
-
-| | dev clusters | server / node (`apiserver`, `agent`) | release binary |
-|---|---|---|---|
-| **macOS, Apple silicon** (13+) | yes, in a VM (Virtualization.framework) | for development only (Docker runtime) | `darwin-arm64`, VM guest included |
-| **Linux x86_64 / aarch64, rootless** | yes, user-namespace sandbox (kernel ≥ 5.11, cgroup v2) | – | `linux-x86_64`, `linux-aarch64` (static) |
-| **Linux, root with crun** | yes | yes: the intended server and node setup | same |
-| macOS Intel, Windows | no (WSL2 untested) | no | – |
-
-Tested on Ubuntu 24.04 (arm64 and x86_64) and recent macOS on Apple
-silicon. Ubuntu ≥ 23.10 needs `sudo litek8s dev setup` once (AppArmor and
-unprivileged user namespaces).
-
-## Multi-node and HA
-
-A server runs the whole control plane and its own pods; any Linux machine
-(a Raspberry Pi, an old laptop, a cheap cloud VM) joins it as a node with
-the token the server prints:
-
-```mermaid
-flowchart TB
-    laptop["your laptop · kubectl"] -->|":6443"| s
-    s["server · litek8s-server (systemd)<br/>API server, controllers, its own pods"]
-    subgraph nodes["nodes (litek8s-agent)"]
-        direction LR
-        pi["Raspberry Pi"] ~~~ old["old laptop"] ~~~ ec2["cheap cloud VM"]
-    end
-    nodes -->|"join token · HTTPS"| s
-    wg["pods talk across nodes over a WireGuard mesh<br/>10.42.0.0/16, one /24 per node<br/>relayed by the server across NATs"]
-    nodes -.- wg
-```
-
-On Linux servers (systemd, root), one command per machine, like k3s's
-installer:
-
-```bash
-# the server (pods run here too); prints the join command and the kubeconfig path
-curl -fsSL https://raw.githubusercontent.com/jairoFernandez/litek8s/main/install.sh | sh -s -- server
-
-# every other machine: the command the server printed
-curl -fsSL https://raw.githubusercontent.com/jairoFernandez/litek8s/main/install.sh | sh -s -- \
-  agent --join https://192.168.1.10:6443 --token K10<hash>::<secret>
-```
-
-This installs `/usr/local/bin/litek8s` (and `crun`/`iptables` from the
-package manager when missing), checks the machine (cgroup v2, kernel
-WireGuard, free ports) and runs `litek8s install server|agent`: a systemd
-unit (`litek8s-server` / `litek8s-agent`, `Restart=always`) with the token in
-`/etc/litek8s/*.env`, kubeconfig in `/etc/litek8s/kubeconfig.yaml`. Pods keep
-running across `systemctl restart` and upgrades, and come back after a
-reboot. Extra flags go to `litek8s apiserver` / `litek8s agent` (e.g.
-`--node-ip`); re-running replaces them. `sudo litek8s uninstall [--purge]`
-removes it all.
-
-Or do it all from your laptop over SSH (your `~/.ssh/config`, keys and
-agent; sudo on the machines), for one machine or a whole cluster declared
-in a file ([docs/clusters.md](docs/clusters.md)):
-
-```bash
-litek8s install server --ssh pi@192.168.1.10      # adds the kubeconfig context
-litek8s install agent --ssh me@old-laptop --join https://192.168.1.10:6443 --token K10<hash>::<secret>
-
-cat > cluster.yaml <<'EOF'
-apiVersion: litek8s.dev/v1
-kind: Cluster
-metadata: {name: home}
-servers: [{ssh: pi@192.168.1.10}]               # 1, or 3 for HA
-agents:
-  - {ssh: me@old-laptop, labels: {disk: ssd}}
-  - {ssh: ubuntu@ec2-host, nodeIp: 10.0.0.7}
-EOF
-litek8s cluster apply -f cluster.yaml             # again: no-op; agent removed + --prune: drained, uninstalled
-litek8s cluster status -f cluster.yaml
-```
-
-Without systemd, run the same processes yourself:
-
-```bash
-litek8s apiserver --listen 0.0.0.0:6443 --data-dir /var/lib/litek8s/apiserver --node-ip 192.168.1.10
-litek8s agent --join https://192.168.1.10:6443 --token K10<hash>::<secret> --node-ip 192.168.1.21
-```
-
-Every node gets a `/24` of `10.42.0.0/16`; Services and DNS work
-cluster-wide. Nodes behind NAT need no VPN or port forwarding: two homes
-reach each other directly when their routers allow it, and a pair with no
-direct path goes through a relay, by default the server (a cloud VM with a
-public address: `--node-external-ip`), with the data path in the kernel
-([docs/networking.md](docs/networking.md)). A node that stops goes `NotReady` after 40 s and its pods are
-rescheduled after their `tolerationSeconds`; laptops that sleep can join
-with a longer `--node-grace-period`. Three servers make the control plane
-highly available: `install.sh | sh -s -- server --cluster-init` on the first,
-`... server --server https://<first>:6443 --token <token>` on two more
-([docs/ha.md](docs/ha.md)). Any one server can die without losing writes;
-`litek8s lb` gives kubectl one address in front of all three:
-
-```mermaid
-flowchart TB
-    laptop["your laptop · kubectl"] --> lb["litek8s lb<br/>127.0.0.1:6443"]
-    subgraph cp["control plane"]
-        direction LR
-        s1["server 1"] <-->|"Raft :6444"| s2["server 2"] <-->|"Raft :6444"| s3["server 3"]
-    end
-    lb --> cp
-    subgraph nodes["nodes"]
-        direction LR
-        n1["agent"] ~~~ n2["agent"] ~~~ n3["agent"]
-    end
-    nodes -->|"any server, fail over"| cp
-```
-
-```bash
-litek8s logs -l app=web --since 1h --grep ERROR
-litek8s query 'topk(5, sum by (pod) (rate(container_cpu_usage_seconds_total[5m])))'
-litek8s alerts
-```
+Measured with the scripts in this repository; setups, raw data and caveats
+in [Numbers](https://litek8s.dev/docs/numbers/).
 
 ## Limitations
 
-Honest list; more in [skills/litek8s/references/differences.md](skills/litek8s/references/differences.md).
+litek8s is an early preview (v0.x), built and tested by one person.
 
-- **No client authentication or RBAC enforcement.** Every API client is
-  admin. Dev clusters listen on `127.0.0.1` only; on a server, put the API
-  behind a firewall or VPN and do not expose port 6443 (or the Raft port,
-  6444) to untrusted networks. Node join and HA peers are authenticated by
-  the join token.
-- One person's project, weeks old: APIs, flags and on-disk formats may
-  change between 0.x releases without migration.
-- Not every kubelet behavior: no `Unhealthy`/`BackOff` events, a memory
-  `emptyDir` is one tmpfs per container mount; ValidatingAdmissionPolicy
-  and webhook `matchConditions` are accepted but not enforced.
-- Metrics cover containers, nodes and cluster state; application
-  `/metrics` endpoints are not scraped (point a Prometheus at them).
-- The macOS VM never returns memory to macOS once touched (a
-  Virtualization.framework limit); litek8s keeps the guest small instead
-  ([docs/dev.md](docs/dev.md#memory-on-macos)).
-- macOS servers use Docker for pods and are meant for development; run
-  real servers and nodes on Linux.
-- Release binaries are built without the experimental `llm` feature
-  ([docs/llm.md](docs/llm.md)), which goes away in 0.2.0; run LLMs with
-  llama.cpp instead ([docs/llm-cluster.md](docs/llm-cluster.md)).
+- **No client authentication or RBAC yet:** every API client is admin. Dev
+  clusters listen on `127.0.0.1` only; keep a server's API on a trusted
+  network.
+- APIs, flags and on-disk formats may change between 0.x releases.
+- Some kubelet behaviors are missing.
 
-## Documentation
+The full list: [Limitations](https://litek8s.dev/docs/limitations/).
+Feedback and issues are very welcome.
 
-[docs/dev.md](docs/dev.md) dev clusters ·
-[docs/docker.md](docs/docker.md) Docker API ·
-[docs/ui.md](docs/ui.md) terminal UI ·
-[docs/observability.md](docs/observability.md) metrics, logs, alerts ·
-[docs/ha.md](docs/ha.md) HA control plane ·
-[docs/crds.md](docs/crds.md) CRDs ·
-[docs/agents.md](docs/agents.md) MCP and agents ·
-[docs/llm-cluster.md](docs/llm-cluster.md) one LLM across machines ·
-[compat/README.md](compat/README.md) compatibility corpus ·
-[CONTRIBUTING.md](CONTRIBUTING.md) building and testing ·
-[SECURITY.md](SECURITY.md) reporting vulnerabilities
+## Learn more
 
-## The legacy daemon
-
-litek8s began as a small Docker-backed orchestrator with its own reduced
-manifest format (`apiVersion: litek8s.dev/v1alpha1`), a daemon over a
-Unix socket (`litek8s serve`) and SSH-backed remote nodes. It is still in
-the binary but no longer the focus; see
-[docs/legacy-daemon.md](docs/legacy-daemon.md).
+- [litek8s.dev](https://litek8s.dev): the tour
+- [Documentation](https://litek8s.dev/docs/): [how it works](https://litek8s.dev/docs/#how-it-works),
+  [platforms](https://litek8s.dev/docs/platforms/), [multi-node and HA](https://litek8s.dev/docs/multi-node/),
+  [CRDs](https://litek8s.dev/docs/crds/)
+- [Contributing](https://github.com/jairoFernandez/litek8s/blob/main/CONTRIBUTING.md) · [Security](https://github.com/jairoFernandez/litek8s/blob/main/SECURITY.md)
 
 ## License
 
-Apache-2.0, see [LICENSE](LICENSE) and [NOTICE](NOTICE). Third-party
-components: [THIRD-PARTY.md](THIRD-PARTY.md).
+Apache-2.0, see [LICENSE](https://github.com/jairoFernandez/litek8s/blob/main/LICENSE) and [NOTICE](https://github.com/jairoFernandez/litek8s/blob/main/NOTICE). Third-party
+components: [THIRD-PARTY.md](https://github.com/jairoFernandez/litek8s/blob/main/THIRD-PARTY.md).
