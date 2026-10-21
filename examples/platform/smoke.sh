@@ -59,7 +59,14 @@ apps() {
   kubectl -n argocd get applications -o json |
     json '"\n".join("%-28s %-10s %s" % (a["metadata"]["name"], a.get("status",{}).get("sync",{}).get("status","?"), a.get("status",{}).get("health",{}).get("status","?")) for a in d["items"])'
 }
+# The app of apps on the repository's current commit first.
+head="$(gitea "$api/repos/$GITEA_USER/gitops/branches/main" | json 'd["commit"]["id"]')"
+kubectl -n argocd annotate application registry argocd.argoproj.io/refresh=normal --overwrite >/dev/null
 deadline=$((SECONDS + timeout))
+until [[ $(kubectl -n argocd get application registry -o jsonpath='{.status.sync.revision}') == "$head" ]]; do
+  if [[ $SECONDS -ge $deadline ]]; then echo "gitops: registry not on $head (timeout)"; exit 1; fi
+  sleep 3
+done
 while :; do
   out="$(apps)"
   grep -qv ' Synced  *Healthy$' <<<"$out" || break
@@ -68,3 +75,19 @@ while :; do
 done
 echo "gitops: all Applications Synced and Healthy"
 sed 's/^/  /' <<<"$out"
+
+# ---- HTTPS through the ingress, verified with the platform's CA ----------------
+
+domain="${DOMAIN:-localhost}"
+port="$(kubectl -n traefik get svc traefik -o jsonpath='{.spec.ports[?(@.name=="websecure")].port}')"
+ca="$(mktemp)"
+trap 'kill $gitea_pf 2>/dev/null; wait $gitea_pf 2>/dev/null; rm -f "$ca"' EXIT
+secret_value cert-manager platform-ca 'ca\.crt' >"$ca"
+deadline=$((SECONDS + timeout))
+for url in "https://argocd.$domain:$port/healthz" "https://gitea.$domain:$port/api/healthz"; do
+  until code="$(curl -s -o /dev/null -w '%{http_code}' --cacert "$ca" "$url")" && [[ $code == 200 ]]; do
+    if [[ $SECONDS -ge $deadline ]]; then echo "https: $url -> $code (timeout)"; exit 1; fi
+    sleep 5
+  done
+  echo "https: $url 200 (certificate from platform-ca)"
+done

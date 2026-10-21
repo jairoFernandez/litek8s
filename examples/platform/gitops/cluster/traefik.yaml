@@ -1,0 +1,48 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: traefik
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    argocd.argoproj.io/sync-wave: '10'
+spec:
+  project: default
+  source:
+    repoURL: https://traefik.github.io/charts
+    chart: traefik
+    targetRevision: 41.7.1
+    helm:
+      valuesObject:
+        # The default IngressClass; Ingress status from its Service, so
+        # Argo CD sees Ingresses healthy.
+        ingressClass:
+          enabled: true
+          isDefaultClass: true
+        providers:
+          kubernetesIngress:
+            publishedService:
+              enabled: true
+        service:
+          type: LoadBalancer
+        ports:
+          web:
+            exposedPort: <INGRESS_HTTP_PORT>
+          websecure:
+            exposedPort: <INGRESS_HTTPS_PORT>
+  destination:
+    name: in-cluster
+    namespace: traefik
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+    retry:
+      limit: 5
+      backoff:
+        duration: 5s
+        maxDuration: 5m0s
+        factor: 2

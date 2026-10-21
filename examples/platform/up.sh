@@ -4,13 +4,20 @@
 # CD syncing it. Safe to run again: secrets are kept, the repository is left
 # as it is (SEED=update commits this checkout's gitops/ into it).
 #   examples/platform/up.sh
-#   RUNNERS="lkdocker dind host" CLUSTER_NAME=home examples/platform/up.sh
+#   RUNNERS="lkdocker dind host" CLUSTER_NAME=home DOMAIN=home.lan examples/platform/up.sh
+# Web UIs are https://<app>.$DOMAIN (default localhost: browsers and curl
+# resolve *.localhost to this machine) on the ingress's LoadBalancer ports
+# HTTP_PORT/HTTPS_PORT (default 80/443), with certificates from the
+# platform's own CA.
 # Runner modes: lkdocker (litek8s Docker API), dind (own dockerd), host (in the pod).
 set -euo pipefail
 dir="$(cd "$(dirname "$0")" && pwd)"
 . "$dir/lib.sh"
 runners="${RUNNERS:-lkdocker}"
 cluster="${CLUSTER_NAME:-mgmt}"
+domain="${DOMAIN:-localhost}"
+http_port="${HTTP_PORT:-80}"
+https_port="${HTTPS_PORT:-443}"
 
 # ---- Gitea and runners ---------------------------------------------------
 
@@ -20,7 +27,18 @@ if ! kubectl -n "$ns" get secret gitea-admin >/dev/null 2>&1; then
     --from-literal=username=lkadmin --from-literal=password="$(openssl rand -hex 16)" >/dev/null
 fi
 helm upgrade --install gitea gitea --repo https://dl.gitea.com/charts/ --version 12.7.0 \
-  -n "$ns" -f "$dir/gitea/values.yaml" --wait --timeout 10m >/dev/null
+  -n "$ns" -f "$dir/gitea/values.yaml" -f - --wait --timeout 10m >/dev/null <<EOF
+ingress:
+  enabled: true
+  annotations:
+    cert-manager.io/cluster-issuer: platform-ca
+  hosts:
+    - host: gitea.$domain
+      paths: [{path: /}]
+  tls:
+    - secretName: gitea-tls
+      hosts: [gitea.$domain]
+EOF
 echo "gitea: ready"
 
 if ! kubectl -n "$ns" get secret runner-token >/dev/null 2>&1; then
@@ -45,7 +63,8 @@ render="$work/render"
 mkdir -p "$render/registry/clusters/$cluster"
 cp "$dir/gitops/NOTICE.md" "$render/"
 cp -R "$dir/gitops/cluster/." "$render/registry/clusters/$cluster/"
-find "$render" -name '*.yaml' -exec perl -pi -e "s#<CLUSTER_NAME>#$cluster#g; s#<GITOPS_REPO_URL>#$repo_url#g" {} +
+find "$render" -name '*.yaml' -exec perl -pi -e "s#<CLUSTER_NAME>#$cluster#g; s#<GITOPS_REPO_URL>#$repo_url#g;
+  s#<DOMAIN_NAME>#$domain#g; s#<INGRESS_HTTP_PORT>#$http_port#g; s#<INGRESS_HTTPS_PORT>#$https_port#g" {} +
 
 gitea -X POST "$api/user/repos" -d '{"name":"gitops","private":true,"default_branch":"main"}' >/dev/null 2>&1 || true
 empty="$(gitea "$api/repos/$GITEA_USER/gitops" | json 'd["empty"]')"
@@ -87,13 +106,18 @@ if ! kubectl -n argocd get secret repo-gitops >/dev/null 2>&1; then
 fi
 
 kubectl apply -f "$render/registry/clusters/$cluster/registry.yaml" >/dev/null
+# Read the repository now, not at the next poll (3 min).
+kubectl -n argocd annotate application registry argocd.argoproj.io/refresh=normal --overwrite >/dev/null
 echo "registry: applied, syncing (examples/platform/smoke.sh waits for it)"
 
+port=""; [[ $https_port == 443 ]] || port=":$https_port"
 cat <<EOF
 
-Gitea:   kubectl -n $ns port-forward svc/gitea-http 3000:3000   -> http://127.0.0.1:3000
-         user lkadmin, password: kubectl -n $ns get secret gitea-admin -o jsonpath='{.data.password}' | base64 -d
-Argo CD: kubectl -n argocd port-forward svc/argocd-server 8080:80  -> http://127.0.0.1:8080
-         user admin, password: kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
-Check:   $dir/smoke.sh $runners
+Gitea:   https://gitea.$domain$port   user lkadmin, password:
+           kubectl -n $ns get secret gitea-admin -o jsonpath='{.data.password}' | base64 -d
+Argo CD: https://argocd.$domain$port  user admin, password:
+           kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
+CA:      kubectl -n cert-manager get secret platform-ca -o jsonpath='{.data.ca\.crt}' | base64 -d > platform-ca.crt
+         (trust it in your browser or keychain to drop the certificate warning)
+Check:   DOMAIN=$domain $dir/smoke.sh $runners
 EOF

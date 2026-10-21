@@ -1,0 +1,35 @@
+# The platform's own certificate authority: a self-signed root kept in the
+# Secret cert-manager/platform-ca, and the ClusterIssuer platform-ca that
+# signs every Ingress's certificate with it. Trust it on your machine:
+#   kubectl -n cert-manager get secret platform-ca -o jsonpath='{.data.ca\.crt}' | base64 -d > platform-ca.crt
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: platform-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: litek8s platform CA (<CLUSTER_NAME>)
+  secretName: platform-ca
+  duration: 87600h # 10 years
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: selfsigned
+    kind: ClusterIssuer
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: platform-ca
+spec:
+  ca:
+    secretName: platform-ca

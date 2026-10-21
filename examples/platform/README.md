@@ -14,7 +14,7 @@ with kubefirst or Konstruct.
 | file | what |
 |---|---|
 | [`up.sh`](up.sh) | installs or updates everything; keeps its secrets and the repository on re-runs |
-| [`smoke.sh`](smoke.sh) | CI jobs per runner mode, then every Argo CD Application Synced and Healthy |
+| [`smoke.sh`](smoke.sh) | CI jobs per runner mode, every Argo CD Application Synced and Healthy on the repository's commit, Argo CD and Gitea over HTTPS with the platform's CA |
 | [`lib.sh`](lib.sh) | Gitea API and git over a port-forward, for both |
 | [`gitea/`](gitea/) | the Gitea chart's values, act_runner per mode |
 | [`gitops/cluster/`](gitops/cluster/) | what goes to `registry/clusters/<cluster>/` in the repository: one Argo CD Application per component, `registry.yaml` the app of apps, `components/argocd` Argo CD itself |
@@ -25,14 +25,19 @@ What is in it so far:
 |---|---|---|
 | 0 | `registry` | the app of apps (this directory, itself included) |
 | 10 | `cert-manager` | v1.21.2 |
-| 10 | `ingress-nginx` | 4.15.1 (the project is retired; to be replaced) |
+| 10 | `traefik` | chart 41.7.1 (Traefik v3.7), the default IngressClass, a LoadBalancer on `HTTP_PORT`/`HTTPS_PORT` |
+| 20 | `cert-issuers` | the platform's own CA (`platform-ca`, self-signed root) and its ClusterIssuer |
 | 30 | `external-secrets-operator` | 2.13.0 |
 | 60 | `reloader` | 2.2.18 |
 | 100 | `argocd` | v3.5.5, managing itself |
 
-Next: TLS and ingress with a local CA and domain, OpenBao (secrets, with
-external-secrets), Argo Workflows and Atlantis on Gitea, the sample app's
-CI/CD across environments.
+Argo CD and Gitea are at `https://argocd.<DOMAIN>` and
+`https://gitea.<DOMAIN>`, with certificates the platform's CA signs.
+kubefirst's ingress-nginx is retired upstream (no releases since March
+2026); Traefik takes its place.
+
+Next: OpenBao (secrets, with external-secrets), Argo Workflows and Atlantis
+on Gitea, the sample app's CI/CD across environments.
 
 ## On a dev cluster
 
@@ -41,20 +46,35 @@ litek8s dev up
 examples/platform/up.sh
 examples/platform/smoke.sh
 
-kubectl -n gitea port-forward svc/gitea-http 3000:3000     # http://127.0.0.1:3000, user lkadmin
-kubectl -n gitea get secret gitea-admin -o jsonpath='{.data.password}' | base64 -d
-kubectl -n argocd port-forward svc/argocd-server 8080:80   # http://127.0.0.1:8080, user admin
+open https://argocd.localhost   # user admin
 kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
+open https://gitea.localhost    # user lkadmin
+kubectl -n gitea get secret gitea-admin -o jsonpath='{.data.password}' | base64 -d
 ```
+
+Browsers, curl and most tools resolve `*.localhost` to this machine, so the
+default `DOMAIN=localhost` needs no DNS; a dev cluster publishes the
+ingress's LoadBalancer ports on `127.0.0.1`. To trust the platform's CA
+(and drop the browser warning), add it to your keychain or browser:
+
+```bash
+kubectl -n cert-manager get secret platform-ca -o jsonpath='{.data.ca\.crt}' | base64 -d > platform-ca.crt
+```
+
+On real machines, set `DOMAIN` to a name whose `*.` records point at a node
+(a home DNS server or router), and the ports stay 80/443.
 
 From a new dev cluster on a Mac (VM with 4 CPUs, 4 GiB): `up.sh` 90 s,
 then `smoke.sh` 2 min 40 s until every Application is Synced and Healthy
 (image pulls included). Memory: Argo CD 585 MiB, Gitea and the lkdocker
 runner 209 MiB, external-secrets 139 MiB, cert-manager 122 MiB,
-ingress-nginx 104 MiB, reloader 12 MiB; the whole node 1.4 GiB.
+reloader 12 MiB; the whole node 1.4 GiB (phase 1, with ingress-nginx at 104 MiB;
+its replacement Traefik uses 28 MiB).
 
 `up.sh` takes `CLUSTER_NAME` (default `mgmt`, the directory in the
-repository) and `RUNNERS` (default `lkdocker`). The repository is
+repository), `RUNNERS` (default `lkdocker`), `DOMAIN` (default `localhost`)
+and `HTTP_PORT`/`HTTPS_PORT` (default 80/443; another port when something
+on the machine holds them, e.g. `HTTPS_PORT=8443`, then the URLs carry it). The repository is
 `lkadmin/gitops` in Gitea; change the platform by pushing to it. `up.sh`
 writes it only when it is empty, or with `SEED=update` (a new commit with
 this checkout's `gitops/`).
@@ -90,5 +110,8 @@ things back), then the namespaces of the components, then
   old one holds the leveldb queue lock (crash loop) and its `ROOT_URL`
   (`git.example.com`) breaks `actions/checkout`; `gitea/values.yaml` fixes
   both.
+- **Gitea's own links** (clone URLs in its UI) show the in-cluster address:
+  runners and job containers clone from Gitea's `ROOT_URL`, which must be
+  reachable from inside the cluster, where `*.localhost` is the pod itself.
 - Runners keep their registration in an `emptyDir`: a new pod registers again
   and Gitea lists the old one as offline.
