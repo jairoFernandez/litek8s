@@ -138,6 +138,8 @@ pub enum DevCommand {
         wireguard_port: Option<u16>,
         #[arg(long, default_value_t = 0)]
         node_port_offset: u16,
+        #[arg(long)]
+        registry_config: Option<PathBuf>,
     },
     #[command(hide = true, name = "__cells")]
     Cells {
@@ -361,7 +363,12 @@ pub async fn run(command: DevCommand) -> Result<()> {
         DevCommand::Load { name, images } => load(&cluster::Cluster::new(&name)?, images).await,
         DevCommand::Setup => setup(),
         DevCommand::Supervise { publish, cpus, memory } => supervise(config::Publish::parse(&publish)?, cpus, memory).await,
-        DevCommand::InnerApiserver { data_dir, node_name, docker_alias, listen_also, wireguard_port, node_port_offset } => {
+        DevCommand::InnerApiserver { data_dir, node_name, docker_alias, listen_also, wireguard_port, node_port_offset, registry_config } => {
+            // Only the file `dev up` shipped (never the machine's
+            // /etc/litek8s/registries.yaml).
+            if let Some(path) = &registry_config {
+                crate::registries::init(Some(path))?;
+            }
             inner_apiserver(InnerOptions { data_dir, node_name, docker_alias, listen_also, wireguard_port, node_port_offset }).await
         }
         DevCommand::Cells { guest } => cells_main(guest).await,
@@ -423,7 +430,8 @@ async fn up(cluster: &cluster::Cluster, nodes: Option<u32>, opts: UpOptions) -> 
         meta.nodes = n;
     }
     cluster.save_meta(&home, &meta)?;
-    let reply = env::request(&home, &env::Request::Start { name: cluster.name.clone(), port: opts.port, nodes: meta.nodes }, Duration::from_secs(90)).await?;
+    let registries = registries_for_nodes(&crate::config::paths().dev_registries)?;
+    let reply = env::request(&home, &env::Request::Start { name: cluster.name.clone(), port: opts.port, nodes: meta.nodes, registries }, Duration::from_secs(90)).await?;
     drop(lock);
     if let Some(e) = reply.error {
         bail!("{context} failed to start: {e}\n{}", logs_tail(&home, cluster, 20));
@@ -439,6 +447,21 @@ async fn up(cluster: &cluster::Cluster, nodes: Option<u32>, opts: UpOptions) -> 
     let nodes = if meta.nodes > 1 { format!("{} nodes, ", meta.nodes) } else { String::new() };
     println!("{context} ready in {:.2}s ({}{}, {}, kubectl context {context})", started.elapsed().as_secs_f64(), nodes, env_state.mode, server(port));
     Ok(())
+}
+
+/// The registry configuration for a cluster's nodes: `path`
+/// (`<LITEK8S_HOME or ~/.litek8s>/registries.yaml`) with the files it names
+/// read in, since the nodes (in the VM) cannot see them. Read at each start.
+fn registries_for_nodes(path: &Path) -> Result<Option<String>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let yaml = crate::registries::bundle(path)?;
+    // It travels in one message to the environment.
+    if yaml.len() > 48 << 10 {
+        bail!("{} is too large for a dev cluster ({} KiB with its files, 48 KiB at most)", path.display(), yaml.len() >> 10);
+    }
+    Ok(Some(yaml))
 }
 
 /// Hand the `docker:` settings to the cluster's Docker API (it keeps them
@@ -1441,4 +1464,25 @@ fn docker_settings(guest: bool, data_dir: &Path, alias: Option<String>) -> Optio
 
 fn parse_share() -> Option<String> {
     guest::parse_cmdline(&std::fs::read_to_string("/proc/cmdline").ok()?).share
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registries_travel_with_their_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("registries.yaml");
+        assert_eq!(registries_for_nodes(&path).unwrap(), None);
+        let pem = rcgen::generate_simple_self_signed(vec!["reg.lan".into()]).unwrap().cert.pem();
+        std::fs::write(dir.path().join("ca.pem"), &pem).unwrap();
+        std::fs::write(&path, "configs:\n  reg.lan:\n    tls: {ca_file: ca.pem}\n    auth: {username: u, password: p}\n").unwrap();
+        let shipped = registries_for_nodes(&path).unwrap().unwrap();
+        let file = crate::registries::RegistriesFile::parse(&shipped).unwrap();
+        assert_eq!(file.configs["reg.lan"].tls.as_ref().unwrap().ca.as_deref(), Some(pem.as_str()));
+        crate::registries::Registries::parse(&shipped, Path::new("/nonexistent")).unwrap();
+        std::fs::write(&path, "mirrors: [").unwrap();
+        assert!(format!("{:#}", registries_for_nodes(&path).unwrap_err()).contains("not a valid registry configuration"));
+    }
 }

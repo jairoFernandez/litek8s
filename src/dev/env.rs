@@ -48,7 +48,15 @@ pub struct EnvState {
 #[serde(tag = "op", rename_all = "lowercase")]
 pub enum Request {
     /// Start a cluster (`port`: the API port wanted, else a free one).
-    Start { name: String, port: Option<u16>, nodes: u32 },
+    Start {
+        name: String,
+        port: Option<u16>,
+        nodes: u32,
+        /// The registry configuration for its nodes (`crate::registries`,
+        /// files inlined), from the user's registries.yaml.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        registries: Option<String>,
+    },
     Stop { name: String },
     /// Stop (`up: false`) or start again one node of a running cluster
     /// (not the control plane): node failure, on a laptop.
@@ -125,7 +133,16 @@ pub enum CellRequest {
     /// Start a cluster's nodes. On Linux the message carries the API
     /// listener, the Docker socket's listener, the host-port broker and
     /// the log file, in that order (SCM_RIGHTS).
-    Start { name: String, nodes: u32, data_dir: PathBuf, docker_alias: String },
+    Start {
+        name: String,
+        nodes: u32,
+        data_dir: PathBuf,
+        docker_alias: String,
+        /// The registry configuration for its nodes (`crate::registries`,
+        /// files inlined), from the user's registries.yaml.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        registries: Option<String>,
+    },
     Stop { name: String },
     Node { name: String, node: u32, up: bool },
     Purge { name: String },
@@ -278,12 +295,12 @@ mod tests {
 
     #[test]
     fn messages_round_trip() {
-        let r = Request::Start { name: "ci".into(), port: None, nodes: 3 };
+        let r = Request::Start { name: "ci".into(), port: None, nodes: 3, registries: None };
         let text = serde_json::to_string(&r).unwrap();
         assert_eq!(text, r#"{"op":"start","name":"ci","port":null,"nodes":3}"#);
         assert_eq!(serde_json::from_str::<Request>(&text).unwrap(), r);
         assert_eq!(serde_json::from_str::<Request>(r#"{"op":"stats"}"#).unwrap(), Request::Stats);
-        let c = CellRequest::Start { name: "dev".into(), nodes: 1, data_dir: "/x".into(), docker_alias: "/s".into() };
+        let c = CellRequest::Start { name: "dev".into(), nodes: 1, data_dir: "/x".into(), docker_alias: "/s".into(), registries: Some("mirrors: {}\n".into()) };
         assert_eq!(serde_json::from_str::<CellRequest>(&serde_json::to_string(&c).unwrap()).unwrap(), c);
     }
 
@@ -312,7 +329,7 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        let r = request(dir.path(), &Request::Start { name: "a".into(), port: Some(7), nodes: 1 }, Duration::from_secs(2)).await.unwrap();
+        let r = request(dir.path(), &Request::Start { name: "a".into(), port: Some(7), nodes: 1, registries: None }, Duration::from_secs(2)).await.unwrap();
         assert_eq!(r.port, Some(7));
         let r = request(dir.path(), &Request::Stats, Duration::from_secs(2)).await.unwrap();
         assert_eq!(r.error.as_deref(), Some("no"));

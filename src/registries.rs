@@ -210,6 +210,18 @@ impl RegistriesFile {
     }
 }
 
+/// The file at `path` made to work on another machine: checked, and the
+/// files it names (relative to its directory) read into it. What `dev up`
+/// and `install --registries` ship to nodes.
+pub fn bundle(path: &Path) -> Result<String> {
+    let invalid = || format!("{} is not a valid registry configuration", path.display());
+    let text = std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let mut file = RegistriesFile::parse(&text).with_context(invalid)?;
+    file.inline_files(path.parent().unwrap_or(Path::new("/"))).with_context(invalid)?;
+    Registries::new(file.clone(), Path::new("/")).with_context(invalid)?;
+    Ok(file.to_yaml())
+}
+
 /// Where a pull goes: a mirror or the registry itself.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Endpoint {

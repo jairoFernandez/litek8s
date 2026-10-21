@@ -284,7 +284,7 @@ impl Env {
         }
     }
 
-    fn start(&self, name: &str, port: Option<u16>, nodes: u32) -> Result<u16> {
+    fn start(&self, name: &str, port: Option<u16>, nodes: u32, registries: Option<String>) -> Result<u16> {
         let cluster = Cluster::new(name)?;
         if self.clusters.lock().unwrap().contains_key(name) {
             bail!("cluster {name} is running already");
@@ -300,7 +300,7 @@ impl Env {
         let log = std::fs::File::create(super::log_path(&chome))?;
         let data = cluster.data_dir(&self.home);
         std::fs::create_dir_all(&data)?;
-        let req = CellRequest::Start { name: name.into(), nodes, data_dir: data, docker_alias: socket.to_string_lossy().into() };
+        let req = CellRequest::Start { name: name.into(), nodes, data_dir: data, docker_alias: socket.to_string_lossy().into(), registries };
         if let Err(e) = self.cell_request(&req, &[listener.as_raw_fd(), docker.as_raw_fd(), broker_sandbox.as_raw_fd(), log.as_raw_fd()]) {
             let _ = std::fs::remove_file(&socket);
             return Err(e);
@@ -351,7 +351,7 @@ impl Env {
 
     fn handle(self: &Arc<Self>, req: Request) -> Response {
         let result = match req {
-            Request::Start { name, port, nodes } => self.start(&name, port, nodes.max(1)).map(Some),
+            Request::Start { name, port, nodes, registries } => self.start(&name, port, nodes.max(1), registries).map(Some),
             Request::Stop { name } => self.stop(&name).map(|_| None),
             Request::Node { name, node, up } => {
                 let r = self.cell_request(&CellRequest::Node { name, node, up }, &[]);
