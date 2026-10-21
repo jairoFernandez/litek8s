@@ -18,6 +18,7 @@ include = [
     "/src/**",
     "/build.rs",
     "/proto/**",
+    "/openapi/**",
     "/tests/**",
     "/examples/**",
     "/skills/**",
