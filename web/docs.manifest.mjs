@@ -36,7 +36,6 @@ export const groups = [
       { slug: 'crds', label: 'CRDs and server-side apply', source: 'docs/crds.md' },
       { slug: 'agents', label: 'MCP and LLM agents', source: 'docs/agents.md' },
       { slug: 'llm-cluster', label: 'One LLM across machines', source: 'docs/llm-cluster.md' },
-      { slug: 'llm', label: 'Built-in LLM experiment', source: 'docs/llm.md', badge: 'experimental' },
     ],
   },
   {
@@ -44,13 +43,6 @@ export const groups = [
     pages: [
       { slug: 'contributing', label: 'Building and testing', source: 'CONTRIBUTING.md' },
       { slug: 'develop-without-docker', label: 'Developing without Docker', source: 'docs/develop-without-docker.md' },
-    ],
-  },
-  {
-    label: 'Legacy daemon',
-    pages: [
-      { slug: 'legacy-daemon', label: 'The legacy daemon', source: 'docs/legacy-daemon.md' },
-      { slug: 'legacy-daemon-demo', label: 'Demo guide', source: 'docs/legacy-daemon-demo.md' },
     ],
   },
 ];

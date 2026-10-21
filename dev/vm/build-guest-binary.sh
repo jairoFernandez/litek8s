@@ -24,11 +24,11 @@ if [[ -n "${LITEK8S_BUILD_VOLUME:-}" ]]; then
   mkdir -p "${ROOT}/${TARGET_DIR}/release"
   docker run "${args[@]}" -v "${LITEK8S_BUILD_VOLUME}:/cache" \
     -e CARGO_TARGET_DIR=/cache/target -e CARGO_HOME=/cache/cargo-home \
-    rust:1.90-alpine sh -c "${SETUP} && cargo build --release --no-default-features && cp /cache/target/release/litek8s /work/${TARGET_DIR}/release/litek8s.tmp && chown $(id -u):$(id -g) /work/${TARGET_DIR}/release/litek8s.tmp" >&2
+    rust:1.90-alpine sh -c "${SETUP} && cargo build --release && cp /cache/target/release/litek8s /work/${TARGET_DIR}/release/litek8s.tmp && chown $(id -u):$(id -g) /work/${TARGET_DIR}/release/litek8s.tmp" >&2
   mv "${ROOT}/${TARGET_DIR}/release/litek8s.tmp" "${ROOT}/${TARGET_DIR}/release/litek8s"
 else
   docker run "${args[@]}" \
     -e "CARGO_TARGET_DIR=/work/${TARGET_DIR}" -e CARGO_HOME=/work/target/guest-cargo-home \
-    rust:1.90-alpine sh -c "${SETUP} && cargo build --release --no-default-features && chown -R $(id -u):$(id -g) /work/${TARGET_DIR} /work/target/guest-cargo-home" >&2
+    rust:1.90-alpine sh -c "${SETUP} && cargo build --release && chown -R $(id -u):$(id -g) /work/${TARGET_DIR} /work/target/guest-cargo-home" >&2
 fi
 echo "${ROOT}/${TARGET_DIR}/release/litek8s"

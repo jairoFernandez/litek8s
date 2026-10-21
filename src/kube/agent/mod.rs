@@ -955,9 +955,9 @@ pub async fn node_agent_with(
         let mtu = if wireguard.is_some() { overlay::MTU } else { 1500 };
         NodeRuntime::Crun(crun::CrunPods::new(&root_dir, &network.pod_cidr, &network.cluster_cidr, mtu).await?)
     } else {
-        let docker = crate::runtime::DockerRuntime::connect()?;
-        docker.ping().await?;
-        NodeRuntime::Docker(DockerPods::new(docker.client()))
+        let docker = runtime::connect_docker()?;
+        docker.ping().await.context("failed to ping the Docker daemon")?;
+        NodeRuntime::Docker(DockerPods::new(docker))
     };
     let overlay = match wireguard {
         Some(port) => match overlay::Overlay::start(&root_dir, port, &network.pod_cidr, &network.cluster_cidr).await {

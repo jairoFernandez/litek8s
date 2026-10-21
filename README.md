@@ -143,6 +143,13 @@ Feedback and issues are very welcome.
   [CRDs](https://litek8s.dev/docs/crds/)
 - [Contributing](https://github.com/jairoFernandez/litek8s/blob/main/CONTRIBUTING.md) · [Security](https://github.com/jairoFernandez/litek8s/blob/main/SECURITY.md)
 
+## History
+
+litek8s began as a small Docker-backed orchestrator with its own daemon and
+manifest format, plus an experiment in distributed LLM inference. 0.2.0
+removed both; every command they had has a Kubernetes-native replacement,
+listed in [CHANGELOG.md](https://github.com/jairoFernandez/litek8s/blob/main/CHANGELOG.md).
+
 ## License
 
 Apache-2.0, see [LICENSE](https://github.com/jairoFernandez/litek8s/blob/main/LICENSE) and [NOTICE](https://github.com/jairoFernandez/litek8s/blob/main/NOTICE). Third-party

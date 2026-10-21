@@ -23,8 +23,8 @@
 # then costs what it costs on a real disk, instead of writing back every
 # dirty page of the whole image from the host's page cache.
 #
-# To benchmark real machines instead (e.g. fresh EC2 t4g.micro from
-# infra/terraform), export BENCH_HOST_<name>=user@host[:port] (and BENCH_KEY if
+# To benchmark real machines instead (e.g. fresh EC2 t4g.micro instances),
+# export BENCH_HOST_<name>=user@host[:port] (and BENCH_KEY if
 # not ~/.ssh/id_ed25519): `up` then attaches to that host instead of booting a
 # VM, and `down` only forgets it. Hosts must be fresh Ubuntu 24.04, one per name.
 #

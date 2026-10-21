@@ -7,27 +7,20 @@
   probe.py cpu <seconds>               -> JSON: per-bucket CPU over a sleep window
   probe.py cpu-snap <file>             -> save a CPU snapshot
   probe.py cpu-diff <file>             -> JSON: per-bucket CPU since the snapshot
-  probe.py ttr-litek8s <sock> <yaml> <name>   -> JSON: apply -> first ready replica
   probe.py ttr-k3s <yaml> <name>              -> JSON: apply -> first Ready pod
   probe.py ttr-kube <url> <json> <name>       -> JSON: POST a Deployment to the litek8s
                                                  Kubernetes API -> first Ready pod
   probe.py kube-apply <url> <json>            -> POST a Deployment (no wait)
   probe.py kube-delete <url> <name>           -> DELETE a Deployment, wait for its pods
   probe.py kube-ready <url> <name...>         -> exit 0 once every Deployment is Available
-  probe.py agent-direct <sock> <n> <json>     -> JSON: latency of n requests sent
-                                                 straight to the resident agent socket
-  probe.py ssh-rpc <n> <json> -- <ssh argv>   -> JSON: latency of n ssh-exec RPCs
 
 Processes are bucketed by cgroup + comm so short-lived children (iptables,
-ssh-spawned `litek8s agent` proxies) are still charged to the right owner via
-the cgroup's cumulative cpu.stat even after they exit.
+runtime helpers) are still charged to the right owner via the cgroup's
+cumulative cpu.stat even after they exit.
 """
 import json
 import urllib.request
 import os
-import socket
-import statistics
-import struct
 import subprocess
 import sys
 import time
@@ -338,47 +331,7 @@ def cpu_diff(a, b):
     }
 
 
-# ---------------------------------------------------------------- litek8s client
-
-
-def lk_request(sock_path, req):
-    s = socket.socket(socket.AF_UNIX)
-    s.connect(sock_path)
-    body = json.dumps(req).encode()
-    s.sendall(struct.pack(">I", len(body)) + body)
-    hdr = b""
-    while len(hdr) < 4:
-        chunk = s.recv(4 - len(hdr))
-        if not chunk:
-            raise RuntimeError("daemon closed connection")
-        hdr += chunk
-    (n,) = struct.unpack(">I", hdr)
-    buf = b""
-    while len(buf) < n:
-        buf += s.recv(n - len(buf))
-    s.close()
-    return json.loads(buf)
-
-
-def lk_ready(sock_path, name):
-    resp = lk_request(sock_path, "GetDeployments")
-    for item in resp.get("Deployments", {}).get("items", []):
-        if item["name"] == name:
-            return item.get("ready_replicas", 0) >= 1
-    return False
-
-
-def ttr_litek8s(sock_path, manifest, name, timeout=180):
-    t0 = time.monotonic()
-    subprocess.run(["litek8s", "--socket-path", sock_path, "apply", "-f", manifest],
-                   check=True, stdout=subprocess.DEVNULL)
-    t_applied = time.monotonic()
-    while time.monotonic() - t0 < timeout:
-        if lk_ready(sock_path, name):
-            t1 = time.monotonic()
-            return {"seconds": round(t1 - t0, 3), "apply_cli_s": round(t_applied - t0, 3)}
-        time.sleep(0.05)
-    raise SystemExit(f"{name} not ready after {timeout}s")
+# ---------------------------------------------------------------- Kubernetes API clients
 
 
 def kube(url, method, path, body=None):
@@ -453,53 +406,6 @@ def ttr_k3s(manifest, name, timeout=180):
     raise SystemExit(f"{name} not ready after {timeout}s")
 
 
-# ---------------------------------------------------------------- rpc
-
-
-def stats(samples_ms):
-    s = sorted(samples_ms)
-    return {"n": len(s), "mean_ms": round(statistics.mean(s), 3), "p50_ms": round(s[len(s) // 2], 3),
-            "p95_ms": round(s[int(len(s) * 0.95) - 1], 3), "min_ms": round(s[0], 3)}
-
-
-def agent_direct(sock_path, n, payload):
-    samples = []
-    data = payload.encode() + b"\n"
-    for _ in range(n):
-        t0 = time.perf_counter()
-        s = socket.socket(socket.AF_UNIX)
-        s.connect(sock_path)
-        s.sendall(data)
-        s.shutdown(socket.SHUT_WR)
-        out = b""
-        while True:
-            chunk = s.recv(65536)
-            if not chunk:
-                break
-            out += chunk
-        s.close()
-        samples.append((time.perf_counter() - t0) * 1000)
-        json.loads(out)
-    return stats(samples)
-
-
-def ssh_rpc(n, payload, argv):
-    samples = []
-    data = payload.encode() + b"\n"
-    snap = cpu_snapshot()
-    for _ in range(n):
-        t0 = time.perf_counter()
-        p = subprocess.run(argv, input=data, capture_output=True)
-        samples.append((time.perf_counter() - t0) * 1000)
-        if p.returncode != 0:
-            raise SystemExit(f"rpc failed: {p.stderr.decode()}")
-    after = cpu_snapshot()
-    out = stats(samples)
-    out["caller_cpu_ms_per_rpc"] = round(
-        1000.0 * (after["busy_ticks"] - snap["busy_ticks"]) / TICK / n, 3)
-    return out
-
-
 def main():
     cmd, args = sys.argv[1], sys.argv[2:]
     if cmd == "mem":
@@ -522,8 +428,6 @@ def main():
     elif cmd == "cpu-diff":
         with open(args[0]) as f:
             out = cpu_diff(json.load(f), cpu_snapshot())
-    elif cmd == "ttr-litek8s":
-        out = ttr_litek8s(*args)
     elif cmd == "ttr-k3s":
         out = ttr_k3s(*args)
     elif cmd == "ttr-kube":
@@ -536,11 +440,6 @@ def main():
         out = kube_delete(*args)
     elif cmd == "kube-ready":
         out = kube_ready(args[0], args[1:])
-    elif cmd == "agent-direct":
-        out = agent_direct(args[0], int(args[1]), args[2])
-    elif cmd == "ssh-rpc":
-        sep = args.index("--")
-        out = ssh_rpc(int(args[0]), args[1], args[sep + 1:])
     else:
         raise SystemExit(__doc__)
     json.dump(out, sys.stdout, indent=1)

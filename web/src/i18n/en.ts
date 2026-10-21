@@ -35,7 +35,7 @@ export const en = {
     menu: 'Menu',
   },
   hero: {
-    badge: 'v0.1 · early preview · Apache-2.0',
+    badge: 'v0.2 · early preview · Apache-2.0',
     lines: ['A whole Kubernetes', 'in one binary,', 'idling at ~20 MiB.'],
     lead:
       'litek8s serves the real Kubernetes API, so kubectl, Helm and Argo CD work unchanged. The control plane, scheduler, controllers, DNS, service proxy and node agent are one Rust process. For local development, home labs and the edge.',

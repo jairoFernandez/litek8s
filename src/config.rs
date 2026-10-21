@@ -1,16 +1,11 @@
 use std::env;
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use directories::ProjectDirs;
 
 const APP_DIR: &str = "litek8s";
-const SOCKET_FILE: &str = "daemon.sock";
-const STATE_FILE: &str = "state.json";
-const VPN_STATE_FILE: &str = "vpn-state.json";
-const VPN_PRIVATE_KEY_FILE: &str = "vpn-private.key";
-const VPN_SPOKE_CONFIG_FILE: &str = "vpn-spoke.json";
 
 /// `$LITEK8S_HOME`: one directory for everything litek8s keeps per user, so
 /// a second litek8s on the machine (a build from a checkout next to an
@@ -30,8 +25,7 @@ const HOME_PREFIX: &str = "lkdev-";
 /// $LITEK8S_HOME/docker.sock, <cluster>/docker.sock  (else ~/.litek8s/...)
 /// $LITEK8S_HOME/config.yaml, ui.yaml, ui-state.json (else ~/.litek8s/...)
 /// $LITEK8S_HOME/kubeconfig                          (else ~/.kube/config)
-/// $LITEK8S_HOME/data/{dev,vm,vpn,node-agent,...}    (else the data dir)
-/// $LITEK8S_HOME/run/{daemon,agent}.sock             (else $XDG_RUNTIME_DIR/litek8s)
+/// $LITEK8S_HOME/data/{dev,vm,node-agent,...}        (else the data dir)
 /// ```
 ///
 /// The variables for a single path (`LITEK8S_DEV_HOME`,
@@ -52,10 +46,6 @@ pub struct Paths {
     pub dev_config: PathBuf,
     /// The kubeconfig `dev up` adds its contexts to.
     pub kubeconfig: PathBuf,
-    /// The legacy daemon's socket.
-    pub daemon_socket: PathBuf,
-    /// The legacy persistent node agent's socket.
-    pub agent_socket: PathBuf,
     /// `litek8s node-agent`'s default `--node-dir`.
     pub node_agent_dir: PathBuf,
     /// What local clusters' kubeconfig contexts start with.
@@ -82,10 +72,6 @@ impl Paths {
             Some(h) => Some(h.join("data")),
             None => platform_data_dir(),
         };
-        let run_dir = match &home {
-            Some(h) => h.join("run"),
-            None => var("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(env::temp_dir).join(APP_DIR),
-        };
         let kubeconfig = var("KUBECONFIG")
             .and_then(|v| env::split_paths(&v).next())
             .filter(|p| !p.as_os_str().is_empty())
@@ -107,13 +93,6 @@ impl Paths {
             dev_home: var("LITEK8S_DEV_HOME").map(PathBuf::from).or_else(|| data_dir.as_ref().map(|d| d.join("dev"))),
             docker_socket: var("LITEK8S_DOCKER_SOCKET").map(PathBuf::from).unwrap_or_else(|| user_dir.join("docker.sock")),
             dev_config: var("LITEK8S_CONFIG").map(PathBuf::from).unwrap_or_else(|| user_dir.join("config.yaml")),
-            // The legacy daemon has always used $XDG_RUNTIME_DIR/litek8s/
-            // (and <tmp>/litek8s/litek8s/ without it).
-            daemon_socket: match &home {
-                Some(_) => run_dir.join(SOCKET_FILE),
-                None => var("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|| env::temp_dir().join(APP_DIR)).join(APP_DIR).join(SOCKET_FILE),
-            },
-            agent_socket: run_dir.join("agent.sock"),
             home,
             user_dir,
             data_dir,
@@ -152,10 +131,6 @@ pub fn version_line() -> String {
     }
 }
 
-pub fn default_socket_path() -> PathBuf {
-    paths().daemon_socket
-}
-
 /// litek8s's data directory: `$LITEK8S_HOME/data`; else
 /// `~/.local/share/litek8s` on Linux (or `$XDG_DATA_HOME/litek8s`),
 /// `~/Library/Application Support/dev.litek8s` on macOS. Installs from
@@ -181,43 +156,10 @@ fn platform_data_dir() -> Option<PathBuf> {
 /// The macOS data directory's name before litek8s had a neutral bundle id.
 const LEGACY_MACOS_DIR: &str = "dev.civojairo.litek8s";
 
-pub fn default_state_file() -> Result<PathBuf> {
-    Ok(data_dir()?.join(STATE_FILE))
-}
-
-pub fn ensure_parent_dir(path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create parent directory for {}", path.display()))?;
-    }
-    Ok(())
-}
-
-fn vpn_data_dir() -> Result<PathBuf> {
-    Ok(data_dir()?.join("vpn"))
-}
-
-pub fn default_vpn_state_file() -> Result<PathBuf> {
-    Ok(vpn_data_dir()?.join(VPN_STATE_FILE))
-}
-
-/// Directory where a node agent caches uploaded weight matrices on disk so a
-/// distributed matmul ships each `right` matrix once per node instead of on
-/// every band call. Survives agent restarts.
-pub fn weights_dir() -> Result<PathBuf> {
-    Ok(data_dir()?.join("weights"))
-}
-
-pub fn default_vpn_private_key_file() -> Result<PathBuf> {
-    Ok(vpn_data_dir()?.join(VPN_PRIVATE_KEY_FILE))
-}
-
-pub fn default_vpn_spoke_config_file() -> Result<PathBuf> {
-    Ok(vpn_data_dir()?.join(VPN_SPOKE_CONFIG_FILE))
-}
-
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     fn env_of<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
@@ -239,10 +181,7 @@ mod tests {
             ("docker_socket", p.docker_socket.clone()),
             ("dev_config", p.dev_config.clone()),
             ("kubeconfig", p.kubeconfig.clone()),
-            ("daemon_socket", p.daemon_socket.clone()),
-            ("agent_socket", p.agent_socket.clone()),
             ("node_agent_dir", p.node_agent_dir.clone()),
-            ("state file", p.data_dir.clone().unwrap().join(STATE_FILE)),
             // What the rest of litek8s derives from them.
             ("vm assets", crate::dev::default_vm_assets_dir(&dev_home)),
             ("env socket", crate::dev::env::control_path(&dev_home)),
@@ -268,8 +207,6 @@ mod tests {
         assert_eq!(p.docker_socket, Path::new("/Users/me/.litek8s/docker.sock"));
         assert_eq!(p.dev_config, Path::new("/Users/me/.litek8s/config.yaml"));
         assert_eq!(p.kubeconfig, Path::new("/Users/me/.kube/config"));
-        assert_eq!(p.daemon_socket, Path::new("/run/user/501/litek8s/daemon.sock"));
-        assert_eq!(p.agent_socket, Path::new("/run/user/501/litek8s/agent.sock"));
         assert_eq!(p.context_prefix, "litek8s-");
         // A variable for one path wins over $LITEK8S_HOME.
         let vars = [("LITEK8S_HOME", "/h"), ("KUBECONFIG", "/k/a:/k/b"), ("LITEK8S_DOCKER_SOCKET", "/s.sock"), ("LITEK8S_DEV_HOME", "/d")];

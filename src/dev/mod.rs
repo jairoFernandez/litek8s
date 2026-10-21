@@ -1206,8 +1206,7 @@ fn file_body(file: tokio::fs::File) -> UploadBody {
 /// streamed.
 async fn export_local_image(image: &str) -> Result<UploadBody> {
     use futures_util::StreamExt;
-    let docker = crate::runtime::DockerRuntime::connect()
-        .and_then(|d| Ok(d.client()))
+    let docker = crate::kube::agent::runtime::connect_docker()
         .with_context(|| format!("{image} is not a file and there is no local Docker to export it from"))?;
     docker
         .inspect_image(image)

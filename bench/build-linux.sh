@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Cross-build a linux release binary of litek8s inside the same rust image that
-# `litek8s node add --install` uses, so the benchmark measures what a real node runs.
+# Cross-build a linux release binary of litek8s inside the rust:1.90 image, the
+# toolchain the release build pins (releases are static musl builds in
+# rust:1.90-alpine, see .github/workflows/release.yml; this one links glibc).
 # Usage: bench/build-linux.sh [arm64|amd64]   -> prints the artifact path
 #
 # Any Docker API does, litek8s's own included (DOCKER_HOST=unix://$HOME/.litek8s/docker.sock,
