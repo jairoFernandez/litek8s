@@ -397,7 +397,9 @@ fn memory_stack(t: &Theme, b: &crate::dev::memory::Breakdown) -> Option<((Option
     // Short of memory from 0.5 on (half of it unavailable is normal):
     // yellow at 0.75, red past 0.9.
     let level = ((b.pressure.unwrap_or(in_use as f64 / limit as f64) - 0.5) / 0.5).clamp(0.0, 1.0);
-    let mut text = format!("{} in use · {} {}", gib(in_use), b.limit_what, gib(limit));
+    // Under a GiB in MB, so a sliver never reads "0.0 GiB".
+    let used = if in_use < 1 << 30 { bytes(in_use) } else { gib(in_use) };
+    let mut text = format!("{used} in use · {} {}", b.limit_what, gib(limit));
     if level >= 0.8 {
         text.push_str(" · short");
     }
@@ -409,7 +411,7 @@ fn figures(app: &App) -> Figures {
     let cpus = app.home_cpus();
     let mem_total = app.home_memory();
     let cpu = match (h.cpu_pct, cpus) {
-        (Some(p), Some(c)) => (Some(p / 100.0 / c.max(1.0)), format!("of {c:.0} CPUs · {p:.0}% of one")),
+        (Some(p), Some(c)) => (Some(p / 100.0 / c.max(1.0)), format!("of {c:.0} CPUs · {} of one", pct(p, 0))),
         (Some(p), None) => (Some(p / 100.0), format!("{p:.0}%")),
         (None, Some(c)) => (None, format!("{c:.0} CPUs")),
         (None, None) => (None, "-".into()),
@@ -456,7 +458,7 @@ fn meter_spans(t: &Theme, r: f64, text: &str, stack: Option<&Stack>, mw: usize) 
         None => t.meter(r, mw),
     };
     let level = stack.map(|s| s.level).unwrap_or(r);
-    spans.push(Span::styled(format!(" {:>3.0}% ", r * 100.0), t.level(level).add_modifier(Modifier::BOLD)));
+    spans.push(Span::styled(format!(" {:>4} ", pct(r * 100.0, 0)), t.level(level).add_modifier(Modifier::BOLD)));
     match text.strip_suffix(" · short") {
         Some(head) => {
             spans.push(Span::raw(head.to_string()));
@@ -741,11 +743,15 @@ fn resource_box(f: &mut Frame, t: &Theme, area: Rect, name: &str, b: Option<&Exp
         return;
     }
     let inner_h = area.height.saturating_sub(2) as usize;
+    let w = area.width.saturating_sub(2) as usize;
     let mut title = vec![Span::styled(name.to_string(), t.title)];
     if let Some(b) = b {
-        title.push(Span::styled(format!(" · {}", b.what), t.dim));
+        // What the figure is, cut to leave room for the bar's scale.
+        let room = w.saturating_sub(name.chars().count() + b.scale.chars().count() + 12);
+        if room > 6 {
+            title.push(Span::styled(format!(" · {}", trunc(&b.what, room)), t.dim));
+        }
     }
-    let w = area.width.saturating_sub(2) as usize;
     let mut lines = Vec::new();
     if let Some((values, max)) = hist {
         let gh = (graph_h as usize).clamp(1, inner_h.saturating_sub(1).max(1));
@@ -780,7 +786,10 @@ fn resource_box(f: &mut Frame, t: &Theme, area: Rect, name: &str, b: Option<&Exp
             lines.push(explain_line(t, l, w, lw));
         }
     }
-    let mut block = t.block(Line::from(title));
+    let mut block = match b {
+        Some(b) => t.block_with(Line::from(title), vec![Span::styled(b.scale.clone(), t.dim)]),
+        None => t.block(Line::from(title)),
+    };
     if more > 0 {
         block = block.title_bottom(Line::from(Span::styled(format!(" +{more} more (narrower: b) ─"), t.dim)).right_aligned());
     }
@@ -794,7 +803,20 @@ struct Explain {
     title: String,
     /// What the headline is (`what macOS charges the VM`).
     what: String,
+    /// What a full bar is (`bar: 1 CPU`): every row's bar is its value
+    /// against it, so bar and number always agree.
+    scale: String,
     lines: Vec<ExplainLine>,
+}
+
+/// A percentage with `digits` decimals that never reads as zero when it is
+/// not: `<0.1%` (or `<1%`).
+fn pct(v: f64, digits: usize) -> String {
+    let unit = 10f64.powi(-(digits as i32));
+    if v > 0.0 && v < unit / 2.0 {
+        return format!("<{unit:.digits$}%");
+    }
+    format!("{v:.digits$}%")
 }
 
 impl Explain {
@@ -808,27 +830,36 @@ struct ExplainLine {
     value: String,
     note: String,
     indent: bool,
-    /// Its share of the total, for the bar.
+    /// Its value against the box's scale (`Explain::scale`), for the bar.
     share: f64,
 }
 
 fn explain_boxes(app: &App) -> Vec<Explain> {
     let mut out = Vec::new();
     if let Some(m) = &app.home.memory {
+        // Against the VM's or sandbox's limit (the meter's), else the total.
+        let (scale, name) = match m.limit.filter(|l| *l > 0) {
+            Some(l) => (l, format!("bar: {} {}", m.limit_what, gib(l))),
+            None => (m.total.max(1), format!("bar: {}", bytes(m.total))),
+        };
         out.push(Explain {
             kind: 0,
             title: format!("Memory · {} ({})", bytes(m.total), m.what),
             what: m.what.to_string(),
-            lines: m.lines.iter().map(|l| ExplainLine { label: l.label.clone(), value: bytes(l.bytes), note: l.note.to_string(), indent: false, share: l.bytes as f64 / m.total.max(1) as f64 }).collect(),
+            scale: name,
+            lines: m.lines.iter().map(|l| ExplainLine { label: l.label.clone(), value: bytes(l.bytes), note: l.note.to_string(), indent: false, share: l.bytes as f64 / scale as f64 }).collect(),
         });
     }
     if let Some(c) = &app.cpu {
-        let share = if c.cpus > 0.0 { format!(" = {:.0}% of {:.0} CPUs", c.total_pct / c.cpus, c.cpus) } else { String::new() };
+        // Rows are in % of one CPU, and so are the bars: a full bar is a
+        // whole CPU (a row using more fills it; its number says how much).
+        let share = if c.cpus > 0.0 { format!(" = {} of {:.0} CPUs", pct(c.total_pct / c.cpus, 0), c.cpus) } else { String::new() };
         out.push(Explain {
             kind: 1,
-            title: format!("CPU · {:.1}% of one CPU{share} ({})", c.total_pct, c.what),
+            title: format!("CPU · {} of one CPU{share} ({})", pct(c.total_pct, 1), c.what),
             what: c.what.to_string(),
-            lines: c.lines.iter().map(|l| ExplainLine { label: l.label.clone(), value: format!("{:.1}%", l.pct), note: l.note.clone(), indent: l.indent, share: l.pct / c.total_pct.max(0.0001) }).collect(),
+            scale: "bar: 1 CPU".into(),
+            lines: c.lines.iter().map(|l| ExplainLine { label: l.label.clone(), value: pct(l.pct, 1), note: l.note.clone(), indent: l.indent, share: l.pct / 100.0 }).collect(),
         });
     }
     if let Some(d) = &app.disk_breakdown() {
@@ -836,6 +867,7 @@ fn explain_boxes(app: &App) -> Vec<Explain> {
             kind: 2,
             title: format!("Disk · {} ({})", bytes(d.total), d.what),
             what: d.what.to_string(),
+            scale: format!("bar: {}", bytes(d.total)),
             lines: d
                 .lines
                 .iter()
@@ -870,11 +902,22 @@ fn explain_box(f: &mut Frame, t: &Theme, b: &Explain, area: Rect, more: bool) {
     let w = area.width.saturating_sub(2) as usize;
     let lw = b.label_width();
     let lines: Vec<Line> = b.lines.iter().map(|l| explain_line(t, l, w, lw)).collect();
-    let mut title = vec![Span::styled(trunc(&b.title, area.width.saturating_sub(if more { 18 } else { 6 }) as usize), t.title)];
+    // The bars' scale at the top right, or the bottom right when the
+    // title needs the room.
+    let right = b.scale.chars().count() + 4;
+    let room = (area.width as usize).saturating_sub(if more { 18 } else { 6 });
+    let top = b.title.chars().count() + right <= room;
+    let mut title = vec![Span::styled(trunc(&b.title, room), t.title)];
     if more {
         title.push(Span::styled("  b: next", t.dim));
     }
-    f.render_widget(Paragraph::new(lines).block(t.block(Line::from(title))), area);
+    let scale = vec![Span::styled(b.scale.clone(), t.dim)];
+    let block = if top {
+        t.block_with(Line::from(title), scale)
+    } else {
+        t.block(Line::from(title)).title_bottom(Line::from(vec![Span::raw(" "), scale[0].clone(), Span::raw(" "), Span::styled("─", t.border)]).right_aligned())
+    };
+    f.render_widget(Paragraph::new(lines).block(block), area);
 }
 
 /// Rows the output of a running `litek8s dev` needs (wrapped) in `width`.

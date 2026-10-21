@@ -602,7 +602,7 @@ fn home_explains_cpu_and_disk_with_b() {
     // `b`: CPU first, then disk.
     app.key(key('b'));
     let s = render(&app, 80, 24);
-    assert!(s.contains("CPU · 30.0% of one CPU = 8% of 4 CPUs (the VM process)"), "{s}");
+    assert!(s.contains("CPU · 30.0% of one CPU = 8% of 4 CPUs") && s.contains("bar: 1 CPU"), "{s}");
     assert!(s.contains("pod default/web-7d9") && s.contains("20.0%") && s.contains("VM overhead"), "{s}");
     app.key(key('b'));
     let s = render(&app, 80, 24);
@@ -786,11 +786,11 @@ fn memory_meter_is_in_use_against_the_limit_not_the_footprint() {
     home.memory = Some(crate::dev::memory::vm_breakdown(4_300_000_000, 4096 << 20, &roomy, 0, None, "dev", shown, &[]));
     app.apply(Msg::Home(Box::new(home.clone())));
     let pct_color = |buf: &ratatui::buffer::Buffer| {
-        let row = (0..buf.area.height).find(|y| (0..buf.area.width).map(|x| buf[(x, *y)].symbol()).collect::<String>().contains("VM limit")).unwrap();
+        let row = (0..buf.area.height).find(|y| (0..buf.area.width).map(|x| buf[(x, *y)].symbol()).collect::<String>().contains("in use · VM limit")).unwrap();
         // The memory meter's percentage: the last one before the text (the
         // CPU box shares the row on wide terminals).
         let text: Vec<&str> = (0..buf.area.width).map(|x| buf[(x, row)].symbol()).collect();
-        let at = (0..text.len()).find(|i| text[*i..].concat().starts_with("VM limit")).unwrap();
+        let at = (0..text.len()).find(|i| text[*i..].concat().starts_with("in use · VM limit")).unwrap();
         let x = (0..at as u16).rev().find(|x| buf[(*x, row)].symbol() == "%").unwrap();
         buf[(x, row)].fg
     };
@@ -799,7 +799,7 @@ fn memory_meter_is_in_use_against_the_limit_not_the_footprint() {
         assert!(s.contains("in use · VM limit 4.0 GiB") && !s.contains("short"), "{s}");
         assert!(!s.contains("4.3 GB of"), "the footprint is not the meter: {s}");
         // In use: litek8s, pods and the kernel, well under half.
-        let line = s.lines().find(|l| l.contains("VM limit")).unwrap();
+        let line = s.lines().find(|l| l.contains("in use · VM limit")).unwrap();
         assert!(line.contains('▒') && line.contains('█'), "stacked parts, cache and freed apart: {line}");
         assert_eq!(pct_color(&render_buf(&app, w, h)), t.level(0.0).fg.unwrap(), "green while the guest has memory available");
     }
@@ -814,6 +814,87 @@ fn memory_meter_is_in_use_against_the_limit_not_the_footprint() {
     assert!(s.contains("· short"), "{s}");
     let red = pct_color(&render_buf(&app, 80, 24));
     assert!(matches!(red, Color::Rgb(r, g, _) if r > 0xe0 && g < 0x90), "{red:?}");
+}
+
+/// Home's CPU breakdown, `b` once (memory first) at 80x24, with these rows.
+fn cpu_screen(lines: &[(&str, f64)]) -> String {
+    let mut app = sample_app();
+    app.cpu = Some(crate::dev::cpu::Breakdown {
+        total_pct: lines.iter().map(|(_, p)| p).sum(),
+        cpus: 16.0,
+        what: "the sandbox's cgroup",
+        lines: lines.iter().map(|(l, p)| crate::dev::cpu::Line { label: l.to_string(), pct: *p, note: String::new(), indent: false }).collect(),
+    });
+    app.explain = 1;
+    render(&app, 80, 24)
+}
+
+/// (number, bar) of a breakdown row: the bar is the block characters
+/// between the label and the number.
+fn row<'a>(s: &'a str, label: &str) -> (String, String) {
+    let line = s.lines().find(|l| l.contains(&format!(" {label} "))).unwrap_or_else(|| panic!("no row {label}:\n{s}"));
+    let rest = line.split_once(label).unwrap().1;
+    let bar: String = rest.chars().filter(|c| "█▉▊▋▌▍▎▏".contains(*c)).collect();
+    let number = rest.split_whitespace().find(|w| w.ends_with('%')).unwrap_or("").to_string();
+    (number, bar)
+}
+
+/// The bars say what the numbers say: a full bar is one CPU (the unit the
+/// rows are in, named in the box's title), not the largest row; a value
+/// that rounds to nothing prints `<0.1%` with at most a hairline, and zero
+/// draws no bar.
+#[test]
+fn cpu_bars_agree_with_their_numbers() {
+    // Tiny values (the reported screen: an idle sandbox on 16 CPUs).
+    let s = cpu_screen(&[("litek8s (dev)", 0.1), ("pods & containers", 0.0), ("sandbox", 0.03)]);
+    assert!(s.contains("bar: 1 CPU"), "the scale is named:\n{s}");
+    assert_eq!(row(&s, "litek8s (dev)"), ("0.1%".into(), "▏".into()), "{s}");
+    assert_eq!(row(&s, "pods & containers"), ("0.0%".into(), "".into()), "{s}");
+    assert_eq!(row(&s, "sandbox"), ("<0.1%".into(), "▏".into()), "{s}");
+    assert!(s.contains("CPU · 0.1% of one CPU = <1% of 16 CPUs"), "{s}");
+    // All zero: no bars at all.
+    let s = cpu_screen(&[("litek8s (dev)", 0.0), ("pods & containers", 0.0), ("sandbox", 0.0)]);
+    for l in ["litek8s (dev)", "pods & containers", "sandbox"] {
+        assert_eq!(row(&s, l), ("0.0%".into(), "".into()), "{s}");
+    }
+    // One dominant row: its bar is its share of a CPU, the others stay
+    // slivers (not scaled up to the largest), past one CPU it is full.
+    let s = cpu_screen(&[("litek8s (dev)", 0.5), ("pods & containers", 50.0), ("sandbox", 1.2)]);
+    let (n, bar) = row(&s, "pods & containers");
+    assert_eq!(n, "50.0%");
+    let width = row(&cpu_screen(&[("litek8s (dev)", 0.0), ("pods & containers", 100.0), ("sandbox", 0.0)]), "pods & containers").1.chars().count();
+    assert_eq!(bar.chars().filter(|c| *c == '█').count(), width / 2, "half of a full bar ({width}): {s}");
+    assert_eq!(row(&s, "litek8s (dev)").1, "▏", "{s}");
+    let s = cpu_screen(&[("litek8s (dev)", 0.5), ("pods & containers", 250.0), ("sandbox", 1.2)]);
+    assert_eq!(row(&s, "pods & containers"), ("250.0%".into(), "█".repeat(width)), "{s}");
+    assert_eq!(row(&s, "sandbox").1.chars().count(), 1, "{s}");
+}
+
+/// Memory and disk bars are against their box's stated scale too: the VM
+/// limit, the disk total.
+#[test]
+fn memory_and_disk_bars_name_their_scale() {
+    let mut app = sample_app();
+    let mem = crate::dev::memory::parse_meminfo("MemTotal: 4000000 kB\nMemFree: 3000000 kB\nMemAvailable: 3500000 kB\nCached: 100000 kB\n");
+    let mut home = app.home.clone();
+    home.memory = Some(crate::dev::memory::vm_breakdown(600 << 20, 4096 << 20, &mem, 0, None, "dev", crate::dev::memory::Usage { litek8s: 12 << 20, containers: 2048 << 20, cache: 0 }, &[]));
+    app.apply(Msg::Home(Box::new(home)));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("bar: VM limit 4.0 GiB"), "{s}");
+    // 2 GiB of pods is half of the 4 GiB limit: half a bar.
+    let full = s.lines().find(|l| l.contains(" pods & containers ")).unwrap();
+    let bar: String = full.chars().filter(|c| "█▉▊▋▌▍▎▏".contains(*c)).collect();
+    let litek8s: String = s.lines().find(|l| l.contains(" litek8s (dev) ")).unwrap().chars().filter(|c| "█▉▊▋▌▍▎▏".contains(*c)).collect();
+    assert!(bar.chars().count() >= 5 && bar.chars().count() <= 7, "{s}");
+    assert_eq!(litek8s, "▏", "12 MiB of 4 GiB is a sliver: {s}");
+    assert!(s.contains("GiB in use · VM limit 4.0 GiB"), "{s}");
+    // Under a GiB the meter says MB: a sliver never reads "0.0 GiB".
+    let mut home = app.home.clone();
+    let idle = crate::dev::memory::parse_meminfo("MemTotal: 4000000 kB\nMemFree: 3900000 kB\nMemAvailable: 3950000 kB\nCached: 20000 kB\n");
+    home.memory = Some(crate::dev::memory::vm_breakdown(600 << 20, 4096 << 20, &idle, 0, None, "dev", crate::dev::memory::Usage { litek8s: 12 << 20, containers: 20 << 20, cache: 0 }, &[]));
+    app.apply(Msg::Home(Box::new(home)));
+    let s = render(&app, 80, 24);
+    assert!(s.contains(" MB in use · VM limit 4.0 GiB") && !s.contains("0.0 GiB in use"), "{s}");
 }
 
 /// `cargo test --lib ui::tests::print_screens -- --ignored --nocapture`:
