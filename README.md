@@ -151,6 +151,11 @@ leak ([bench/SOAK.md](bench/SOAK.md)).
   and cost-estimated, ratcheting, server-side apply with managedFields.
   [docs/crds.md](docs/crds.md)
 
+Use case: **one LLM across all your machines**. A model too big for any
+one of them runs on several with llama.cpp's RPC backend (a DaemonSet of
+workers, one OpenAI-compatible server):
+[examples/llm-rpc](examples/llm-rpc/README.md), [docs/llm-cluster.md](docs/llm-cluster.md).
+
 ## How it works
 
 One process does what a Kubernetes distribution splits across etcd, the
@@ -290,7 +295,8 @@ Honest list; more in [skills/litek8s/references/differences.md](skills/litek8s/r
 - macOS servers use Docker for pods and are meant for development; run
   real servers and nodes on Linux.
 - Release binaries are built without the experimental `llm` feature
-  ([docs/llm.md](docs/llm.md)).
+  ([docs/llm.md](docs/llm.md)), which goes away in 0.2.0; run LLMs with
+  llama.cpp instead ([docs/llm-cluster.md](docs/llm-cluster.md)).
 
 ## Documentation
 
@@ -301,6 +307,7 @@ Honest list; more in [skills/litek8s/references/differences.md](skills/litek8s/r
 [docs/ha.md](docs/ha.md) HA control plane ·
 [docs/crds.md](docs/crds.md) CRDs ·
 [docs/agents.md](docs/agents.md) MCP and agents ·
+[docs/llm-cluster.md](docs/llm-cluster.md) one LLM across machines ·
 [compat/README.md](compat/README.md) compatibility corpus ·
 [CONTRIBUTING.md](CONTRIBUTING.md) building and testing ·
 [SECURITY.md](SECURITY.md) reporting vulnerabilities

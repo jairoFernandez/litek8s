@@ -1,0 +1,130 @@
+# One LLM split across every opted-in node with llama.cpp's RPC backend.
+# See README.md. Everything you would change lives in this file.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: llm
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-config
+  namespace: llm
+data:
+  # The model: any GGUF file llama.cpp can load. Qwen2.5 0.5B (491 MiB) fits a
+  # laptop dev cluster; 1.5B (1.1 GiB), 7B (4.7 GiB) or larger is where pooling
+  # several machines' memory starts to matter.
+  MODEL_URL: "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+  MODEL_FILE: "qwen2.5-0.5b-instruct-q4_k_m.gguf"
+  # sha256 of the GGUF (Hugging Face shows it per file); empty skips the check.
+  MODEL_SHA256: "74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db"
+  # llama.cpp build. The official images are built without the RPC backend,
+  # the release tarballs with it, so pods run on the official image (for its
+  # libraries) and an init container unpacks the same build's tarball.
+  # Change it together with the image tag in rpc-server.yaml / llama-server.yaml.
+  LLAMA_BUILD: "b11669"
+  LLAMA_SHA256_ARM64: "9ac6fda2058d35677608a06f751a50122ddfa4ce0ddb7f084466b8e79b6d4a99"
+  LLAMA_SHA256_X64: "cf07c1c112d709bd67e522017471de57ed0ec8bea031d732c5422351c07f65ac"
+  # llama-server waits for this many rpc-server pods before loading the model.
+  RPC_MIN_WORKERS: "1"
+  # Extra llama-server flags, e.g. "-c 8192" or "--tensor-split 2,1,1" (layer
+  # shares per worker, in the order of the log's "rpc workers:" line).
+  LLAMA_ARGS: "-c 4096"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: llm-scripts
+  namespace: llm
+data:
+  fetch-llama.sh: |
+    # Unpacks llama.cpp's release build (RPC backend included) for this
+    # node's CPU into /opt/llama, verifying its sha256.
+    set -eu
+    case "$(uname -m)" in
+      x86_64) arch=x64; sum="$LLAMA_SHA256_X64" ;;
+      aarch64) arch=arm64; sum="$LLAMA_SHA256_ARM64" ;;
+      *) echo "unsupported architecture $(uname -m)" >&2; exit 1 ;;
+    esac
+    dir="/opt/llama/llama-$LLAMA_BUILD"
+    if [ -x "$dir/llama-server" ]; then exit 0; fi
+    url="https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_BUILD/llama-$LLAMA_BUILD-bin-ubuntu-$arch.tar.gz"
+    echo "fetching $url"
+    curl -fsSL --retry 5 -o /tmp/llama.tgz "$url"
+    echo "$sum  /tmp/llama.tgz" | sha256sum -c -
+    tar xzf /tmp/llama.tgz -C /opt/llama
+    rm /tmp/llama.tgz
+  fetch-model.sh: |
+    # Downloads the model once into the cache volume.
+    set -eu
+    f="/models/$MODEL_FILE"
+    if [ -s "$f" ]; then echo "model cached: $f"; exit 0; fi
+    echo "downloading $MODEL_URL"
+    curl -fL --retry 5 -C - -o "$f.part" "$MODEL_URL"
+    if [ -n "$MODEL_SHA256" ]; then echo "$MODEL_SHA256  $f.part" | sha256sum -c -; fi
+    mv "$f.part" "$f"
+  run-llama-server.sh: |
+    # Starts llama-server with --rpc set to every ready rpc-server pod (the
+    # headless Service's DNS answer) and restarts it when that set changes:
+    # llama.cpp's RPC client does not reconnect, and a new worker only gets
+    # layers when the model is loaded again.
+    set -u
+    unset LLAMA_ARG_HOST LLAMA_ARG_PORT # the image's defaults; flags below
+    bin="/opt/llama/llama-$LLAMA_BUILD"
+    workers() {
+      getent ahostsv4 "$RPC_SERVICE" | awk '{print $1}' | sort -u -t . -k1,1n -k2,2n -k3,3n -k4,4n |
+        sed "s/\$/:$RPC_PORT/" | paste -sd, -
+    }
+    # The worker set once it has stayed the same for 5 s (a rollout or a node
+    # coming back changes it a few times in a row).
+    settled() {
+      prev="$(workers)"
+      while :; do
+        sleep 5
+        cur="$(workers)"
+        if [ "$cur" = "$prev" ]; then echo "$cur"; return; fi
+        prev="$cur"
+      done
+    }
+    # TERM, then KILL after 10 s: a worker whose node lost power never
+    # answers, and llama-server can wait on it for many minutes.
+    halt() {
+      kill -TERM "$1" 2>/dev/null
+      (sleep 10; kill -KILL "$1" 2>/dev/null) &
+      wait "$1"; status=$?
+      kill $! 2>/dev/null
+      return "$status"
+    }
+    stop() { [ -n "${pid:-}" ] && halt "$pid"; exit 0; }
+    trap stop TERM INT
+    pid='' said=''
+    while :; do
+      w="$(settled)"
+      n="$(echo "$w" | tr , '\n' | grep -c . || true)"
+      if [ "$n" -lt "$RPC_MIN_WORKERS" ]; then
+        [ "$said" = "$n" ] || echo "waiting for rpc workers: $n of $RPC_MIN_WORKERS ready"
+        said="$n"
+        continue
+      fi
+      said=
+      echo "rpc workers: $w"
+      # shellcheck disable=SC2086 # LLAMA_ARGS is a list of flags
+      "$bin/llama-server" --host 0.0.0.0 --port 8080 --metrics \
+        -m "/models/$MODEL_FILE" --rpc "$w" -ngl 999 $LLAMA_ARGS &
+      pid=$! status=''
+      while kill -0 "$pid" 2>/dev/null; do
+        sleep 5 & wait $!
+        now="$(workers)"
+        if [ "$now" != "$w" ]; then
+          sleep 2
+          # Same answer twice: not a DNS hiccup.
+          [ "$(workers)" = "$now" ] || continue
+          echo "rpc workers changed: $w -> ${now:-none}; restarting llama-server"
+          halt "$pid"; status=$?
+          break
+        fi
+      done
+      [ -n "$status" ] || { wait "$pid"; status=$?; }
+      echo "llama-server exited ($status)"
+      pid=
+    done

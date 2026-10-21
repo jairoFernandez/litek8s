@@ -1,0 +1,101 @@
+# One llama.cpp rpc-server per opted-in node: it offers that node's CPU and
+# memory (or its GPU, with a GPU build) to llama-server, which places model
+# layers on it in proportion to the memory each worker reports (the node's
+# RAM). Opt a node in with:
+#   kubectl label node <node> llm.litek8s.dev/rpc=true
+# The RPC protocol has no authentication: workers listen on their pod IP only
+# (the WireGuard overlay between nodes), never on a host port.
+apiVersion: v1
+kind: Service
+metadata:
+  name: rpc-server
+  namespace: llm
+spec:
+  clusterIP: None # headless: DNS answers with every ready worker's pod IP
+  selector:
+    app: rpc-server
+  ports:
+    - name: rpc
+      port: 50052
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: rpc-server
+  namespace: llm
+spec:
+  selector:
+    matchLabels:
+      app: rpc-server
+  template:
+    metadata:
+      labels:
+        app: rpc-server
+    spec:
+      nodeSelector:
+        llm.litek8s.dev/rpc: "true"
+      tolerations:
+        # Nodes kept for this job only (taint llm.litek8s.dev/dedicated=:NoSchedule).
+        - key: llm.litek8s.dev/dedicated
+          operator: Exists
+      initContainers:
+        - name: fetch-llama
+          image: ghcr.io/ggml-org/llama.cpp:server-b11669
+          command: ["/bin/sh", "/scripts/fetch-llama.sh"]
+          envFrom:
+            - configMapRef:
+                name: llm-config
+          volumeMounts:
+            - { name: llama, mountPath: /opt/llama }
+            - { name: scripts, mountPath: /scripts }
+      containers:
+        - name: rpc-server
+          image: ghcr.io/ggml-org/llama.cpp:server-b11669
+          command: ["/bin/sh", "-c"]
+          # Not exec'd: as PID 1 rpc-server would ignore SIGTERM.
+          args:
+            - |
+              /opt/llama/llama-$LLAMA_BUILD/ggml-rpc-server --host "$POD_IP" --port 50052 --cache &
+              trap 'kill $!' TERM INT
+              wait $!; wait $!
+          env:
+            - name: LLAMA_BUILD
+              valueFrom:
+                configMapKeyRef: { name: llm-config, key: LLAMA_BUILD }
+            - name: POD_IP
+              valueFrom:
+                fieldRef: { fieldPath: status.podIP }
+            # --cache keeps tensors here, so a restarted worker loads them
+            # from its own disk instead of over the network.
+            - name: LLAMA_CACHE
+              value: /cache
+          ports:
+            - name: rpc
+              containerPort: 50052
+          readinessProbe:
+            # Listening on 50052 (0xC384)? A TCP probe would work too, but
+            # rpc-server logs every connection it accepts.
+            exec:
+              command: ["/bin/sh", "-c", "grep -q ':C384 00000000:0000 0A' /proc/net/tcp"]
+            periodSeconds: 5
+          resources:
+            # No memory limit: a worker holds as many layers as its node's RAM
+            # earns it, and llama.cpp cannot see a cgroup limit (it would be
+            # OOM-killed instead of getting fewer layers). Pin shares with
+            # LLAMA_ARGS="--tensor-split ..." in 00-config.yaml.
+            requests:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - { name: llama, mountPath: /opt/llama }
+            - { name: cache, mountPath: /cache }
+      volumes:
+        - name: llama
+          emptyDir: {}
+        - name: scripts
+          configMap:
+            name: llm-scripts
+        - name: cache
+          hostPath:
+            path: /var/cache/litek8s-llm-rpc
+            type: DirectoryOrCreate

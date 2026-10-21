@@ -1,0 +1,106 @@
+# llama-server: loads the model, keeps the layers it can on the rpc-server
+# workers (-ngl 999 offloads every layer to them) and serves the
+# OpenAI-compatible API on port 8080 (/v1/chat/completions, /v1/models,
+# /health, Prometheus /metrics).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: models
+  namespace: llm
+spec:
+  # litek8s's default StorageClass (local-path) puts it on the node the
+  # server is first scheduled to; the server stays there afterwards.
+  accessModes: [ReadWriteOnce]
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llama-server
+  namespace: llm
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # one pod owns the ReadWriteOnce model cache
+  selector:
+    matchLabels:
+      app: llama-server
+  template:
+    metadata:
+      labels:
+        app: llama-server
+    spec:
+      initContainers:
+        - name: fetch-llama
+          image: ghcr.io/ggml-org/llama.cpp:server-b11669
+          command: ["/bin/sh", "/scripts/fetch-llama.sh"]
+          envFrom:
+            - configMapRef:
+                name: llm-config
+          volumeMounts:
+            - { name: llama, mountPath: /opt/llama }
+            - { name: scripts, mountPath: /scripts }
+        - name: fetch-model
+          image: ghcr.io/ggml-org/llama.cpp:server-b11669
+          command: ["/bin/sh", "/scripts/fetch-model.sh"]
+          envFrom:
+            - configMapRef:
+                name: llm-config
+          volumeMounts:
+            - { name: models, mountPath: /models }
+            - { name: scripts, mountPath: /scripts }
+      containers:
+        - name: llama-server
+          image: ghcr.io/ggml-org/llama.cpp:server-b11669
+          command: ["/bin/sh", "/scripts/run-llama-server.sh"]
+          envFrom:
+            - configMapRef:
+                name: llm-config
+          env:
+            - name: RPC_SERVICE
+              value: rpc-server
+            - name: RPC_PORT
+              value: "50052"
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - { name: llama, mountPath: /opt/llama }
+            - { name: models, mountPath: /models }
+            - { name: scripts, mountPath: /scripts }
+      volumes:
+        - name: llama
+          emptyDir: {}
+        - name: models
+          persistentVolumeClaim:
+            claimName: models
+        - name: scripts
+          configMap:
+            name: llm-scripts
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llama
+  namespace: llm
+spec:
+  # On a litek8s dev cluster a NodePort is also open on the host's
+  # localhost; on a real cluster use any node's IP.
+  type: NodePort
+  selector:
+    app: llama-server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
