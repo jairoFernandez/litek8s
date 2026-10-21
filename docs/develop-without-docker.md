@@ -7,14 +7,13 @@ with crun, [dev.md](dev.md)) and the Docker Engine API it serves on
 
 | what | needs | on litek8s |
 |---|---|---|
-| `cargo test` (tests/integration.rs drives the legacy daemon through bollard) | a Docker API | `DOCKER_HOST=unix://$HOME/.litek8s/docker.sock cargo test` |
 | the compat corpus | a cluster | the `litek8s dev` cluster itself (`KUBECONFIG`) |
 | the dev VM's guest binary (`dev/vm/build-guest-binary.sh`), Linux bench binaries (`bench/build-linux.sh`) | `docker run rust:*` with the checkout bind-mounted | same scripts, `DOCKER_HOST` on litek8s |
 | the k3s reference (`compat/baseline-k3d.sh`) | k3d: privileged containers with nested containerd | k3d on litek8s's Docker API, or k3s in a qemu VM (`compat/baseline-k3s-vm.sh`) |
 
 OrbStack (or Docker Desktop) can stay installed as a fallback: nothing here
 stops, reconfigures or uses it. Unset `DOCKER_HOST` and it is what
-`docker` and `cargo test` talk to again.
+`docker` talks to again.
 
 ## Using litek8s vs developing it
 
@@ -30,8 +29,7 @@ Up to three litek8s can live on one Mac without sharing anything:
 sockets (`docker.sock`, `<cluster>/docker.sock`), `config.yaml`, `ui.yaml`
 and the UI's state, the kubeconfig `dev up` writes (`<dir>/kubeconfig`
 unless `KUBECONFIG` is set), the data directory (`<dir>/data`: the dev VM,
-its disk, the clusters, `vm/` for the guest), and the legacy daemon's
-socket (`<dir>/run`). Contexts get the prefix `lkdev-`
+its disk, the clusters, `vm/` for the guest). Contexts get the prefix `lkdev-`
 (`LITEK8S_CONTEXT_PREFIX`), the default cluster's docker context is `lkdev`.
 So `dev/lk dev up` starts a VM of its own, next to the release's, and
 `litek8s ui` / `dev/lk ui` each show only their own clusters. Both
@@ -99,31 +97,11 @@ for builds in the VM, one build at a time.
 
 ## cargo test
 
-```bash
-eval "$(dev/stable.sh env)"
-cargo test                             # and: cargo test --no-default-features
-```
-
-Measured on an M3 Max (14 cores, 36 GiB), dev VM at 4 vCPUs / 4 GiB,
-`CARGO_BUILD_JOBS=4`, host load average ~5, test binaries already built
-(2026-10-19):
-
-| `cargo test` | litek8s (VM) | OrbStack |
-|---|---|---|
-| default features: all tests (integration alone) | 31 s (24.8 s) | 26 s (21.1 s) |
-| `--no-default-features` | 22 s (16.8 s) | 25 s (20.6 s) |
-
-All green on both. The integration tests dominate and vary by a few
-seconds between runs; the two are the same within that noise.
-
-What had to change: the legacy daemon (`src/runtime/docker.rs`) probed
-readiness and proxied Services by dialing container IPs from the host.
-Only Linux and OrbStack route those; with Docker in a VM (litek8s's,
-Docker Desktop's) the address never answers. A direct connect now gives up
-after 300 ms and remembers that container IPs are unreachable; probes then
-run `nc` from a throwaway `busybox` container in the target's network
-namespace, and the service proxy uses the published host port. On Linux
-and OrbStack nothing changes.
+`cargo test` needs no Docker API: the tests that drove the legacy daemon
+through Docker (`tests/integration.rs`) went with it in 0.2.0. The API
+server, HA, MCP and observability tests run in-process
+([CONTRIBUTING.md](../CONTRIBUTING.md#test)); the crun runtime's container
+execution is tested on Linux only (bench/vm.sh).
 
 ## The compat corpus
 

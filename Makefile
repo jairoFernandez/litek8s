@@ -1,4 +1,4 @@
-.PHONY: help deps build release test test-one fmt lint check clean serve apply
+.PHONY: help deps build release test test-one fmt lint check clean apiserver
 
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN{FS=":.*?## "}{printf "  %-12s %s\n",$$1,$$2}'
@@ -12,7 +12,7 @@ build: ## debug build
 release: ## release build
 	cargo build --release
 
-test: ## integration tests (needs a Docker API; docs/develop-without-docker.md)
+test: ## unit and API tests (no Docker needed)
 	cargo test
 
 test-one: ## run one test: make test-one T=name
@@ -29,8 +29,5 @@ check: fmt lint test ## fmt+lint+test
 clean: ## wipe target
 	cargo clean
 
-serve: ## start daemon
-	cargo run -- serve
-
-apply: ## apply example: make apply F=examples/nginx.yaml
-	cargo run -- apply -f $(F)
+apiserver: ## API server + controllers + a local node; kubeconfig in /tmp/litek8s.kubeconfig
+	cargo run -- apiserver --kubeconfig /tmp/litek8s.kubeconfig

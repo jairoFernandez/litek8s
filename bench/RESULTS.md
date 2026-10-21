@@ -1,5 +1,7 @@
 # litek8s vs k3s on a small node — baseline
 
+> The `litek8s` and `rpc` phases below measured the legacy daemon (`litek8s serve`), removed in 0.2.0; the `kube`/`kube-crun` phases measure what ships.
+
 Baseline before replacing the Docker runtime (crun/litecontainer) and moving to a
 push-based resident agent. Raw data:
 [`results/2026-10-16-t4g-micro-shape/`](results/2026-10-16-t4g-micro-shape/)
@@ -780,8 +782,7 @@ litek8s's local node) and **7.8 % on the control plane**, 5.8 % of it in forked 
 ## Rerun
 
 ```bash
-bench/run.sh                        # all phases on fresh local VMs, ~55 min
-bench/run.sh litek8s rpc            # just litek8s single-node + remote-node phases
+bench/run.sh                        # default phases (kube-crun k3s k3s-minimal) on fresh local VMs
 bench/run.sh kube kube-crun         # the Kubernetes path on Docker and on crun
 bench/run.sh argocd-k3s argocd-litek8s   # Argo CD on both (ARGO_VM_MEM, ARGO_RUNS)
 bench/run.sh obs-k3s obs-litek8s     # observability: k3s + kube-prometheus-stack + Loki vs built in
@@ -790,8 +791,8 @@ IDLE_SECS=60 SETTLE_SECS=10 bench/run.sh k3s-minimal   # quick look
 python3 bench/report.py bench/results/<timestamp>      # tables from raw JSON
 ```
 
-Needs Homebrew `qemu` (aarch64 + edk2 firmware) and Docker (to cross-build the linux binary,
-same `rust:1.90` image as `node add --install`). It downloads the Ubuntu 24.04 arm64 cloud
+Needs Homebrew `qemu` (aarch64 + edk2 firmware) and Docker (to cross-build the linux binary
+in the `rust:1.90` image, or pass `LITEK8S_BIN`). It downloads the Ubuntu 24.04 arm64 cloud
 image once into `bench/.work/`. Files: `vm.sh` (throwaway VMs, or attach to real hosts),
-`run.sh` (phases), `node/probe.py` (in-guest sampler, time-to-ready and RPC timing),
+`run.sh` (phases), `node/probe.py` (in-guest sampler and time-to-ready),
 `report.py` (tables), `build-linux.sh` (cross-build).

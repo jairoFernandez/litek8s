@@ -35,8 +35,8 @@ Details, the first guest on a new Mac and the pinned `dev/stable.sh` in
 Rust stable (≥ 1.90; the crate uses edition 2024):
 
 ```bash
-cargo build                          # debug, with the experimental `llm` feature
-cargo build --release --no-default-features   # what the releases ship
+cargo build                          # debug
+cargo build --release                # what the releases ship
 ```
 
 On macOS, `litek8s dev up` also needs the dev VM's guest (a static Linux
@@ -52,16 +52,12 @@ the Docker API ([docs/develop-without-docker.md](docs/develop-without-docker.md)
 ## Test
 
 ```bash
-cargo test                           # unit tests + integration tests
-cargo test --no-default-features     # CI runs both
-cargo test apply_get_logs_and_delete_roundtrip   # one test
+cargo test                           # unit and API tests, no Docker needed
+cargo test discovery_and_default_objects        # one test
 cargo clippy --all-targets -- -D warnings
 cargo fmt
 ```
 
-- `tests/integration.rs` drives the legacy daemon and needs a Docker API
-  (Docker, OrbStack, or litek8s's own: `eval "$(dev/stable.sh env)"`); it
-  skips itself when none is reachable.
 - `tests/kube_apiserver.rs`, `tests/mcp.rs`, `tests/obs_api.rs` and
   `tests/ha.rs` run the API server in-process and need no Docker.
 - Unit tests live next to the code (`#[cfg(test)]`). The terminal UI is
@@ -91,7 +87,7 @@ k3s (k3d) before it counts. The official conformance suite runs with
 
 - Keep each PR to one change, with tests where the code has them.
 - `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and
-  `cargo test` (both feature sets) pass; CI runs them on Linux and macOS.
+  `cargo test` pass; CI runs them on Linux and macOS.
 - Performance claims come with numbers and how they were measured; the
   harnesses are in [bench/](bench/).
 - Comments and docs say what the code does and why, in plain sentences.

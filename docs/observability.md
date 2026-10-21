@@ -215,8 +215,7 @@ object, as kube-apiserver keeps for its own groups, would make `helm
 install metrics-server` fail: Helm does not adopt objects it did not
 create.)
 
-`litek8s top` with no legacy daemon running (or with `--context`) shows
-the current kube context's nodes (usage against allocatable) and pods,
+`litek8s top` shows the current kube context's (or `--context`'s) nodes (usage against allocatable) and pods,
 busiest first, refreshed every `--interval-secs` on a terminal and printed
 once when piped or with `--once`; `-n`, `-l`, `--containers` and
 `--sort-by cpu|memory|name` narrow and order it. It reads only the

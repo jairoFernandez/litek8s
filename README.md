@@ -321,9 +321,6 @@ Honest list; more in [skills/litek8s/references/differences.md](skills/litek8s/r
   ([docs/dev.md](docs/dev.md#memory-on-macos)).
 - macOS servers use Docker for pods and are meant for development; run
   real servers and nodes on Linux.
-- Release binaries are built without the experimental `llm` feature
-  ([docs/llm.md](docs/llm.md)), which goes away in 0.2.0; run LLMs with
-  llama.cpp instead ([docs/llm-cluster.md](docs/llm-cluster.md)).
 
 ## Documentation
 
@@ -331,6 +328,8 @@ Honest list; more in [skills/litek8s/references/differences.md](skills/litek8s/r
 [docs/docker.md](docs/docker.md) Docker API ·
 [docs/ui.md](docs/ui.md) terminal UI ·
 [docs/observability.md](docs/observability.md) metrics, logs, alerts ·
+[docs/clusters.md](docs/clusters.md) clusters over SSH ·
+[docs/networking.md](docs/networking.md) networking across NATs ·
 [docs/ha.md](docs/ha.md) HA control plane ·
 [docs/crds.md](docs/crds.md) CRDs ·
 [docs/agents.md](docs/agents.md) MCP and agents ·
@@ -339,13 +338,14 @@ Honest list; more in [skills/litek8s/references/differences.md](skills/litek8s/r
 [CONTRIBUTING.md](CONTRIBUTING.md) building and testing ·
 [SECURITY.md](SECURITY.md) reporting vulnerabilities
 
-## The legacy daemon
+## History
 
 litek8s began as a small Docker-backed orchestrator with its own reduced
 manifest format (`apiVersion: litek8s.dev/v1alpha1`), a daemon over a
-Unix socket (`litek8s serve`) and SSH-backed remote nodes. It is still in
-the binary but no longer the focus; see
-[docs/legacy-daemon.md](docs/legacy-daemon.md).
+Unix socket (`litek8s serve`) and SSH-backed remote nodes, plus an
+experiment in distributed LLM inference. 0.2.0 removed both: everything
+they did has a Kubernetes-native replacement, listed in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

@@ -5,8 +5,8 @@ name: release
 # Running it by hand (workflow_dispatch) builds the same archives as workflow
 # artifacts, without a release: a dry run before tagging.
 #
-#   litek8s-<tag>-linux-x86_64.tar.gz   static (musl), --no-default-features
-#   litek8s-<tag>-linux-aarch64.tar.gz  static (musl), --no-default-features
+#   litek8s-<tag>-linux-x86_64.tar.gz   static (musl)
+#   litek8s-<tag>-linux-aarch64.tar.gz  static (musl)
 #   litek8s-<tag>-darwin-arm64.tar.gz   ad-hoc signed with the Virtualization
 #                                       entitlement, plus the dev VM's guest
 #                                       (share/litek8s/vm), whose /init is the
@@ -82,7 +82,7 @@ jobs:
             -e CARGO_PROFILE_RELEASE_STRIP=symbols \
             -e LITEK8S_RELEASE \
             "$RUST_MUSL_IMAGE" \
-            sh -c 'apk add -q musl-dev gcc g++ make perl >/dev/null && cargo build --release --locked --no-default-features'
+            sh -c 'apk add -q musl-dev gcc g++ make perl >/dev/null && cargo build --release --locked'
           sudo chown -R "$(id -u):$(id -g)" target
 
       - name: Check the binary
@@ -129,7 +129,7 @@ jobs:
       - name: Build
         env:
           CARGO_PROFILE_RELEASE_STRIP: symbols
-        run: cargo build --release --locked --no-default-features
+        run: cargo build --release --locked
 
       # The dev VM needs com.apple.security.virtualization. An ad-hoc
       # signature carries it (the entitlement is not restricted, so no Apple
