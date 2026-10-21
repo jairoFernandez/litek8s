@@ -15,7 +15,12 @@ gitops_repo="$(platform_get gitops_repo)"; gitops_repo="${gitops_repo:-gitops}"
 app_repo="$(platform_get app_repo)"; app_repo="${app_repo:-metaphor}"
 domain="$(platform_get domain)"; domain="${domain:-${DOMAIN:-localhost}}"
 if [[ $git_provider == github && -z ${GITHUB_TOKEN:-} && -z ${GITHUB_TOKEN_FILE:-} ]]; then
-  GITHUB_TOKEN="$(secret_value github-runner github-runner GITHUB_TOKEN)"
+  # Argo CD and external-secrets make it (wave 50) after up.sh returns.
+  deadline=$((SECONDS + timeout))
+  until GITHUB_TOKEN="$(secret_value github-runner github-runner GITHUB_TOKEN 2>/dev/null)" && [[ -n $GITHUB_TOKEN ]]; do
+    if [[ $SECONDS -ge $deadline ]]; then echo "github: no Secret github-runner/github-runner (timeout)"; exit 1; fi
+    sleep 5
+  done
 fi
 ca="$(mktemp)"
 trap 'scm_disconnect; rm -f "$ca"' EXIT
