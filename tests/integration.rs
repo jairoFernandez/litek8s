@@ -552,10 +552,16 @@ async fn reconciler_recreates_container_after_manual_removal() -> Result<()> {
         },
     )
     .await?;
-    assert!(matches!(
-        row.last_exit.as_deref(),
-        Some("removed") | Some("container disappeared")
-    ));
+    // A forced remove kills the container and then removes it: the
+    // reconciler may see it gone, being removed, or killed in between.
+    assert!(
+        matches!(
+            row.last_exit.as_deref(),
+            Some("removed" | "container disappeared" | "container exited" | "exited(137)")
+        ),
+        "last_exit: {:?}",
+        row.last_exit
+    );
 
     harness.cleanup_deployment(&deployment).await?;
     Ok(())
