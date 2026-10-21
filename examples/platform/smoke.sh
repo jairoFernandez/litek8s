@@ -167,6 +167,25 @@ YAML
   kubectl -n argo delete "$wf" >/dev/null
 fi
 
+# ---- The sample app: a push to metaphor reaches development ---------------------
+
+if kubectl -n argocd get application development >/dev/null 2>&1; then
+  msg="smoke-$RANDOM$RANDOM"
+  m="$api/repos/$GITEA_USER/metaphor/contents/index.html"
+  cur="$(gitea "$m")"
+  html="$(json 'd["content"]' <<<"$cur" | base64 -d | sed "s#<p>message: .*</p>#<p>message: $msg</p>#")"
+  commit="$(gitea -X PUT "$m" -d "{\"sha\":\"$(json 'd["sha"]' <<<"$cur")\",\"message\":\"$msg\",
+    \"content\":\"$(printf '%s\n' "$html" | base64 | tr -d '\n')\"}" | json 'd["commit"]["sha"][:12]')"
+  echo "metaphor: pushed $commit ($msg)"
+  url="https://metaphor-development.$domain:$port/"
+  deadline=$((SECONDS + timeout))
+  until page="$(curl -s --cacert "$ca" "$url")" && grep -q "$msg" <<<"$page" && grep -q "version: $commit" <<<"$page"; do
+    if [[ $SECONDS -ge $deadline ]]; then echo "metaphor: $url does not show $commit (timeout)"; printf '%s\n' "$page" | tail -3; exit 1; fi
+    sleep 5
+  done
+  echo "metaphor: $url serves $commit (built by Gitea Actions, deployed by Argo CD)"
+fi
+
 # ---- Atlantis: a pull request plans and applies OpenTofu against OpenBao -------
 
 kubectl get namespace atlantis >/dev/null 2>&1 || exit 0

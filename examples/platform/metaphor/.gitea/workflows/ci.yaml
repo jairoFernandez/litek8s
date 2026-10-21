@@ -1,0 +1,41 @@
+name: ci
+on:
+  push:
+    branches: [main]
+jobs:
+  build-and-deploy:
+    runs-on: lkdocker
+    steps:
+      - uses: actions/checkout@v4
+
+      # The runner mounts its Docker socket (litek8s's Docker API) into the job.
+      - name: Docker CLI
+        run: |
+          curl -fsSL "https://download.docker.com/linux/static/stable/$(uname -m)/docker-27.5.1.tgz" |
+            tar -xz -C /usr/local/bin --strip-components=1 docker/docker
+          docker version --format 'docker API {{.Server.APIVersion}}'
+
+      - name: Build into the cluster's image store
+        run: |
+          tag="$(git rev-parse --short=12 HEAD)"
+          sed -i "s/__VERSION__/$tag/" index.html
+          DOCKER_BUILDKIT=0 docker build -t "metaphor:$tag" .
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+
+      - name: Deploy to development
+        env:
+          GITOPS_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+        run: |
+          python3 - <<'PY'
+          import base64, json, os, re, urllib.request
+          url = "%s/api/v1/repos/%s/gitops/contents/registry/environments/development/metaphor/kustomization.yaml" % (
+              os.environ["GITHUB_SERVER_URL"], os.environ["GITHUB_REPOSITORY_OWNER"])
+          auth = {"Authorization": "token " + os.environ["GITOPS_TOKEN"], "Content-Type": "application/json"}
+          cur = json.load(urllib.request.urlopen(urllib.request.Request(url, headers=auth)))
+          text = base64.b64decode(cur["content"]).decode()
+          new = re.sub(r"newTag: .*", "newTag: " + os.environ["TAG"], text)
+          body = {"content": base64.b64encode(new.encode()).decode(), "sha": cur["sha"],
+                  "message": "metaphor %s to development" % os.environ["TAG"]}
+          urllib.request.urlopen(urllib.request.Request(url, data=json.dumps(body).encode(), headers=auth, method="PUT"))
+          print("development: metaphor", os.environ["TAG"])
+          PY

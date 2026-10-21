@@ -1,0 +1,10 @@
+# metaphor in development. Its CI sets newTag on every push to its main.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - deployment.yaml
+  - service.yaml
+  - ingress.yaml
+images:
+  - name: metaphor
+    newTag: bootstrap

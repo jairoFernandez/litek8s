@@ -14,10 +14,11 @@ with kubefirst or Konstruct.
 | file | what |
 |---|---|
 | [`up.sh`](up.sh) | installs or updates everything; keeps its secrets and the repository on re-runs |
-| [`smoke.sh`](smoke.sh) | CI jobs per runner mode; every Argo CD Application Synced and Healthy on the repository's commit; Argo CD, Gitea and OpenBao over HTTPS with the platform's CA; a secret from OpenBao to a Kubernetes Secret through external-secrets; a two-step Argo Workflow; a pull request that Atlantis plans and applies with OpenTofu against OpenBao, then undoes |
+| [`smoke.sh`](smoke.sh) | CI jobs per runner mode; every Argo CD Application Synced and Healthy on the repository's commit; Argo CD, Gitea and OpenBao over HTTPS with the platform's CA; a secret from OpenBao to a Kubernetes Secret through external-secrets; a two-step Argo Workflow; a push to the sample app served in development; a pull request that Atlantis plans and applies with OpenTofu against OpenBao, then undoes |
 | [`lib.sh`](lib.sh) | Gitea API and git over a port-forward, for both |
 | [`gitea/`](gitea/) | the Gitea chart's values, act_runner per mode |
-| [`gitops/`](gitops/) | the repository's root: `atlantis.yaml`, `terraform/openbao` (OpenBao's policies in OpenTofu) |
+| [`gitops/`](gitops/) | the repository's root: `atlantis.yaml`, `terraform/openbao` (OpenBao's policies in OpenTofu), `registry/environments/development` (the sample app) |
+| [`metaphor/`](metaphor/) | the sample app's repository: a static page, its Dockerfile and its CI (`.gitea/workflows/ci.yaml`) |
 | [`gitops/cluster/`](gitops/cluster/) | what goes to `registry/clusters/<cluster>/` in the repository: one Argo CD Application per component, `registry.yaml` the app of apps, `components/argocd` Argo CD itself |
 
 What is in it so far:
@@ -33,18 +34,19 @@ What is in it so far:
 | 40 | `cluster-secret-store` | ClusterSecretStore `openbao`: ExternalSecrets in any namespace read OpenBao's KV `secret/`; `openbao-platform` reads `platform/`, for the `atlantis` namespace only |
 | 50 | `argo-workflows` | chart 2.0.12 (v4.1.5), workflows in namespace `argo`, UI with token login |
 | 50 | `atlantis` | chart 6.16.1 (v0.48.1) on Gitea, OpenTofu, state in Kubernetes Secrets; its credentials from OpenBao |
+| 70 | `development` | the sample app `metaphor` in namespace `development` |
 | 60 | `reloader` | 2.2.18 |
 | 100 | `argocd` | v3.5.5, managing itself |
 
 Argo CD, Gitea, OpenBao, Argo Workflows and Atlantis are at
-`https://{argocd,gitea,openbao,argo,atlantis}.<DOMAIN>`, with certificates
-the platform's CA signs.
+`https://{argocd,gitea,openbao,argo,atlantis}.<DOMAIN>`, the sample app at
+`https://metaphor-development.<DOMAIN>`, with certificates the platform's CA
+signs.
 kubefirst's ingress-nginx is retired upstream (no releases since March
 2026); Traefik takes its place.
 
-Next: the sample app's CI/CD across environments (kubefirst's metaphor:
-image built by Gitea Actions, pushed to Gitea's registry, promoted through
-development, staging and production by Argo CD), and single sign-on.
+Next: staging and production with promotion between them, a registry for
+clusters with more than one node, and single sign-on.
 
 ## On a dev cluster
 
@@ -73,12 +75,13 @@ kubectl -n cert-manager get secret platform-ca -o jsonpath='{.data.ca\.crt}' | b
 On real machines, set `DOMAIN` to a name whose `*.` records point at a node
 (a home DNS server or router), and the ports stay 80/443.
 
-From a new dev cluster on a Mac (VM with 4 CPUs, 4 GiB): `up.sh` 115 s,
-then `smoke.sh` 210 s until everything above passes (image pulls
-included). Memory: Argo CD 448 MiB, Gitea and the lkdocker runner 273 MiB,
-cert-manager 149 MiB, external-secrets 117 MiB, Atlantis 104 MiB, Argo
-Workflows 86 MiB, OpenBao 49 MiB, Traefik 37 MiB, reloader 22 MiB; the
-whole node 1.6 GiB (kubefirst's local mode asks Docker for 5 GiB).
+From a new dev cluster on a Mac (VM with 4 CPUs, 4 GiB): `up.sh` 149 s,
+then `smoke.sh` 190 s until everything above passes (image pulls
+included). Memory: Argo CD 723 MiB, Gitea and the lkdocker runner 238 MiB,
+cert-manager 176 MiB, external-secrets 164 MiB, Atlantis 123 MiB, OpenBao
+97 MiB, Argo Workflows 73 MiB, Traefik 52 MiB, reloader 15 MiB; the whole
+node 2.0 GiB (kubefirst's local mode asks Docker for 5 GiB, its cloud
+clusters 4 x 8 GiB).
 
 `up.sh` takes `CLUSTER_NAME` (default `mgmt`, the directory in the
 repository), `RUNNERS` (default `lkdocker`), `DOMAIN` (default `localhost`)
@@ -91,6 +94,28 @@ this checkout's `gitops/`).
 Remove it all: `kubectl delete namespace argocd` first (or Argo CD puts
 things back), then the namespaces of the components, then
 `helm -n gitea uninstall gitea; kubectl delete namespace gitea`.
+
+## The sample app: push to deploy
+
+`up.sh` puts [`metaphor/`](metaphor/) in Gitea as `lkadmin/metaphor` with
+the repository secret `GITOPS_TOKEN` (a token that can write to `gitops`).
+Every push to its `main`:
+
+1. Gitea Actions runs `.gitea/workflows/ci.yaml` on the `lkdocker` runner.
+   The runner mounts its Docker socket, litek8s's Docker API, into the job;
+   `docker build` puts `metaphor:<commit>` straight into the cluster's image
+   store, the one pods start from: no registry, nothing pushed or pulled.
+2. The job sets `newTag: <commit>` in the gitops repository's
+   `registry/environments/development/metaphor/kustomization.yaml`.
+3. Gitea's webhook tells Argo CD about the push (no 3-minute poll), and Argo
+   CD rolls out the new image (`imagePullPolicy: Never`, on the node with
+   the Docker engine).
+
+`smoke.sh` changes the page with a commit and waits for
+`https://metaphor-development.<DOMAIN>` to serve it. Each build leaves its
+image in the store (`docker image prune` on the cluster's Docker API).
+`SEED=update` leaves `registry/environments` in the repository as it is:
+the tags there are the CI's.
 
 ## Infrastructure as code: Atlantis and OpenTofu
 

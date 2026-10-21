@@ -78,15 +78,41 @@ if [[ $empty == True || ${SEED:-} == update ]]; then
     git -C "$repo" remote add origin "$gitea_url/$GITEA_USER/gitops.git"
   else
     gitc clone -q "$gitea_url/$GITEA_USER/gitops.git" "$repo"
+    # The environments stay: their image tags are what the apps' CI set.
+    [[ -d $repo/registry/environments ]] && mv "$repo/registry/environments" "$work/environments"
     find "$repo" -mindepth 1 -maxdepth 1 ! -name .git -exec rm -rf {} +
   fi
   cp -R "$render/." "$repo/"
+  if [[ -d $work/environments ]]; then
+    rm -rf "$repo/registry/environments"
+    mv "$work/environments" "$repo/registry/environments"
+  fi
   git -C "$repo" add -A
   if ! git -C "$repo" diff --cached --quiet; then
     gitc -C "$repo" commit -qm "litek8s platform: $cluster from examples/platform/gitops"
     gitc -C "$repo" push -q origin main
     echo "gitops: pushed to $GITEA_USER/gitops"
   fi
+fi
+
+# ---- the sample app ----------------------------------------------------------
+
+# metaphor: its CI (Gitea Actions on the lkdocker runner) builds it and sets
+# its tag in the gitops repository with GITOPS_TOKEN, a repository secret.
+gitea -X POST "$api/user/repos" -d '{"name":"metaphor","private":true,"default_branch":"main"}' >/dev/null 2>&1 || true
+if [[ $(gitea "$api/repos/$GITEA_USER/metaphor" | json 'd["empty"]') == True ]]; then
+  if ! gitea "$api/repos/$GITEA_USER/metaphor/actions/secrets" | json '[x["name"] for x in d]' | grep -q GITOPS_TOKEN; then
+    token="$(gitea -X POST "$api/users/$GITEA_USER/tokens" \
+      -d "{\"name\":\"metaphor-ci-$(date +%s)\",\"scopes\":[\"write:repository\"]}" | json 'd["sha1"]')"
+    gitea -X PUT "$api/repos/$GITEA_USER/metaphor/actions/secrets/GITOPS_TOKEN" -d "{\"data\":\"$token\"}" >/dev/null
+  fi
+  app="$work/metaphor"
+  git init -q -b main "$app"
+  cp -R "$dir/metaphor/." "$app/"
+  git -C "$app" add -A
+  gitc -C "$app" commit -qm "metaphor: the platform's sample app"
+  gitc -C "$app" push -q "$gitea_url/$GITEA_USER/metaphor.git" main
+  echo "metaphor: pushed to $GITEA_USER/metaphor (its CI builds and deploys it)"
 fi
 
 # ---- Argo CD ---------------------------------------------------------------
@@ -118,6 +144,10 @@ if ! kubectl -n openbao get secret openbao-unseal-key >/dev/null 2>&1; then
 fi
 
 kubectl apply -f "$render/registry/clusters/$cluster/registry.yaml" >/dev/null
+if ! gitea "$api/repos/$GITEA_USER/gitops/hooks" | json '[h["config"]["url"] for h in d]' | grep -q argocd-server; then
+  gitea -X POST "$api/repos/$GITEA_USER/gitops/hooks" -d '{"type":"gogs","active":true,"events":["push"],
+    "config":{"url":"http://argocd-server.argocd.svc.cluster.local/api/webhook","content_type":"json"}}' >/dev/null
+fi
 # Read the repository now, not at the next poll (3 min).
 kubectl -n argocd annotate application registry argocd.argoproj.io/refresh=normal --overwrite >/dev/null
 echo "registry: applied, syncing (examples/platform/smoke.sh waits for it)"
@@ -198,6 +228,7 @@ Argo CD: https://argocd.$domain$port  user admin, password:
 Argo Workflows: https://argo.$domain$port  token:
            kubectl -n argo create token argo-workflows-server --duration 12h   (paste as "Bearer <token>")
 Atlantis: https://atlantis.$domain$port  (pull requests to $GITEA_USER/gitops in Gitea)
+metaphor: https://metaphor-development.$domain$port  (push to $GITEA_USER/metaphor to deploy)
 OpenBao: https://openbao.$domain$port root token:
            kubectl -n openbao get secret openbao-init -o jsonpath='{.data.root-token}' | base64 -d
 CA:      kubectl -n cert-manager get secret platform-ca -o jsonpath='{.data.ca\.crt}' | base64 -d > platform-ca.crt

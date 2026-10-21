@@ -1,0 +1,18 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: metaphor
+  annotations:
+    cert-manager.io/cluster-issuer: platform-ca
+spec:
+  rules:
+    - host: metaphor-development.<DOMAIN_NAME>
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service: {name: metaphor, port: {name: http}}
+  tls:
+    - hosts: [metaphor-development.<DOMAIN_NAME>]
+      secretName: metaphor-tls
