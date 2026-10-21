@@ -15,18 +15,18 @@ set -euo pipefail
 engine=${1:?engine} example=${2:?example}
 out="${RUNNER_TEMP:-/tmp}"
 name="bench-$engine-$example"
+# The runner's tools (static Go binaries), wherever the image put them.
+tools=(-v "$(command -v yq):/usr/local/bin/yq:ro" -v "$(command -v kubectl):/usr/local/bin/kubectl:ro" -v "$(command -v helm):/usr/local/bin/helm:ro")
 
 if [[ $engine == dind ]]; then
   docker run -d --name "$name" --privileged --entrypoint sleep \
-    -v "$PWD:/src" -w /src -v /usr/bin/yq:/usr/local/bin/yq:ro \
-    -v /usr/local/bin/kubectl:/usr/local/bin/kubectl:ro -v /usr/local/bin/helm:/usr/local/bin/helm:ro \
+    -v "$PWD:/src" -w /src "${tools[@]}" \
     docker:27-dind infinity >/dev/null
   docker exec "$name" apk add -q bash bc curl >/dev/null
 else
   docker run -d --name "$name" --privileged --entrypoint sleep \
-    -v "$PWD:/src" -w /src -v /usr/bin/yq:/usr/local/bin/yq:ro \
-    -v /usr/local/bin/kubectl:/usr/local/bin/kubectl:ro -v /usr/local/bin/helm:/usr/local/bin/helm:ro \
-    -v /usr/bin/docker:/usr/local/bin/docker:ro \
+    -v "$PWD:/src" -w /src "${tools[@]}" \
+    -v "$(command -v docker):/usr/local/bin/docker:ro" \
     -v /usr/libexec/docker/cli-plugins:/usr/local/lib/docker/cli-plugins:ro \
     ubuntu:24.04 infinity >/dev/null
   docker exec "$name" bash -c 'apt-get update -qq && apt-get install -y -qq bc curl ca-certificates >/dev/null'
