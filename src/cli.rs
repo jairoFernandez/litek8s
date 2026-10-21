@@ -107,7 +107,9 @@ Defaults a server gets unless given: --listen 0.0.0.0:6443 --data-dir
 crun --node-ip <detected> --kubeconfig /etc/litek8s/kubeconfig.yaml (an agent:
 --node-dir, --runtime, --node-ip). Re-running with other flags (or another
 binary) replaces them and restarts the service; pods keep running across
-restarts.
+restarts. --registries FILE installs a registry configuration (mirrors,
+credentials, CAs; k3s registries.yaml format, the files it names read in) as
+/etc/litek8s/registries.yaml, which the service reads at start.
 
 Straight from a release: curl -fsSL https://raw.githubusercontent.com/jairoFernandez/litek8s/main/install.sh | sh -s -- server
 
@@ -397,6 +399,8 @@ enum Command {
         node_external_ip: Option<std::net::IpAddr>,
         #[arg(long, help = "Also serve the Docker Engine API on this Unix socket (crun runtime; published ports bind on 127.0.0.1)")]
         docker_socket: Option<PathBuf>,
+        #[arg(long, value_name = "FILE", help = "Registry mirrors, credentials and TLS for image pulls (k3s registries.yaml format; default /etc/litek8s/registries.yaml when it exists); read at start")]
+        registry_config: Option<PathBuf>,
         #[arg(long, requires = "data_dir", help = "Start a highly available control plane with this server as its first member (a single server's objects move into it)")]
         cluster_init: bool,
         #[arg(long, value_name = "URL", requires_all = ["data_dir", "token"], conflicts_with = "cluster_init", help = "Join the control plane of this server as another server, e.g. https://192.168.1.10:6443 (needs --token)")]
@@ -506,6 +510,8 @@ enum Command {
         node_external_ip: Option<std::net::IpAddr>,
         #[arg(long, value_parser = parse_duration, help = "Heartbeat grace for this node when longer than the cluster's (e.g. 15m for a laptop that sleeps)")]
         node_grace_period: Option<Duration>,
+        #[arg(long, value_name = "FILE", help = "Registry mirrors, credentials and TLS for image pulls (k3s registries.yaml format; default /etc/litek8s/registries.yaml when it exists); read at start")]
+        registry_config: Option<PathBuf>,
     },
     #[command(
         about = "Search and follow pod logs, including containers that are gone",
@@ -755,11 +761,13 @@ pub async fn run() -> Result<()> {
             no_wireguard,
             node_external_ip,
             docker_socket,
+            registry_config,
             cluster_init,
             server,
             raft_port,
             obs,
         } => {
+            crate::registries::init(registry_config.as_deref())?;
             let docker = match &docker_socket {
                 Some(path) => {
                     let _ = std::fs::remove_file(path);
@@ -883,7 +891,8 @@ pub async fn run() -> Result<()> {
             }
         }
         Command::Skill { reference, list, install } => skill(reference, list, install),
-        Command::Agent { join, token, node_name, node_ip, node_dir, runtime, wireguard_port, no_wireguard, node_external_ip, node_grace_period } => {
+        Command::Agent { join, token, node_name, node_ip, node_dir, runtime, wireguard_port, no_wireguard, node_external_ip, node_grace_period, registry_config } => {
+            crate::registries::init(registry_config.as_deref())?;
             let node_name = node_name.unwrap_or_else(crate::kube::agent::default_node_name);
             let node_dir = node_dir.unwrap_or_else(crate::kube::agent::default_root_dir);
             let mut client = crate::kube::join::Client::new(&join, &token, &node_name, &node_dir)?;

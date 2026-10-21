@@ -9,6 +9,7 @@
 //! agents:
 //!   - {ssh: me@old-laptop, labels: {disk: ssd}}
 //!   - {ssh: ubuntu@ec2-host, nodeIp: 10.0.0.7, taints: ["gpu=true:NoSchedule"]}
+//! registries: registries.yaml                # optional, for every machine
 //! ```
 //!
 //! `apply` installs or updates the servers (the first with --cluster-init
@@ -189,6 +190,10 @@ pub struct ClusterFile {
     /// A release tag to install (`v0.2.0`).
     #[serde(default)]
     pub release: Option<String>,
+    /// A registry configuration (k3s registries.yaml format) every machine
+    /// gets as /etc/litek8s/registries.yaml; relative to the cluster file.
+    #[serde(default)]
+    pub registries: Option<PathBuf>,
 }
 
 /// A machine with everything resolved.
@@ -250,12 +255,17 @@ const MANAGED_FLAGS: &[(&str, &str)] = &[
     ("--cluster-init", "apply starts the first of several servers with it"),
     ("--node-name", "use the machine's `name`"),
     ("--node-ip", "use the machine's `nodeIp`"),
+    ("--registries", "use the file's `registries`"),
 ];
 
 impl ClusterFile {
     pub fn load(path: &Path) -> Result<Self> {
         let text = std::fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;
-        Self::parse(&text).with_context(|| format!("{} is not a valid cluster file", path.display()))
+        let mut file = Self::parse(&text).with_context(|| format!("{} is not a valid cluster file", path.display()))?;
+        if let (Some(r), Some(dir)) = (&mut file.registries, path.parent()) {
+            *r = dir.join(&*r);
+        }
+        Ok(file)
     }
 
     pub fn parse(text: &str) -> Result<Self> {
@@ -638,6 +648,7 @@ pub async fn apply(file: &ClusterFile, o: &ApplyOptions) -> Result<()> {
     let hosts = file.hosts();
     let local = LocalBinary::detect(o.binary.clone().or_else(|| file.binary.clone()), o.release.clone().or_else(|| file.release.clone()))?;
     let timeout = o.timeout.unwrap_or(Duration::from_secs(180));
+    let registries = file.registries.as_deref().map(crate::registries::bundle).transpose()?;
     println!("cluster {name}: {} server(s), {} agent(s)", file.servers.len(), file.agents.len());
     // Probe every machine first (and ask for sudo passwords one at a time).
     let mut remotes = Vec::new();
@@ -656,6 +667,7 @@ pub async fn apply(file: &ClusterFile, o: &ApplyOptions) -> Result<()> {
             skip_checks: o.skip_checks,
             timeout: Some(timeout),
             label: Some(label(h)),
+            registries: registries.clone(),
             ..Default::default()
         };
         let remote = &remotes[i];
@@ -944,6 +956,16 @@ identityFile: ~/.ssh/home
         let t: Vec<Taint> = hosts[2].spec.taints.iter().map(|t| t.parse().unwrap()).collect();
         assert_eq!(t[0].to_string(), "gpu=true:NoSchedule");
         assert_eq!(t[1].to_string(), "spot:PreferNoSchedule");
+    }
+
+    #[test]
+    fn registries_are_relative_to_the_cluster_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("cluster.yaml");
+        std::fs::write(&path, format!("{FILE}registries: lan/registries.yaml\n")).unwrap();
+        assert_eq!(ClusterFile::load(&path).unwrap().registries, Some(dir.path().join("lan/registries.yaml")));
+        let e = ClusterFile::parse(&format!("{FILE}serverArgs: [--registries, x]\n")).unwrap_err();
+        assert!(format!("{e:#}").contains("use the file's `registries`"), "{e:#}");
     }
 
     #[test]

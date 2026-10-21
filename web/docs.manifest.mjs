@@ -33,6 +33,7 @@ export const groups = [
       { slug: 'ui', label: 'Terminal UI', source: 'docs/ui.md' },
       { slug: 'observability', label: 'Metrics, logs, alerts', source: 'docs/observability.md' },
       { slug: 'clusters', label: 'Clusters over SSH', source: 'docs/clusters.md' },
+      { slug: 'registries', label: 'Private registries and mirrors', source: 'docs/registries.md' },
       { slug: 'networking', label: 'Networking across NATs', source: 'docs/networking.md' },
       { slug: 'ha', label: 'HA control plane', source: 'docs/ha.md' },
       { slug: 'crds', label: 'CRDs and server-side apply', source: 'docs/crds.md' },

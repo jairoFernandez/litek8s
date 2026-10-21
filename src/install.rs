@@ -469,6 +469,12 @@ pub async fn install(mut o: InstallOptions) -> Result<()> {
     if let Some(t) = take_flag(&mut o.args, "--timeout")? {
         o.timeout = crate::cli::parse_duration(&t).map_err(anyhow::Error::msg)?;
     }
+    // The registry configuration to install where the service reads it.
+    let registries = match take_flag(&mut o.args, "--registries")? {
+        Some(_) if has_flag(&o.args, &["--registry-config"]) => bail!("--registries installs {}: drop --registry-config", crate::registries::DEFAULT_PATH),
+        Some(path) => Some(crate::registries::bundle(Path::new(&path))?),
+        None => None,
+    };
     check_host()?;
     let role = o.role;
     if role.other().unit_path().exists() {
@@ -499,12 +505,16 @@ pub async fn install(mut o: InstallOptions) -> Result<()> {
     let env_file = plan.token.as_deref().map(render_env);
     let same_unit = std::fs::read_to_string(role.unit_path()).ok().as_deref() == Some(unit.as_str());
     let same_env = std::fs::read_to_string(role.env_file()).ok() == env_file;
+    let same_registries = registries.as_ref().is_none_or(|text| std::fs::read_to_string(crate::registries::DEFAULT_PATH).ok().as_ref() == Some(text));
     let new_binary = ensure_binary()?;
     // Nothing to do when the same binary already runs the same flags: a
     // re-run (`litek8s cluster apply`) leaves the service alone.
-    let changed = new_binary || !same_unit || !same_env || !unit_active(role);
+    let changed = new_binary || !same_unit || !same_env || !same_registries || !unit_active(role);
     if changed {
         std::fs::create_dir_all(ETC_DIR)?;
+        if let Some(text) = &registries {
+            write_file(Path::new(crate::registries::DEFAULT_PATH), text, 0o600)?;
+        }
         match &env_file {
             Some(text) => write_file(Path::new(role.env_file()), text, 0o600)?,
             None => {

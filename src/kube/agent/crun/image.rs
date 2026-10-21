@@ -36,6 +36,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
 use super::spec::ImageConfig;
+use crate::registries::{Credentials, Endpoint, Registries};
 
 const MANIFEST_TYPES: &str = "application/vnd.oci.image.index.v1+json, \
 application/vnd.docker.distribution.manifest.list.v2+json, \
@@ -108,20 +109,6 @@ impl Reference {
         s
     }
 
-    fn api_host(&self) -> &str {
-        if self.registry == "docker.io" { "registry-1.docker.io" } else { &self.registry }
-    }
-
-    fn scheme(&self) -> &'static str {
-        let host = self.registry.split(':').next().unwrap_or_default();
-        let insecure = std::env::var("LITEK8S_INSECURE_REGISTRIES").unwrap_or_default();
-        if host == "localhost" || host == "127.0.0.1" || insecure.split(',').any(|r| r.trim() == self.registry) {
-            "http"
-        } else {
-            "https"
-        }
-    }
-
     fn manifest_ref(&self) -> &str {
         self.digest.as_deref().or(self.tag.as_deref()).unwrap_or("latest")
     }
@@ -190,8 +177,13 @@ pub(crate) struct PullOptions {
     pub always: bool,
     /// `(architecture, variant)`; the host's by default.
     pub platform: Option<(String, Option<String>)>,
-    /// Registry credentials (user, password), as `X-Registry-Auth` gives them.
+    /// Registry credentials (user, password), as `X-Registry-Auth` gives
+    /// them; they win over the registry configuration's for the registry
+    /// itself (not its mirrors).
     pub auth: Option<(String, String)>,
+    /// Mirrors, credentials and TLS; the process's (`registries::current`)
+    /// if unset.
+    pub registries: Option<Arc<Registries>>,
     /// Keep the image out of the image GC (Docker API pulls).
     pub pinned: bool,
     /// Progress for clients that show it: (layer digest or "", message).
@@ -502,20 +494,18 @@ impl ImageStore {
                     }
                     return Ok(found);
                 }
-                let mut session = Session::new(&reference);
-                session.auth = opts.auth.clone();
-                if let Ok(Some(digest)) = session.head_manifest().await {
-                    if digest == entry.top {
-                        progress("", "Image is up to date");
-                        return Ok(found);
+                for mut session in Session::all(&reference, opts) {
+                    if let Ok(Some(digest)) = session.head_manifest().await {
+                        if digest == entry.top {
+                            progress("", "Image is up to date");
+                            return Ok(found);
+                        }
+                        break;
                     }
                 }
             }
         }
-        let mut session = Session::new(&reference);
-        session.auth = opts.auth.clone();
-        session.platform = opts.platform.clone();
-        let (top, manifest_digest, manifest) = session.resolve_manifest().await?;
+        let (mut session, (top, manifest_digest, manifest)) = Session::resolve_any(&reference, opts).await?;
         progress("", &format!("Pulling from {}", reference.repository.trim_start_matches("library/")));
         let config_desc = &manifest["config"];
         let config_digest = config_desc["digest"].as_str().context("manifest has no config")?.to_string();
@@ -1265,23 +1255,6 @@ fn set_opaque(_dir: &Path) -> Result<()> {
 trait Io: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> Io for T {}
 
-fn tls_config() -> Arc<rustls::ClientConfig> {
-    static CONFIG: std::sync::OnceLock<Arc<rustls::ClientConfig>> = std::sync::OnceLock::new();
-    CONFIG
-        .get_or_init(|| {
-            let mut roots = rustls::RootCertStore::empty();
-            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-            let mut config = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
-                .with_safe_default_protocol_versions()
-                .expect("TLS versions")
-                .with_root_certificates(roots)
-                .with_no_client_auth();
-            config.alpn_protocols = vec![b"http/1.1".to_vec()];
-            Arc::new(config)
-        })
-        .clone()
-}
-
 struct Url {
     https: bool,
     host: String,
@@ -1309,8 +1282,13 @@ fn parse_url(url: &str) -> Result<Url> {
 }
 
 pub(crate) async fn send(method: hyper::Method, url: &str, headers: &[(&str, String)]) -> Result<hyper::Response<hyper::body::Incoming>> {
+    send_with(&crate::registries::current(), method, url, headers, Bytes::new()).await
+}
+
+/// A request with `body`, TLS as `registries` says for the host.
+async fn send_with(registries: &Registries, method: hyper::Method, url: &str, headers: &[(&str, String)], body: Bytes) -> Result<hyper::Response<hyper::body::Incoming>> {
     let u = parse_url(url)?;
-    let io = open(&u).await?;
+    let io = open(&u, registries).await?;
     let (mut sender, conn) = hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(io)).await?;
     tokio::spawn(async move {
         let _ = conn.await;
@@ -1324,7 +1302,9 @@ pub(crate) async fn send(method: hyper::Method, url: &str, headers: &[(&str, Str
     for (k, v) in headers {
         req = req.header(*k, v);
     }
-    let req = req.body(http_body_util::Empty::<Bytes>::new())?;
+    // No body, no content-length (signed CDN URLs, picky servers).
+    let body = if body.is_empty() { http_body_util::Either::Left(http_body_util::Empty::<Bytes>::new()) } else { http_body_util::Either::Right(http_body_util::Full::new(body)) };
+    let req = req.body(body)?;
     tokio::time::timeout(Duration::from_secs(60), sender.send_request(req))
         .await
         .context("registry did not answer")?
@@ -1336,7 +1316,7 @@ pub(crate) async fn send(method: hyper::Method, url: &str, headers: &[(&str, Str
 /// dialers do: a registry host often has several addresses, and one that
 /// does not answer (or a flow a userspace network such as pasta dropped
 /// without a reset, which looks connected) must not hang the pull.
-async fn open(u: &Url) -> Result<Box<dyn Io>> {
+async fn open(u: &Url, registries: &Registries) -> Result<Box<dyn Io>> {
     const CONNECT: Duration = Duration::from_secs(10);
     const HANDSHAKE: Duration = Duration::from_secs(15);
     let host = dial_host(&u.host);
@@ -1363,7 +1343,7 @@ async fn open(u: &Url) -> Result<Box<dyn Io>> {
             return Ok(Box::new(tcp));
         }
         let name = rustls::pki_types::ServerName::try_from(u.host.clone())?;
-        match tokio::time::timeout(HANDSHAKE, tokio_rustls::TlsConnector::from(tls_config()).connect(name, tcp)).await {
+        match tokio::time::timeout(HANDSHAKE, tokio_rustls::TlsConnector::from(registries.tls(&u.host, u.port)).connect(name, tcp)).await {
             Ok(Ok(tls)) => return Ok(Box::new(tls)),
             Ok(Err(e)) => last = anyhow::Error::new(e).context(format!("TLS handshake with {} ({addr}) failed", u.host)),
             Err(_) => last = anyhow::anyhow!("timed out in the TLS handshake with {} ({addr})", u.host),
@@ -1418,11 +1398,27 @@ pub(crate) fn parse_challenge(header: &str) -> Option<(String, HashMap<String, S
     Some((scheme.to_lowercase(), params))
 }
 
+/// `application/x-www-form-urlencoded` of `pairs`.
+fn url_form(pairs: &[(&str, &str)]) -> String {
+    let enc = |v: &str| {
+        v.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+                _ => format!("%{b:02X}"),
+            })
+            .collect::<String>()
+    };
+    pairs.iter().map(|(k, v)| format!("{}={}", enc(k), enc(v))).collect::<Vec<_>>().join("&")
+}
+
 struct Session {
     reference: Reference,
+    /// The mirror or registry this session talks to.
+    endpoint: Endpoint,
+    registries: Arc<Registries>,
     token: Option<String>,
-    /// Credentials for the registry (Basic auth, or to get a token).
-    auth: Option<(String, String)>,
+    /// Credentials for the endpoint (Basic auth, or to get a token).
+    creds: Option<Credentials>,
     /// The registry asked for Basic auth: send it with every request.
     basic: bool,
     /// `(architecture, variant)` to pick from an index; the host's if unset.
@@ -1430,18 +1426,54 @@ struct Session {
 }
 
 impl Session {
-    fn new(reference: &Reference) -> Self {
-        Self { reference: reference.clone(), token: None, auth: None, basic: false, platform: None }
+    fn new(reference: &Reference, endpoint: Endpoint, registries: Arc<Registries>, creds: Option<Credentials>) -> Self {
+        Self { reference: reference.clone(), endpoint, registries, token: None, creds, basic: false, platform: None }
+    }
+
+    /// A session per endpoint to try, in order: the registry's mirrors,
+    /// then the registry itself.
+    fn all(reference: &Reference, opts: &PullOptions) -> Vec<Self> {
+        let registries = opts.registries.clone().unwrap_or_else(crate::registries::current);
+        registries
+            .endpoints(&reference.registry, &reference.repository)
+            .into_iter()
+            .map(|ep| {
+                let creds = match (&opts.auth, ep.upstream) {
+                    (Some((username, password)), true) => Some(Credentials::Basic { username: username.clone(), password: password.clone() }),
+                    _ => registries.credentials(&ep),
+                };
+                let mut s = Self::new(reference, ep, registries.clone(), creds);
+                s.platform = opts.platform.clone();
+                s
+            })
+            .collect()
+    }
+
+    /// The first endpoint that resolves the manifest, and what it resolved.
+    async fn resolve_any(reference: &Reference, opts: &PullOptions) -> Result<(Self, (String, String, Value))> {
+        let mut errors = Vec::new();
+        for mut s in Self::all(reference, opts) {
+            match s.resolve_manifest().await {
+                Ok(r) => return Ok((s, r)),
+                Err(e) if s.endpoint.upstream => errors.push(e),
+                Err(e) => errors.push(e.context(format!("mirror {}", s.endpoint.host))),
+            }
+        }
+        // One endpoint: its error as it is.
+        if errors.len() == 1 {
+            return Err(errors.remove(0));
+        }
+        bail!("{}", errors.iter().map(|e| format!("{e:#}")).collect::<Vec<_>>().join("; "))
     }
 
     fn basic_header(&self) -> Option<String> {
         use base64::Engine;
-        let (u, p) = self.auth.as_ref()?;
-        Some(format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{u}:{p}"))))
+        let Some(Credentials::Basic { username, password }) = &self.creds else { return None };
+        Some(format!("Basic {}", base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"))))
     }
 
     fn url(&self, kind: &str, r: &str) -> String {
-        format!("{}://{}/v2/{}/{kind}/{r}", self.reference.scheme(), self.reference.api_host(), self.reference.repository)
+        self.endpoint.url(kind, r)
     }
 
     /// A request to the registry, authenticating (anonymously) when it asks,
@@ -1462,7 +1494,7 @@ impl Session {
             } else if let (Some(b), true, true) = (self.basic_header(), self.basic, same_host) {
                 headers.push(("authorization", b));
             }
-            let resp = send(method.clone(), &url, &headers).await?;
+            let resp = send_with(&self.registries, method.clone(), &url, &headers, Bytes::new()).await?;
             let status = resp.status();
             // Rate limits on anonymous pulls (ECR Public answers 429 to a
             // burst of manifest and blob requests): wait and retry here
@@ -1492,6 +1524,9 @@ impl Session {
                 };
                 continue;
             }
+            if status == hyper::StatusCode::UNAUTHORIZED && authed && same_host && self.creds.is_some() {
+                bail!("{} refused the credentials the registry configuration (registries.yaml) or `docker login` gave it", self.endpoint.host);
+            }
             if status == hyper::StatusCode::UNAUTHORIZED && !authed && same_host {
                 let challenge = resp
                     .headers()
@@ -1504,12 +1539,15 @@ impl Session {
                         authed = true;
                         continue;
                     }
-                    Some((scheme, _)) if scheme == "basic" && self.auth.is_some() => {
+                    Some((scheme, _)) if scheme == "basic" && matches!(self.creds, Some(Credentials::Basic { .. })) => {
                         self.basic = true;
                         authed = true;
                         continue;
                     }
-                    _ => bail!("{} requires authentication (log in with `docker login`, or pull secrets for pods)", self.reference.registry),
+                    _ => bail!(
+                        "{} requires authentication: give it credentials in the registry configuration (registries.yaml), or `docker login` for the Docker API",
+                        self.endpoint.host
+                    ),
                 }
             }
             return Ok(resp);
@@ -1519,15 +1557,26 @@ impl Session {
 
     async fn fetch_token(&self, params: &HashMap<String, String>) -> Result<String> {
         let realm = params.get("realm").context("auth challenge without a realm")?;
-        let mut query = Vec::new();
-        if let Some(s) = params.get("service") {
-            query.push(format!("service={s}"));
-        }
-        let scope = params.get("scope").cloned().unwrap_or_else(|| format!("repository:{}:pull", self.reference.repository));
-        query.push(format!("scope={scope}"));
-        let url = format!("{realm}{}{}", if realm.contains('?') { "&" } else { "?" }, query.join("&"));
-        let headers: Vec<(&str, String)> = self.basic_header().map(|b| ("authorization", b)).into_iter().collect();
-        let resp = send(hyper::Method::GET, &url, &headers).await?;
+        let scope = params.get("scope").cloned().unwrap_or_else(|| format!("repository:{}:pull", self.endpoint.repository));
+        let resp = if let Some(Credentials::IdentityToken(refresh)) = &self.creds {
+            // OAuth2 refresh token grant, as Docker and containerd do.
+            let mut form = url_form(&[("grant_type", "refresh_token"), ("refresh_token", refresh), ("client_id", "litek8s"), ("scope", &scope)]);
+            if let Some(s) = params.get("service") {
+                form.push('&');
+                form.push_str(&url_form(&[("service", s)]));
+            }
+            let headers = [("content-type", "application/x-www-form-urlencoded".to_string())];
+            send_with(&self.registries, hyper::Method::POST, realm, &headers, Bytes::from(form)).await?
+        } else {
+            let mut query = Vec::new();
+            if let Some(s) = params.get("service") {
+                query.push(format!("service={s}"));
+            }
+            query.push(format!("scope={scope}"));
+            let url = format!("{realm}{}{}", if realm.contains('?') { "&" } else { "?" }, query.join("&"));
+            let headers: Vec<(&str, String)> = self.basic_header().map(|b| ("authorization", b)).into_iter().collect();
+            send_with(&self.registries, hyper::Method::GET, &url, &headers, Bytes::new()).await?
+        };
         if !resp.status().is_success() {
             bail!("token request to {realm} failed: {}", resp.status());
         }
@@ -1633,7 +1682,7 @@ mod tests {
             }
         });
         let reference = Reference::parse(&format!("localhost:{port}/a/b:c")).unwrap();
-        let mut session = Session::new(&reference);
+        let mut session = Session::all(&reference, &PullOptions::default()).remove(0);
         let url = format!("http://127.0.0.1:{port}/v2/a/b/blobs/sha256:00");
         let resp = session.get(hyper::Method::GET, &url, None).await.unwrap();
         assert_eq!(resp.status(), hyper::StatusCode::OK);
@@ -1644,12 +1693,11 @@ mod tests {
         let r = Reference::parse("nginx:alpine").unwrap();
         assert_eq!((r.registry.as_str(), r.repository.as_str(), r.tag.as_deref()), ("docker.io", "library/nginx", Some("alpine")));
         assert_eq!(r.canonical(), "docker.io/library/nginx:alpine");
-        assert_eq!(r.api_host(), "registry-1.docker.io");
         assert_eq!(Reference::parse("busybox").unwrap().canonical(), "docker.io/library/busybox:latest");
         let r = Reference::parse("ghcr.io/org/app/sub:v1").unwrap();
         assert_eq!((r.registry.as_str(), r.repository.as_str()), ("ghcr.io", "org/app/sub"));
         let r = Reference::parse("localhost:5000/app").unwrap();
-        assert_eq!((r.registry.as_str(), r.tag.as_deref(), r.scheme()), ("localhost:5000", Some("latest"), "http"));
+        assert_eq!((r.registry.as_str(), r.tag.as_deref()), ("localhost:5000", Some("latest")));
         let d = format!("sha256:{}", "a".repeat(64));
         let r = Reference::parse(&format!("registry.k8s.io/pause:3.9@{d}")).unwrap();
         assert_eq!((r.tag.as_deref(), r.digest.as_deref(), r.manifest_ref()), (Some("3.9"), Some(d.as_str()), d.as_str()));
@@ -1672,6 +1720,144 @@ mod tests {
         assert_eq!(pick("arm", Some("v7")).as_deref(), Some("sha256:v7"));
         assert_eq!(pick("amd64", None).as_deref(), Some("sha256:amd"));
         assert_eq!(pick("riscv64", None), None);
+    }
+
+    /// A registry on localhost behind TLS from a private CA that wants
+    /// Basic auth (`bearer`: a token from `/token`, for Basic credentials or
+    /// the identity token `refresh-ok`); serves one image, `app:v1`.
+    async fn private_registry(bearer: bool) -> (u16, String) {
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+        let ca_key = KeyPair::generate().unwrap();
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca = ca_params.self_signed(&ca_key).unwrap();
+        let key = KeyPair::generate().unwrap();
+        let cert = CertificateParams::new(vec!["localhost".to_string()]).unwrap().signed_by(&key, &ca, &ca_key).unwrap();
+        let server = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.der().clone()], rustls::pki_types::PrivateKeyDer::try_from(key.serialize_der()).unwrap())
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(server));
+
+        let tar = tar_of(&[("hello.txt", b"from the private registry")]);
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+        gz.write_all(&tar).unwrap();
+        let layer = gz.finish().unwrap();
+        let (arch, _) = host_platform();
+        let config = serde_json::to_vec(&json!({"architecture": arch, "os": "linux", "config": {}, "rootfs": {"type": "layers", "diff_ids": [format!("sha256:{}", sha256_hex(&tar))]}})).unwrap();
+        let manifest = serde_json::to_vec(&json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {"mediaType": "application/vnd.oci.image.config.v1+json", "digest": format!("sha256:{}", sha256_hex(&config)), "size": config.len()},
+            "layers": [{"mediaType": "application/vnd.oci.image.layer.v1.tar+gzip", "digest": format!("sha256:{}", sha256_hex(&layer)), "size": layer.len()}],
+        }))
+        .unwrap();
+        let mut objects: HashMap<String, Vec<u8>> = HashMap::new();
+        objects.insert("/v2/app/manifests/v1".into(), manifest);
+        objects.insert(format!("/v2/app/blobs/sha256:{}", sha256_hex(&config)), config);
+        objects.insert(format!("/v2/app/blobs/sha256:{}", sha256_hex(&layer)), layer);
+        let objects = Arc::new(objects);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((tcp, _)) = listener.accept().await else { return };
+                let (acceptor, objects) = (acceptor.clone(), objects.clone());
+                tokio::spawn(async move {
+                    let Ok(tls) = acceptor.accept(tcp).await else { return };
+                    let svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                        let objects = objects.clone();
+                        async move {
+                            let reply = |status: u16, body: Vec<u8>| hyper::Response::builder().status(status).body(http_body_util::Full::new(Bytes::from(body))).unwrap();
+                            let authz = req.headers().get("authorization").and_then(|h| h.to_str().ok()).unwrap_or_default().to_string();
+                            let basic_ok = authz == "Basic dXNlcjpzM2NyZXQ="; // user:s3cret
+                            let path = req.uri().path().to_string();
+                            if path == "/token" {
+                                let form = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+                                let refresh_ok = String::from_utf8_lossy(&form).contains("refresh_token=refresh-ok");
+                                return Ok::<_, std::convert::Infallible>(if basic_ok || refresh_ok { reply(200, br#"{"token":"tok"}"#.to_vec()) } else { reply(401, vec![]) });
+                            }
+                            let ok = if bearer { authz == "Bearer tok" } else { basic_ok };
+                            if !ok {
+                                let challenge = if bearer {
+                                    format!(r#"Bearer realm="https://localhost:{port}/token",service="test""#)
+                                } else {
+                                    r#"Basic realm="test""#.to_string()
+                                };
+                                let mut r = reply(401, vec![]);
+                                r.headers_mut().insert("www-authenticate", challenge.parse().unwrap());
+                                return Ok(r);
+                            }
+                            Ok(match objects.get(&path) {
+                                Some(b) => reply(200, b.clone()),
+                                None => reply(404, vec![]),
+                            })
+                        }
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new().serve_connection(hyper_util::rt::TokioIo::new(tls), svc).await;
+                });
+            }
+        });
+        (port, ca.pem())
+    }
+
+    fn registries(yaml: &str) -> Option<Arc<Registries>> {
+        Some(Arc::new(Registries::parse(yaml, Path::new("/")).unwrap()))
+    }
+
+    fn indented(pem: &str) -> String {
+        pem.lines().map(|l| format!("\n          {l}")).collect()
+    }
+
+    #[tokio::test]
+    async fn pulls_from_a_private_registry_only_with_its_configuration() {
+        let (port, ca) = private_registry(false).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ImageStore::open(tmp.path()).unwrap();
+        // The image names a registry that exists only as its mirror here.
+        let image = "registry.invalid/app:v1";
+        let mirror = format!("mirrors:\n  registry.invalid:\n    endpoint: [\"https://localhost:{port}\"]\n");
+        let pull = |yaml: String| {
+            let store = &store;
+            async move { store.pull_with(image, &PullOptions { registries: registries(&yaml), ..Default::default() }).await }
+        };
+        let e = format!("{:#}", pull(mirror.clone()).await.unwrap_err());
+        assert!(e.contains(&format!("mirror localhost:{port}")) && e.contains("TLS handshake") && e.contains("registry.invalid"), "{e}");
+        let tls = format!("{mirror}configs:\n  localhost:{port}:\n    tls:\n      ca: |{}\n", indented(&ca));
+        let e = format!("{:#}", pull(tls.clone()).await.unwrap_err());
+        assert!(e.contains("requires authentication"), "{e}");
+        let e = format!("{:#}", pull(format!("{tls}    auth: {{username: user, password: wrong}}\n")).await.unwrap_err());
+        assert!(e.contains("refused the credentials"), "{e}");
+        let pulled = pull(format!("{tls}    auth: {{username: user, password: s3cret}}\n")).await.unwrap();
+        assert_eq!(std::fs::read_to_string(pulled.layers[0].join("hello.txt")).unwrap(), "from the private registry");
+        assert!(store.get(image).is_some());
+        // insecure_skip_verify instead of the CA.
+        store.set_key(&Reference::parse(image).unwrap().canonical(), None).unwrap();
+        let skip = format!("{mirror}configs:\n  localhost:{port}:\n    tls: {{insecure_skip_verify: true}}\n    auth: {{auth: dXNlcjpzM2NyZXQ=}}\n");
+        pull(skip).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn token_auth_with_credentials_or_an_identity_token() {
+        let (port, ca) = private_registry(true).await;
+        let tmp = tempfile::tempdir().unwrap();
+        let store = ImageStore::open(tmp.path()).unwrap();
+        // The registry itself this time (named localhost: TLS only through
+        // its own https:// entry under mirrors).
+        let image = format!("localhost:{port}/app:v1");
+        let base = format!("mirrors:\n  localhost:{port}:\n    endpoint: [\"https://localhost:{port}\"]\nconfigs:\n  localhost:{port}:\n    tls:\n      ca: |{}\n", indented(&ca));
+        for (auth, ok) in [("{username: user, password: s3cret}", true), ("{identitytoken: refresh-ok}", true), ("{identitytoken: refresh-bad}", false)] {
+            store.set_key(&Reference::parse(&image).unwrap().canonical(), None).unwrap();
+            let r = store.pull_with(&image, &PullOptions { registries: registries(&format!("{base}    auth: {auth}\n")), ..Default::default() }).await;
+            assert_eq!(r.is_ok(), ok, "{auth}: {r:?}");
+        }
+        // Docker's X-Registry-Auth wins over the file for the registry itself.
+        store.set_key(&Reference::parse(&image).unwrap().canonical(), None).unwrap();
+        let opts = PullOptions { registries: registries(&format!("{base}    auth: {{identitytoken: refresh-bad}}\n")), auth: Some(("user".into(), "s3cret".into())), ..Default::default() };
+        store.pull_with(&image, &opts).await.unwrap();
     }
 
     #[test]

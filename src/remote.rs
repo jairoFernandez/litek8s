@@ -647,6 +647,8 @@ pub struct RemoteInstall {
     pub skip_checks: bool,
     pub timeout: Option<Duration>,
     pub label: Option<String>,
+    /// A registry configuration to install (`registries::bundle`).
+    pub registries: Option<String>,
 }
 
 /// Whether the service will run pods with crun (so crun and iptables have
@@ -732,12 +734,17 @@ pub async fn install_on(remote: &Remote, o: &RemoteInstall, local: &LocalBinary)
     if let Some(token) = &o.token {
         remote.capture(r#"umask 077; cat > "$1/token""#, std::slice::from_ref(&dir), Some(token.clone())).await?;
     }
+    let mut service_args = o.args.clone();
+    if let Some(text) = &o.registries {
+        remote.capture(r#"umask 077; cat > "$1/registries.yaml""#, std::slice::from_ref(&dir), Some(text.clone())).await?;
+        service_args.extend(["--registries".to_string(), format!("{dir}/registries.yaml")]);
+    }
     if uses_crun(role, &o.args) && !(probe.tools.contains("crun") && probe.tools.contains("iptables-restore")) {
         remote.root_stream(DEPS, &[]).await?;
     }
     remote.say(&format!("running litek8s install {} as root", if role == Role::Server { "server" } else { "agent" }));
     let mut args = vec![dir, bin];
-    args.extend(install_args(role, &o.args, o.skip_checks, o.timeout));
+    args.extend(install_args(role, &service_args, o.skip_checks, o.timeout));
     let script = format!("{RESULT_ENV}=1; export {RESULT_ENV}\n{RUN_INSTALL}");
     let line = remote.root_stream(&script, &args).await?;
     let Some(line) = line else {
@@ -873,12 +880,14 @@ pub fn write_context(context: &str, server_url: &str, result: &InstallResult) ->
 pub async fn install_cmd(role: Role, mut args: Vec<String>, flags: SshFlags, skip_checks: bool, timeout: Duration) -> Result<()> {
     let ssh = flags.ssh.clone().context("no --ssh")?;
     let token = crate::install::take_flag(&mut args, "--token")?.or_else(|| std::env::var("LITEK8S_TOKEN").ok().filter(|t| !t.is_empty()));
+    // Read here (with the files it names), installed there.
+    let registries = crate::install::take_flag(&mut args, "--registries")?.map(|p| crate::registries::bundle(std::path::Path::new(&p))).transpose()?;
     if role == Role::Agent && token.is_none() {
         bail!("`litek8s install agent --ssh` needs --join https://<server>:6443 and --token <token> (printed by `litek8s install server`)");
     }
     let local = LocalBinary::detect(flags.binary.clone(), flags.release.clone())?;
     let remote = Remote::connect(&ssh, None, true).await?;
-    let o = RemoteInstall { ssh: ssh.clone(), role: Some(role), args: args.clone(), token, binary: flags.binary, release: flags.release, skip_checks, timeout: Some(timeout), label: None };
+    let o = RemoteInstall { ssh: ssh.clone(), role: Some(role), args: args.clone(), token, binary: flags.binary, release: flags.release, skip_checks, timeout: Some(timeout), label: None, registries };
     let result = install_on(&remote, &o, &local).await?;
     if role == Role::Agent {
         println!("{} on {}", if result.changed { "installed" } else { "unchanged" }, ssh.display());

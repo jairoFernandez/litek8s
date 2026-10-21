@@ -502,6 +502,7 @@ impl Builder {
                     let v = if id.is_empty() { json!({"status": msg}) } else { json!({"status": msg, "id": id, "progressDetail": {}}) };
                     let _ = tx.send(v);
                 })),
+                ..Default::default()
             };
             self.engine.images.pull_with(&from, &opts).await.with_context(|| format!("pulling {from}"))?;
             info = images::resolve(&self.engine.images, &from);

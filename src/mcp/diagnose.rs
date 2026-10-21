@@ -162,7 +162,7 @@ pub fn analyze(pod: &Value, node: Option<&Value>, events: &[Value], now: i64) ->
                         "error",
                         reason,
                         format!("{what} cannot pull image {}{detail}", spec["image"]),
-                        "Check the image name and tag, registry credentials (imagePullSecrets), and for a locally built image `litek8s dev load --name <cluster> <image>` (or build it with the cluster's Docker socket).",
+                        "Check the image name and tag, the registry's CA and credentials (the nodes' registry configuration, registries.yaml: pods' imagePullSecrets are not used), and for a locally built image `litek8s dev load --name <cluster> <image>` (or build it with the cluster's Docker socket).",
                     )),
                     "CrashLoopBackOff" => f.push(finding(
                         "error",

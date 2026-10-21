@@ -271,7 +271,7 @@ impl Manager {
 
     fn handle(self: &Arc<Self>, req: CellRequest, fds: Vec<OwnedFd>) -> CellReply {
         let result = match req {
-            CellRequest::Start { name, nodes, data_dir, docker_alias } => self.start(&name, nodes.max(1), &data_dir, &docker_alias, fds),
+            CellRequest::Start { name, nodes, data_dir, docker_alias, registries } => self.start(&name, nodes.max(1), &data_dir, &docker_alias, registries.as_deref(), fds),
             CellRequest::Stop { name } => self.stop(&name),
             CellRequest::Node { name, node, up } => self.node(&name, node, up),
             CellRequest::Purge { name } => self.purge(&name),
@@ -290,7 +290,7 @@ impl Manager {
         self.state.lock().unwrap().slots.remove(&slot);
     }
 
-    fn start(self: &Arc<Self>, name: &str, nodes: u32, data_dir: &Path, docker_alias: &str, fds: Vec<OwnedFd>) -> Result<()> {
+    fn start(self: &Arc<Self>, name: &str, nodes: u32, data_dir: &Path, docker_alias: &str, registries: Option<&str>, fds: Vec<OwnedFd>) -> Result<()> {
         let cluster = Cluster::new(name)?;
         {
             let state = self.state.lock().unwrap();
@@ -302,6 +302,8 @@ impl Manager {
             bail!("cluster {name}: expected the API listener, Docker socket, broker and log descriptors");
         }
         std::fs::create_dir_all(data_dir).with_context(|| format!("cannot create {}", data_dir.display()))?;
+        // Every node reads it (an empty one: no mirrors, no credentials).
+        write_private(&registries_path(data_dir), registries.unwrap_or_default())?;
         let cg = self.cgroup(name);
         remove_cgroup(&cg);
         std::fs::create_dir_all(&cg).with_context(|| format!("cannot create cgroup {}", cg.display()))?;
@@ -384,6 +386,7 @@ impl Manager {
             cmd.args(["dev", "__apiserver", "--data-dir"]).arg(&spec.data_dir);
             cmd.args(["--node-name", &node_name, "--docker-alias", &spec.docker_alias]);
             cmd.args(["--node-port-offset", &spec.cluster.node_port_offset().to_string()]);
+            cmd.arg("--registry-config").arg(registries_path(&spec.data_dir));
             if spec.nodes > 1 {
                 cmd.args(["--listen-also", &format!("{ip}:{CELL_API_PORT}"), "--wireguard-port", &WIREGUARD_PORT.to_string()]);
             }
@@ -393,6 +396,7 @@ impl Manager {
             cmd.args(["agent", "--join", &format!("https://{server_ip}:{CELL_API_PORT}"), "--node-name", &node_name, "--node-ip", ip]);
             cmd.arg("--node-dir").arg(spec.data_dir.join("workers").join(index.to_string()));
             cmd.args(["--runtime", "crun", "--wireguard-port", &WIREGUARD_PORT.to_string()]);
+            cmd.arg("--registry-config").arg(registries_path(&spec.data_dir));
         }
         cmd.env("LITEK8S_DEV_ROOTLESS", "0").env("LITEK8S_DEV_HOSTNAME", &node_name).env("LITEK8S_NODE_IP", ip);
         cmd.env_remove("LITEK8S_DEV_HOLDER_IDS");
@@ -598,6 +602,21 @@ impl Manager {
             _ => Ok(()),
         }
     }
+}
+
+/// The registry configuration `dev up` sent, for the cluster's nodes.
+fn registries_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("registries.yaml")
+}
+
+/// Write `text` to `path`, readable by its owner only (credentials).
+fn write_private(path: &Path, text: &str) -> Result<()> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let tmp = path.with_extension("tmp");
+    let _ = std::fs::remove_file(&tmp);
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp).with_context(|| format!("cannot write {}", tmp.display()))?;
+    f.write_all(text.as_bytes())?;
+    std::fs::rename(&tmp, path).with_context(|| format!("cannot write {}", path.display()))
 }
 
 struct NodeSpec {

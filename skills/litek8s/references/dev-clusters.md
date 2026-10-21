@@ -51,6 +51,8 @@ own API port, data, Docker socket and kube context.
   (named cluster: `~/.litek8s/N/docker.sock`), then use `image: myapp:dev`.
 - Image stores are per cluster.
 - A registry on the host's localhost works (`image: localhost:5000/x:1`).
+- Private registries, CAs, mirrors: `~/.litek8s/registries.yaml` (k3s
+  format), read by `dev up` at each start (docs/registries.md).
 
 ## Settings
 

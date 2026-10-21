@@ -661,7 +661,7 @@ impl Shared {
         }
     }
 
-    async fn start(self: &Arc<Self>, name: &str, port: Option<u16>, nodes: u32) -> Result<u16> {
+    async fn start(self: &Arc<Self>, name: &str, port: Option<u16>, nodes: u32, registries: Option<String>) -> Result<u16> {
         let cluster = Cluster::new(name)?;
         if self.clusters.lock().unwrap().contains_key(name) {
             bail!("cluster {name} is running already");
@@ -677,7 +677,7 @@ impl Shared {
         }
         let log = std::fs::File::create(super::log_path(&chome))?;
         self.logs.lock().unwrap().insert(name.into(), log);
-        let req = CellRequest::Start { name: name.into(), nodes, data_dir: cluster.guest_data_dir(), docker_alias: socket.to_string_lossy().into() };
+        let req = CellRequest::Start { name: name.into(), nodes, data_dir: cluster.guest_data_dir(), docker_alias: socket.to_string_lossy().into(), registries };
         let reply = self.vm.cells(&req).await;
         let failure = match reply {
             Ok(CellReply { error: Some(e) }) => Some(anyhow::anyhow!("{e}")),
@@ -726,7 +726,7 @@ impl Shared {
 
     async fn handle(self: Arc<Self>, req: Request) -> Response {
         let result = match req {
-            Request::Start { name, port, nodes } => self.start(&name, port, nodes.max(1)).await.map(Some),
+            Request::Start { name, port, nodes, registries } => self.start(&name, port, nodes.max(1), registries).await.map(Some),
             Request::Stop { name } => self.stop(&name).await.map(|_| None),
             Request::Node { name, node, up } => {
                 let r = match self.vm.cells(&CellRequest::Node { name, node, up }).await {

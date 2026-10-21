@@ -24,6 +24,11 @@ On Linux, dev clusters run rootless and need `crun`, `uidmap`, `passt`
 everything and says what is missing ([dev.md](dev.md#what-it-needs)).
 macOS needs nothing else: no Docker Desktop, no Lima, no sudo.
 
+Running it as a service on Linux servers (`litek8s install server|agent`,
+also over SSH) is in [clusters.md](clusters.md); private registries and
+mirrors for their nodes (`--registries registries.yaml`) in
+[registries.md](registries.md).
+
 Shell completion: Homebrew installs it; otherwise `litek8s completion zsh`
 (or bash, fish, powershell, elvish) prints the script, e.g. `source <(litek8s
 completion zsh)` in `~/.zshrc`.

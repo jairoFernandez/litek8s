@@ -24,6 +24,7 @@ const HOME_PREFIX: &str = "lkdev-";
 /// ```text
 /// $LITEK8S_HOME/docker.sock, <cluster>/docker.sock  (else ~/.litek8s/...)
 /// $LITEK8S_HOME/config.yaml, ui.yaml, ui-state.json (else ~/.litek8s/...)
+/// $LITEK8S_HOME/registries.yaml                     (else ~/.litek8s/...)
 /// $LITEK8S_HOME/kubeconfig                          (else ~/.kube/config)
 /// $LITEK8S_HOME/data/{dev,vm,node-agent,...}        (else the data dir)
 /// ```
@@ -44,6 +45,9 @@ pub struct Paths {
     pub docker_socket: PathBuf,
     /// `litek8s dev`'s settings.
     pub dev_config: PathBuf,
+    /// Registry mirrors, credentials and TLS `dev up` gives its clusters
+    /// (`crate::registries`).
+    pub dev_registries: PathBuf,
     /// The kubeconfig `dev up` adds its contexts to.
     pub kubeconfig: PathBuf,
     /// `litek8s node-agent`'s default `--node-dir`.
@@ -93,6 +97,7 @@ impl Paths {
             dev_home: var("LITEK8S_DEV_HOME").map(PathBuf::from).or_else(|| data_dir.as_ref().map(|d| d.join("dev"))),
             docker_socket: var("LITEK8S_DOCKER_SOCKET").map(PathBuf::from).unwrap_or_else(|| user_dir.join("docker.sock")),
             dev_config: var("LITEK8S_CONFIG").map(PathBuf::from).unwrap_or_else(|| user_dir.join("config.yaml")),
+            dev_registries: user_dir.join("registries.yaml"),
             home,
             user_dir,
             data_dir,
@@ -180,6 +185,7 @@ mod tests {
             ("dev_home", dev_home.clone()),
             ("docker_socket", p.docker_socket.clone()),
             ("dev_config", p.dev_config.clone()),
+            ("dev_registries", p.dev_registries.clone()),
             ("kubeconfig", p.kubeconfig.clone()),
             ("node_agent_dir", p.node_agent_dir.clone()),
             // What the rest of litek8s derives from them.
@@ -206,6 +212,7 @@ mod tests {
         assert_eq!(p.home, None);
         assert_eq!(p.docker_socket, Path::new("/Users/me/.litek8s/docker.sock"));
         assert_eq!(p.dev_config, Path::new("/Users/me/.litek8s/config.yaml"));
+        assert_eq!(p.dev_registries, Path::new("/Users/me/.litek8s/registries.yaml"));
         assert_eq!(p.kubeconfig, Path::new("/Users/me/.kube/config"));
         assert_eq!(p.context_prefix, "litek8s-");
         // A variable for one path wins over $LITEK8S_HOME.

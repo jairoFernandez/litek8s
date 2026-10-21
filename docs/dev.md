@@ -274,6 +274,9 @@ apply when the first cluster starts it.
   framework's NAT gateway; the registry must listen on all interfaces, which
   `docker run -p 5000:5000 registry:2` does).
   Other plain-HTTP registries: `LITEK8S_INSECURE_REGISTRIES=host:port`.
+- Private registries (a CA of your own, credentials, plain HTTP) and
+  mirrors: `~/.litek8s/registries.yaml`, k3s's format, which `dev up` gives
+  the cluster's nodes at each start ([registries.md](registries.md)).
 
 ## Several clusters
 

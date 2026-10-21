@@ -8,7 +8,7 @@ otherwise get from `kubectl describe pod`, `kubectl logs --previous`,
 
 | symptom (finding reason) | cause | what to do |
 |---|---|---|
-| `ErrImagePull` / `ImagePullBackOff` | wrong name/tag, private registry, or a local image the cluster does not have | fix the tag; `imagePullSecrets`; local image: `litek8s dev load --name N img:tag` or `docker build` on the cluster's socket |
+| `ErrImagePull` / `ImagePullBackOff` | wrong name/tag, private registry, or a local image the cluster does not have | fix the tag; private registry (unknown CA, `requires authentication`): the nodes' registries.yaml (docs/registries.md; `imagePullSecrets` are not used); local image: `litek8s dev load --name N img:tag` or `docker build` on the cluster's socket |
 | `CrashLoopBackOff` + exit 1 | the app fails at start | `previous_logs` in diagnose_pod (or `pod_logs previous=true`) |
 | exit 137 `OOMKilled` | memory limit too low | raise `resources.limits.memory`; check `container_memory_working_set_bytes` |
 | exit 137 without OOM, liveness probe set | liveness probe killed it | check the probe's port/path/timeout and the app's startup time; add a startupProbe |
