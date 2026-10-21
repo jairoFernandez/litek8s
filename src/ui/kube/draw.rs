@@ -318,7 +318,7 @@ fn table(f: &mut Frame, app: &App, tv: &TableView, area: Rect) {
         lines.push(Line::from(spans));
     }
     if tv.rows.is_empty() {
-        let why = if tv.total > 0 { "nothing matches (esc clears the filter)".to_string() } else { format!("no {} here", tv.res.plural) };
+        let why = if tv.total > 0 { "nothing matches (esc clears the filter)".to_string() } else { format!("no {} here  ·  t: the tree of the namespace  ·  : any resource", tv.res.plural) };
         lines.push(Line::styled(format!(" {why}"), t.dim));
     }
     f.render_widget(Paragraph::new(lines), inner);
@@ -731,7 +731,7 @@ pub fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
     }
     match ui.top() {
         View::Table(tv) => {
-            let mut v: Vec<(&str, &str)> = vec![(":", "cmd"), ("/", "filter")];
+            let mut v: Vec<(&str, &str)> = vec![(":", "cmd"), ("/", "filter"), ("t", "tree")];
             match tv.res.kind.as_str() {
                 "Pod" => v.extend([("l", "logs"), ("s", "shell"), ("d", "describe"), ("F", "fwd")]),
                 "Container" => v.extend([("l", "logs"), ("s", "shell"), ("d", "describe")]),
@@ -753,7 +753,7 @@ pub fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         }
         View::Logs(_) => vec![("esc", "back"), ("f", "follow"), ("/", "filter"), ("t", "time"), ("w", "wrap"), ("p", "previous"), ("^s", "save")],
         View::Xray(_) => vec![("esc", "back"), ("enter", "fold"), ("d", "describe"), ("l", "logs"), ("s", "shell")],
-        View::Tree(_) => vec![("esc", "back"), ("space", "fold"), ("enter", "describe"), ("/", "filter"), ("l", "logs"), ("0", "all ns")],
+        View::Tree(_) => vec![("t/esc", "back"), ("space", "fold"), ("enter", "describe"), ("/", "filter"), ("l", "logs"), ("0", "all ns")],
         View::Forwards { .. } => vec![("esc", "back"), ("d", "stop")],
     }
 }

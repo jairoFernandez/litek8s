@@ -926,3 +926,26 @@ fn other_contexts_can_be_hidden() {
     assert!(!render(&app, 80, 24).contains("Other kubeconfig contexts"));
     assert_eq!(app.list_len(), app.clusters.local.len());
 }
+
+#[test]
+fn clusters_t_opens_a_cluster_in_tree_mode() {
+    let mut app = sample_app();
+    app.apply(Msg::Clusters(Box::new(clusters_sample())));
+    app.key(key('2'));
+    assert!(render(&app, 80, 24).lines().last().unwrap().contains("tree"));
+    // A local cluster: its tree, no question about kubectl or docker.
+    app.key(key('j'));
+    assert_eq!(app.key(key('t')), vec![Effect::UseCluster("ci".into())]);
+    assert_eq!(app.tab, Tab::Kube);
+    assert!(app.overlay == Overlay::None);
+    assert!(matches!(app.kube.top(), super::kube::state::View::Tree(_)));
+    // The switch resets the view: the tree stays.
+    app.kube.reset(None, "litek8s-ci".into());
+    assert!(matches!(app.kube.top(), super::kube::state::View::Tree(_)));
+    // Another context: the same.
+    app.key(key('2'));
+    app.key(key('G'));
+    assert_eq!(app.key(key('t')), vec![Effect::UseContext("orbstack".into())]);
+    assert_eq!(app.tab, Tab::Kube);
+    assert!(matches!(app.kube.top(), super::kube::state::View::Tree(_)));
+}

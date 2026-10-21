@@ -34,11 +34,16 @@ pub struct TreeView {
     /// Lists not there yet, or refused (`pods: forbidden`).
     pub missing: Vec<String>,
     pub loading: bool,
+    /// The server's Service Table has no Selector column (an older
+    /// litek8s): services come as plain objects instead.
+    pub service_objects: bool,
+    /// A row to put the cursor on once it shows (`t` on an object).
+    pub focus: Option<String>,
 }
 
 impl TreeView {
     pub fn new(ns: Option<String>) -> TreeView {
-        TreeView { ns, all: false, rows: Vec::new(), folded: BTreeSet::new(), filter: None, shown: Vec::new(), prefix: Vec::new(), hidden: Vec::new(), sel: 0, sel_key: None, offset: Cell::new(0), height: Cell::new(10), missing: Vec::new(), loading: true }
+        TreeView { ns, all: false, rows: Vec::new(), folded: BTreeSet::new(), filter: None, shown: Vec::new(), prefix: Vec::new(), hidden: Vec::new(), sel: 0, sel_key: None, offset: Cell::new(0), height: Cell::new(10), missing: Vec::new(), loading: true, service_objects: false, focus: None }
     }
 
     /// The informers it is drawn from: the nine kinds, in its namespace
@@ -48,7 +53,8 @@ impl TreeView {
             .iter()
             .filter_map(|k| {
                 let id = ids.get(k)?;
-                Some((*k, WatchKey { res: id.clone(), ns: if *k == Kind::Node { None } else { self.ns.clone() }, fields: String::new() }))
+                let res = if *k == Kind::Service && self.service_objects { format!("{id}{}", super::informer::OBJECTS) } else { id.clone() };
+                Some((*k, WatchKey { res, ns: if *k == Kind::Node { None } else { self.ns.clone() }, fields: String::new() }))
             })
             .collect()
     }
@@ -68,7 +74,13 @@ impl TreeView {
         self.missing.clear();
         let mut synced = 0;
         for (kind, key) in self.keys(ids) {
-            match data.get(&key) {
+            // Until the plain services arrive, the Table's (without pods).
+            let table_key = WatchKey { res: key.res.trim_end_matches(super::informer::OBJECTS).to_string(), ..key.clone() };
+            let snap = data.get(&key).or_else(|| data.get(&table_key));
+            if kind == Kind::Service && !self.service_objects && snap.is_some_and(|s| s.synced && !s.columns.is_empty() && !s.columns.iter().any(|c| c.name.eq_ignore_ascii_case("selector"))) {
+                self.service_objects = true;
+            }
+            match snap {
                 Some(s) if s.error.is_some() && s.rows.is_empty() => self.missing.push(format!("{}: {}", kind.plural(), s.error.as_deref().unwrap_or_default())),
                 Some(s) => {
                     if s.synced {
@@ -94,6 +106,19 @@ impl TreeView {
                     Some((j, w)) if rank(w) >= rank(h) => (j, w),
                     _ => (i, h),
                 });
+            }
+        }
+        if let Some(f) = self.focus.clone() {
+            if let Some(i) = self.rows.iter().position(|r| r.key() == f) {
+                self.focus = None;
+                self.folded.clear();
+                self.refresh();
+                if let Some(p) = self.shown.iter().position(|&j| j == i) {
+                    self.select(p);
+                    // Some air above it.
+                    self.offset.set(p.saturating_sub(3));
+                }
+                return;
             }
         }
         self.refresh();

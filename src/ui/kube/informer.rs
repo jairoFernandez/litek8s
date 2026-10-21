@@ -17,6 +17,9 @@ use super::table::{self, Column, Health, Row, Snapshot, TABLE_ACCEPT};
 use crate::ui::app::Msg;
 use crate::ui::client::{Endpoint, Lines, enc};
 
+/// The suffix of a key whose informer lists plain objects, not a Table.
+pub const OBJECTS: &str = "#objects";
+
 pub fn spawn(ep: Endpoint, res: Resource, key: WatchKey, tx: UnboundedSender<Msg>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(run(ep, res, key, tx))
 }
@@ -57,7 +60,9 @@ fn rows_of(obj: &Value, columns: &[Column], kind: &str, containers: bool) -> Vec
 async fn list(ep: &Endpoint, res: &Resource, key: &WatchKey, tx: &UnboundedSender<Msg>) -> anyhow::Result<State> {
     let containers = res.plural == CONTAINERS;
     let base = if containers { format!("/api/v1/namespaces/{}/pods", key.ns.as_deref().unwrap_or("default")) } else { res.list_path(key.ns.as_deref()) };
-    let accept = if containers { "application/json" } else { TABLE_ACCEPT };
+    // `<id>#objects`: plain objects (a service's selector when the
+    // server's Table has no Selector column).
+    let accept = if containers || key.res.ends_with(OBJECTS) { "application/json" } else { TABLE_ACCEPT };
     let mut st = State { columns: Arc::new(Vec::new()), rows: BTreeMap::new(), rv: String::new() };
     let mut cont = String::new();
     loop {
@@ -87,7 +92,7 @@ async fn list(ep: &Endpoint, res: &Resource, key: &WatchKey, tx: &UnboundedSende
         match doc.columns() {
             Some(cols) if !cols.is_empty() => st.columns = Arc::new(cols),
             Some(_) => {}
-            None => st.columns = Arc::new(table::plain_columns()),
+            None => st.columns = Arc::new(table::plain_columns_for(&res.kind)),
         }
         for r in doc.into_rows(&st.columns, &res.kind) {
             st.rows.insert(r.key(), Arc::new(r));
@@ -129,7 +134,7 @@ async fn run(ep: Endpoint, res: Resource, key: WatchKey, tx: UnboundedSender<Msg
         loop {
             let base = if containers { format!("/api/v1/namespaces/{}/pods", key.ns.as_deref().unwrap_or("default")) } else { res.list_path(key.ns.as_deref()) };
             let path = format!("{base}{}", query(&key, &format!("watch=1&allowWatchBookmarks=true&includeObject=Metadata&resourceVersion={}", enc(&st.rv))));
-            let accept = if containers { "application/json" } else { TABLE_ACCEPT };
+            let accept = if containers || key.res.ends_with(OBJECTS) { "application/json" } else { TABLE_ACCEPT };
             let resp = match ep.send_with(Method::GET, &path, &[("Accept", accept)], None, Vec::new()).await {
                 Ok(r) if r.status().is_success() => r,
                 _ => break,

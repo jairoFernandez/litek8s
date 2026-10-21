@@ -136,6 +136,8 @@ pub struct RowDoc {
 #[serde(default)]
 pub struct ObjDoc {
     pub metadata: MetaDoc,
+    /// Kept only for kinds whose plain rows print from it (services).
+    pub spec: Value,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -177,10 +179,10 @@ impl ListDoc {
         if self.kind == "Table" {
             self.rows.into_iter().map(|r| row_of(r.object.metadata, r.cells.iter().map(cell_text).collect(), columns, kind)).collect()
         } else {
-            let cols = plain_columns();
+            let cols = plain_columns_for(kind);
             self.items.into_iter().map(|o| {
-                let name = o.metadata.name.clone();
-                row_of(o.metadata, vec![name, String::new()], &cols, kind)
+                let cells = plain_cells(kind, &o.metadata.name, &o.spec);
+                row_of(o.metadata, cells, &cols, kind)
             }).collect()
         }
     }
@@ -231,11 +233,52 @@ pub fn table_rows(doc: &Value, columns: &[Column], kind: &str) -> Vec<Row> {
     doc["rows"].as_array().into_iter().flatten().map(|r| row(&r["object"], r["cells"].as_array().map(Vec::as_slice).unwrap_or(&[]), columns, kind)).collect()
 }
 
+/// The columns of plain objects of `kind`: Name and Age, and for
+/// services kubectl's (Selector too), printed here from their spec.
+pub fn plain_columns_for(kind: &str) -> Vec<Column> {
+    match kind {
+        "Service" => ["Name", "Type", "Cluster-IP", "External-IP", "Port(s)", "Age", "Selector"].iter().map(|n| Column::new(n, if *n == "Selector" { 1 } else { 0 })).collect(),
+        _ => plain_columns(),
+    }
+}
+
+fn plain_cells(kind: &str, name: &str, spec: &Value) -> Vec<String> {
+    match kind {
+        "Service" => {
+            let ports: Vec<String> = spec["ports"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|p| {
+                    let proto = p["protocol"].as_str().unwrap_or("TCP");
+                    match p["nodePort"].as_u64() {
+                        Some(np) => format!("{}:{np}/{proto}", p["port"]),
+                        None => format!("{}/{proto}", p["port"]),
+                    }
+                })
+                .collect();
+            let sel: Vec<String> = spec["selector"].as_object().into_iter().flatten().map(|(k, v)| format!("{k}={}", v.as_str().unwrap_or_default())).collect();
+            let or_none = |v: String| if v.is_empty() { "<none>".to_string() } else { v };
+            vec![
+                name.to_string(),
+                spec["type"].as_str().unwrap_or("ClusterIP").to_string(),
+                or_none(spec["clusterIP"].as_str().unwrap_or_default().to_string()),
+                "<none>".into(),
+                or_none(ports.join(",")),
+                String::new(),
+                or_none(sel.join(",")),
+            ]
+        }
+        _ => vec![name.to_string(), String::new()],
+    }
+}
+
 /// A row of a plain object (no Table).
 pub fn plain_row(obj: &Value, kind: &str) -> Row {
-    let cols = plain_columns();
-    let name = obj.pointer("/metadata/name").cloned().unwrap_or(Value::Null);
-    row(obj, &[name, Value::String(String::new())], &cols, kind)
+    let cols = plain_columns_for(kind);
+    let name = obj.pointer("/metadata/name").and_then(Value::as_str).unwrap_or_default();
+    let cells: Vec<Value> = plain_cells(kind, name, &obj["spec"]).into_iter().map(Value::String).collect();
+    row(obj, &cells, &cols, kind)
 }
 
 fn row(obj: &Value, cells: &[Value], columns: &[Column], kind: &str) -> Row {
