@@ -18,7 +18,9 @@ use super::command::{self, Cmd, History, Ns};
 use super::filter::{Filter, Mode};
 use super::resources::{Catalog, Resource, builtins};
 use super::table::{Column, Health, Row, Snapshot, compare_cells};
+use super::treeview::TreeView;
 use super::uiconfig::{Plugin, Theme, UiConfig, key_matches};
+use crate::tree::Kind as TreeKind;
 use crate::kube::selector::LabelSelector;
 use crate::ui::app::Effect;
 
@@ -465,6 +467,7 @@ pub enum View {
     Pager(Pager),
     Logs(LogsView),
     Xray(XrayView),
+    Tree(TreeView),
     Forwards { sel: usize },
 }
 
@@ -477,6 +480,7 @@ pub enum PromptKind {
     Kubectl,
     Search,
     LogFilter,
+    TreeFilter,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -716,6 +720,15 @@ impl KubeUi {
                     out.push((t.res.clone(), key));
                 }
             }
+            if let View::Tree(tv) = v {
+                for (kind, key) in tv.keys(&self.tree_ids()) {
+                    if let Some(res) = self.catalog.find(kind.plural()) {
+                        if !out.iter().any(|(_, k)| *k == key) {
+                            out.push((res.clone(), key));
+                        }
+                    }
+                }
+            }
         }
         if let Some(ns) = self.catalog.find("namespaces") {
             let key = WatchKey { res: ns.id(), ns: None, fields: String::new() };
@@ -724,6 +737,26 @@ impl KubeUi {
             }
         }
         out
+    }
+
+    /// The resource ids of a tree's kinds on this cluster.
+    pub fn tree_ids(&self) -> HashMap<TreeKind, String> {
+        TreeKind::ALL.iter().filter_map(|k| self.catalog.find(k.plural()).filter(|r| r.group.is_empty() || r.group == "apps" || r.group == "batch").map(|r| (*k, r.id()))).collect()
+    }
+
+    /// Rebuild the tree on top from the informers' rows.
+    fn refresh_tree(&mut self) {
+        let ids = self.tree_ids();
+        if let Some(View::Tree(tv)) = self.views.last_mut() {
+            tv.rebuild(&self.data, &ids);
+        }
+    }
+
+    fn open_tree(&mut self, ns: Option<String>, all: bool) {
+        let mut tv = TreeView::new(ns);
+        tv.all = all;
+        self.push(View::Tree(tv));
+        self.refresh_tree();
     }
 
     /// Ask the runtime for the informers the views need, when that changed.
@@ -780,8 +813,10 @@ impl KubeUi {
             KMsg::Data(key, snap) => {
                 self.data.insert(key.clone(), snap);
                 // Only what is on screen is recomputed now; the rest when shown.
-                if let Some(View::Table(_)) = self.views.last() {
-                    self.refresh_top();
+                match self.views.last() {
+                    Some(View::Table(_)) => self.refresh_top(),
+                    Some(View::Tree(_)) => self.refresh_tree(),
+                    _ => {}
                 }
             }
             KMsg::Contexts { list, current } => {
@@ -1123,6 +1158,7 @@ impl KubeUi {
             View::Pager(_) => self.pager_key(key),
             View::Logs(_) => self.logs_key(key),
             View::Xray(_) => self.xray_key(key),
+            View::Tree(_) => self.tree_key(key),
             View::Forwards { .. } => self.forwards_key(key),
         }
     }
@@ -1162,6 +1198,14 @@ impl KubeUi {
                 p.mode = t.filter.mode;
             }
         }
+        if kind == PromptKind::TreeFilter {
+            if let View::Tree(tv) = self.top() {
+                if let Some(f) = &tv.filter {
+                    p.text = f.raw.clone();
+                    p.mode = f.mode;
+                }
+            }
+        }
         if kind == PromptKind::LogFilter {
             if let View::Logs(l) = self.top() {
                 if let Some(f) = &l.filter {
@@ -1198,6 +1242,12 @@ impl KubeUi {
                             l.filter = None;
                         }
                     }
+                    PromptKind::TreeFilter => {
+                        if let Some(View::Tree(tv)) = self.views.last_mut() {
+                            tv.filter = None;
+                            tv.refresh();
+                        }
+                    }
                     PromptKind::Search => {
                         if let Some(View::Pager(pg)) = self.views.last_mut() {
                             pg.search = None;
@@ -1226,7 +1276,7 @@ impl KubeUi {
                 p.suggestions = typed_sugg;
                 return self.keep(p);
             }
-            KeyCode::Tab | KeyCode::BackTab if matches!(p.kind, PromptKind::Filter | PromptKind::LogFilter | PromptKind::Search) => {
+            KeyCode::Tab | KeyCode::BackTab if matches!(p.kind, PromptKind::Filter | PromptKind::LogFilter | PromptKind::Search | PromptKind::TreeFilter) => {
                 p.mode = p.mode.next();
                 self.mode = p.mode;
             }
@@ -1291,6 +1341,13 @@ impl KubeUi {
                     l.offset = 0;
                 }
             }
+            PromptKind::TreeFilter => {
+                if let Some(View::Tree(tv)) = self.views.last_mut() {
+                    tv.filter = Some(Filter::parse(&p.text, p.mode)).filter(|f| !f.pattern.is_empty());
+                    tv.refresh();
+                    tv.select(0);
+                }
+            }
             PromptKind::Search => {
                 if let Some(View::Pager(pg)) = self.views.last_mut() {
                     pg.search = Some(Filter::parse(&p.text, p.mode)).filter(|f| !f.pattern.is_empty());
@@ -1329,7 +1386,7 @@ impl KubeUi {
                 }
                 Vec::new()
             }
-            PromptKind::LogFilter | PromptKind::Search => Vec::new(),
+            PromptKind::LogFilter | PromptKind::Search | PromptKind::TreeFilter => Vec::new(),
         }
     }
 
@@ -1374,6 +1431,15 @@ impl KubeUi {
             }
             Cmd::Context(Some(c)) => return self.use_context(c),
             Cmd::Namespace(n) => self.use_namespace(n.filter(|n| n != "all" && n != "-A")),
+            Cmd::Tree { ns, all } => {
+                let ns = match ns {
+                    Some(Ns::All) => None,
+                    Some(Ns::Named(n)) => Some(n),
+                    None => self.namespace.clone(),
+                };
+                self.views.truncate(1);
+                self.open_tree(ns, all);
+            }
             Cmd::Xray { name, ns } => {
                 let Some(res) = self.catalog.find(&name).cloned() else {
                     self.say(format!("unknown resource {name}"), true);
@@ -1784,6 +1850,12 @@ impl KubeUi {
             }
             KeyCode::Char('f') if !ctrl => {
                 self.push(View::Forwards { sel: 0 });
+                return Some(Vec::new());
+            }
+            KeyCode::Char('T') => {
+                // The tree of this view's namespace.
+                let ns = if res.namespaced { t.ns.clone() } else { self.namespace.clone() };
+                self.open_tree(ns, false);
                 return Some(Vec::new());
             }
             _ => {}
@@ -2330,6 +2402,119 @@ impl KubeUi {
         Some(Vec::new())
     }
 
+    fn tree_key(&mut self, key: KeyEvent) -> Handled {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let ids = self.tree_ids();
+        let Some(View::Tree(tv)) = self.views.last_mut() else { return None };
+        let len = tv.shown.len();
+        let page = tv.height.get().max(1);
+        let to = match key.code {
+            KeyCode::Down | KeyCode::Char('j') if !ctrl => Some(tv.sel as isize + 1),
+            KeyCode::Up | KeyCode::Char('k') if !ctrl => Some(tv.sel as isize - 1),
+            KeyCode::PageDown => Some((tv.sel + page) as isize),
+            KeyCode::PageUp => Some(tv.sel as isize - page as isize),
+            KeyCode::Char('g') | KeyCode::Home => Some(0),
+            KeyCode::Char('G') | KeyCode::End => Some(len as isize - 1),
+            _ => None,
+        };
+        if let Some(i) = to {
+            tv.select(i.clamp(0, len.saturating_sub(1) as isize) as usize);
+            return Some(Vec::new());
+        }
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('q') => {
+                if key.code == KeyCode::Esc && tv.filter.is_some() {
+                    tv.filter = None;
+                    tv.refresh();
+                } else {
+                    self.pop();
+                }
+                return Some(Vec::new());
+            }
+            KeyCode::Char(' ') => {
+                tv.toggle(None);
+                return Some(Vec::new());
+            }
+            KeyCode::Right => {
+                tv.toggle(Some(false));
+                return Some(Vec::new());
+            }
+            KeyCode::Left => {
+                tv.left();
+                return Some(Vec::new());
+            }
+            KeyCode::Char('/') => {
+                self.open_prompt(PromptKind::TreeFilter, String::new());
+                return Some(Vec::new());
+            }
+            KeyCode::Char('0') => {
+                // All namespaces, and back.
+                let ns = match tv.ns.take() {
+                    Some(n) => {
+                        self.last_ns = Some(n);
+                        None
+                    }
+                    None => Some(self.last_ns.clone().or_else(|| self.namespace.clone()).unwrap_or_else(|| "default".into())),
+                };
+                let all = tv.all;
+                self.views.pop();
+                self.open_tree(ns, all);
+                return Some(Vec::new());
+            }
+            KeyCode::Char('H') => {
+                tv.all = !tv.all;
+                let on = tv.all;
+                self.refresh_tree();
+                self.say(if on { "old ReplicaSets shown" } else { "old ReplicaSets hidden" }, false);
+                return Some(Vec::new());
+            }
+            KeyCode::Char('r') if ctrl => {
+                let keys: Vec<WatchKey> = tv.keys(&ids).into_iter().map(|(_, k)| k).collect();
+                return Some(keys.into_iter().map(|k| Effect::Kube(KEffect::Relist(k))).collect());
+            }
+            KeyCode::Char(c) if c.is_ascii_digit() => return None,
+            KeyCode::Tab | KeyCode::BackTab => return None,
+            _ => {}
+        }
+        let Some(row) = tv.selected().cloned() else { return Some(Vec::new()) };
+        let Some(kind) = row.kind else {
+            // A group line: enter folds it.
+            if key.code == KeyCode::Enter {
+                tv.toggle(None);
+            }
+            return Some(Vec::new());
+        };
+        let Some(res) = self.catalog.find(kind.plural()).cloned() else { return Some(Vec::new()) };
+        let obj = ObjRef { res, ns: row.ns.clone(), name: row.name.clone() };
+        let ro = self.config.read_only;
+        Some(match (key.code, ctrl, kind) {
+            (KeyCode::Enter | KeyCode::Char('d'), false, _) => self.describe(obj),
+            (KeyCode::Char('y'), false, _) => self.yaml(obj),
+            (KeyCode::Char('e'), false, _) if !ro => vec![k(KEffect::Edit { obj, text: None })],
+            (KeyCode::Char('d'), true, _) | (KeyCode::Delete, _, _) if !ro => {
+                self.confirm_delete(vec![obj], false);
+                Vec::new()
+            }
+            (KeyCode::Char('l' | 'p'), false, TreeKind::Pod) => vec![k(KEffect::Containers { obj, purpose: Purpose::Logs { previous: key.code == KeyCode::Char('p') } })],
+            (KeyCode::Char('l'), false, TreeKind::Deployment | TreeKind::StatefulSet | TreeKind::DaemonSet | TreeKind::ReplicaSet | TreeKind::Job | TreeKind::Service) => {
+                let title = format!("{} (all pods)", obj.label());
+                self.open_logs(LogTarget::Owner(obj), title, false);
+                Vec::new()
+            }
+            (KeyCode::Char('s'), false, TreeKind::Pod) if !ro => vec![k(KEffect::Containers { obj, purpose: Purpose::Shell })],
+            (KeyCode::Char('F'), false, TreeKind::Pod | TreeKind::Service | TreeKind::Deployment | TreeKind::StatefulSet | TreeKind::ReplicaSet) => vec![k(KEffect::PortForwardPrepare(obj))],
+            (KeyCode::Char('c'), false, _) => {
+                self.say(format!("copied {}", obj.name), false);
+                vec![k(KEffect::Copy(obj.name))]
+            }
+            (KeyCode::Char('e' | 's') | KeyCode::Delete, _, _) | (KeyCode::Char('d'), true, _) if ro => {
+                self.read_only();
+                Vec::new()
+            }
+            _ => Vec::new(),
+        })
+    }
+
     fn forwards_key(&mut self, key: KeyEvent) -> Handled {
         let n = self.forwards.len();
         let Some(View::Forwards { sel }) = self.views.last_mut() else { return None };
@@ -2587,7 +2772,7 @@ fn help_lines(ui: &KubeUi) -> Vec<String> {
             ("< > O", "sort column left/right, reverse;  N A S: name, age, status"),
             ("ctrl-w", "wide columns;  ctrl-z: faults only;  ctrl-r: reload"),
             ("m", "actions of the selected row"),
-            ("f", "port-forwards;  ! kubectl;  ? this help"),
+            ("f", "port-forwards;  T tree of the namespace;  ! kubectl;  ? this help"),
         ],
     );
     section(
@@ -2597,6 +2782,7 @@ fn help_lines(ui: &KubeUi) -> Vec<String> {
             (":deploy -l x", "with a label selector;  -f field selector (server side)"),
             (":ctx [name]", "switch context (no name: pick one)"),
             (":ns [name]", "switch namespace (no name: the namespaces list)"),
+            (":tree [ns]", "nodes, workloads down their owners, services → pods (-A, --all)"),
             (":xray deploy", "owner tree: deploy/sts/ds/job/cronjob/rs → pods → containers"),
             (":kubectl ...", "run kubectl on this context and namespace (also :! and !)"),
             (":aliases", "every resource type the cluster serves"),
@@ -2605,6 +2791,15 @@ fn help_lines(ui: &KubeUi) -> Vec<String> {
         ],
     );
     section("Pagers (describe, YAML, kubectl)", &[("/ n N", "search, next, previous"), ("w", "wrap;  ← → scroll sideways"), ("e", "edit;  y YAML;  d describe;  m managedFields"), ("c", "copy;  ctrl-s save to a file")]);
+    section(
+        "Tree (:tree, T)",
+        &[
+            ("space ← →", "fold, fold or go up, unfold;  enter on a namespace folds it"),
+            ("enter d y e", "describe, YAML, edit the object;  l logs  s shell  F forward"),
+            ("/", "keep matching lines (and what they are under)"),
+            ("0", "all namespaces and back;  H old ReplicaSets;  ctrl-d delete"),
+        ],
+    );
     section("Logs", &[("f", "follow / pause"), ("/", "show matching lines"), ("t w", "timestamps, wrap"), ("p", "previous containers' logs"), ("c x", "copy, clear;  ctrl-s save")]);
     section("Edit", &[("e", "opens $EDITOR; the server validates it (dry run)"), ("y", "on the diff: apply it;  e edit again;  esc drop it")]);
     l.push(String::new());

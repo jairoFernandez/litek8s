@@ -327,6 +327,16 @@ fn columns_for(kind: &str) -> Vec<Column> {
                 },
             },
             AGE,
+            // `-o wide` (as kubectl): the pods it selects.
+            Column {
+                name: "Selector",
+                type_: "string",
+                format: "",
+                cell: |v| {
+                    let sel: Vec<String> = v.pointer("/spec/selector").and_then(Value::as_object).into_iter().flatten().map(|(k, x)| format!("{k}={}", x.as_str().unwrap_or_default())).collect();
+                    json!(if sel.is_empty() { "<none>".to_string() } else { sel.join(",") })
+                },
+            },
         ],
         _ => vec![NAME, AGE],
     }
@@ -449,7 +459,7 @@ pub fn build(rt: &ResourceType, objects: &[Value], rv: u64, include_object: bool
             // Columns kubectl shows only with `-o wide`.
             let wide = matches!(
                 (rt.kind.as_str(), col.name),
-                ("Pod", "IP" | "Node") | ("Node", "Internal-IP" | "OS-Image" | "Container-Runtime")
+                ("Pod", "IP" | "Node") | ("Node", "Internal-IP" | "OS-Image" | "Container-Runtime") | ("Service", "Selector")
             );
             defs.push(json!({"name": col.name, "type": col.type_, "format": col.format, "description": "", "priority": if wide { 1 } else { 0 }}));
             extractors.push(Box::new(col.cell));
