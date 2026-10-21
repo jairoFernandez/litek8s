@@ -1302,7 +1302,9 @@ async fn send_with(registries: &Registries, method: hyper::Method, url: &str, he
     for (k, v) in headers {
         req = req.header(*k, v);
     }
-    let req = req.body(http_body_util::Full::new(body))?;
+    // No body, no content-length (signed CDN URLs, picky servers).
+    let body = if body.is_empty() { http_body_util::Either::Left(http_body_util::Empty::<Bytes>::new()) } else { http_body_util::Either::Right(http_body_util::Full::new(body)) };
+    let req = req.body(body)?;
     tokio::time::timeout(Duration::from_secs(60), sender.send_request(req))
         .await
         .context("registry did not answer")?
