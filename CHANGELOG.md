@@ -1,7 +1,11 @@
 # Changelog
 
-## Unreleased
+## 0.2.3
 
+- **`litek8s ui`:** the Home breakdown bars agree with their numbers. Each
+  bar is its row's value against a scale the box names (CPU: 1 CPU; memory:
+  the VM's or sandbox's limit; disk: the total), not against the largest
+  row; tiny values read `<0.1%` with at most a hairline and zero has no bar.
 - **Private registries and mirrors:** a registry configuration in k3s's
   `registries.yaml` format (a k3s file works as is): mirrors per registry or
   `"*"` (tried in order before the registry, with rewrites), and per host a
