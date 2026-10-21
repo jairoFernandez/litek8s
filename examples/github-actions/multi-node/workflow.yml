@@ -11,7 +11,7 @@ jobs:
 
       # The control plane and two workers, joined like real nodes (each
       # with its own network namespace, pod CIDR and WireGuard overlay).
-      - uses: jairoFernandez/litek8s/.github/actions/setup-litek8s@main
+      - uses: jairoFernandez/litek8s/.github/actions/setup-litek8s@v0.2.1
         with:
           nodes: 3
 

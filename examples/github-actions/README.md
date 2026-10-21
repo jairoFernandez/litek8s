@@ -12,7 +12,7 @@ the paths. Measurements against kind and dockerd: [docs/ci.md](../../docs/ci.md)
 | [multi-node/](multi-node/) | 3 nodes: topology spread, a DaemonSet, Service traffic across nodes, draining a node | kind with workers |
 
 ```yaml
-- uses: jairoFernandez/litek8s/.github/actions/setup-litek8s@main
+- uses: jairoFernandez/litek8s/.github/actions/setup-litek8s@v0.2.1
   with:
     nodes: 1            # control plane + N-1 workers
     # version: v0.2.1   # default: the latest release

@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: jairoFernandez/litek8s/.github/actions/setup-litek8s@main
+      - uses: jairoFernandez/litek8s/.github/actions/setup-litek8s@v0.2.1
       - run: |
           helm install hello ./chart --wait
           helm test hello
@@ -59,8 +59,8 @@ Outputs: `version`, `context`, `kubeconfig`, `api-url`, `docker-socket`,
 arm64): on macOS the dev cluster is a VM, and GitHub's macOS runners allow
 no nested virtualization.
 
-Pin the action to a release tag (`@v0.2.1` and later) once one includes it;
-`@main` follows the repository.
+Pin the action to a release tag (`@v0.2.1` or later), as above; `@main`
+follows the repository.
 
 ### Examples
 

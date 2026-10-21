@@ -11,7 +11,7 @@ jobs:
 
       # A one-node cluster in about a second; kubectl and Helm (both on
       # GitHub's runners) use it through KUBECONFIG.
-      - uses: jairoFernandez/litek8s/.github/actions/setup-litek8s@main
+      - uses: jairoFernandez/litek8s/.github/actions/setup-litek8s@v0.2.1
 
       - name: Install the chart
         run: |

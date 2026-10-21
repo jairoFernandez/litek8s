@@ -12,7 +12,7 @@ jobs:
 
       # Exports DOCKER_HOST (litek8s's socket) and DOCKER_BUILDKIT=0, so
       # docker and docker compose build with litek8s's own builder.
-      - uses: jairoFernandez/litek8s/.github/actions/setup-litek8s@main
+      - uses: jairoFernandez/litek8s/.github/actions/setup-litek8s@v0.2.1
 
       - name: Start the stack
         run: docker compose up -d --build --wait --wait-timeout 180

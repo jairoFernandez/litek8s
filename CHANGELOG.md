@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.1
 
 - **CI:** a GitHub Action, `jairoFernandez/litek8s/.github/actions/setup-litek8s`,
   gives a job a cluster and a Docker API (replacing `helm/kind-action` and
