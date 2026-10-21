@@ -141,8 +141,30 @@ jobs:
           name: bench-${{ matrix.example }}-${{ matrix.engine }}
           path: ${{ runner.temp }}/result.json
 
+  # The same examples where a GitLab.com job runs them, in a privileged
+  # container: Docker in Docker (docker:dind, plus kind in it for helm)
+  # against litek8s (examples/ci/litek8s-ci.sh in ubuntu:24.04).
+  in-container:
+    name: ${{ matrix.example }} on ${{ matrix.engine }} (container)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        example: [compose, helm]
+        engine: [dind, litek8s]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Measure
+        run: .github/ci-bench/in-container.sh ${{ matrix.engine }} ${{ matrix.example }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-${{ matrix.example }}-${{ matrix.engine }}-container
+          path: ${{ runner.temp }}/result.json
+
   report:
-    needs: bench
+    needs: [bench, in-container]
     if: always()
     runs-on: ubuntu-24.04
     steps:
