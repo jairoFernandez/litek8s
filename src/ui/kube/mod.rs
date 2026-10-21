@@ -127,7 +127,7 @@ fn tls_config(ca: Option<Vec<u8>>, client: Option<(Vec<u8>, Vec<u8>)>, insecure:
     let provider = Arc::new(rustls::crypto::ring::default_provider());
     let builder = rustls::ClientConfig::builder_with_provider(provider.clone()).with_safe_default_protocol_versions()?;
     let builder = if insecure {
-        builder.dangerous().with_custom_certificate_verifier(Arc::new(NoVerify(provider)))
+        builder.dangerous().with_custom_certificate_verifier(Arc::new(crate::registries::NoVerify(provider)))
     } else {
         let mut roots = rustls::RootCertStore::empty();
         match ca {
@@ -151,30 +151,6 @@ fn tls_config(ca: Option<Vec<u8>>, client: Option<(Vec<u8>, Vec<u8>)>, insecure:
     Ok(Arc::new(config))
 }
 
-#[derive(Debug)]
-struct NoVerify(Arc<rustls::crypto::CryptoProvider>);
-
-impl rustls::client::danger::ServerCertVerifier for NoVerify {
-    fn verify_server_cert(
-        &self,
-        _: &rustls::pki_types::CertificateDer<'_>,
-        _: &[rustls::pki_types::CertificateDer<'_>],
-        _: &rustls::pki_types::ServerName<'_>,
-        _: &[u8],
-        _: rustls::pki_types::UnixTime,
-    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        Ok(rustls::client::danger::ServerCertVerified::assertion())
-    }
-    fn verify_tls12_signature(&self, m: &[u8], c: &rustls::pki_types::CertificateDer<'_>, d: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls12_signature(m, c, d, &self.0.signature_verification_algorithms)
-    }
-    fn verify_tls13_signature(&self, m: &[u8], c: &rustls::pki_types::CertificateDer<'_>, d: &rustls::DigitallySignedStruct) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        rustls::crypto::verify_tls13_signature(m, c, d, &self.0.signature_verification_algorithms)
-    }
-    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        self.0.signature_verification_algorithms.supported_schemes()
-    }
-}
 
 /// Keep the pods Home counts (and names cgroups and images by) current:
 /// a list, then a watch from its resourceVersion; re-list when the watch

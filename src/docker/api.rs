@@ -1250,6 +1250,7 @@ fn pull(engine: &Arc<Engine>, q: &HashMap<String, String>, req: &Request<Incomin
             let v = if id.is_empty() { json!({"status": msg}) } else { json!({"status": msg, "progressDetail": {}, "id": id}) };
             let _ = progress_tx.send(v);
         })),
+        ..Default::default()
     };
     let engine = engine.clone();
     tokio::spawn(async move {

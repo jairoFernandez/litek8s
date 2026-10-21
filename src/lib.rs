@@ -8,6 +8,7 @@ pub mod install;
 pub mod kube;
 pub mod mcp;
 pub mod obs;
+pub mod registries;
 pub mod remote;
 pub mod tree;
 pub mod ui;
