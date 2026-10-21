@@ -53,8 +53,9 @@ Kubernetes:
   server         List or remove the API servers of a highly available control plane
   lb             A TCP load balancer in front of the API servers of an HA control plane
   tree           A tree of the cluster: nodes, workloads down their owners, services (the legacy daemon's when it runs)
-  install        Run litek8s on this Linux server as a systemd service (server or agent)
+  install        Run litek8s as a systemd service on this Linux server, or on another over --ssh
   uninstall      Stop and remove the litek8s systemd service and its pods
+  cluster        Clusters of machines over SSH from a cluster file (apply, status, delete)
 
 Observability (built into the API server):
   logs           Search and follow pod logs, including containers that are gone
@@ -76,7 +77,6 @@ Legacy daemon (litek8s.dev/v1alpha1 manifests, started with `litek8s serve`):
   proxy          Open a local TCP proxy to a published deployment port
   service        Manage stable local service listeners backed by deployments
   node           Register a remote node reachable over ssh
-  cluster        Create and manage local multi-node daemon clusters in Docker containers
   control-plane  Manage the daemon's Raft control-plane membership
   vpn            Manage the WireGuard mesh that connects daemon nodes across clouds
   infra          Scaffold Terraform + deploy projects for provisioning litek8s nodes
@@ -147,15 +147,28 @@ token goes to /etc/litek8s/<server|agent>.env (0600), never into the unit.
 Defaults a server gets unless given: --listen 0.0.0.0:6443 --data-dir
 /var/lib/litek8s/apiserver --node-dir /var/lib/litek8s/node-agent --runtime
 crun --node-ip <detected> --kubeconfig /etc/litek8s/kubeconfig.yaml (an agent:
---node-dir, --runtime, --node-ip). Re-running replaces the flags and restarts
-the service; pods keep running across restarts.
+--node-dir, --runtime, --node-ip). Re-running with other flags (or another
+binary) replaces them and restarts the service; pods keep running across
+restarts.
 
-Straight from a release: curl -fsSL https://raw.githubusercontent.com/jairoFernandez/litek8s/main/install.sh | sh -s -- server";
+Straight from a release: curl -fsSL https://raw.githubusercontent.com/jairoFernandez/litek8s/main/install.sh | sh -s -- server
+
+From another machine, over ssh (sudo there; no root needed here):
+  litek8s install server --ssh pi@192.168.1.10
+  litek8s install agent --ssh me@old-laptop --join https://192.168.1.10:6443 --token K10...::...
+SSH flags (anywhere after server/agent): --ssh USER@HOST, -i KEY, --ssh-port N,
+--ssh-option K=V; --binary PATH (a Linux build to upload; default: this one if
+it is a static Linux build, else the GitHub release of this version, fetched
+by the machine), --release vX.Y.Z; for a server --context NAME (default: its
+node name) and --api-address HOST[:PORT] for the kubeconfig context added here.
+An unchanged binary and flags leave the service running as it is.
+Several machines at once: `litek8s cluster apply -f cluster.yaml`.";
 
 const UNINSTALL_AFTER_HELP: &str = "\
 Examples:
   sudo litek8s uninstall
   sudo litek8s uninstall --purge
+  litek8s uninstall --ssh pi@192.168.1.10              from this machine, over ssh
 
 Stops and removes litek8s-server.service / litek8s-agent.service, kills every
 pod and removes the pod network (litek8s0, litek8s-wg, LITEK8S-* iptables
@@ -245,10 +258,24 @@ Examples:
 
 const CLUSTER_AFTER_HELP: &str = "\
 Examples:
-  litek8s cluster create my-cluster --control-planes 3
-  litek8s cluster create dev --control-planes 3 --workers 2
-  litek8s cluster list
-  litek8s cluster delete my-cluster";
+  litek8s cluster apply -f cluster.yaml
+  litek8s cluster apply -f cluster.yaml --prune      also remove agents taken out of the file
+  litek8s cluster status -f cluster.yaml
+  litek8s cluster delete -f cluster.yaml --yes
+
+A cluster file:
+  apiVersion: litek8s.dev/v1
+  kind: Cluster
+  metadata: {name: home}
+  servers: [{ssh: pi@192.168.1.10}]               # 1, or 3/5 for HA
+  agents:
+    - {ssh: me@old-laptop, labels: {disk: ssd}}
+    - {ssh: ubuntu@ec2-host, nodeIp: 10.0.0.7, taints: ['gpu=true:NoSchedule']}
+
+apply runs `litek8s install server|agent --ssh` on each machine (unchanged
+ones are left alone), adds the kubeconfig context <name>, and sets the labels
+and taints on the Nodes. Local clusters for development: `litek8s dev up`.
+See docs/clusters.md.";
 
 const APPLY_AFTER_HELP: &str = "\
 Examples:
@@ -559,7 +586,7 @@ enum Command {
         obs: ObsArgs,
     },
     #[command(
-        about = "Run litek8s on this Linux server as a systemd service (server or agent)",
+        about = "Run litek8s as a systemd service on this Linux server, or on another over --ssh",
         help_template = HELP_TEMPLATE,
         after_help = INSTALL_AFTER_HELP
     )]
@@ -579,6 +606,14 @@ enum Command {
     Uninstall {
         #[arg(long, help = "Also delete the data directories (the cluster's objects, images, volumes) and /etc/litek8s")]
         purge: bool,
+        #[arg(long, value_name = "USER@HOST", help = "Uninstall from this machine over ssh (with sudo there)")]
+        ssh: Option<String>,
+        #[arg(short = 'i', long, value_name = "FILE", requires = "ssh", help = "With --ssh: the private key (ssh -i)")]
+        identity_file: Option<PathBuf>,
+        #[arg(long, value_name = "PORT", requires = "ssh", help = "With --ssh: the SSH port")]
+        ssh_port: Option<u16>,
+        #[arg(long, value_name = "KEY=VALUE", requires = "ssh", help = "With --ssh: an ssh -o option (repeatable)")]
+        ssh_option: Vec<String>,
     },
     #[command(
         about = "Local Kubernetes clusters for development (like kind/k3d), no Docker needed",
@@ -880,7 +915,7 @@ enum Command {
         out: Option<PathBuf>,
     },
     #[command(
-        about = "Create and manage local multi-node daemon clusters in Docker containers",
+        about = "Clusters of machines over SSH from a cluster file (apply, status, delete)",
         help_template = HELP_TEMPLATE,
         after_help = CLUSTER_AFTER_HELP
     )]
@@ -1443,62 +1478,36 @@ enum ControlPlaneCommand {
 
 #[derive(Debug, Subcommand)]
 enum ClusterCommand {
-    #[command(about = "Create a local multi-node cluster in Docker containers")]
-    Create {
-        #[arg(help = "Cluster name")]
-        name: String,
-        #[arg(long, default_value_t = 1, help = "Number of control-plane nodes")]
-        control_planes: u32,
-        #[arg(long, default_value_t = 0, help = "Number of worker nodes")]
-        workers: u32,
-        #[arg(
-            long,
-            help = "Path to a pre-built Linux litek8s binary (cross-compiles automatically if omitted)"
-        )]
-        binary: Option<PathBuf>,
-    },
-    #[command(about = "Delete a local cluster and its containers")]
-    Delete {
-        #[arg(help = "Cluster name")]
-        name: String,
-    },
-    #[command(about = "List running local clusters")]
-    List,
-    #[command(
-        about = "Apply a declarative cluster manifest (kind: Cluster) idempotently",
-        help_template = HELP_TEMPLATE
-    )]
+    #[command(about = "Install or update every machine of a cluster file over SSH; idempotent", help_template = HELP_TEMPLATE)]
     Apply {
-        #[arg(short = 'f', long, help = "Path to a cluster manifest YAML")]
+        #[arg(short = 'f', long, value_name = "FILE", help = "The cluster file (kind: Cluster)")]
+        file: PathBuf,
+        #[arg(long, help = "Drain, uninstall and delete agents that are no longer in the file")]
+        prune: bool,
+        #[arg(long, requires = "prune", help = "With --prune: also delete the removed agents' data")]
+        purge: bool,
+        #[arg(long, value_name = "PATH", help = "Install this Linux litek8s binary (overrides the file's binary/release)")]
+        binary: Option<PathBuf>,
+        #[arg(long, value_name = "TAG", help = "Install this release (v0.2.0) instead of this litek8s's version")]
+        release: Option<String>,
+        #[arg(long, help = "Do not check the machines for crun, cgroup v2, WireGuard and free ports")]
+        skip_checks: bool,
+        #[arg(long, default_value = "3m", value_parser = parse_duration, help = "How long each server and node may take to be ready")]
+        timeout: Duration,
+    },
+    #[command(about = "Show each machine of a cluster file: service, version, node, readiness, pods", help_template = HELP_TEMPLATE)]
+    Status {
+        #[arg(short = 'f', long, value_name = "FILE", help = "The cluster file (kind: Cluster)")]
         file: PathBuf,
     },
-    #[command(
-        about = "Show what `cluster apply` would change without mutating state",
-        help_template = HELP_TEMPLATE
-    )]
-    Diff {
-        #[arg(short = 'f', long, help = "Path to a cluster manifest YAML")]
+    #[command(about = "Uninstall litek8s from every machine of a cluster file", help_template = HELP_TEMPLATE)]
+    Delete {
+        #[arg(short = 'f', long, value_name = "FILE", help = "The cluster file (kind: Cluster)")]
         file: PathBuf,
-    },
-    #[command(
-        about = "Tear down workloads and worker nodes declared in a cluster manifest (preserves VPN state)",
-        help_template = HELP_TEMPLATE
-    )]
-    Destroy {
-        #[arg(short = 'f', long, help = "Path to a cluster manifest YAML")]
-        file: PathBuf,
-    },
-    #[command(
-        about = "Dump the current cluster state as a kind: Cluster manifest on stdout",
-        help_template = HELP_TEMPLATE
-    )]
-    Export {
-        #[arg(
-            long,
-            default_value = "exported-cluster",
-            help = "metadata.name to embed in the exported manifest"
-        )]
-        name: String,
+        #[arg(long, help = "Go ahead (every pod of the cluster stops)")]
+        yes: bool,
+        #[arg(long, help = "Also delete the data directories on each machine")]
+        purge: bool,
     },
 }
 
@@ -1535,12 +1544,6 @@ impl DaemonEndpoint {
             DaemonEndpoint::Unix(path) => protocol::request(path, request).await,
             DaemonEndpoint::Tcp(addr) => protocol::request_tcp(addr, request).await,
         }
-    }
-}
-
-impl crate::cluster_orchestrator::DaemonEndpoint for DaemonEndpoint {
-    async fn request(&self, request: Request) -> Result<Response> {
-        DaemonEndpoint::request(self, request).await
     }
 }
 
@@ -1646,13 +1649,21 @@ pub async fn run() -> Result<()> {
             .await
         }
         Command::Install { skip_checks, timeout, role } => {
-            let (role, args) = match role {
+            let (role, mut args) = match role {
                 InstallRole::Server { args } => (crate::install::Role::Server, args),
                 InstallRole::Agent { args } => (crate::install::Role::Agent, args),
             };
+            let flags = crate::remote::take_ssh_flags(&mut args)?;
+            if flags.ssh.is_some() {
+                return crate::remote::install_cmd(role, args, flags, skip_checks, timeout).await;
+            }
             crate::install::install(crate::install::InstallOptions { role, args, skip_checks, timeout }).await
         }
-        Command::Uninstall { purge } => crate::install::uninstall(purge),
+        Command::Uninstall { purge, ssh: None, .. } => crate::install::uninstall(purge),
+        Command::Uninstall { purge, ssh: Some(dest), identity_file, ssh_port, ssh_option } => {
+            let ssh = crate::remote::Ssh { dest, port: ssh_port, identity_file, options: ssh_option };
+            crate::remote::uninstall_cmd(ssh, purge).await
+        }
         Command::Dev { command } => crate::dev::run(command).await,
         Command::Server { command } => match command {
             ServerCommand::List { server } => crate::kube::ha::lb::list(&server).await,
@@ -2153,62 +2164,12 @@ pub async fn run() -> Result<()> {
             }
         },
         Command::Cluster { command } => match command {
-            ClusterCommand::Create {
-                name,
-                control_planes,
-                workers,
-                binary,
-            } => {
-                println!("{}", title("Cluster Create"));
-                let config = crate::cluster::ClusterConfig {
-                    name,
-                    control_planes,
-                    workers,
-                    binary,
-                };
-                let info = crate::cluster::create_cluster(config).await?;
-                println!();
-                println!(
-                    "{} cluster {} with {} node(s)",
-                    ok("ok"),
-                    label(&info.name),
-                    info.nodes.len()
-                );
-                println!();
-                println!("{}", muted("connect with:"));
-                println!("  litek8s --server {} get deployments", info.api_addr);
-                Ok(())
+            ClusterCommand::Apply { file, prune, purge, binary, release, skip_checks, timeout } => {
+                let f = crate::cluster::ClusterFile::load(&file)?;
+                crate::cluster::apply(&f, &crate::cluster::ApplyOptions { prune, purge, binary, release, skip_checks, timeout: Some(timeout) }).await
             }
-            ClusterCommand::Delete { name } => {
-                crate::cluster::delete_cluster(&name).await?;
-                println!("{} cluster {} deleted", ok("ok"), label(&name));
-                Ok(())
-            }
-            ClusterCommand::List => {
-                let entries = crate::cluster::list_clusters().await?;
-                if entries.is_empty() {
-                    println!("{}", muted("no clusters found"));
-                    return Ok(());
-                }
-                println!(
-                    "{:<20} {:<5} {:<8} {}",
-                    muted("NAME"),
-                    muted("CP"),
-                    muted("WORKERS"),
-                    muted("API")
-                );
-                for entry in &entries {
-                    println!(
-                        "{:<20} {:<5} {:<8} {}",
-                        entry.name, entry.control_planes, entry.workers, entry.api_addr
-                    );
-                }
-                Ok(())
-            }
-            ClusterCommand::Apply { file } => run_cluster_apply(&endpoint, &file).await,
-            ClusterCommand::Diff { file } => run_cluster_diff(&endpoint, &file).await,
-            ClusterCommand::Destroy { file } => run_cluster_destroy(&endpoint, &file).await,
-            ClusterCommand::Export { name } => run_cluster_export(&endpoint, &name).await,
+            ClusterCommand::Status { file } => crate::cluster::status(&crate::cluster::ClusterFile::load(&file)?).await,
+            ClusterCommand::Delete { file, yes, purge } => crate::cluster::delete(&crate::cluster::ClusterFile::load(&file)?, yes, purge).await,
         },
         Command::Agent { join: None, serve, .. } => {
             if serve {
@@ -3280,97 +3241,6 @@ async fn run_vpn_join(
     println!("Write the wg-quick config and bring it up:");
     println!("  litek8s vpn show-config --role spoke --output /tmp/wg0.conf");
     println!("  sudo wg-quick up /tmp/wg0.conf");
-    Ok(())
-}
-
-async fn run_cluster_apply(endpoint: &DaemonEndpoint, file: &Path) -> Result<()> {
-    use crate::cluster_manifest::ClusterManifest;
-
-    let manifest = ClusterManifest::parse_file(file)
-        .with_context(|| format!("failed to parse {}", file.display()))?;
-    println!(
-        "{}",
-        title(&format!("Cluster Apply ({})", manifest.metadata.name))
-    );
-
-    let report = crate::cluster_orchestrator::apply(&manifest, endpoint).await?;
-    if let Some(message) = report.vpn_initialized.as_deref() {
-        println!("  {} {}", ok("vpn"), message);
-    }
-    for name in &report.nodes_added {
-        println!("  {} node/{}", ok("added"), name);
-    }
-    for name in &report.nodes_unchanged {
-        println!("  {} node/{}", muted("kept"), name);
-    }
-    for path in &report.workloads_applied {
-        println!("  {} workload {}", ok("applied"), path.display());
-    }
-    if report.nodes_added.is_empty()
-        && report.nodes_unchanged.is_empty()
-        && report.workloads_applied.is_empty()
-        && report.vpn_initialized.is_none()
-    {
-        println!("  {}", muted("nothing to do"));
-    }
-    Ok(())
-}
-
-async fn run_cluster_diff(endpoint: &DaemonEndpoint, file: &Path) -> Result<()> {
-    use crate::cluster_manifest::ClusterManifest;
-
-    let manifest = ClusterManifest::parse_file(file)
-        .with_context(|| format!("failed to parse {}", file.display()))?;
-    println!(
-        "{}",
-        title(&format!("Cluster Diff ({})", manifest.metadata.name))
-    );
-
-    let report = crate::cluster_orchestrator::diff(&manifest, endpoint).await?;
-    if let Some(action) = report.vpn_to_initialize.as_deref() {
-        println!("  {} vpn → {}", ok("init"), action);
-    } else if report.vpn_already_initialized {
-        println!("  {} vpn (already initialized)", muted("="));
-    }
-    for name in &report.nodes_to_add {
-        println!("  {} node/{}", ok("+"), name);
-    }
-    for name in &report.nodes_already_present {
-        println!("  {} node/{}", muted("="), name);
-    }
-    for name in &report.nodes_extra {
-        println!("  {} node/{} (extra, not in manifest)", muted("?"), name);
-    }
-    for path in &report.workloads_to_apply {
-        println!("  {} workload {}", ok("apply"), path.display());
-    }
-    Ok(())
-}
-
-async fn run_cluster_destroy(endpoint: &DaemonEndpoint, file: &Path) -> Result<()> {
-    use crate::cluster_manifest::ClusterManifest;
-
-    let manifest = ClusterManifest::parse_file(file)
-        .with_context(|| format!("failed to parse {}", file.display()))?;
-    println!(
-        "{}",
-        title(&format!("Cluster Destroy ({})", manifest.metadata.name))
-    );
-
-    let report = crate::cluster_orchestrator::destroy(&manifest, endpoint).await?;
-    for path in &report.workloads_deleted {
-        println!("  {} workload {}", ok("deleted"), path.display());
-    }
-    for name in &report.nodes_drained {
-        println!("  {} node/{}", ok("drained"), name);
-    }
-    Ok(())
-}
-
-async fn run_cluster_export(endpoint: &DaemonEndpoint, name: &str) -> Result<()> {
-    let manifest = crate::cluster_orchestrator::export(name, endpoint).await?;
-    let yaml = serde_yaml::to_string(&manifest).context("failed to serialize cluster manifest")?;
-    print!("{yaml}");
     Ok(())
 }
 

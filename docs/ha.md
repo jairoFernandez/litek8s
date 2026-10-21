@@ -28,6 +28,18 @@ litek8s server list --server http://192.168.1.10:6443
 litek8s server remove lk3 --server https://192.168.1.10:6443 --token K10...::...
 ```
 
+From a laptop, the same over SSH with one file
+([docs/clusters.md](clusters.md)): three `servers` make `cluster apply`
+start the first with `--cluster-init` and join the other two to it.
+
+```yaml
+apiVersion: litek8s.dev/v1
+kind: Cluster
+metadata: {name: home}
+servers: [{ssh: pi@192.168.1.10}, {ssh: pi@192.168.1.11}, {ssh: pi@192.168.1.12}]
+agents: [{ssh: me@old-laptop}]
+```
+
 `litek8s install server` fills in `--listen 0.0.0.0:6443 --data-dir
 /var/lib/litek8s/apiserver --node-dir /var/lib/litek8s/node-agent --runtime
 crun --kubeconfig /etc/litek8s/kubeconfig.yaml` and the detected `--node-ip`

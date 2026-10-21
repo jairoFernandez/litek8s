@@ -236,7 +236,30 @@ unit (`litek8s-server` / `litek8s-agent`, `Restart=always`) with the token in
 running across `systemctl restart` and upgrades, and come back after a
 reboot. Extra flags go to `litek8s apiserver` / `litek8s agent` (e.g.
 `--node-ip`); re-running replaces them. `sudo litek8s uninstall [--purge]`
-removes it all. Without systemd, run the same processes yourself:
+removes it all.
+
+Or do it all from your laptop over SSH (your `~/.ssh/config`, keys and
+agent; sudo on the machines), for one machine or a whole cluster declared
+in a file ([docs/clusters.md](docs/clusters.md)):
+
+```bash
+litek8s install server --ssh pi@192.168.1.10      # adds the kubeconfig context
+litek8s install agent --ssh me@old-laptop --join https://192.168.1.10:6443 --token K10<hash>::<secret>
+
+cat > cluster.yaml <<'EOF'
+apiVersion: litek8s.dev/v1
+kind: Cluster
+metadata: {name: home}
+servers: [{ssh: pi@192.168.1.10}]               # 1, or 3 for HA
+agents:
+  - {ssh: me@old-laptop, labels: {disk: ssd}}
+  - {ssh: ubuntu@ec2-host, nodeIp: 10.0.0.7}
+EOF
+litek8s cluster apply -f cluster.yaml             # again: no-op; agent removed + --prune: drained, uninstalled
+litek8s cluster status -f cluster.yaml
+```
+
+Without systemd, run the same processes yourself:
 
 ```bash
 litek8s apiserver --listen 0.0.0.0:6443 --data-dir /var/lib/litek8s/apiserver --node-ip 192.168.1.10

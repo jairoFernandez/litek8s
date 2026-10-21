@@ -44,7 +44,27 @@ fn upsert(list: &mut Vec<Value>, name: &str, key: &str, body: Value) {
 /// `context`, pointing at `server`) and, if `make_current`, made the
 /// current context.
 pub fn merge(doc: &str, context: &str, server: &str, make_current: bool) -> Result<String> {
+    merge_cluster(doc, context, &ClusterEntry { server: server.to_string(), ..Default::default() }, make_current)
+}
+
+/// A kubeconfig `cluster:` entry.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClusterEntry {
+    pub server: String,
+    /// PEM, written as `certificate-authority-data`.
+    pub ca: Option<String>,
+    /// The name the server's certificate is checked for (`tls-server-name`),
+    /// when it does not name the address in `server`.
+    pub tls_server_name: Option<String>,
+    /// The user's bearer token.
+    pub token: Option<String>,
+}
+
+/// [`merge`] with a whole cluster entry.
+pub fn merge_cluster(doc: &str, context: &str, entry: &ClusterEntry, make_current: bool) -> Result<String> {
+    use base64::Engine;
     let name = context;
+    let server = entry.server.as_str();
     let mut root = if doc.trim().is_empty() {
         Mapping::new()
     } else {
@@ -58,8 +78,18 @@ pub fn merge(doc: &str, context: &str, server: &str, make_current: bool) -> Resu
     root.entry("kind".into()).or_insert("Config".into());
     let mut cluster = Mapping::new();
     cluster.insert("server".into(), server.into());
+    if let Some(ca) = &entry.ca {
+        cluster.insert("certificate-authority-data".into(), base64::engine::general_purpose::STANDARD.encode(ca).into());
+    }
+    if let Some(n) = &entry.tls_server_name {
+        cluster.insert("tls-server-name".into(), n.as_str().into());
+    }
     upsert(seq(&mut root, "clusters"), name, "cluster", Value::Mapping(cluster));
-    upsert(seq(&mut root, "users"), name, "user", Value::Mapping(Mapping::new()));
+    let mut user = Mapping::new();
+    if let Some(t) = &entry.token {
+        user.insert("token".into(), t.as_str().into());
+    }
+    upsert(seq(&mut root, "users"), name, "user", Value::Mapping(user));
     let mut context = Mapping::new();
     context.insert("cluster".into(), name.into());
     context.insert("user".into(), name.into());
@@ -105,6 +135,13 @@ fn write_private(path: &Path, content: &str) -> Result<()> {
 pub fn install(path: &Path, context: &str, server: &str, make_current: bool) -> Result<()> {
     let doc = std::fs::read_to_string(path).unwrap_or_default();
     write_private(path, &merge(&doc, context, server, make_current)?)
+}
+
+/// Add or update a context with a whole cluster entry in the kubeconfig at
+/// `path`.
+pub fn install_cluster(path: &Path, context: &str, entry: &ClusterEntry, make_current: bool) -> Result<()> {
+    let doc = std::fs::read_to_string(path).unwrap_or_default();
+    write_private(path, &merge_cluster(&doc, context, entry, make_current)?)
 }
 
 /// `doc` with `context` (which must exist) as the current context.
@@ -228,5 +265,22 @@ mod tests {
         let gone: Value = serde_yaml::from_str(&remove(&two, "litek8s-ci").unwrap()).unwrap();
         assert_eq!(gone["contexts"].as_sequence().unwrap().len(), 2);
         assert_eq!(gone["current-context"], "kind-kind");
+    }
+
+    #[test]
+    fn a_remote_cluster_with_its_ca_and_server_name() {
+        let entry = ClusterEntry { server: "https://192.168.1.10:6443".into(), ca: Some("-----BEGIN CERTIFICATE-----\nX\n".into()), tls_server_name: Some("kubernetes.default.svc".into()), token: Some("t".into()) };
+        let doc = merge_cluster(KIND, "home", &entry, true).unwrap();
+        let v: Value = serde_yaml::from_str(&doc).unwrap();
+        let c = v["clusters"].as_sequence().unwrap().iter().find(|c| c["name"] == "home").unwrap();
+        assert_eq!(c["cluster"]["server"], "https://192.168.1.10:6443");
+        assert_eq!(c["cluster"]["tls-server-name"], "kubernetes.default.svc");
+        use base64::Engine;
+        assert_eq!(c["cluster"]["certificate-authority-data"], base64::engine::general_purpose::STANDARD.encode("-----BEGIN CERTIFICATE-----\nX\n").as_str());
+        assert_eq!(v["current-context"], "home");
+        let u = v["users"].as_sequence().unwrap().iter().find(|c| c["name"] == "home").unwrap();
+        assert_eq!(u["user"]["token"], "t");
+        // Applying it again changes nothing.
+        assert_eq!(merge_cluster(&doc, "home", &entry, true).unwrap(), doc);
     }
 }
