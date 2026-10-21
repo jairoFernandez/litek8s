@@ -11,7 +11,7 @@ export const en = {
   meta: {
     title: 'litek8s · a lightweight Kubernetes in one binary',
     description:
-      'The real Kubernetes API, local dev clusters in about a second, a Docker-compatible API, a terminal UI, built-in metrics, logs and alerts, HA and multi-node: one Rust binary that idles at about 20 MiB.',
+      'The real Kubernetes API, local dev clusters in about a second, a Docker-compatible API, a terminal UI, built-in metrics, logs and alerts, HA and multi-node: one Rust binary whose whole control plane idles at 23 MiB, 24× less than k3s.',
   },
   links: {
     github: GH,
@@ -36,7 +36,7 @@ export const en = {
   },
   hero: {
     badge: 'v0.2 · early preview · Apache-2.0',
-    lines: ['A whole Kubernetes', 'in one binary,', 'idling at ~20 MiB.'],
+    lines: ['A whole Kubernetes', 'in one binary,', 'idling at 23 MiB.'],
     lead:
       'litek8s serves the real Kubernetes API, so kubectl, Helm and Argo CD work unchanged. The control plane, scheduler, controllers, DNS, service proxy and node agent are one Rust process. For local development, home labs and the edge.',
     primary: 'Install',
@@ -120,13 +120,13 @@ export const en = {
     rows: [
       {
         label: 'Whole orchestrator, 5 nginx pods',
-        note: 'PSS, 1 GiB arm64 VM',
+        note: 'PSS, v0.2.1; idle, no pods: 23.2 vs 567',
         unit: 'MiB',
         bars: [
-          { name: 'litek8s', value: 24.6, us: true },
-          { name: 'k3s minimal', value: 603 },
+          { name: 'litek8s', value: 33.5, us: true },
+          { name: 'k3s minimal', value: 579 },
         ],
-        href: blob('bench/RESULTS.md#the-kubernetes-path-on-crun-without-docker-2026-10-17'),
+        href: blob('bench/RESULTS.md#footprint-of-the-v021-release-2026-10-21-x86_64kvm'),
         src: 'bench/RESULTS.md',
       },
       {
@@ -210,8 +210,9 @@ export const en = {
       },
     ],
     footnote:
-      'The 6 conformance failures: 5 are macOS-only (TCP DNS on port 53, a hostPort binding) and pass on Linux; 1 was a watch fixed since. A 3-server HA control plane stays linearizable under leader kills and partitions, and a 3-node cluster ran 21 h under churn with no leak.',
+      'On macOS a dev cluster runs in a small Linux VM, and Activity Monitor shows the whole VM: about 240 MiB fresh, ~380 MiB after pulling and running 5 nginx pods, as macOS keeps every page the guest has touched until the VM stops. The 6 conformance failures: 5 are macOS-only (TCP DNS on port 53, a hostPort binding) and pass on Linux; 1 was a watch fixed since. A 3-server HA control plane stays linearizable under leader kills and partitions, and a 3-node cluster ran 21 h under churn with no leak.',
     footLinks: [
+      { label: 'Memory on macOS', href: '/docs/dev/#memory-on-macos' },
       { label: 'bench/HA.md', href: blob('bench/HA.md') },
       { label: 'bench/SOAK.md', href: blob('bench/SOAK.md') },
     ],

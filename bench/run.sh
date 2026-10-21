@@ -16,6 +16,8 @@
 # Knobs (env): IDLE_SECS=300 SETTLE_SECS=60 TTR_RUNS=5
 #              K3S_VERSION=<tag, default: k3s stable channel> VM_MEM=1024 VM_CPUS=2
 #              KEEP_VMS=1 (leave VMs running) LITEK8S_BIN=<prebuilt linux binary>
+#              KUBE_ARGS=<extra `litek8s apiserver` flags, e.g. --no-observability>
+#              PORT_<KUBECRUN|KUBE|K3S|K3SMIN>=<ssh port> (with BENCH_WORK, parallel runs)
 #              LITEK8S_ARCH=amd64|arm64 (default: the host's; on x86_64 Linux the VMs are
 #              amd64 under KVM, see vm.sh)
 #              LITEK8S_COMMIT=<id> (recorded when the checkout has no .git)
@@ -37,7 +39,7 @@ VM_MEM="${VM_MEM:-1024}"
 VM_CPUS="${VM_CPUS:-2}"
 OUT="${OUT:-$HERE/results/$(date -u +%Y%m%dT%H%M%SZ)}"
 IMAGE="nginx:alpine"
-PORT_K3S=2292 PORT_K3SMIN=2293 PORT_KUBE=2295 PORT_KUBECRUN=2296
+PORT_K3S="${PORT_K3S:-2292}" PORT_K3SMIN="${PORT_K3SMIN:-2293}" PORT_KUBE="${PORT_KUBE:-2295}" PORT_KUBECRUN="${PORT_KUBECRUN:-2296}"
 PORT_ARGOK3S=2297 PORT_ARGOLK=2298 PORT_OBSK3S=2299 PORT_OBSLK=2300
 GUEST_ARCH="${LITEK8S_ARCH:-$([[ "$(uname -m)" == x86_64 ]] && echo amd64 || echo arm64)}"
 ARGO_VM_MEM="${ARGO_VM_MEM:-2048}"
@@ -137,6 +139,7 @@ measure_idle() { # vm system tag
   sleep "$SETTLE_SECS"
   rroot "$1" "probe.py mem" | save "$2.$3.mem.json"
   rroot "$1" "probe.py cpu $IDLE_SECS" | save "$2.$3.cpu.json"
+  rroot "$1" "probe.py mem" | save "$2.$3.mem-end.json"
 }
 
 install_docker() {
@@ -181,7 +184,7 @@ phase_kube() {
   rroot "$vm" 'install -m 755 /tmp/litek8s /usr/local/bin/litek8s && rm /tmp/litek8s
     mkdir -p /var/lib/litek8s
     systemd-run --unit=litek8s --quiet /usr/local/bin/litek8s apiserver --listen 127.0.0.1:6443 \
-      --data-dir /var/lib/litek8s/apiserver --kubeconfig /root/litek8s.kubeconfig --runtime '"$rt"'
+      --data-dir /var/lib/litek8s/apiserver --kubeconfig /root/litek8s.kubeconfig --runtime '"$rt"' '"${KUBE_ARGS:-}"'
     for i in $(seq 1 100); do curl -sf '"$KUBE_URL"'/readyz >/dev/null && break; sleep 0.1; done'
   if [[ "$rt" == docker ]]; then
     # Pull the pod sandbox and service-proxy helper images now, as k3s ships its pause image.
@@ -612,7 +615,7 @@ PY' | save "$tag.info.json"
   echo " \"argo_vm_mem_mib\": $ARGO_VM_MEM, \"argo_vm_cpus\": $ARGO_VM_CPUS, \"argo_runs\": $ARGO_RUNS,"
   echo " \"argo_chart_version\": \"$ARGO_CHART_VERSION\", \"helm\": \"$HELM_VERSION\", \"kubectl\": \"$KUBECTL_VERSION\","
   echo " \"host\": \"$(sysctl -n machdep.cpu.brand_string 2>/dev/null || sed -n 's/^model name[^:]*: //p' /proc/cpuinfo 2>/dev/null | head -1 || uname -m)\","
-  echo " \"host_cpus\": $(getconf _NPROCESSORS_ONLN), \"guest_arch\": \"$GUEST_ARCH\","
+  echo " \"host_cpus\": $(getconf _NPROCESSORS_ONLN), \"guest_arch\": \"$GUEST_ARCH\", \"kube_args\": \"${KUBE_ARGS:-}\","
   echo " \"litek8s_commit\": \"${LITEK8S_COMMIT:-$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null)}\", \"phases\": \"${PHASES[*]}\"}"
 } >"$OUT/env.json"
 

@@ -1,0 +1,67 @@
+{
+ "buckets": {
+  "os/other": {
+   "rss_kib": 189080,
+   "pss_kib": 91807,
+   "procs": 19,
+   "comms": {
+    "systemd": 2,
+    "systemd-journal": 1,
+    "multipathd": 1,
+    "systemd-udevd": 1,
+    "systemd-resolve": 1,
+    "systemd-timesyn": 1,
+    "systemd-network": 1,
+    "cron": 1,
+    "dbus-daemon": 1,
+    "polkitd": 1,
+    "systemd-logind": 1,
+    "udisksd": 1,
+    "rsyslogd": 1,
+    "ModemManager": 1,
+    "agetty": 2,
+    "packagekitd": 1,
+    "(sd-pam)": 1
+   }
+  },
+  "sshd": {
+   "rss_kib": 25896,
+   "pss_kib": 7722,
+   "procs": 3,
+   "comms": {
+    "sshd": 3
+   }
+  },
+  "litek8s-serve": {
+   "rss_kib": 23680,
+   "pss_kib": 23676,
+   "procs": 1,
+   "comms": {
+    "litek8s": 1
+   }
+  }
+ },
+ "pods": {},
+ "categories": {
+  "os/other": {
+   "rss_kib": 189080,
+   "pss_kib": 91807
+  },
+  "node-agent": {
+   "rss_kib": 25896,
+   "pss_kib": 7722
+  },
+  "control-plane": {
+   "rss_kib": 23680,
+   "pss_kib": 23676
+  }
+ },
+ "system": {
+  "mem_total_kib": 984184,
+  "mem_available_kib": 674636,
+  "mem_used_kib": 309548
+ },
+ "cgroup_memory_current_kib": {
+  "system.slice/litek8s.service": 3012
+ }
+}

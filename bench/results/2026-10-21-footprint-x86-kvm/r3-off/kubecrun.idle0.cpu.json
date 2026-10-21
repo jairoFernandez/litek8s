@@ -1,0 +1,45 @@
+{
+ "window_s": 300.0,
+ "buckets": {
+  "litek8s-serve": {
+   "cpu_s": 0.04,
+   "pct_one_core": 0.013
+  },
+  "litek8s.service (short-lived)": {
+   "cpu_s": 0.034,
+   "pct_one_core": 0.011
+  },
+  "os/other": {
+   "cpu_s": 0.087,
+   "pct_one_core": 0.029
+  },
+  "sshd": {
+   "cpu_s": 0.0,
+   "pct_one_core": 0.0
+  },
+  "user.slice (short-lived)": {
+   "cpu_s": 0.009,
+   "pct_one_core": 0.003
+  }
+ },
+ "categories": {
+  "control-plane": {
+   "cpu_s": 0.074,
+   "pct_one_core": 0.025
+  },
+  "node-agent": {
+   "cpu_s": 0.009,
+   "pct_one_core": 0.003
+  },
+  "os/other": {
+   "cpu_s": 0.087,
+   "pct_one_core": 0.029
+  }
+ },
+ "write_syscall_kib": {
+  "litek8s-serve": 42
+ },
+ "busy_cpu_s": 0.17,
+ "system_busy_pct_of_all_cpus": 0.028,
+ "ncpu": 2
+}

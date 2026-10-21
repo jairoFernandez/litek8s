@@ -667,6 +667,81 @@ should be read that way:
 (`OBS_WARMUP_SECS`, `OBS_WINDOW_SECS`, `OBS_QUERY_RUNS`, `OBS_VM_MEM`), then
 `python3 bench/obs_report.py bench/results/<timestamp>`.
 
+## Footprint of the v0.2.1 release (2026-10-21, x86_64/KVM)
+
+The "idles at about 20 MiB" on the README and the site came from the
+2026-10-17 `kube-crun` run above (arm64, `b5bb4b2`). Since then
+observability, the HA control plane, the overlay relay, the MCP server and
+more landed in the same binary, and the legacy daemon left it. Re-measured
+on what users install.
+
+**Setup.** `bench/run.sh kube-crun` and `k3s-minimal` (same probes and
+workload as above) on omarchy (AMD Ryzen 7 5800X, 16 threads; qemu + KVM in
+a Docker container given `/dev/kvm`). Fresh Ubuntu 24.04 **amd64** guests of
+**2 vCPU / 1 GiB**, no swap. litek8s is the **v0.2.1 release binary**
+(`litek8s-v0.2.1-linux-x86_64.tar.gz` from GitHub Releases, checked against
+SHA256SUMS; 38.3 MiB) running `apiserver --runtime crun` (crun 1.14.1),
+once with its defaults (observability on) and once with
+`--no-observability` (`KUBE_ARGS`); k3s v1.36.5+k3s1 minimal
+(`--disable=traefik,servicelb,metrics-server,local-storage`). Three rounds;
+in each the three guests ran side by side (`BENCH_WORK`, `PORT_*`). Memory
+was sampled at the start and the end of each 300 s window (6 samples per
+cell); the table has the medians (the spread was 0.1–0.4 MiB for litek8s,
+up to 40 MiB for k3s). Raw data and `summarize.py`:
+[`results/2026-10-21-footprint-x86-kvm/`](results/2026-10-21-footprint-x86-kvm/).
+
+| metric | **litek8s v0.2.1** | … `--no-observability` | k3s minimal |
+|---|---|---|---|
+| Whole orchestrator, 0 workloads (PSS) | **23.2 MiB** | 20.8 MiB | 567 MiB |
+| Whole orchestrator, 5 nginx (PSS) | **33.5 MiB** | 31.7 MiB | 579 MiB |
+| … the litek8s process / k3s-server, 0 → 5 nginx | 23.2 → 25.9 MiB | 20.8 → 24.1 MiB | 391 → 391 MiB |
+| … the container runtime, 0 → 5 nginx | 0 → 7.6 MiB (5 shims) | 0 → 7.6 MiB | 120 → 146 MiB |
+| … addon pods (CoreDNS) | — | — | 60 → 47 MiB |
+| Guest RAM left (MemAvailable), 5 nginx | **631 MiB** | 624 MiB | 232 MiB |
+| Idle CPU, 0 workloads (whole guest, % of one vCPU) | **0.07 %** | 0.06 % | 1.61 % |
+| Idle CPU, 5 nginx (whole guest, % of one vCPU) | **0.16 %** | 0.12 % | 2.21 % |
+| Apply → first Ready pod (median of 15, warm image) | **0.08 s** | 0.08 s | 0.76 s |
+| Disk used after install (no workload images) | 47 MiB | 47 MiB | 438 MiB |
+
+**Read:** the whole control plane (API server, object store, controllers,
+scheduler, DNS, service proxy, node agent, metrics, logs and alerts) idles
+at **23 MiB, 24× less than k3s minimal**; with 5 nginx pods the whole
+orchestrator, runtime included, is **33.5 MiB, 17× less**. Observability
+costs 2.4 MiB with no pods and 1.8 MiB with five (the A/B above measured
+1.8 MiB). Against 2026-10-17 (arm64: 14.0 MiB idle, 24.6 MiB with 5
+nginx) the process is 9 MiB larger; this run cannot say how much of that is
+the architecture (the x86_64 binary is larger, and PSS counts the code
+pages it touched) and how much the features since. The runtime side did not
+move (five shims, 7.6 MiB). Same day and harness, k3s minimal is what it
+was (567 MiB idle here, 572 MiB on arm64).
+
+**`litek8s dev`** (release binaries in a scratch `LITEK8S_HOME`, one
+cluster; [`dev.md`](results/2026-10-21-footprint-x86-kvm/dev.md)):
+
+| | idle | 5 nginx |
+|---|---|---|
+| Linux, rootless sandbox (omarchy), in use (`memory.current - file`) | **44 MiB** (pasta 25, litek8s 19) | 124 MiB (a later sample of 123: pods 63¹, the rest 60) |
+| macOS, the VM process's footprint (Activity Monitor) | **238 MiB** | 381 MiB |
+| macOS, used inside the guest | — | 182 MiB |
+
+¹ nginx starts a worker per CPU: 16 per pod on this 16-thread host.
+
+On macOS a cluster is a Linux VM, and Activity Monitor shows the VM:
+238 MiB fresh, of which the cluster (litek8s and its pods) is 30 MiB and
+the rest the guest kernel, the guest's own processes and its page cache.
+The footprint then only grows: Virtualization.framework keeps every page
+the guest touched until the VM stops, so after pulling and starting 5
+nginx it stays at ~380 MiB even with the pods deleted again (154 MiB used
+in the guest), and a VM in daily use grows toward its ceiling (1 GiB until
+the guest needs more; another dev VM on the same Mac, up for a day with one
+cluster: 1050 MiB). Stopping the VM (`dev down` of its last cluster) hands
+it back ([docs/dev.md](../docs/dev.md#memory-on-macos)).
+
+**Rerun:** `LITEK8S_BIN=<linux binary> bench/run.sh kube-crun k3s-minimal`,
+`KUBE_ARGS=--no-observability` for the other column;
+`python3 bench/results/2026-10-21-footprint-x86-kvm/summarize.py <results dir>`
+after collecting rounds as `r<N>-{on,off,k3s}`.
+
 ## Remote node over SSH (litek8s only)
 
 Control plane in one guest, the node in a second guest of the same shape, reached through

@@ -57,5 +57,5 @@
   <text class="d-t" x="508" y="494" text-anchor="middle">crun: containers</text>
   <text class="d-s" x="508" y="513" text-anchor="middle">no containerd, no pause containers</text>
   <text class="d-note" x="24" y="494">one Rust process</text>
-  <text class="d-note d-note-muted" x="24" y="513">idles at about 20 MiB</text>
+  <text class="d-note d-note-muted" x="24" y="513">idles at 23 MiB</text>
 </svg>

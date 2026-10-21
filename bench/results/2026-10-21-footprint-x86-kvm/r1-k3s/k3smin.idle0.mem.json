@@ -1,0 +1,115 @@
+{
+ "buckets": {
+  "os/other": {
+   "rss_kib": 164056,
+   "pss_kib": 75099,
+   "procs": 18,
+   "comms": {
+    "systemd": 2,
+    "systemd-journal": 1,
+    "multipathd": 1,
+    "systemd-udevd": 1,
+    "systemd-resolve": 1,
+    "systemd-timesyn": 1,
+    "systemd-network": 1,
+    "cron": 1,
+    "dbus-daemon": 1,
+    "polkitd": 1,
+    "systemd-logind": 1,
+    "udisksd": 1,
+    "rsyslogd": 1,
+    "agetty": 2,
+    "ModemManager": 1,
+    "(sd-pam)": 1
+   }
+  },
+  "sshd": {
+   "rss_kib": 25856,
+   "pss_kib": 7875,
+   "procs": 3,
+   "comms": {
+    "sshd": 3
+   }
+  },
+  "k3s-server": {
+   "rss_kib": 463880,
+   "pss_kib": 402830,
+   "procs": 1,
+   "comms": {
+    "k3s-server": 1
+   }
+  },
+  "containerd": {
+   "rss_kib": 175276,
+   "pss_kib": 114226,
+   "procs": 1,
+   "comms": {
+    "containerd": 1
+   }
+  },
+  "containerd-shim": {
+   "rss_kib": 17072,
+   "pss_kib": 17068,
+   "procs": 1,
+   "comms": {
+    "containerd-shim": 1
+   }
+  },
+  "pod sandbox (pause)": {
+   "rss_kib": 752,
+   "pss_kib": 744,
+   "procs": 1,
+   "comms": {
+    "pause": 1
+   }
+  },
+  "k8s addon pods": {
+   "rss_kib": 59576,
+   "pss_kib": 59572,
+   "procs": 1,
+   "comms": {
+    "coredns": 1
+   }
+  }
+ },
+ "pods": {
+  "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-podccd77a6e_dc6a_4451_a582_f86a9c6f20b5.slice": {
+   "kind": "k8s addon pods",
+   "pss_kib": 59572,
+   "comms": [
+    "coredns"
+   ]
+  }
+ },
+ "categories": {
+  "os/other": {
+   "rss_kib": 164056,
+   "pss_kib": 75099
+  },
+  "node-agent": {
+   "rss_kib": 25856,
+   "pss_kib": 7875
+  },
+  "control-plane": {
+   "rss_kib": 463880,
+   "pss_kib": 402830
+  },
+  "runtime": {
+   "rss_kib": 193100,
+   "pss_kib": 132038
+  },
+  "addons": {
+   "rss_kib": 59576,
+   "pss_kib": 59572
+  }
+ },
+ "system": {
+  "mem_total_kib": 984184,
+  "mem_available_kib": 301092,
+  "mem_used_kib": 683092
+ },
+ "cgroup_memory_current_kib": {
+  "system.slice/k3s.service": 624740,
+  "kubepods.slice": 10896
+ }
+}

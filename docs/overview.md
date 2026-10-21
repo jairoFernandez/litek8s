@@ -4,7 +4,7 @@
 labs and the edge. It serves the real Kubernetes API, so `kubectl`, Helm
 and Argo CD work unchanged, but the whole control plane, scheduler,
 controllers, DNS, service proxy and node agent are one Rust process that
-idles at about 20 MiB.
+idles at 23 MiB on Linux (on macOS, plus the small VM it runs in).
 
 ```bash
 litek8s dev up        # a local cluster: ~0.2 s on Linux, ~1.3 s on macOS

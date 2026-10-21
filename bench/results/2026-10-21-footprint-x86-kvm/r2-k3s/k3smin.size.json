@@ -1,0 +1,1 @@
+{"disk_used_delta_kib": 451348, "k3s_binary_kib": 77224, "var_lib_rancher_k3s_kib": 373372, "k3s_data_dir_kib": 258884, "k3s_containerd_store_kib": 105780, "k3s_version": "k3s version v1.36.5+k3s1 (3dd98cc5)"}
