@@ -32,7 +32,8 @@ export const groups = [
       { slug: 'ha', label: 'HA control plane', source: 'docs/ha.md' },
       { slug: 'crds', label: 'CRDs and server-side apply', source: 'docs/crds.md' },
       { slug: 'agents', label: 'MCP and LLM agents', source: 'docs/agents.md' },
-      { slug: 'llm', label: 'LLM inference', source: 'docs/llm.md', badge: 'experimental' },
+      { slug: 'llm-cluster', label: 'One LLM across machines', source: 'docs/llm-cluster.md' },
+      { slug: 'llm', label: 'Built-in LLM experiment', source: 'docs/llm.md', badge: 'experimental' },
     ],
   },
   {

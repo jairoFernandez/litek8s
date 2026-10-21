@@ -1,5 +1,15 @@
 # Local LLM inference (experimental, `--features llm`)
 
+> **To run an LLM split across your machines, use
+> [llm-cluster.md](llm-cluster.md)**: llama.cpp's RPC backend as a
+> DaemonSet plus one llama-server, manifests in
+> [`examples/llm-rpc/`](../examples/llm-rpc/README.md), tested on a dev
+> cluster and on real nodes. What this experiment taught (pooling memory is
+> the win, not speed) holds there too.
+>
+> The code below goes away in 0.2.0, with its `litek8s llm`, `model`,
+> `tensor` and `pipeline` commands.
+
 The `llm` feature (on in `cargo build`'s defaults, off in the release
 binaries) adds `litek8s llm` and `litek8s model`: Qwen inference on the CPU
 with SafeTensors or GGUF weights, a disk-backed KV cache and distributed
