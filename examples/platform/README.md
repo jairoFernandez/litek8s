@@ -174,13 +174,14 @@ seal in `gitops/cluster/openbao.yaml`.
 
 ## Notes
 
-- **No ServerSideApply in Argo CD (yet).** Argo CD's diff for server-side
-  apply needs the server's OpenAPI models of the built-in types, which
-  litek8s does not serve yet (`unable to resolve parseableType for
-  GroupVersionKind: /v1, Kind=ServiceAccount`). The Applications use
-  client-side apply; the three CRDs too big for it (its 256 KiB annotation:
-  external-secrets' SecretStore and ClusterSecretStore, Argo CD's
-  ApplicationSet) carry `argocd.argoproj.io/sync-options: Replace=true`.
+- **Client-side apply in Argo CD.** Argo CD's diff for server-side apply
+  needs the server's OpenAPI models of the built-in types, which litek8s
+  0.2.1 and older do not serve (`unable to resolve parseableType for
+  GroupVersionKind: /v1, Kind=ServiceAccount`; served since, see
+  CHANGELOG.md). So that the example runs on those too, the Applications use
+  client-side apply, and the three CRDs too big for it (its 256 KiB
+  annotation: external-secrets' SecretStore and ClusterSecretStore, Argo
+  CD's ApplicationSet) carry `argocd.argoproj.io/sync-options: Replace=true`.
 - **No wait Jobs.** kubefirst orders its waves with Jobs that wait for
   Deployments; here Argo CD's health check for Applications (in
   `components/argocd/argocd-cm.yaml`) makes the app of apps wait for each
