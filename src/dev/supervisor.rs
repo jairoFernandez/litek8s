@@ -128,6 +128,15 @@ fn remove_cgroup(dir: &Path) {
     let _ = std::fs::remove_dir(dir);
 }
 
+/// pasta, unless `LITEK8S_DEV_NETWORK=slirp4netns` asks for slirp4netns
+/// (some pasta releases drop TCP flows now and then, see docs/dev.md).
+fn pasta() -> Option<PathBuf> {
+    if std::env::var("LITEK8S_DEV_NETWORK").is_ok_and(|v| v == "slirp4netns") && which("slirp4netns").is_some() {
+        return None;
+    }
+    which("pasta")
+}
+
 /// The userspace network of the sandbox's network namespace.
 enum Network {
     Pasta { pid_file: PathBuf, netns_file: Option<PathBuf> },
@@ -137,7 +146,7 @@ enum Network {
 
 impl Network {
     fn attach(pid1: u32, rootless: bool, home: &Path) -> Result<Self> {
-        if let Some(pasta) = which("pasta") {
+        if let Some(pasta) = pasta() {
             let pid_file = home.join("pasta.pid");
             let _ = std::fs::remove_file(&pid_file);
             let mut cmd = std::process::Command::new(pasta);
@@ -392,7 +401,7 @@ pub async fn run(publish: super::config::Publish, cpus: Option<usize>, memory_mi
     let mut cmd = std::process::Command::new("/proc/self/exe");
     cmd.arg("dev-sandbox").args(["dev", "__cells"]);
     cmd.env("LITEK8S_DEV_ROOTLESS", if rootless { "1" } else { "0" });
-    if which("pasta").is_some() {
+    if pasta().is_some() {
         if let Some(gw) = std::fs::read_to_string("/proc/net/route").ok().and_then(|t| super::hostinfo::parse_default_gateway(&t)) {
             cmd.env("LITEK8S_DEV_HOST_GATEWAY", gw);
         }

@@ -37,7 +37,8 @@ The cluster runs in namespaces of its own, as your user:
 
 Pods reach the Internet through [pasta](https://passt.top) (or
 slirp4netns), a userspace network stack on the host side, the way rootless
-Podman does. The host side (`litek8s dev supervise`) binds the API port on
+Podman does; `LITEK8S_DEV_NETWORK=slirp4netns` picks slirp4netns where both
+are installed (what [CI](ci.md#pasta-slirp4netns-and-githubs-runners) uses). The host side (`litek8s dev supervise`) binds the API port on
 `127.0.0.1` before the sandbox exists, and binds NodePorts and LoadBalancer
 ports on `127.0.0.1` when the cluster asks for them (it receives the
 listening sockets as file descriptors), so `localhost:<nodePort>` works

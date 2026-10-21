@@ -46,10 +46,17 @@ pub(crate) fn ipam_for(root: &Path, network_id: &str, subnet: &str) -> Result<Ip
 }
 
 /// Shell commands that create (idempotently) a network's bridge.
+///
+/// The bridge gets a fixed MAC address (derived from the gateway, as
+/// Docker does). Without one Linux gives a bridge the lowest MAC of its
+/// ports, so a new container's veth could change the gateway's MAC under
+/// the running containers, whose ARP entries then point nowhere for
+/// seconds: DNS (answered at the gateway) and egress stall.
 pub fn bridge_commands(bridge: &str, gateway: &str, prefix: u8) -> String {
+    let address = gateway.parse().map(|ip| format!("ip link set {bridge} address {}; ", mac_for(ip))).unwrap_or_default();
     format!(
         "ip link show {bridge} >/dev/null 2>&1 || ip link add {bridge} type bridge; \
-ip addr replace {gateway}/{prefix} dev {bridge}; ip link set {bridge} up"
+{address}ip addr replace {gateway}/{prefix} dev {bridge}; ip link set {bridge} up"
     )
 }
 
@@ -315,6 +322,13 @@ pub fn port_bindings(host_config: &serde_json::Value) -> BTreeMap<String, Vec<(S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bridge_mac_is_fixed() {
+        let cmds = bridge_commands("br-abc", "172.18.0.1", 16);
+        assert!(cmds.contains("ip link set br-abc address 02:42:ac:12:00:01;"), "{cmds}");
+        assert!(!bridge_commands("br-abc", "not-an-ip", 16).contains("address"));
+    }
 
     #[test]
     fn dns_answers_per_network() {
