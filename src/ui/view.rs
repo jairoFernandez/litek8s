@@ -397,7 +397,9 @@ fn memory_stack(t: &Theme, b: &crate::dev::memory::Breakdown) -> Option<((Option
     // Short of memory from 0.5 on (half of it unavailable is normal):
     // yellow at 0.75, red past 0.9.
     let level = ((b.pressure.unwrap_or(in_use as f64 / limit as f64) - 0.5) / 0.5).clamp(0.0, 1.0);
-    let mut text = format!("{} in use · {} {}", gib(in_use), b.limit_what, gib(limit));
+    // Under a GiB in MB, so a sliver never reads "0.0 GiB".
+    let used = if in_use < 1 << 30 { bytes(in_use) } else { gib(in_use) };
+    let mut text = format!("{used} in use · {} {}", b.limit_what, gib(limit));
     if level >= 0.8 {
         text.push_str(" · short");
     }

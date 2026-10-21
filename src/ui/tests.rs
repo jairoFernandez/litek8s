@@ -887,6 +887,14 @@ fn memory_and_disk_bars_name_their_scale() {
     let litek8s: String = s.lines().find(|l| l.contains(" litek8s (dev) ")).unwrap().chars().filter(|c| "█▉▊▋▌▍▎▏".contains(*c)).collect();
     assert!(bar.chars().count() >= 5 && bar.chars().count() <= 7, "{s}");
     assert_eq!(litek8s, "▏", "12 MiB of 4 GiB is a sliver: {s}");
+    assert!(s.contains("GiB in use · VM limit 4.0 GiB"), "{s}");
+    // Under a GiB the meter says MB: a sliver never reads "0.0 GiB".
+    let mut home = app.home.clone();
+    let idle = crate::dev::memory::parse_meminfo("MemTotal: 4000000 kB\nMemFree: 3900000 kB\nMemAvailable: 3950000 kB\nCached: 20000 kB\n");
+    home.memory = Some(crate::dev::memory::vm_breakdown(600 << 20, 4096 << 20, &idle, 0, None, "dev", crate::dev::memory::Usage { litek8s: 12 << 20, containers: 20 << 20, cache: 0 }, &[]));
+    app.apply(Msg::Home(Box::new(home)));
+    let s = render(&app, 80, 24);
+    assert!(s.contains(" MB in use · VM limit 4.0 GiB") && !s.contains("0.0 GiB in use"), "{s}");
 }
 
 /// `cargo test --lib ui::tests::print_screens -- --ignored --nocapture`:
