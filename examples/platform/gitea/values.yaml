@@ -1,0 +1,31 @@
+# Gitea chart (https://dl.gitea.com/charts/, 12.7.0): one pod, SQLite, Actions on.
+# The admin user comes from the Secret gitea-admin that up.sh creates.
+
+# One pod on one volume: RollingUpdate (the chart's default, maxSurge 100%)
+# starts the new pod while the old one still holds the leveldb queue lock
+# and the new one crash-loops.
+strategy:
+  type: Recreate
+
+# The chart's default HA Postgres and Valkey cluster: not needed for one pod.
+postgresql-ha:
+  enabled: false
+valkey-cluster:
+  enabled: false
+
+gitea:
+  admin:
+    existingSecret: gitea-admin
+    email: admin@lk.test
+  config:
+    database: {DB_TYPE: sqlite3}
+    session: {PROVIDER: memory}
+    cache: {ADAPTER: memory}
+    queue: {TYPE: level}
+    actions: {ENABLED: true}
+    # What runners and job containers clone from (the default
+    # git.example.com breaks actions/checkout).
+    server:
+      ROOT_URL: http://gitea-http.gitea.svc.cluster.local:3000/
+      DOMAIN: gitea-http.gitea.svc.cluster.local
+      SSH_DOMAIN: gitea-ssh.gitea.svc.cluster.local

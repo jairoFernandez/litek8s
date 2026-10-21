@@ -1,0 +1,35 @@
+# act_runner whose job containers run on litek8s's own Docker API (crun
+# containers, no dockerd, no privileged pod). The socket exists on the node
+# that runs the Docker engine: a dev cluster's server node, or a server
+# started with `litek8s apiserver --docker-socket`.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: runner-lkdocker, namespace: gitea}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: runner-lkdocker}}
+  template:
+    metadata: {labels: {app: runner-lkdocker}}
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - {key: node-role.kubernetes.io/control-plane, operator: Exists}
+      containers:
+      - name: runner
+        image: gitea/act_runner:0.2.11
+        env:
+        - {name: GITEA_INSTANCE_URL, value: "http://gitea-http.gitea.svc.cluster.local:3000"}
+        - {name: GITEA_RUNNER_NAME, value: runner-lkdocker}
+        - {name: GITEA_RUNNER_LABELS, value: "lkdocker:docker://node:20-bookworm"}
+        - name: GITEA_RUNNER_REGISTRATION_TOKEN
+          valueFrom: {secretKeyRef: {name: runner-token, key: token}}
+        volumeMounts:
+        - {name: sock, mountPath: /var/run/docker.sock}
+        - {name: data, mountPath: /data}
+      volumes:
+      - name: sock
+        hostPath: {path: /run/litek8s/docker.sock, type: Socket}
+      - {name: data, emptyDir: {}}

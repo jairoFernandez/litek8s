@@ -1,0 +1,22 @@
+# Argo CD, managed by itself after up.sh applies it once.
+# Upgrade: change the version in the URL.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: argocd
+
+resources:
+  - namespace.yaml
+  - https://raw.githubusercontent.com/argoproj/argo-cd/v3.5.5/manifests/install.yaml
+
+patches:
+  - path: argocd-cm.yaml
+  - path: argocd-cmd-params-cm.yaml
+  # Too big for client-side apply (256 KiB annotation); see README.
+  - target:
+      kind: CustomResourceDefinition
+      name: applicationsets.argoproj.io
+    patch: |-
+      - op: add
+        path: /metadata/annotations
+        value:
+          argocd.argoproj.io/sync-options: Replace=true

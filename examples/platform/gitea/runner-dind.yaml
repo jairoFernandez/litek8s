@@ -1,0 +1,36 @@
+# act_runner with its own dockerd (Docker-in-Docker, privileged sidecar):
+# works on any node, costs ~200 MiB for dockerd.
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: runner-dind, namespace: gitea}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: runner-dind}}
+  template:
+    metadata: {labels: {app: runner-dind}}
+    spec:
+      containers:
+      - name: runner
+        image: gitea/act_runner:0.2.11
+        # Wait for dockerd: the runner exits when it cannot ping it.
+        command: ["/sbin/tini", "--", "sh", "-c", "until nc -z 127.0.0.1 2375; do sleep 1; done; exec /opt/act/run.sh"]
+        env:
+        - {name: DOCKER_HOST, value: "tcp://127.0.0.1:2375"}
+        - {name: GITEA_INSTANCE_URL, value: "http://gitea-http.gitea.svc.cluster.local:3000"}
+        - {name: GITEA_RUNNER_NAME, value: runner-dind}
+        - {name: GITEA_RUNNER_LABELS, value: "dind:docker://node:20-bookworm"}
+        - name: GITEA_RUNNER_REGISTRATION_TOKEN
+          valueFrom: {secretKeyRef: {name: runner-token, key: token}}
+        volumeMounts:
+        - {name: data, mountPath: /data}
+      - name: dind
+        image: docker:27-dind
+        securityContext: {privileged: true}
+        # Empty: plain TCP on 2375 (the image adds --host itself).
+        env:
+        - {name: DOCKER_TLS_CERTDIR, value: ""}
+        volumeMounts:
+        - {name: docker, mountPath: /var/lib/docker}
+      volumes:
+      - {name: data, emptyDir: {}}
+      - {name: docker, emptyDir: {}}

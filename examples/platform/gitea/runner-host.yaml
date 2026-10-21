@@ -1,0 +1,24 @@
+# act_runner running jobs directly in its own pod (Alpine, no isolation
+# between jobs, no `uses:` actions that need node).
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: runner-host, namespace: gitea}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: runner-host}}
+  template:
+    metadata: {labels: {app: runner-host}}
+    spec:
+      containers:
+      - name: runner
+        image: gitea/act_runner:0.2.11
+        env:
+        - {name: GITEA_INSTANCE_URL, value: "http://gitea-http.gitea.svc.cluster.local:3000"}
+        - {name: GITEA_RUNNER_NAME, value: runner-host}
+        - {name: GITEA_RUNNER_LABELS, value: "host:host"}
+        - name: GITEA_RUNNER_REGISTRATION_TOKEN
+          valueFrom: {secretKeyRef: {name: runner-token, key: token}}
+        volumeMounts:
+        - {name: data, mountPath: /data}
+      volumes:
+      - {name: data, emptyDir: {}}
