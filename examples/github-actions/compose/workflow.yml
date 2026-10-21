@@ -1,0 +1,31 @@
+# Integration tests with docker compose against litek8s's Docker API, in
+# place of the runner's dockerd. Testcontainers works the same way: it
+# reads DOCKER_HOST.
+name: compose-integration
+on: [push, pull_request]
+
+jobs:
+  integration:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Exports DOCKER_HOST (litek8s's socket) and DOCKER_BUILDKIT=0, so
+      # docker and docker compose build with litek8s's own builder.
+      - uses: jairoFernandez/litek8s/.github/actions/setup-litek8s@main
+
+      - name: Start the stack
+        run: docker compose up -d --build --wait --wait-timeout 180
+
+      - name: Test from the runner and from a container
+        run: |
+          before=$(curl -fsS localhost:8000/ | awk '{print $2}')
+          docker compose run --rm test
+          after=$(curl -fsS localhost:8000/ | awk '{print $2}')
+          test "$after" -eq $((before + 3))
+
+      - name: Logs and teardown
+        if: always()
+        run: |
+          docker compose logs --no-color
+          docker compose down -v

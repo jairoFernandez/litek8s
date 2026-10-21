@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- **CI:** a GitHub Action, `jairoFernandez/litek8s/.github/actions/setup-litek8s`,
+  gives a job a cluster and a Docker API (replacing `helm/kind-action` and
+  the runner's dockerd), with Helm, compose and multi-node examples in
+  `examples/github-actions/` and a script for other CI systems
+  (`examples/ci/litek8s-ci.sh`). Measurements in [docs/ci.md](docs/ci.md).
+- Image pulls no longer hang when a connection to a registry stalls: each
+  address gets 10 s to connect and 15 s for the TLS handshake before the
+  next one is tried, and small responses must arrive within a minute. On
+  GitHub's runners pasta dropped such flows, leaving pods in
+  `ContainerCreating` for good.
+- `LITEK8S_DEV_NETWORK=slirp4netns` makes `litek8s dev` use slirp4netns
+  even where pasta is installed.
+- build.rs no longer makes every build rerun it (and rebuild the crate) in a
+  checkout without `.git/packed-refs`.
+
 ## 0.2.0
 
 litek8s is now only the Kubernetes distribution. The original Docker-backed

@@ -1,0 +1,47 @@
+# Scheduling tests on a 3-node cluster: topology spread, a DaemonSet,
+# cross-node Service traffic, and a drained node's pods moving elsewhere.
+name: multi-node
+on: [push, pull_request]
+
+jobs:
+  scheduling:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # The control plane and two workers, joined like real nodes (each
+      # with its own network namespace, pod CIDR and WireGuard overlay).
+      - uses: jairoFernandez/litek8s/.github/actions/setup-litek8s@main
+        with:
+          nodes: 3
+
+      - name: Spread three replicas over three nodes
+        run: |
+          kubectl get nodes
+          kubectl apply -f spread.yaml
+          kubectl rollout status deployment/web --timeout=3m
+          kubectl rollout status daemonset/agent --timeout=3m
+          kubectl get pods -o wide
+          test "$(kubectl get pods -l app=web -o jsonpath='{.items[*].spec.nodeName}' | tr ' ' '\n' | sort -u | wc -l)" = 3
+          test "$(kubectl get pods -l app=agent --field-selector=status.phase=Running -o name | wc -l)" = 3
+
+      - name: Reach the Service from every node
+        run: |
+          for pod in $(kubectl get pods -l app=agent -o name); do
+            kubectl exec "$pod" -- wget -qO- -T 5 http://web >/dev/null
+          done
+
+      - name: Drain a worker
+        run: |
+          node="$(kubectl get nodes -l '!node-role.kubernetes.io/control-plane' -o name | head -1 | cut -d/ -f2)"
+          kubectl drain "$node" --ignore-daemonsets --timeout=2m
+          kubectl get pods -l app=web -o wide
+          # Nothing of the Deployment is left there: its evicted replica
+          # runs on another node or waits (Pending) under maxSkew 1.
+          ! kubectl get pods -l app=web -o jsonpath='{.items[*].spec.nodeName}' | grep -qw "$node"
+          kubectl uncordon "$node"
+          kubectl rollout status deployment/web --timeout=2m
+
+      - name: Diagnostics
+        if: failure()
+        run: litek8s-diagnose
