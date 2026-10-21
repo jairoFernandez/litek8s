@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- The API server publishes the OpenAPI definitions of the built-in types
+  (Kubernetes 1.33) next to the CRDs' schemas, in `/openapi/v2` (JSON and
+  protobuf) and `/openapi/v3`. Argo CD's `ServerSideApply=true` and
+  `ServerSideDiff=true` work (they failed with `unable to resolve
+  parseableType for GroupVersionKind`), and `kubectl explain` shows built-in
+  types. Compat corpus case `argocd_ssa` (L4).
+
 ## 0.2.0
 
 litek8s is now only the Kubernetes distribution. The original Docker-backed

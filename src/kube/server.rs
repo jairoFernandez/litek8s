@@ -39,6 +39,7 @@ use super::defaults;
 use super::discovery;
 use super::join;
 use super::metrics::{self, Metrics};
+use super::openapi;
 use super::patch;
 use super::protobuf;
 use super::registry::{Registry, ResourceType};
@@ -1098,6 +1099,38 @@ fn json_response_typed(code: StatusCode, value: &Value, content_type: &'static s
     resp
 }
 
+fn bytes_response(body: Vec<u8>, content_type: &'static str) -> Response<Body> {
+    let mut resp = Response::new(full(body));
+    resp.headers_mut().insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+    resp
+}
+
+/// Builds an OpenAPI document on the blocking pool: it takes a few
+/// milliseconds and waits for other OpenAPI requests (`openapi::render`).
+async fn openapi_blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+    tokio::task::spawn_blocking(f).await.expect("OpenAPI document")
+}
+
+/// A per-group-version OpenAPI v3 document. Asked for with the current hash
+/// (the URL `/openapi/v3` lists), it never changes, so clients may cache it
+/// (kubectl's disk cache does), as the API server allows.
+async fn openapi_v3_response(state: &Arc<ApiState>, req: &Req, group: &str, version: &str) -> Result<Response<Body>, ApiError> {
+    let crds = state.crds();
+    let hash = openapi::registry_hash(&state.registry, &crds);
+    let (st, group, version) = (state.clone(), group.to_string(), version.to_string());
+    let doc = openapi_blocking(move || openapi::openapi_group_version(&st.registry, &crds, &group, &version))
+        .await
+        .ok_or_else(ApiError::not_found_path)?;
+    let mut resp = bytes_response(doc, "application/json");
+    if req.q("hash") == Some(hash.as_str()) {
+        resp.headers_mut().insert(hyper::header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=31536000, immutable"));
+    }
+    if let Ok(etag) = HeaderValue::from_str(&format!("\"{hash}\"")) {
+        resp.headers_mut().insert(hyper::header::ETAG, etag);
+    }
+    Ok(resp)
+}
+
 fn text_response(body: &'static str) -> Response<Body> {
     let mut resp = Response::new(full(body));
     resp.headers_mut()
@@ -1428,28 +1461,19 @@ async fn route(state: &Arc<ApiState>, path: &str, req: &Req) -> Result<Response<
                 Err(ApiError::not_found_path())
             }
         }
-        ["openapi", "v3"] if get => Ok(json_response(StatusCode::OK, &discovery::openapi_root(&state.registry, &state.crds()))),
-        ["openapi", "v3", "api", version] if get => discovery::openapi_group_version(&state.registry, &state.crds(), "", version)
-            .map(|d| json_response(StatusCode::OK, &d))
-            .ok_or_else(ApiError::not_found_path),
-        ["openapi", "v3", "apis", group, version] if get => {
-            discovery::openapi_group_version(&state.registry, &state.crds(), group, version)
-                .map(|d| json_response(StatusCode::OK, &d))
-                .ok_or_else(ApiError::not_found_path)
-        }
-        // kubectl falls back to OpenAPI v2 for kinds the v3 index does not
-        // list (e.g. `kind: List`) and asks for the gnostic protobuf form. An
-        // empty message is a valid empty document: no schemas, so kubectl
-        // skips client-side checks and the server validates instead.
+        ["openapi", "v3"] if get => Ok(json_response(StatusCode::OK, &openapi::openapi_root(&state.registry, &state.crds()))),
+        ["openapi", "v3", "api", version] if get => openapi_v3_response(state, req, "", version).await,
+        ["openapi", "v3", "apis", group, version] if get => openapi_v3_response(state, req, group, version).await,
+        // client-go's OpenAPISchema() (kubectl, Argo CD) asks for the gnostic
+        // protobuf form.
         ["openapi", "v2"] if get && req.accept.contains("protobuf") => {
-            let mut resp = Response::new(full(Bytes::new()));
-            resp.headers_mut().insert(
-                CONTENT_TYPE,
-                HeaderValue::from_static("application/com.github.proto-openapi.spec.v2.v1.0+protobuf"),
-            );
-            Ok(resp)
+            let crds = state.crds();
+            Ok(bytes_response(openapi_blocking(move || openapi::openapi_v2_protobuf(&crds)).await, openapi::PROTOBUF_TYPE))
         }
-        ["openapi", "v2"] if get => Ok(json_response(StatusCode::OK, &discovery::openapi_v2(&state.crds()))),
+        ["openapi", "v2"] if get => {
+            let crds = state.crds();
+            Ok(bytes_response(openapi_blocking(move || openapi::openapi_v2(&crds)).await, "application/json"))
+        }
         ["apis", "agent.litek8s.dev", "v1", "connect"] if get => agent_connect(state, req),
         ["apis", "agent.litek8s.dev", "v1", "join"] if req.method == Method::POST => {
             join::handle_join(state, req.header("authorization"), req.header(join::PASSWORD_HEADER), &req.body)

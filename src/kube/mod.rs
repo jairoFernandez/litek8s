@@ -17,6 +17,8 @@ pub mod ha;
 pub mod join;
 pub mod managed;
 pub mod metrics;
+pub mod openapi;
+mod openapi_pb;
 pub mod patch;
 mod pod_streams;
 pub mod protobuf;

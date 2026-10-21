@@ -1,0 +1,2 @@
+{"id": "helm_argo_cd", "tier": "L4", "status": "pass", "seconds": 19, "detail": "argo-cd-10.10.5"}
+{"id": "argocd_ssa", "tier": "L4", "status": "pass", "seconds": 18, "detail": ""}
