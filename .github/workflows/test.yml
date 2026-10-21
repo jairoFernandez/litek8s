@@ -8,6 +8,10 @@ on:
   pull_request:
     paths-ignore: ["web/**"]
   workflow_dispatch:
+    inputs:
+      loop_runs:
+        description: "Fresh 3-node dev clusters for the multi-node loop"
+        default: "10"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -129,3 +133,36 @@ jobs:
       - name: Diagnostics
         if: failure()
         run: litek8s-diagnose ci
+
+  # The multi-node example's start, again and again on fresh clusters: every
+  # pod must get the cluster DNS alone and reach the Service (a worker that
+  # joined before the server's DNS was up once gave its pods the runner's
+  # resolvers, and `web` resolved on the Internet).
+  multinode-loop:
+    needs: build-linux
+    name: multi-node loop
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: litek8s-linux
+          path: ${{ runner.temp }}/bin
+      # Prepares the runner (user namespaces, the user's systemd); the loop
+      # makes its own clusters in a LITEK8S_HOME of its own.
+      - uses: ./.github/actions/setup-litek8s
+        with:
+          binary: ${{ runner.temp }}/bin/litek8s
+          docker: false
+      - name: bench/dev-multinode-loop.sh
+        env:
+          LITEK8S_HOME: ${{ runner.temp }}/loop
+        run: mkdir -p "$LITEK8S_HOME" && bench/dev-multinode-loop.sh "${{ inputs.loop_runs || '10' }}"
+      - name: Failed runs
+        if: failure()
+        run: |
+          for d in "$RUNNER_TEMP"/loop/loop-*; do
+            [[ -d "$d" ]] || continue
+            echo "::group::$d"; tail -n 60 "$d"/*; echo "::endgroup::"
+          done
