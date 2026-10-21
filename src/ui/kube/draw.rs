@@ -59,6 +59,7 @@ pub fn draw(f: &mut Frame, app: &App, area: Rect) {
         View::Pager(p) => pager(f, p, t, body),
         View::Logs(l) => logs(f, l, t, body),
         View::Xray(x) => xray(f, x, t, body),
+        View::Tree(tv) => tree(f, app, tv, body),
         View::Forwards { sel } => forwards(f, ui, *sel, app.now, body),
     }
     match &ui.overlay {
@@ -94,6 +95,7 @@ fn header(f: &mut Frame, app: &App, area: Rect) {
             },
             View::Logs(_) => "logs".into(),
             View::Xray(x) => format!("xray {}", x.res.plural),
+            View::Tree(_) => "tree".into(),
             View::Forwards { .. } => "port-forwards".into(),
         })
         .collect();
@@ -552,6 +554,76 @@ fn xray(f: &mut Frame, x: &XrayView, t: &Theme, area: Rect) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+/// `:tree`: connectors dim, a health glyph, the kind dim, the name, what
+/// it says in its health's color; namespace lines bold.
+fn tree(f: &mut Frame, app: &App, tv: &super::treeview::TreeView, area: Rect) {
+    let t = &app.kube.theme;
+    let mut title = format!("tree {}", tv.ns.as_deref().map(|n| format!("namespace {n}")).unwrap_or_else(|| "all namespaces".into()));
+    if tv.all {
+        title.push_str(" (with old ReplicaSets)");
+    }
+    if let Some(fl) = &tv.filter {
+        title.push_str(&format!("  /{}", fl.raw));
+    }
+    let objects = tv.rows.iter().filter(|r| r.kind.is_some()).count();
+    let right = vec![Span::styled(if tv.loading { "loading…".to_string() } else { format!("{objects} objects") }, t.dim)];
+    let rw: usize = right.iter().map(|s| s.width()).sum();
+    let b = t.block_with(trunc(&title, (area.width as usize).saturating_sub(rw + 10)), right).padding(Padding::left(1));
+    let inner = b.inner(area);
+    f.render_widget(b, area);
+    let mut height = inner.height as usize;
+    let mut lines: Vec<Line> = Vec::new();
+    for m in &tv.missing {
+        lines.push(Line::styled(trunc(&format!("✕ {m}"), inner.width as usize), t.warn));
+        height = height.saturating_sub(1);
+    }
+    tv.height.set(height.max(1));
+    let mut off = tv.offset.get().min(tv.shown.len().saturating_sub(1));
+    if tv.sel < off {
+        off = tv.sel;
+    }
+    if tv.sel >= off + height {
+        off = tv.sel + 1 - height;
+    }
+    tv.offset.set(off);
+    let width = inner.width as usize;
+    for (n, &i) in tv.shown.iter().enumerate().skip(off).take(height) {
+        let r = &tv.rows[i];
+        let sel = n == tv.sel;
+        let base = if sel { t.selected } else { Style::new() };
+        let on = |s: Style| if sel { base } else { s };
+        let mut spans = vec![Span::styled(tv.prefix[n].clone(), on(t.dim))];
+        spans.push(Span::styled(format!("{} ", r.health.glyph()), on(t.health(r.health))));
+        match r.kind {
+            None => spans.push(Span::styled(r.name.clone(), on(t.bold))),
+            Some(k) => {
+                spans.push(Span::styled(format!("{} ", k.name()), on(t.dim)));
+                spans.push(Span::styled(r.name.clone(), base));
+            }
+        }
+        let more = if tv.hidden[n] > 0 { format!("  ▸ {} more", tv.hidden[n]) } else { String::new() };
+        // What it says gets what is left of the width.
+        let used: usize = spans.iter().map(|s| s.width()).sum::<usize>() + more.chars().count();
+        if !r.detail.is_empty() && used + 3 < width {
+            spans.push(Span::styled(format!("  {}", trunc(&r.detail, width - used - 2)), on(t.health(r.health))));
+        }
+        if !more.is_empty() {
+            spans.push(Span::styled(more, on(t.accent.remove_modifier(Modifier::BOLD))));
+        }
+        let used: usize = spans.iter().map(|s| s.width()).sum();
+        if sel && used < width {
+            spans.push(Span::styled(" ".repeat(width - used), base));
+        }
+        let line = Line::from(spans);
+        lines.push(line);
+    }
+    if tv.shown.is_empty() {
+        let msg = if tv.loading { " loading…" } else if tv.filter.is_some() { " nothing matches (esc clears the filter)" } else { " nothing here" };
+        lines.push(Line::styled(msg, t.dim));
+    }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 fn forwards(f: &mut Frame, ui: &KubeUi, sel: usize, now: i64, area: Rect) {
     let t = &ui.theme;
     let b = block(format!("port-forwards [{}]", ui.forwards.len()), t);
@@ -672,6 +744,7 @@ pub fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
         }
         View::Logs(_) => vec![("esc", "back"), ("f", "follow"), ("/", "filter"), ("t", "time"), ("w", "wrap"), ("p", "previous"), ("^s", "save")],
         View::Xray(_) => vec![("esc", "back"), ("enter", "fold"), ("d", "describe"), ("l", "logs"), ("s", "shell")],
+        View::Tree(_) => vec![("esc", "back"), ("space", "fold"), ("enter", "describe"), ("/", "filter"), ("l", "logs"), ("0", "all ns")],
         View::Forwards { .. } => vec![("esc", "back"), ("d", "stop")],
     }
 }

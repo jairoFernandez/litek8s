@@ -15,6 +15,7 @@ pub mod resources;
 pub mod rt;
 pub mod state;
 pub mod table;
+pub mod treeview;
 pub mod uiconfig;
 pub mod yaml;
 

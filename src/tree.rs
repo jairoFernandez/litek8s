@@ -5,6 +5,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 
+use crate::ui::theme::Health;
+
 use anyhow::Result;
 use hyper::Method;
 use serde_json::Value;
@@ -114,179 +116,345 @@ fn restarts(p: &Value) -> i64 {
     p.pointer("/status/containerStatuses").and_then(Value::as_array).into_iter().flatten().map(|c| n(c, "/restartCount")).sum()
 }
 
-fn label(kind: &str, o: &Value) -> String {
-    let name = s(o, "/metadata/name");
-    let detail = match kind {
-        "Deployment" | "ReplicaSet" | "StatefulSet" => {
-            let want = o.pointer("/spec/replicas").and_then(Value::as_i64).unwrap_or(1);
-            format!("{}/{} ready", n(o, "/status/readyReplicas"), want)
-        }
-        "DaemonSet" => format!("{}/{} ready", n(o, "/status/numberReady"), n(o, "/status/desiredNumberScheduled")),
-        "Job" => {
-            let want = o.pointer("/spec/completions").and_then(Value::as_i64).unwrap_or(1);
-            let failed = n(o, "/status/failed");
-            let mut d = format!("{}/{} done", n(o, "/status/succeeded"), want);
-            if failed > 0 {
-                d.push_str(&format!(", {failed} failed"));
-            }
-            d
-        }
-        "CronJob" => {
-            let mut d = format!("schedule {}", s(o, "/spec/schedule"));
-            if o.pointer("/spec/suspend").and_then(Value::as_bool) == Some(true) {
-                d.push_str(", suspended");
-            }
-            d
-        }
-        "Pod" => {
-            let mut d = pod_status(o);
-            let node = s(o, "/spec/nodeName");
-            if !node.is_empty() {
-                d.push_str(&format!(" on {node}"));
-            }
-            let r = restarts(o);
-            if r > 0 {
-                d.push_str(&format!(", {r} restart{}", if r == 1 { "" } else { "s" }));
-            }
-            d
-        }
-        _ => String::new(),
-    };
-    format!("{kind} {name}  {detail}")
+/// The kinds a tree has, in the order a namespace lists them (by name).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub enum Kind {
+    CronJob,
+    DaemonSet,
+    #[default]
+    Deployment,
+    Job,
+    Node,
+    Pod,
+    ReplicaSet,
+    Service,
+    StatefulSet,
 }
 
-/// Whether a Service's selector picks a pod.
-fn selects(svc: &Value, pod: &Value) -> bool {
-    let Some(sel) = svc.pointer("/spec/selector").and_then(Value::as_object).filter(|m| !m.is_empty()) else {
-        return false;
-    };
-    sel.iter().all(|(k, v)| pod.pointer("/metadata/labels").and_then(|l| l.get(k)) == Some(v))
-}
-
-struct Node {
-    label: String,
-    children: Vec<Node>,
-}
-
-fn draw(out: &mut String, nodes: &[Node], prefix: &str) {
-    for (i, node) in nodes.iter().enumerate() {
-        let last = i + 1 == nodes.len();
-        out.push_str(prefix);
-        out.push_str(if last { "└─ " } else { "├─ " });
-        out.push_str(&node.label);
-        out.push('\n');
-        draw(out, &node.children, &format!("{prefix}{}", if last { "   " } else { "│  " }));
+impl Kind {
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::CronJob => "CronJob",
+            Kind::DaemonSet => "DaemonSet",
+            Kind::Deployment => "Deployment",
+            Kind::Job => "Job",
+            Kind::Node => "Node",
+            Kind::Pod => "Pod",
+            Kind::ReplicaSet => "ReplicaSet",
+            Kind::Service => "Service",
+            Kind::StatefulSet => "StatefulSet",
+        }
     }
+
+    /// The API's plural (the UI's resource name).
+    pub fn plural(self) -> &'static str {
+        match self {
+            Kind::CronJob => "cronjobs",
+            Kind::DaemonSet => "daemonsets",
+            Kind::Deployment => "deployments",
+            Kind::Job => "jobs",
+            Kind::Node => "nodes",
+            Kind::Pod => "pods",
+            Kind::ReplicaSet => "replicasets",
+            Kind::Service => "services",
+            Kind::StatefulSet => "statefulsets",
+        }
+    }
+
+    pub const ALL: [Kind; 9] = [Kind::Node, Kind::Pod, Kind::ReplicaSet, Kind::Deployment, Kind::StatefulSet, Kind::DaemonSet, Kind::Job, Kind::CronJob, Kind::Service];
+}
+
+/// One object as a tree needs it: from the API's objects (`litek8s tree`)
+/// or from a UI's table rows (`litek8s ui`'s `:tree`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Item {
+    pub kind: Kind,
+    pub ns: String,
+    pub name: String,
+    pub uid: String,
+    /// The controlling owner's uid.
+    pub owner: Option<String>,
+    /// What follows the name: `1/2 ready`, `Running on n1, 3 restarts`; a
+    /// service's type, IP and ports; a node's Ready condition.
+    pub detail: String,
+    pub health: Health,
+    /// A pod's labels (services pick pods by them).
+    pub labels: BTreeMap<String, String>,
+    /// A service's selector (empty: it selects nothing itself).
+    pub selector: BTreeMap<String, String>,
+    /// A pod's node.
+    pub node: String,
+    /// A pod that counts as ready for a service.
+    pub running: bool,
+    /// An old ReplicaSet scaled to zero (history, not a workload).
+    pub history: bool,
+    /// A node's pod CIDR.
+    pub cidr: String,
+}
+
+/// A line of a tree, in order: `depth` 0 for the `nodes` and `namespace
+/// <ns>` groups, 1 for what is under them, and so on.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Row {
+    pub depth: usize,
+    /// `None` for a group line.
+    pub kind: Option<Kind>,
+    pub ns: String,
+    pub name: String,
+    pub detail: String,
+    pub health: Health,
+}
+
+impl Row {
+    /// What the line says: `Deployment api  1/2 ready`, `namespace web`.
+    pub fn text(&self) -> String {
+        match self.kind {
+            Some(k) => format!("{} {}  {}", k.name(), self.name, self.detail).trim_end().to_string(),
+            None => self.name.clone(),
+        }
+    }
+
+    /// A stable id (folds and the selection follow it).
+    pub fn key(&self) -> String {
+        match self.kind {
+            Some(k) => format!("{}/{}/{}", k.name(), self.ns, self.name),
+            None => format!("group/{}", self.name),
+        }
+    }
+}
+
+fn plural(n: usize, what: &str) -> String {
+    format!("{n} {what}{}", if n == 1 { "" } else { "s" })
+}
+
+impl Item {
+    /// From an API object of `kind`.
+    pub fn from_object(kind: Kind, o: &Value) -> Item {
+        let strings = |p: &str| -> BTreeMap<String, String> { o.pointer(p).and_then(Value::as_object).into_iter().flatten().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect() };
+        let mut it = Item {
+            kind,
+            ns: s(o, "/metadata/namespace").into(),
+            name: s(o, "/metadata/name").into(),
+            uid: s(o, "/metadata/uid").into(),
+            owner: o.pointer("/metadata/ownerReferences").and_then(Value::as_array).into_iter().flatten().find(|r| r["controller"].as_bool() == Some(true)).and_then(|r| r["uid"].as_str()).map(str::to_string),
+            ..Default::default()
+        };
+        match kind {
+            Kind::Deployment | Kind::ReplicaSet | Kind::StatefulSet => {
+                let want = o.pointer("/spec/replicas").and_then(Value::as_i64).unwrap_or(1);
+                let ready = n(o, "/status/readyReplicas");
+                it.detail = format!("{ready}/{want} ready");
+                it.health = if ready >= want { Health::Ok } else { Health::Warn };
+                it.history = kind == Kind::ReplicaSet && want == 0 && n(o, "/status/replicas") == 0;
+            }
+            Kind::DaemonSet => {
+                let (ready, want) = (n(o, "/status/numberReady"), n(o, "/status/desiredNumberScheduled"));
+                it.detail = format!("{ready}/{want} ready");
+                it.health = if ready >= want { Health::Ok } else { Health::Warn };
+            }
+            Kind::Job => {
+                let want = o.pointer("/spec/completions").and_then(Value::as_i64).unwrap_or(1);
+                let (done, failed) = (n(o, "/status/succeeded"), n(o, "/status/failed"));
+                it.detail = format!("{done}/{want} done");
+                if failed > 0 {
+                    it.detail.push_str(&format!(", {failed} failed"));
+                }
+                it.health = if failed > 0 && done < want { Health::Bad } else if done >= want { Health::Done } else { Health::Warn };
+            }
+            Kind::CronJob => {
+                it.detail = format!("schedule {}", s(o, "/spec/schedule"));
+                if o.pointer("/spec/suspend").and_then(Value::as_bool) == Some(true) {
+                    it.detail.push_str(", suspended");
+                    it.health = Health::Done;
+                }
+            }
+            Kind::Pod => {
+                let status = pod_status(o);
+                let ready = o.pointer("/status/containerStatuses").and_then(Value::as_array).map(|c| (c.iter().filter(|x| x["ready"].as_bool() == Some(true)).count(), c.len())).unwrap_or((0, 0));
+                it.health = Health::of_pod(&status, &format!("{}/{}", ready.0, ready.1));
+                it.running = status == "Running";
+                it.node = s(o, "/spec/nodeName").into();
+                it.labels = strings("/metadata/labels");
+                it.detail = pod_detail(&status, &it.node, restarts(o));
+            }
+            Kind::Service => {
+                let ports: Vec<String> = o
+                    .pointer("/spec/ports")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .map(|p| match p["nodePort"].as_i64() {
+                        Some(np) => format!("{}:{np}", p["port"]),
+                        None => p["port"].to_string(),
+                    })
+                    .collect();
+                it.detail = service_detail(s(o, "/spec/type"), s(o, "/spec/clusterIP"), &ports.join(","));
+                it.selector = strings("/spec/selector");
+            }
+            Kind::Node => {
+                let ready = o
+                    .pointer("/status/conditions")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .find(|c| c["type"] == "Ready")
+                    .map(|c| if c["status"] == "True" { "Ready" } else { "NotReady" })
+                    .unwrap_or("Unknown");
+                it.detail = ready.into();
+                it.health = if ready == "Ready" { Health::Ok } else { Health::Bad };
+                it.cidr = s(o, "/spec/podCIDR").into();
+            }
+        }
+        it
+    }
+}
+
+/// `Running on n1, 3 restarts`.
+pub fn pod_detail(status: &str, node: &str, restarts: i64) -> String {
+    let mut d = status.to_string();
+    if !node.is_empty() && node != "<none>" {
+        d.push_str(&format!(" on {node}"));
+    }
+    if restarts > 0 {
+        d.push_str(&format!(", {}", plural(restarts as usize, "restart")));
+    }
+    d
+}
+
+/// `NodePort 10.43.0.9 80:30080`.
+pub fn service_detail(kind: &str, ip: &str, ports: &str) -> String {
+    let mut d = format!("{kind} {ip}");
+    if !ports.is_empty() {
+        d.push_str(&format!(" {ports}"));
+    }
+    d
+}
+
+/// Whether a selector picks a pod's labels.
+fn selects(sel: &BTreeMap<String, String>, labels: &BTreeMap<String, String>) -> bool {
+    !sel.is_empty() && sel.iter().all(|(k, v)| labels.get(k) == Some(v))
+}
+
+/// The tree's lines: nodes (with their pods, counted in `namespace` when
+/// one is given), then each namespace's workloads down their controllers'
+/// ownerReferences and its services with the pods they select. Old
+/// ReplicaSets at zero only with `all`.
+pub fn build(items: &[Item], all: bool, namespace: Option<&str>) -> Vec<Row> {
+    let by_uid: HashMap<&str, &Item> = items.iter().filter(|i| !i.uid.is_empty() && !matches!(i.kind, Kind::Node | Kind::Service)).map(|i| (i.uid.as_str(), i)).collect();
+    let mut children: HashMap<&str, Vec<&Item>> = HashMap::new();
+    let mut roots: BTreeMap<&str, Vec<&Item>> = BTreeMap::new();
+    for it in items.iter().filter(|i| !matches!(i.kind, Kind::Node | Kind::Service)) {
+        if it.history && !all {
+            continue;
+        }
+        match it.owner.as_deref().filter(|u| by_uid.contains_key(u)) {
+            Some(uid) => children.entry(uid).or_default().push(it),
+            None => roots.entry(it.ns.as_str()).or_default().push(it),
+        }
+    }
+    let row = |it: &Item, depth: usize| Row { depth, kind: Some(it.kind), ns: it.ns.clone(), name: it.name.clone(), detail: it.detail.clone(), health: it.health };
+    fn walk<'a>(it: &'a Item, depth: usize, children: &HashMap<&'a str, Vec<&'a Item>>, out: &mut Vec<Row>, row: &dyn Fn(&Item, usize) -> Row) {
+        out.push(row(it, depth));
+        let mut kids: Vec<&&Item> = children.get(it.uid.as_str()).map(|v| v.iter().collect()).unwrap_or_default();
+        kids.sort_by_key(|k| (k.kind, k.name.as_str()));
+        for k in kids {
+            walk(k, depth + 1, children, out, row);
+        }
+    }
+    let pods: Vec<&Item> = items.iter().filter(|i| i.kind == Kind::Pod).collect();
+    let mut out = Vec::new();
+    let mut nodes: Vec<&Item> = items.iter().filter(|i| i.kind == Kind::Node).collect();
+    nodes.sort_by_key(|n| n.name.as_str());
+    if !nodes.is_empty() {
+        out.push(Row { depth: 0, kind: None, ns: String::new(), name: "nodes".into(), detail: String::new(), health: Health::Ok });
+        for n in nodes {
+            let count = pods.iter().filter(|p| p.node == n.name).count();
+            let scope = namespace.map(|ns| format!(" in {ns}")).unwrap_or_default();
+            let mut detail = format!("{}, {}{scope}", n.detail, plural(count, "pod"));
+            if !n.cidr.is_empty() {
+                detail.push_str(&format!(", pods {}", n.cidr));
+            }
+            out.push(Row { detail, ..row(n, 1) });
+        }
+    }
+    let mut services: BTreeMap<&str, Vec<&Item>> = BTreeMap::new();
+    for svc in items.iter().filter(|i| i.kind == Kind::Service) {
+        services.entry(svc.ns.as_str()).or_default().push(svc);
+    }
+    let mut namespaces: Vec<&str> = roots.keys().chain(services.keys()).copied().collect();
+    namespaces.sort();
+    namespaces.dedup();
+    for ns in namespaces {
+        out.push(Row { depth: 0, kind: None, ns: ns.to_string(), name: format!("namespace {ns}"), detail: String::new(), health: Health::Ok });
+        let mut list: Vec<&&Item> = roots.get(ns).map(|v| v.iter().collect()).unwrap_or_default();
+        list.sort_by_key(|i| (i.kind, i.name.as_str()));
+        for it in list {
+            walk(it, 1, &children, &mut out, &row);
+        }
+        let mut svcs = services.get(ns).cloned().unwrap_or_default();
+        svcs.sort_by_key(|s| s.name.as_str());
+        for svc in svcs {
+            let mut r = row(svc, 1);
+            if !svc.selector.is_empty() {
+                let picked: Vec<&&Item> = pods.iter().filter(|p| p.ns == ns && selects(&svc.selector, &p.labels)).collect();
+                let ready = picked.iter().filter(|p| p.running).count();
+                r.detail.push_str(&format!(" → {ready}/{} pods", picked.len()));
+                r.health = if picked.is_empty() || ready == 0 { Health::Warn } else if ready < picked.len() { Health::Warn } else { Health::Ok };
+            }
+            out.push(r);
+        }
+    }
+    out
+}
+
+/// For each line, whether it is the last of its siblings.
+pub fn last_flags(rows: &[Row]) -> Vec<bool> {
+    let mut last = vec![true; rows.len()];
+    for i in 0..rows.len() {
+        let d = rows[i].depth;
+        if let Some(next) = rows[i + 1..].iter().find(|r| r.depth <= d) {
+            last[i] = next.depth < d;
+        }
+    }
+    last
+}
+
+/// The connectors in front of each line (`│  ├─ `), from depths alone.
+pub fn prefixes(rows: &[Row]) -> Vec<String> {
+    let last = last_flags(rows);
+    let mut open: Vec<bool> = Vec::new();
+    rows.iter()
+        .enumerate()
+        .map(|(i, r)| {
+            open.truncate(r.depth);
+            let mut p: String = open.iter().map(|o| if *o { "│  " } else { "   " }).collect();
+            p.push_str(if last[i] { "└─ " } else { "├─ " });
+            open.push(!last[i]);
+            p
+        })
+        .collect()
 }
 
 pub fn render(server: &str, o: &Objects, all: bool, namespace: Option<&str>) -> String {
-    // Objects by uid, and each owner's children (by kind, then name).
-    let mut kinds: Vec<(&str, &Vec<Value>)> = vec![
-        ("CronJob", &o.cronjobs),
-        ("Deployment", &o.deployments),
-        ("StatefulSet", &o.statefulsets),
-        ("DaemonSet", &o.daemonsets),
-        ("Job", &o.jobs),
-        ("ReplicaSet", &o.replicasets),
-        ("Pod", &o.pods),
+    let lists: [(Kind, &Vec<Value>); 9] = [
+        (Kind::Node, &o.nodes),
+        (Kind::Pod, &o.pods),
+        (Kind::ReplicaSet, &o.replicasets),
+        (Kind::Deployment, &o.deployments),
+        (Kind::StatefulSet, &o.statefulsets),
+        (Kind::DaemonSet, &o.daemonsets),
+        (Kind::Job, &o.jobs),
+        (Kind::CronJob, &o.cronjobs),
+        (Kind::Service, &o.services),
     ];
-    let mut by_uid: HashMap<&str, (&str, &Value)> = HashMap::new();
-    for (kind, list) in &kinds {
-        for obj in list.iter() {
-            by_uid.insert(s(obj, "/metadata/uid"), (kind, obj));
-        }
-    }
-    let mut children: HashMap<&str, Vec<(&str, &Value)>> = HashMap::new();
-    let mut roots: BTreeMap<&str, Vec<(&str, &Value)>> = BTreeMap::new();
-    for (kind, list) in kinds.drain(..) {
-        for obj in list {
-            // An old ReplicaSet scaled to zero is history, not a workload.
-            if kind == "ReplicaSet" && !all && n(obj, "/spec/replicas") == 0 && n(obj, "/status/replicas") == 0 {
-                continue;
-            }
-            let owner = obj
-                .pointer("/metadata/ownerReferences")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .find(|r| r["controller"].as_bool() == Some(true))
-                .and_then(|r| r["uid"].as_str())
-                .filter(|uid| by_uid.contains_key(uid));
-            match owner {
-                Some(uid) => children.entry(uid).or_default().push((kind, obj)),
-                None => roots.entry(s(obj, "/metadata/namespace")).or_default().push((kind, obj)),
-            }
-        }
-    }
-    fn build<'a>(kind: &'a str, obj: &'a Value, children: &HashMap<&'a str, Vec<(&'a str, &'a Value)>>) -> Node {
-        let mut kids: Vec<&(&str, &Value)> = children.get(s(obj, "/metadata/uid")).map(|v| v.iter().collect()).unwrap_or_default();
-        kids.sort_by_key(|(k, o)| (*k, s(o, "/metadata/name")));
-        Node { label: label(kind, obj), children: kids.into_iter().map(|(k, o)| build(k, o, children)).collect() }
-    }
-
-    let mut namespaces: BTreeMap<&str, Vec<Node>> = BTreeMap::new();
-    for (ns, list) in &roots {
-        let mut list: Vec<&(&str, &Value)> = list.iter().collect();
-        list.sort_by_key(|(k, o)| (*k, s(o, "/metadata/name")));
-        namespaces.entry(ns).or_default().extend(list.into_iter().map(|(k, obj)| build(k, obj, &children)));
-    }
-    for svc in &o.services {
-        let ns = s(svc, "/metadata/namespace");
-        let picked: Vec<&Value> = o.pods.iter().filter(|p| s(p, "/metadata/namespace") == ns && selects(svc, p)).collect();
-        let ready = picked.iter().filter(|p| pod_status(p) == "Running").count();
-        let ports: Vec<String> = svc
-            .pointer("/spec/ports")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .map(|p| match p["nodePort"].as_i64() {
-                Some(np) => format!("{}:{np}", p["port"]),
-                None => p["port"].to_string(),
-            })
-            .collect();
-        let mut detail = format!("{} {}", s(svc, "/spec/type"), s(svc, "/spec/clusterIP"));
-        if !ports.is_empty() {
-            detail.push_str(&format!(" {}", ports.join(",")));
-        }
-        if svc.pointer("/spec/selector").and_then(Value::as_object).is_some_and(|m| !m.is_empty()) {
-            detail.push_str(&format!(" → {ready}/{} pods", picked.len()));
-        }
-        namespaces.entry(ns).or_default().push(Node { label: format!("Service {}  {detail}", s(svc, "/metadata/name")), children: Vec::new() });
-    }
-
-    let mut nodes: Vec<Node> = Vec::new();
-    let mut cluster_nodes: Vec<Node> = o
-        .nodes
-        .iter()
-        .map(|node| {
-            let name = s(node, "/metadata/name");
-            let ready = node
-                .pointer("/status/conditions")
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .find(|c| c["type"] == "Ready")
-                .map(|c| if c["status"] == "True" { "Ready" } else { "NotReady" })
-                .unwrap_or("Unknown");
-            let pods = o.pods.iter().filter(|p| s(p, "/spec/nodeName") == name).count();
-            let cidr = s(node, "/spec/podCIDR");
-            let scope = namespace.map(|ns| format!(" in {ns}")).unwrap_or_default();
-            let mut d = format!("Node {name}  {ready}, {pods} pod{}{scope}", if pods == 1 { "" } else { "s" });
-            if !cidr.is_empty() {
-                d.push_str(&format!(", pods {cidr}"));
-            }
-            Node { label: d, children: Vec::new() }
-        })
-        .collect();
-    cluster_nodes.sort_by(|a, b| a.label.cmp(&b.label));
-    if !cluster_nodes.is_empty() {
-        nodes.push(Node { label: "nodes".into(), children: cluster_nodes });
-    }
-    for (ns, children) in namespaces {
-        nodes.push(Node { label: format!("namespace {ns}"), children });
-    }
+    let items: Vec<Item> = lists.iter().flat_map(|(k, l)| l.iter().map(move |v| Item::from_object(*k, v))).collect();
+    let rows = build(&items, all, namespace);
     let mut out = format!("cluster {server}\n");
-    draw(&mut out, &nodes, "");
+    for (p, r) in prefixes(&rows).iter().zip(&rows) {
+        out.push_str(p);
+        out.push_str(&r.text());
+        out.push('\n');
+    }
     out
 }
 

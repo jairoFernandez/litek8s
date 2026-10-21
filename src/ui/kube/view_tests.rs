@@ -551,3 +551,165 @@ fn filtering_thousands_of_rows_is_fast() {
     eprintln!("5000 rows: {per_key:?} per filter keystroke, {frame:?} per frame");
     assert!(per_key < std::time::Duration::from_millis(if cfg!(debug_assertions) { 400 } else { 40 }), "{per_key:?}");
 }
+
+fn obj_row(ns: &str, name: &str, uid: &str, owner: Option<&str>, cells: &[&str], health: Health, labels: serde_json::Value) -> Row {
+    let cells: Vec<String> = cells.iter().map(|s| s.to_string()).collect();
+    Row {
+        ns: ns.into(),
+        name: name.into(),
+        uid: uid.into(),
+        haystack: format!("{name} {}", cells.join(" ")).to_lowercase(),
+        cells,
+        labels: json!({"metadata": {"labels": labels}}),
+        owners: owner.map(|o| vec![super::table::Owner { kind: "X".into(), name: "x".into(), uid: o.into(), controller: true }]).unwrap_or_default(),
+        health,
+        ..Default::default()
+    }
+}
+
+fn wk(res: &str, ns: Option<&str>) -> WatchKey {
+    WatchKey { res: res.into(), ns: ns.map(str::to_string), fields: String::new() }
+}
+
+/// A namespace `shop`: deploy api → rs → 2 pods (one crashing), a bare
+/// pod, a service picking the api pods, one node.
+fn tree_data(app: &mut App, ns: Option<&str>) {
+    let pod_cols: &[(&str, i64)] = &[("Name", 0), ("Ready", 0), ("Status", 0), ("Restarts", 0), ("Age", 0), ("IP", 1), ("Node", 1)];
+    let pods = vec![
+        obj_row("shop", "api-abc-1", "p1", Some("r1"), &["api-abc-1", "1/1", "Running", "0", "", "", "n1"], Health::Ok, json!({"app": "api"})),
+        obj_row("shop", "api-abc-2", "p2", Some("r1"), &["api-abc-2", "0/1", "CrashLoopBackOff", "3 (1m ago)", "", "", "n1"], Health::Bad, json!({"app": "api"})),
+        obj_row("shop", "debug", "p3", None, &["debug", "0/1", "Pending", "0", "", "", "<none>"], Health::Warn, json!({})),
+    ];
+    let msgs = vec![
+        (wk("v1/nodes", None), test_snapshot(&[("Name", 0), ("Status", 0), ("Roles", 0), ("Age", 0), ("Version", 0)], vec![obj_row("", "n1", "n", None, &["n1", "Ready", "control-plane", "", "v1.33"], Health::Ok, json!({}))])),
+        (wk("v1/pods", ns), test_snapshot(pod_cols, pods)),
+        (wk("apps/v1/deployments", ns), test_snapshot(&[("Name", 0), ("Ready", 0), ("Up-to-date", 0), ("Available", 0), ("Age", 0)], vec![obj_row("shop", "api", "d1", None, &["api", "1/2", "2", "1", ""], Health::Warn, json!({}))])),
+        (wk("apps/v1/replicasets", ns), test_snapshot(&[("Name", 0), ("Desired", 0), ("Current", 0), ("Ready", 0), ("Age", 0)], vec![obj_row("shop", "api-abc", "r1", Some("d1"), &["api-abc", "2", "2", "1", ""], Health::Warn, json!({})), obj_row("shop", "api-old", "r0", Some("d1"), &["api-old", "0", "0", "0", ""], Health::Ok, json!({}))])),
+        (wk("v1/services", ns), test_snapshot(&[("Name", 0), ("Type", 0), ("Cluster-IP", 0), ("External-IP", 0), ("Port(s)", 0), ("Age", 0), ("Selector", 1)], vec![obj_row("shop", "api", "s1", None, &["api", "ClusterIP", "10.43.0.9", "<none>", "80/TCP", "", "app=api"], Health::Ok, json!({}))])),
+    ];
+    for (k, s) in msgs {
+        app.apply(Msg::Kube(KMsg::Data(k, s)));
+    }
+}
+
+#[test]
+fn tree_shows_owners_services_and_nodes_live() {
+    let mut app = app();
+    app.key(key(':'));
+    typing(&mut app, "tree -A");
+    app.key(code(KeyCode::Enter));
+    // It asks for the nine kinds' informers (no fetching of its own).
+    let pending = app.kube.take_effects();
+    let Some(KEffect::Watch(w)) = pending.iter().rev().find(|e| matches!(e, KEffect::Watch(_))) else { panic!("{pending:?}") };
+    for res in ["v1/pods", "apps/v1/replicasets", "apps/v1/deployments", "batch/v1/cronjobs", "v1/services", "v1/nodes"] {
+        assert!(w.iter().any(|(_, k)| k.res == res && k.ns.is_none()), "{res}");
+    }
+    tree_data(&mut app, None);
+    let s = render(&app, 80, 24);
+    for want in [
+        "tree all namespaces",
+        "├─ ● nodes",
+        "│  └─ ● Node n1  Ready, 2 pods",
+        "└─ ✕ namespace shop",
+        "   ├─ ◐ Deployment api  1/2 ready",
+        "   │  └─ ◐ ReplicaSet api-abc  1/2 ready",
+        "   │     ├─ ● Pod api-abc-1  Running on n1",
+        "   │     └─ ✕ Pod api-abc-2  CrashLoopBackOff on n1, 3 restarts",
+        "   ├─ ◐ Pod debug  Pending",
+        "   └─ ◐ Service api  ClusterIP 10.43.0.9 80 → 1/2 pods",
+    ] {
+        assert!(s.contains(want), "missing {want:?} in\n{s}");
+    }
+    assert!(!s.contains("api-old"), "{s}");
+    for l in s.lines() {
+        assert_eq!(l.chars().count(), 80);
+    }
+    // H: old ReplicaSets too.
+    app.key(key('H'));
+    assert!(render(&app, 80, 24).contains("ReplicaSet api-old  0/0 ready"));
+    app.key(key('H'));
+    // Live: a pod recovers, the tree follows.
+    let pods = vec![
+        obj_row("shop", "api-abc-1", "p1", Some("r1"), &["api-abc-1", "1/1", "Running", "0", "", "", "n1"], Health::Ok, json!({"app": "api"})),
+        obj_row("shop", "api-abc-2", "p2", Some("r1"), &["api-abc-2", "1/1", "Running", "3", "", "", "n1"], Health::Ok, json!({"app": "api"})),
+    ];
+    app.apply(Msg::Kube(KMsg::Data(wk("v1/pods", None), test_snapshot(&[("Name", 0), ("Ready", 0), ("Status", 0), ("Restarts", 0), ("Age", 0), ("IP", 1), ("Node", 1)], pods))));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("Pod api-abc-2  Running on n1, 3 restarts") && s.contains("→ 2/2 pods") && !s.contains("debug"), "{s}");
+}
+
+#[test]
+fn tree_folds_filters_and_acts_on_objects() {
+    let mut app = app();
+    app.key(key(':'));
+    typing(&mut app, "tree shop");
+    app.key(code(KeyCode::Enter));
+    tree_data(&mut app, Some("shop"));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("tree namespace shop") && s.contains("Node n1  Ready, 2 pods in shop"), "{s}");
+    // Down to the deployment; space folds what is under it.
+    for _ in 0..3 {
+        app.key(key('j'));
+    }
+    app.key(key(' '));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("Deployment api  1/2 ready  ▸ 3 more") && !s.contains("api-abc-1"), "{s}");
+    app.key(code(KeyCode::Right));
+    assert!(render(&app, 80, 24).contains("api-abc-1"));
+    // ← on a leaf goes to its parent.
+    app.key(key('j'));
+    app.key(key('j'));
+    app.key(code(KeyCode::Left));
+    let View::Tree(tv) = app.kube.top() else { panic!() };
+    assert_eq!(tv.selected().unwrap().name, "api-abc");
+    // enter: describe; l on a pod: its containers first.
+    app.key(key('j'));
+    let effects = kube_effects(app.key(code(KeyCode::Enter)));
+    assert!(matches!(&effects[..], [KEffect::Describe { obj, .. }] if obj.name == "api-abc-1" && obj.res.plural == "pods"), "{effects:?}");
+    app.key(code(KeyCode::Esc));
+    let effects = kube_effects(app.key(key('l')));
+    assert!(matches!(&effects[..], [KEffect::Containers { obj, .. }] if obj.name == "api-abc-1"), "{effects:?}");
+    // /: matching lines and what they are under.
+    app.key(key('/'));
+    typing(&mut app, "crash");
+    app.key(code(KeyCode::Enter));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("Pod api-abc-2") && s.contains("ReplicaSet api-abc") && s.contains("namespace shop") && !s.contains("api-abc-1") && !s.contains("Service api"), "{s}");
+    app.key(code(KeyCode::Esc));
+    assert!(render(&app, 80, 24).contains("Service api"));
+    // 0: all namespaces (a new set of informers).
+    app.key(key('0'));
+    let View::Tree(tv) = app.kube.top() else { panic!() };
+    assert_eq!(tv.ns, None);
+    // T from a table opens the tree of its namespace.
+    app.key(code(KeyCode::Esc));
+    app.key(key(':'));
+    typing(&mut app, "deploy -n shop");
+    app.key(code(KeyCode::Enter));
+    app.key(key('T'));
+    let View::Tree(tv) = app.kube.top() else { panic!() };
+    assert_eq!(tv.ns.as_deref(), Some("shop"));
+}
+
+/// A tree of 5 000 pods is rebuilt on every change: it stays cheap.
+#[test]
+fn tree_of_thousands_of_pods_rebuilds_fast() {
+    let mut app = app();
+    app.key(key(':'));
+    typing(&mut app, "tree -A");
+    app.key(code(KeyCode::Enter));
+    let cols: &[(&str, i64)] = &[("Name", 0), ("Ready", 0), ("Status", 0), ("Restarts", 0), ("Age", 0), ("IP", 1), ("Node", 1)];
+    let rs: Vec<Row> = (0..50).map(|i| obj_row(&format!("ns-{}", i % 10), &format!("app{i}-rs"), &format!("r{i}"), None, &[&format!("app{i}-rs"), "100", "100", "100", ""], Health::Ok, json!({}))).collect();
+    let pods: Vec<Row> = (0..5000).map(|i| obj_row(&format!("ns-{}", i % 50 % 10), &format!("app{}-{i}", i % 50), &format!("p{i}"), Some(&format!("r{}", i % 50)), &[&format!("app{}-{i}", i % 50), "1/1", "Running", "0", "", "", "n1"], Health::Ok, json!({}))).collect();
+    app.apply(Msg::Kube(KMsg::Data(wk("apps/v1/replicasets", None), test_snapshot(&[("Name", 0), ("Desired", 0), ("Current", 0), ("Ready", 0), ("Age", 0)], rs))));
+    let snap = test_snapshot(cols, pods);
+    let t = std::time::Instant::now();
+    app.apply(Msg::Kube(KMsg::Data(wk("v1/pods", None), snap)));
+    let rebuild = t.elapsed();
+    let View::Tree(tv) = app.kube.top() else { panic!() };
+    assert_eq!(tv.rows.iter().filter(|r| r.kind == Some(crate::tree::Kind::Pod)).count(), 5000);
+    let t = std::time::Instant::now();
+    render(&app, 120, 40);
+    eprintln!("tree of 5000 pods: rebuild {rebuild:?}, frame {:?}", t.elapsed());
+    assert!(rebuild < std::time::Duration::from_millis(if cfg!(debug_assertions) { 1500 } else { 100 }), "{rebuild:?}");
+}

@@ -729,6 +729,7 @@ request goes to the context the UI shows; `:kubectl` passes it as
 | `:pods -l app=web,tier!=db`, `:pods -f status.phase=Running`, `:pods /nginx` | with a label selector, a field selector (sent to the server), a filter |
 | `:ctx` / `:ctx prod` | pick a context / switch to one (the views reconnect) |
 | `:ns` / `:ns web` | the namespaces / switch the namespace |
+| `:tree`, `:tree shop`, `:tree -A --all` | the cluster as [`litek8s tree`](#tree) draws it, live (below); `--all` adds old ReplicaSets |
 | `:xray deploy [ns]` | owner trees: deploy → ReplicaSets → pods → containers (also `sts`, `ds`, `rs`, `job`, `cronjob` → jobs → pods, `svc` → its pods, `node` → its pods) |
 | `:kubectl get events -A`, `:!top pods`, `!` | kubectl on the UI's context and namespace; its output in a pager (`exec -it`, `edit`, `attach` get the terminal) |
 | `:pf` | the running port-forwards |
@@ -787,6 +788,7 @@ as numbers, `2/3` by its counts, `512Mi` and `250m` by size.
 | `r` / `u` / `H` | deploy (`r`: sts, ds too) | rollout restart / undo (to the previous revision) / history and status |
 | `F` | pod, svc, deploy, sts, rs | port-forward (a service's or workload's goes to one of its ready pods) |
 | `f` | | the port-forwards (`d` stops one) |
+| `T` | | the tree of the table's namespace |
 | `c` / `u` / `r` | node | cordon / uncordon / drain (evictions, honoring PodDisruptionBudgets; DaemonSet pods stay) |
 | `t` | cronjob | run it now (a Job from its template) |
 | `x` | secret / workloads | decode its data / its xray tree |
@@ -868,6 +870,50 @@ connection counts.
 `enter` folds a branch; `d`, `y`, `e`, `l`, `s`, `ctrl-d` act on the row's
 object (on a container row: its logs and shell); `ctrl-r` reloads it.
 
+### tree
+
+`:tree` (or `T` on a table) shows what `litek8s tree --context <ctx>`
+prints, and keeps it current: nodes, then each namespace's workloads down
+their controllers (CronJob → Job → Pod, Deployment → ReplicaSet → Pod,
+StatefulSet, DaemonSet and Job → Pod, pods with no owner) and its services
+with how many of the pods they select are ready. Both are drawn by one
+builder (`src/tree.rs`); the UI feeds it the rows its informers already
+keep for the nine kinds, so the tree costs no requests of its own and
+changes as the watches do (a 5 000-pod tree is rebuilt in about 8 ms, at
+most once a second while pods keep changing).
+
+```
+╭─ tree all namespaces ─────────────────────────────────────────── 11 objects ─╮
+│ ├─ ◐ namespace default                                                       │
+│ │  ├─ ◐ Pod solo  Pending                                                    │
+│ │  └─ ● Service kubernetes  ClusterIP 10.43.0.1 443                          │
+│ ├─ ● namespace kube-system                                                   │
+│ │  └─ ● Service kube-dns  ClusterIP 10.43.0.10 53,53                         │
+│ └─ ◐ namespace shop                                                          │
+│    ├─ ● CronJob tick  schedule */5 * * * *                                   │
+│    ├─ ◐ Deployment api  0/3 ready                                            │
+│    │  └─ ◐ ReplicaSet api-6bcdd669f6  0/3 ready                              │
+│    │     ├─ ◐ Pod api-6bcdd669f6-mm7gl  Pending                              │
+│    │     ├─ ◐ Pod api-6bcdd669f6-mvswq  Pending                              │
+│    │     └─ ◐ Pod api-6bcdd669f6-wn8fn  Pending                              │
+│    ├─ ◐ Job once  0/1 done                                                   │
+│    │  └─ ◐ Pod once-927zc  Pending                                           │
+│    └─ ◐ Service api  ClusterIP 10.43.0.11 80 → 0/3 pods                      │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ esc back  space fold  enter describe  / filter  l logs  0 all ns       ?  help
+```
+
+Each line has its state's glyph and color (running and ready green,
+pending or partly ready yellow, crashing or failed red); a namespace takes
+the worst of what is in it. `space` folds and unfolds a branch (`▸ 3 more`
+says what it hides), `→` unfolds, `←` folds or goes up to the parent;
+`enter` describes the object (on a namespace line it folds), `d` `y` `e`
+`l` `s` `F` `c` `ctrl-d` act on it as in the tables; `/` keeps the
+matching lines with what they are under; `0` switches between the
+namespace and all of them, `H` shows the old ReplicaSets, `ctrl-r` lists
+everything again. A list the cluster refuses (`nodes is forbidden`) says
+so at the top and the rest still shows.
+
 ### `ui.yaml`
 
 `~/.litek8s/ui.yaml` (next to `config.yaml`; `$LITEK8S_UI_CONFIG` to put it
@@ -919,6 +965,7 @@ selects rows with a click and scrolls with the wheel.
 | pagers (describe, YAML, kubectl, help) | `/` search, `n`/`N` next/previous match, `w` wrap, `←→` scroll sideways, `e` edit, `y`/`d` YAML/describe, `m` managedFields, `c` copy, `ctrl-s` save, `esc` back |
 | logs | `f` follow/pause, `/` filter, `t` timestamps, `w` wrap, `p` previous, `c` copy, `x` clear, `ctrl-s` save, `esc` back |
 | xray | `enter` fold, `d` `y` `e` `l` `s` `ctrl-d` on the row, `ctrl-r` reload |
+| tree | `space` fold, `←` `→` fold/up and unfold, `enter` describe, `d` `y` `e` `l` `s` `F` `c` `ctrl-d` on the row, `/` filter, `0` all namespaces, `H` old ReplicaSets, `ctrl-r` reload |
 
 `1`-`8` and `tab` still switch views, `q` quits.
 

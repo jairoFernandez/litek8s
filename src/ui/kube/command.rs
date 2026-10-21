@@ -24,6 +24,8 @@ pub enum Cmd {
     Namespace(Option<String>),
     Kubectl(String),
     Xray { name: String, ns: Option<Ns> },
+    /// `litek8s tree`'s picture; `all`: old ReplicaSets too.
+    Tree { ns: Option<Ns>, all: bool },
     Forwards,
     Aliases,
     Help,
@@ -56,6 +58,12 @@ pub fn parse(line: &str, aliases: &BTreeMap<String, String>) -> Result<Cmd, Stri
         "ctx" | "context" | "contexts" => Cmd::Context(arg()),
         "ns" | "namespace" if !rest.is_empty() && !rest.starts_with('-') => Cmd::Namespace(arg()),
         "kubectl" | "k" => Cmd::Kubectl(rest.to_string()),
+        "tree" | "t" => {
+            let all = words(rest).iter().any(|w| w == "--all");
+            let rest: Vec<String> = words(rest).into_iter().filter(|w| w != "--all").collect();
+            let (bare, ns, _) = resource_args(&rest.join(" "))?;
+            Cmd::Tree { ns: ns.or(bare.map(Ns::Named)), all }
+        }
         "pf" | "portforward" | "portforwards" | "port-forward" | "port-forwards" => Cmd::Forwards,
         "aliases" | "alias" | "a" | "api-resources" => Cmd::Aliases,
         "xray" | "x" => {
@@ -131,7 +139,7 @@ fn quote(s: &str) -> String {
 }
 
 /// The words a command can start with besides resource names.
-pub const COMMANDS: &[&str] = &["ctx", "ns", "xray", "pf", "kubectl", "aliases", "help", "quit"];
+pub const COMMANDS: &[&str] = &["ctx", "ns", "tree", "xray", "pf", "kubectl", "aliases", "help", "quit"];
 
 /// What the word being typed could become: candidates for the last word
 /// of `line` (with `ns` / `ctx` / `-n` taking names).
@@ -250,6 +258,9 @@ mod tests {
         assert!(parse("xray", &no()).is_err());
         assert_eq!(parse("q", &no()), Ok(Cmd::Quit));
         assert_eq!(parse("pf", &no()), Ok(Cmd::Forwards));
+        assert_eq!(parse("tree", &no()), Ok(Cmd::Tree { ns: None, all: false }));
+        assert_eq!(parse("tree web --all", &no()), Ok(Cmd::Tree { ns: Some(Ns::Named("web".into())), all: true }));
+        assert_eq!(parse("tree -A", &no()), Ok(Cmd::Tree { ns: Some(Ns::All), all: false }));
         let aliases: BTreeMap<String, String> = [("cp".to_string(), "pods -n kube-system -l tier=control-plane".to_string())].into();
         assert_eq!(parse("cp", &aliases), Ok(Cmd::Resource { name: "pods".into(), ns: Some(Ns::Named("kube-system".into())), filter: "-l tier=control-plane".into() }));
     }
