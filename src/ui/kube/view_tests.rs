@@ -82,6 +82,9 @@ fn app() -> App {
     app.tab = Tab::Kube;
     app.kube = KubeUi::new(None);
     app.kube.now = NOW;
+    // A litek8s cluster: everything may be changed.
+    app.kube.context = "prod".into();
+    app.apply(Msg::Kube(KMsg::Identified { context: "prod".into(), litek8s: true }));
     let rows = vec![
         pod("default", "web-7d9-abc", "1/1", "Running", "0", "web"),
         pod("default", "web-7d9-def", "0/1", "CrashLoopBackOff", "7 (2m ago)", "web"),
@@ -712,4 +715,95 @@ fn tree_of_thousands_of_pods_rebuilds_fast() {
     render(&app, 120, 40);
     eprintln!("tree of 5000 pods: rebuild {rebuild:?}, frame {:?}", t.elapsed());
     assert!(rebuild < std::time::Duration::from_millis(if cfg!(debug_assertions) { 1500 } else { 100 }), "{rebuild:?}");
+}
+
+
+/// An app on another cluster's context (not litek8s).
+fn foreign(writable: &[&str]) -> App {
+    let mut a = app();
+    a.kube.context = "work-prod".into();
+    a.apply(Msg::Kube(KMsg::Identified { context: "work-prod".into(), litek8s: false }));
+    if !writable.is_empty() {
+        let cfg: super::uiconfig::UiConfig = serde_yaml::from_str(&format!("writableContexts: [{}]", writable.join(", "))).unwrap();
+        a.apply(Msg::Kube(KMsg::Config(Ok(cfg))));
+    }
+    a
+}
+
+#[test]
+fn other_clusters_are_read_only_unless_listed() {
+    let mut app = foreign(&[]);
+    let s = render(&app, 80, 24);
+    assert!(s.contains("read-only"), "{s}");
+    // Delete: no dialog, a refusal saying how to allow it.
+    assert!(app.key(ctrl('d')).is_empty());
+    assert_eq!(app.kube.overlay, Overlay::None);
+    let (msg, err) = app.status.clone().unwrap();
+    assert!(err && msg.contains("work-prod is not a litek8s cluster") && msg.contains("writableContexts"), "{msg}");
+    // Every other change too, also through paths without a key check.
+    for k in [key('e'), key('s')] {
+        assert!(kube_effects(app.key(k)).iter().all(|e| !e.mutates()));
+    }
+    let pod = ObjRef { res: app.kube.catalog.find("pods").unwrap().clone(), ns: "default".into(), name: "web-7d9-abc".into() };
+    app.apply(Msg::Kube(KMsg::Containers { obj: pod.clone(), list: vec![ContainerInfo { name: "app".into(), kind: String::new(), running: true }], purpose: Purpose::Shell }));
+    assert!(app.kube.take_effects().iter().all(|e| !matches!(e, KEffect::Shell { .. })));
+    app.apply(Msg::Kube(KMsg::Diff { obj: pod.clone(), lines: vec!["+x".into()], body: "x: 1\n".into() }));
+    assert!(kube_effects(app.key(key('y'))).is_empty());
+    // kubectl: reading verbs run, changing ones do not.
+    app.key(key('!'));
+    typing(&mut app, "delete pod web-7d9-abc");
+    assert!(kube_effects(app.key(code(KeyCode::Enter))).iter().all(|e| !matches!(e, KEffect::Kubectl { .. })));
+    app.key(key('!'));
+    typing(&mut app, "get pods -o wide");
+    assert!(kube_effects(app.key(code(KeyCode::Enter))).iter().any(|e| matches!(e, KEffect::Kubectl { .. })));
+    // Plugins run only when they say they only read.
+    app.key(code(KeyCode::Esc));
+    let cfg: super::uiconfig::UiConfig = serde_yaml::from_str("plugins:\n- {name: rm, key: ctrl-x, scopes: [pods], command: kubectl, args: [delete]}\n- {name: dive, key: ctrl-i, scopes: [pods], command: dive, mutates: false}\n").unwrap();
+    app.apply(Msg::Kube(KMsg::Config(Ok(cfg))));
+    assert!(kube_effects(app.key(ctrl('x'))).is_empty());
+    assert!(matches!(&kube_effects(app.key(ctrl('i')))[..], [KEffect::Plugin { .. }]));
+    // Reads, logs and port-forwards still work.
+    app.key(code(KeyCode::Esc));
+    assert!(matches!(&kube_effects(app.key(key('d')))[..], [KEffect::Describe { .. }]));
+    app.key(code(KeyCode::Esc));
+    assert!(matches!(&kube_effects(app.key(key('l')))[..], [KEffect::Containers { purpose: Purpose::Logs { .. }, .. }]));
+    assert!(matches!(&kube_effects(app.key(KeyEvent::new(KeyCode::Char('F'), KeyModifiers::SHIFT)))[..], [KEffect::PortForwardPrepare(_)]));
+}
+
+#[test]
+fn writable_contexts_and_read_only_everywhere() {
+    // Listed in writableContexts: changes are allowed.
+    let mut app = foreign(&["work-prod"]);
+    assert!(!render(&app, 80, 24).contains("read-only"));
+    app.key(ctrl('d'));
+    assert!(matches!(app.kube.overlay, Overlay::Confirm(_)));
+    let effects = kube_effects(app.key(key('y')));
+    assert!(matches!(&effects[..], [KEffect::Delete { .. }]), "{effects:?}");
+    // A litek8s cluster needs no listing; readOnly: true wins over both.
+    let mut app = self::app();
+    app.key(ctrl('d'));
+    assert!(matches!(app.kube.overlay, Overlay::Confirm(_)));
+    app.key(code(KeyCode::Esc));
+    let cfg: super::uiconfig::UiConfig = serde_yaml::from_str("readOnly: true\nwritableContexts: [prod]").unwrap();
+    app.apply(Msg::Kube(KMsg::Config(Ok(cfg))));
+    app.key(ctrl('d'));
+    assert_eq!(app.kube.overlay, Overlay::None);
+    assert!(app.status.as_ref().is_some_and(|(m, _)| m.contains("readOnly: true")));
+    // Before it is known whether a new context is litek8s: read-only.
+    let mut app = self::app();
+    app.kube.reset(None, "new-one".into());
+    assert!(app.kube.take_effects().contains(&KEffect::Identify("new-one".into())));
+    assert_eq!(app.kube.access(), Access::Checking);
+    app.apply(Msg::Kube(KMsg::Identified { context: "new-one".into(), litek8s: true }));
+    assert_eq!(app.kube.access(), Access::Writable);
+}
+
+#[test]
+fn kubectl_verbs_that_change_things() {
+    for a in ["delete pod x", "-n web apply -f x.yaml", "rollout restart deploy/web", "exec -it web -- sh", "edit deploy web", "scale deploy web --replicas 2", "label pod x a=b", "drain n1", "auth reconcile -f x"] {
+        assert!(kubectl_mutates(a), "{a}");
+    }
+    for a in ["get pods -A", "--context x -n web get events", "describe pod x", "logs -f web", "top nodes", "rollout status deploy/web", "auth can-i list pods", "config view", "port-forward svc/web 8080:80", ""] {
+        assert!(!kubectl_mutates(a), "{a}");
+    }
 }

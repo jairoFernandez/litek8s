@@ -1020,7 +1020,7 @@ fn clusters(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
             .collect();
         let mut state = TableState::default().with_selected(sel.checked_sub(c.local.len()));
         let table = Table::new(rows, [Constraint::Percentage(40), Constraint::Fill(1)])
-            .block(t.block_with("Other kubeconfig contexts", vec![Span::styled("read-only · enter: Kubernetes view", t.dim)]))
+            .block(t.block_with("Other kubeconfig contexts", vec![Span::styled("read-only by default · enter: Kubernetes view", t.dim)]))
             .column_spacing(1)
             .highlight_spacing(HighlightSpacing::Always)
             .highlight_symbol(Span::styled("▌", t.accent))

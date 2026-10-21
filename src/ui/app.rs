@@ -130,7 +130,8 @@ pub enum Effect {
     Dev(DevOp),
     /// Show this local cluster in every view.
     UseCluster(String),
-    /// Show this kubeconfig context in the Kubernetes view (read-only).
+    /// Show this kubeconfig context in the Kubernetes view (read-only
+    /// unless it is a litek8s cluster or in `writableContexts`).
     UseContext(String),
     /// Point kubectl and docker at this local cluster.
     SwitchTools(String),
@@ -436,7 +437,7 @@ pub struct App {
     pub home: HomeSample,
     /// The local cluster the views show (its Docker socket and API).
     pub cluster: String,
-    /// A kubeconfig context the Kubernetes view shows instead (read-only).
+    /// A kubeconfig context the Kubernetes view shows instead.
     pub context_override: Option<String>,
     pub clusters: ClustersSample,
     /// The CPU figure explained (from the last two samples).
@@ -869,6 +870,9 @@ impl App {
                 self.relink();
             }
             Msg::Kube(m) => {
+                if matches!(&m, KMsg::Config(Ok(c)) if !c.show_other_contexts) {
+                    self.clusters.others.clear();
+                }
                 self.kube.now = self.now;
                 self.kube.apply(m);
                 if let Some((text, error)) = self.kube.flash.take() {
@@ -920,6 +924,10 @@ impl App {
             }
             Msg::Clusters(sample) => {
                 let mut sample = *sample;
+                // `showOtherContexts: false`: litek8s's clusters only.
+                if !self.kube.config.show_other_contexts {
+                    sample.others.clear();
+                }
                 if let Some(op) = &self.dev_busy {
                     if let Some(row) = sample.local.iter_mut().find(|r| r.name == op.cluster()) {
                         row.status = if op.starts() { DevStatus::Starting } else { DevStatus::Stopping };
@@ -1384,7 +1392,7 @@ impl App {
                 if code == KeyCode::Enter {
                     let context = context.clone();
                     self.context_override = Some(context.clone());
-                    self.flash(format!("Kubernetes view: context {context} (read-only here; enter on a local cluster to go back)"), false);
+                    self.flash(format!("Kubernetes view: context {context} (read-only unless in writableContexts; enter on a local cluster to go back)"), false);
                     return vec![Effect::UseContext(context)];
                 }
                 if matches!(code, KeyCode::Char('u' | 'd' | 'D')) {

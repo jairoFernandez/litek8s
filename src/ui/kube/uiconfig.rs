@@ -13,6 +13,8 @@
 //!     scopes: [pods]
 //!     command: dive
 //!     args: [$COL-IMAGE]
+//! writableContexts: [staging]   # other clusters are read-only
+//! showOtherContexts: true        # false: Clusters lists litek8s's only
 //! theme: default          # high-contrast, mono
 //! background: auto        # dark, light
 //! ascii: false            # or LITEK8S_UI_ASCII=1
@@ -36,9 +38,16 @@ pub struct UiConfig {
     pub plugins: Vec<Plugin>,
     pub skin: Skin,
     pub logs: LogsConfig,
-    /// No deletes, edits, scaling or shells.
+    /// No deletes, edits, scaling or shells, on any cluster.
     #[serde(rename = "readOnly", alias = "read_only")]
     pub read_only: bool,
+    /// Contexts that are not litek8s clusters but may be changed from the
+    /// UI (others are read-only).
+    #[serde(rename = "writableContexts", alias = "writable_contexts")]
+    pub writable_contexts: Vec<String>,
+    /// List the kubeconfig's other contexts in the Clusters view.
+    #[serde(rename = "showOtherContexts", alias = "show_other_contexts")]
+    pub show_other_contexts: bool,
     /// kubectl to run for `:kubectl` (default: `kubectl` on the PATH).
     pub kubectl: Option<String>,
     /// The whole UI's look: `default`, `high-contrast`, `mono`.
@@ -59,6 +68,8 @@ impl Default for UiConfig {
             skin: Skin::default(),
             logs: LogsConfig::default(),
             read_only: false,
+            writable_contexts: Vec::new(),
+            show_other_contexts: true,
             kubectl: None,
             theme: Default::default(),
             background: Default::default(),
@@ -83,11 +94,14 @@ pub struct Plugin {
     pub background: bool,
     /// Ask first.
     pub confirm: bool,
+    /// It may change the cluster (the default): not run on read-only
+    /// contexts. `false` for ones that only read.
+    pub mutates: bool,
 }
 
 impl Default for Plugin {
     fn default() -> Self {
-        Plugin { name: String::new(), key: String::new(), scopes: vec!["all".into()], description: String::new(), command: String::new(), args: Vec::new(), background: false, confirm: false }
+        Plugin { name: String::new(), key: String::new(), scopes: vec!["all".into()], description: String::new(), command: String::new(), args: Vec::new(), background: false, confirm: false, mutates: true }
     }
 }
 

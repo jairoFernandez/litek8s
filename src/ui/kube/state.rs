@@ -168,6 +168,63 @@ pub enum KEffect {
     Save { name: String, lines: Vec<String> },
     Plugin { plugin: Plugin, vars: Vec<(String, String)> },
     SaveHistory(Vec<String>),
+    /// Find out whether a context is a litek8s cluster.
+    Identify(String),
+}
+
+impl KEffect {
+    /// Whether it changes the cluster (refused on read-only contexts).
+    /// Port-forwards, logs and reads are not changes.
+    pub fn mutates(&self) -> bool {
+        match self {
+            KEffect::Edit { .. } | KEffect::Apply { .. } | KEffect::Delete { .. } | KEffect::Scale { .. } | KEffect::Restart(_) | KEffect::Undo(_) => true,
+            KEffect::Cordon { .. } | KEffect::Drain { .. } | KEffect::Trigger(_) | KEffect::Shell { .. } => true,
+            KEffect::Containers { purpose: Purpose::Shell, .. } => true,
+            KEffect::Plugin { plugin, .. } => plugin.mutates,
+            KEffect::Kubectl { args, .. } => kubectl_mutates(args),
+            _ => false,
+        }
+    }
+}
+
+/// How the shown context may be used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Access {
+    Writable,
+    /// `readOnly: true` in ui.yaml.
+    ReadOnlyEverywhere,
+    /// Another cluster, not in `writableContexts`.
+    NotLitek8s,
+    /// Not known yet (a moment after switching).
+    Checking,
+}
+
+/// Whether a kubectl command line can change the cluster: anything but
+/// the verbs that only read (and `port-forward`, `rollout status|history`).
+pub fn kubectl_mutates(args: &str) -> bool {
+    let words = super::filter::words(args);
+    // The verb: the first word that is not a flag or a flag's value.
+    let mut it = words.iter().peekable();
+    let mut verb = None;
+    while let Some(w) = it.next() {
+        if w.starts_with('-') {
+            if !w.contains('=') && matches!(w.as_str(), "-n" | "--namespace" | "--context" | "--kubeconfig" | "-s" | "--server" | "--cluster" | "--user") {
+                it.next();
+            }
+            continue;
+        }
+        verb = Some(w.as_str());
+        break;
+    }
+    let sub = it.find(|w| !w.starts_with('-')).map(String::as_str);
+    match verb {
+        None => false,
+        Some("get" | "describe" | "logs" | "top" | "explain" | "api-resources" | "api-versions" | "version" | "cluster-info" | "events" | "port-forward" | "wait" | "diff" | "completion" | "help" | "options") => false,
+        Some("auth") => !matches!(sub, Some("can-i" | "whoami")),
+        Some("config") => !matches!(sub, Some("view" | "get-contexts" | "current-context" | "get-clusters" | "get-users")),
+        Some("rollout") => !matches!(sub, Some("status" | "history")),
+        Some(_) => true,
+    }
 }
 
 /// What the runtime reports.
@@ -193,6 +250,8 @@ pub enum KMsg {
     /// Values of an extra column (metrics, observability) by row key.
     Ext { kind: String, column: String, values: HashMap<String, String> },
     Config(Result<UiConfig, String>),
+    /// Whether a context is a litek8s cluster.
+    Identified { context: String, litek8s: bool },
 }
 
 // ---- views ----
@@ -584,6 +643,10 @@ const N: KeyModifiers = KeyModifiers::NONE;
 const CTRL: KeyModifiers = KeyModifiers::CONTROL;
 
 pub struct KubeUi {
+    /// The kubeconfig context shown (what writes are judged by).
+    pub context: String,
+    /// Contexts known to be litek8s clusters (or not).
+    litek8s: HashMap<String, bool>,
     pub catalog: Catalog,
     pub discovered: bool,
     pub discovery_error: Option<String>,
@@ -656,13 +719,19 @@ impl KubeUi {
             next_id: 1,
             now: chrono::Utc::now().timestamp(),
             mode: Mode::Substring,
+            context: String::new(),
+            litek8s: HashMap::new(),
         };
         ui.views.push(View::Table(TableView::new(pods, namespace)));
         ui
     }
 
     /// A new cluster (context switch): forget what the old one had.
-    pub fn reset(&mut self, namespace: Option<String>) {
+    pub fn reset(&mut self, namespace: Option<String>, context: String) {
+        if !self.litek8s.contains_key(&context) {
+            self.pending.push(KEffect::Identify(context.clone()));
+        }
+        self.context = context;
         let top = self.top_table().map(|t| t.res.name());
         self.data.clear();
         self.ext.clear();
@@ -770,7 +839,14 @@ impl KubeUi {
     }
 
     pub fn take_effects(&mut self) -> Vec<KEffect> {
-        std::mem::take(&mut self.pending)
+        let pending: Vec<Effect> = std::mem::take(&mut self.pending).into_iter().map(Effect::Kube).collect();
+        self.guard(pending)
+            .into_iter()
+            .filter_map(|e| match e {
+                Effect::Kube(k) => Some(k),
+                _ => None,
+            })
+            .collect()
     }
 
     pub fn namespaces(&self) -> Vec<String> {
@@ -966,6 +1042,9 @@ impl KubeUi {
                 self.ext_gen += 1;
                 self.refresh_top();
             }
+            KMsg::Identified { context, litek8s } => {
+                self.litek8s.insert(context, litek8s);
+            }
             KMsg::Config(Ok(c)) => {
                 self.theme = Theme::from_config(&c);
                 self.config = c;
@@ -1118,7 +1197,7 @@ impl KubeUi {
     /// A key for the Kubernetes view; `None` when it is the app's (tabs,
     /// quit).
     pub fn key(&mut self, key: KeyEvent) -> Handled {
-        let out = self.key_inner(key);
+        let out = self.key_inner(key).map(|e| self.guard(e));
         self.sync_watches();
         out
     }
@@ -1411,6 +1490,9 @@ impl KubeUi {
             self.say("kubectl what? e.g. !get events --sort-by=.lastTimestamp", true);
             return Vec::new();
         }
+        if kubectl_mutates(&args) && self.read_only() {
+            return Vec::new();
+        }
         let id = self.id();
         let mut p = Pager::new(id, format!("kubectl {args}"), PagerKind::Kubectl);
         p.lines.clear();
@@ -1666,10 +1748,62 @@ impl KubeUi {
     // ---- tables ----
 
     fn read_only(&mut self) -> bool {
-        if self.config.read_only {
-            self.say("read-only (ui.yaml readOnly: true)", true);
+        match self.access() {
+            Access::Writable => false,
+            a => {
+                let why = self.refusal(a);
+                self.say(why, true);
+                true
+            }
         }
-        self.config.read_only
+    }
+
+    /// Whether this context may be changed from here: litek8s's own
+    /// clusters may; any other cluster is read-only unless ui.yaml lists it
+    /// in `writableContexts`; `readOnly: true` makes every one read-only.
+    pub fn access(&self) -> Access {
+        if self.config.read_only {
+            return Access::ReadOnlyEverywhere;
+        }
+        if self.config.writable_contexts.iter().any(|c| *c == self.context) {
+            return Access::Writable;
+        }
+        match self.litek8s.get(&self.context) {
+            Some(true) => Access::Writable,
+            Some(false) => Access::NotLitek8s,
+            None => Access::Checking,
+        }
+    }
+
+    /// What a refused change says (and how to allow it).
+    pub fn refusal(&self, a: Access) -> String {
+        let file = super::uiconfig::path();
+        let file = match std::env::var("HOME") {
+            Ok(h) if !h.is_empty() => file.display().to_string().replacen(&h, "~", 1),
+            _ => file.display().to_string(),
+        };
+        match a {
+            Access::ReadOnlyEverywhere => format!("read-only: readOnly: true in {file}"),
+            Access::Checking => format!("read-only until {} is known to be a litek8s cluster (checking)", self.context),
+            _ => format!("read-only: {} is not a litek8s cluster; to change it from here, add it to writableContexts in {file}", self.context),
+        }
+    }
+
+    /// Effects that change the cluster go only to writable contexts; the
+    /// rest say why. (Keys check first, so no dialog opens for nothing;
+    /// this is the net under every path: confirmations, pickers, hotkeys.)
+    fn guard(&mut self, effects: Vec<Effect>) -> Vec<Effect> {
+        let a = self.access();
+        if a == Access::Writable {
+            return effects;
+        }
+        let before = effects.len();
+        let kept: Vec<Effect> = effects.into_iter().filter(|e| !matches!(e, Effect::Kube(k) if k.mutates())).collect();
+        if kept.len() < before {
+            let why = self.refusal(a);
+            self.say(why, true);
+        }
+        kept
     }
 
     /// The actions the selected row's type has (the `m` menu, the help).
@@ -2486,7 +2620,7 @@ impl KubeUi {
         };
         let Some(res) = self.catalog.find(kind.plural()).cloned() else { return Some(Vec::new()) };
         let obj = ObjRef { res, ns: row.ns.clone(), name: row.name.clone() };
-        let ro = self.config.read_only;
+        let ro = self.access() != Access::Writable;
         Some(match (key.code, ctrl, kind) {
             (KeyCode::Enter | KeyCode::Char('d'), false, _) => self.describe(obj),
             (KeyCode::Char('y'), false, _) => self.yaml(obj),

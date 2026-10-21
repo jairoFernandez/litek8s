@@ -548,8 +548,10 @@ terminal:
 `litek8s dev` runs as many clusters as you like in one VM or sandbox
 ([dev.md](dev.md#several-clusters)); view 2 lists them, with the VM's or
 sandbox's size and what it uses, and the other contexts of your kubeconfig
-(a home cluster, a cloud one) read-only. On the Mac, with a 3-node cluster
-and a stopped one:
+(a home cluster, a cloud one): `enter` on one shows it in the Kubernetes
+view, [read-only](#read-only-clusters) unless you allow it, and
+`showOtherContexts: false` in [`ui.yaml`](#uiyaml) leaves them out of the
+list. On the Mac, with a 3-node cluster and a stopped one:
 
 ```
  litek8s 1 Home  2 Clust 3 Ctrs 4 Imgs 5 Vols 6 Space 7 Kube 8 Set 9 Obs  ● dev
@@ -559,7 +561,7 @@ and a stopped one:
 │   ci           ● up        127.0.0.1:61325  3     5.6 MB    2m   litek8s-ci  │
 │   old          ○ down      -                1     -         3d   litek8s-old │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-╭─ Other kubeconfig contexts ───────────── read-only · enter: Kubernetes view ─╮
+╭─ Other kubeconfig contexts ── read-only by default · enter: Kubernetes view ─╮
 │   home                          https://192.168.1.10:6443                    │
 ╰──────────────────────────────────────────────────────────────────────────────╯
  All clusters share one VM (its CPUs and memory: Settings).
@@ -719,6 +721,29 @@ files, client certificates, basic auth, and **exec plugins**
 token is needed and again when it expires or the server refuses it. Every
 request goes to the context the UI shows; `:kubectl` passes it as
 `--context`, so the kubeconfig's current context is never used by accident.
+
+### Read-only clusters
+
+Only litek8s's own clusters can be changed from the UI by default. Any
+other context (a cloud cluster, a colleague's) is **read-only**: you can
+list, describe, read YAML and logs, follow the tree and port-forward, but
+deletes, edits, applies, scaling, rollout restarts and undos, cordon and
+drain, running a CronJob, shells, `:kubectl` commands that change things
+(anything but `get`, `describe`, `logs`, `top`, `rollout status`, …) and
+plugins not marked `mutates: false` are refused, with a message saying how
+to allow it. The header shows ` read-only ` for such a context.
+
+A context counts as litek8s when it is one of `litek8s dev`'s clusters
+(`litek8s-<name>`, `lkdev-<name>` with `$LITEK8S_HOME`, checked against the
+clusters on disk) or its API server says so (`/version` reports
+`v1.33.0+litek8s`; asked once per context). To change another cluster from
+here, list it in `ui.yaml`:
+
+```yaml
+writableContexts: [staging, home]
+```
+
+`readOnly: true` makes every cluster read-only, litek8s's included.
 
 ### Command mode (`:`)
 
@@ -938,6 +963,7 @@ plugins:                        # your commands, on the selected row
     args: [-n, $NAMESPACE, $NAME]
     background: true            # output in a pager instead of the terminal
     confirm: false              # true: ask first
+    mutates: false              # it only reads: also runs on read-only clusters
 theme: default                  # high-contrast, mono; see Look
 background: auto                # dark, light
 ascii: false                    # true (or LITEK8S_UI_ASCII=1): ASCII only
@@ -947,7 +973,9 @@ skin:                           # names, 0-255 or #rrggbb, over the theme's colo
   warn: yellow
   bad: red
 logs: {tail: 100, buffer: 10000, timestamps: false, wrap: false, maxStreams: 30}
-readOnly: false                 # true: no deletes, edits, scaling, shells
+readOnly: false                 # true: no deletes, edits, scaling, shells, anywhere
+writableContexts: []            # other clusters that may be changed (see Read-only clusters)
+showOtherContexts: true         # false: Clusters lists litek8s's clusters only
 kubectl: kubectl                # which kubectl `:kubectl` runs
 ```
 

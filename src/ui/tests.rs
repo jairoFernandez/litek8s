@@ -910,3 +910,19 @@ fn header_shows_a_development_build() {
     let short = render(&app, 80, 10);
     assert!(short.lines().next().unwrap().contains("litek8s DEV"), "{short}");
 }
+
+#[test]
+fn other_contexts_can_be_hidden() {
+    let mut app = sample_app();
+    app.apply(Msg::Clusters(Box::new(clusters_sample())));
+    app.key(key('2'));
+    assert!(render(&app, 80, 24).contains("Other kubeconfig contexts"));
+    // showOtherContexts: false in ui.yaml: gone now and from later samples.
+    let cfg: super::kube::uiconfig::UiConfig = serde_yaml::from_str("showOtherContexts: false").unwrap();
+    app.apply(Msg::Kube(super::kube::KMsg::Config(Ok(cfg))));
+    let s = render(&app, 80, 24);
+    assert!(!s.contains("Other kubeconfig contexts") && !s.contains("192.168.1.10") && s.contains("Local clusters"), "{s}");
+    app.apply(Msg::Clusters(Box::new(clusters_sample())));
+    assert!(!render(&app, 80, 24).contains("Other kubeconfig contexts"));
+    assert_eq!(app.list_len(), app.clusters.local.len());
+}

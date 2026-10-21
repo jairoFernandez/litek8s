@@ -114,6 +114,15 @@ fn header(f: &mut Frame, app: &App, area: Rect) {
         None => spans.push(Span::styled(c, t.accent)),
     }
     let mut right = Vec::new();
+    // Not a litek8s cluster (or readOnly: true): nothing changes from here.
+    match ui.access() {
+        Access::Writable => {}
+        Access::Checking => right.push(Span::styled("read-only? ", t.dim)),
+        _ => right.push(Span::styled(" read-only ", t.chip.patch(t.warn).add_modifier(Modifier::BOLD))),
+    }
+    if !right.is_empty() {
+        right.push(Span::raw(" "));
+    }
     if !ui.forwards.is_empty() {
         right.push(Span::styled(format!("⇄{} ", ui.forwards.len()), t.ok.add_modifier(Modifier::BOLD)));
     }
