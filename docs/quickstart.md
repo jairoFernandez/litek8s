@@ -40,3 +40,19 @@ flowchart LR
     you -->|"127.0.0.1:port<br/>context litek8s-ci"| c1
     you -.->|"docker.sock"| d1
 ```
+
+## Your own image, no registry
+
+The Docker socket and the cluster share one image store, so an image you
+build is a pod's `image:` right away:
+
+```bash
+export DOCKER_HOST=unix://$HOME/.litek8s/docker.sock
+DOCKER_BUILDKIT=0 docker build -t myapp:dev .   # litek8s's builder
+kubectl create deployment myapp --image=myapp:dev
+```
+
+`DOCKER_BUILDKIT=0` works with any `docker` CLI. To build with buildx (Docker
+Desktop and OrbStack install it) use `docker build --load -t myapp:dev .`:
+without `--load` buildx keeps the image in its own builder and the cluster
+never sees it. See [Builds](docker.md#builds-two-builders).

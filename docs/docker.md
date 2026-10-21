@@ -11,6 +11,19 @@ docker run --rm -it alpine sh
 docker compose up -d --build
 ```
 
+**Building with buildx installed** (Docker Desktop, OrbStack and most
+Linux packages ship it): `docker build` goes through buildx, so add `--load`
+or the image does not show up in `docker images` (nor for pods). Or make
+loading the default for this endpoint once, or use litek8s's own builder:
+
+```bash
+docker buildx create --use --name litek8s --driver docker-container --driver-opt default-load=true
+DOCKER_BUILDKIT=0 docker build -t myapp:dev .     # litek8s's builder, no buildx
+```
+
+`docker compose up --build` loads its images either way. Details in
+[Builds](#builds-two-builders).
+
 It runs **next to** an installed Docker or OrbStack, on its own socket:
 nothing of theirs is stopped, changed or used. Leave `DOCKER_HOST` unset to
 talk to them as before. To switch with `docker context` instead of an
