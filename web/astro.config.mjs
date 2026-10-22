@@ -1,6 +1,7 @@
 // @ts-check
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
+import vercel from '@astrojs/vercel';
 import { REPO, groups } from './docs.manifest.mjs';
 
 // The public URL, for canonical links and the sitemap: SITE_URL if set, else
@@ -11,6 +12,9 @@ const site = process.env.SITE_URL ?? (process.env.VERCEL ? 'https://litek8s.dev'
 export default defineConfig({
   site,
   trailingSlash: 'always',
+  adapter: vercel({
+    webAnalytics: { enabled: true },
+  }),
   integrations: [
     starlight({
       title: 'litek8s',
