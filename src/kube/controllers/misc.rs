@@ -608,8 +608,12 @@ mod tests {
 
     #[test]
     fn numeric_string_target_ports_are_ports() {
+        // Validation rejects such a port now; one stored before still works.
         let api = api();
-        web_service(&api, json!("8443"));
+        web_service(&api, json!(80));
+        let mut svc = api.get_object("", "services", "default", "web").unwrap();
+        svc["spec"]["ports"][0]["targetPort"] = json!("8443");
+        api.store().update(ObjectKey::new("", "services", "default", "web"), svc, None).unwrap();
         web_pod(&api, "a", "10.42.0.1", true);
         reconcile_service(&api, "default", "web").unwrap();
         assert_eq!(endpoints(&api, "web").unwrap()["subsets"][0]["ports"][0]["port"], 8443);

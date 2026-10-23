@@ -140,8 +140,16 @@ pub fn containers(list: &mut Value) {
 /// Clients rely on them: `kubectl patch` with a JSON patch `replace` of
 /// `.../containers/0/imagePullPolicy` needs the field to exist.
 pub fn pod_template(obj: &mut Value, ptr: &str) {
+    if let Some(spec) = obj.pointer_mut(&format!("{ptr}/spec")).and_then(Value::as_object_mut) {
+        set_default(spec, "restartPolicy", json!("Always"));
+    }
+    job_pod_template(obj, ptr);
+}
+
+/// A Job's pod template: as `pod_template`, but without a default restart
+/// policy (Jobs must name OnFailure or Never; upstream rejects a missing one).
+pub fn job_pod_template(obj: &mut Value, ptr: &str) {
     let Some(spec) = obj.pointer_mut(&format!("{ptr}/spec")).and_then(Value::as_object_mut) else { return };
-    set_default(spec, "restartPolicy", json!("Always"));
     set_default(spec, "dnsPolicy", json!("ClusterFirst"));
     set_default(spec, "schedulerName", json!("default-scheduler"));
     set_default(spec, "terminationGracePeriodSeconds", json!(30));
