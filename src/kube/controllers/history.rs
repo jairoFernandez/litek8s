@@ -92,3 +92,113 @@ pub(crate) fn template_of(api: &ApiState, ns: &str, name: &str) -> Option<Value>
     }
     Some(t)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kube::controllers::util::s;
+
+    fn template(image: &str) -> Value {
+        json!({"metadata": {"labels": {"app": "web"}}, "spec": {"containers": [{"name": "c", "image": image}]}})
+    }
+
+    fn setup(limit: Option<i64>) -> (ApiState, Value) {
+        let api = ApiState::open(None, "127.0.0.1:0".into(), false).unwrap();
+        let mut spec = json!({"selector": {"matchLabels": {"app": "web"}}, "template": template("v1")});
+        if let Some(limit) = limit {
+            spec["revisionHistoryLimit"] = json!(limit);
+        }
+        let sts = json!({"apiVersion": "apps/v1", "kind": "StatefulSet", "metadata": {"name": "web"}, "spec": spec});
+        let owner = api.create_object("apps", "statefulsets", Some("default"), sts).unwrap();
+        (api, owner)
+    }
+
+    fn sync_image(api: &ApiState, owner: &Value, image: &str, in_use: &[String]) -> String {
+        let t = template(image);
+        sync(api, owner, &t, &util::hash_of(&t), in_use).unwrap().name
+    }
+
+    /// (name, revision) of every revision, oldest first.
+    fn revisions(api: &ApiState, owner: &Value) -> Vec<(String, i64)> {
+        list(api, "default", owner).iter().map(|r| (util::name(r), r["revision"].as_i64().unwrap())).collect()
+    }
+
+    #[test]
+    fn records_one_revision_per_template() {
+        let (api, owner) = setup(None);
+        let v1 = sync_image(&api, &owner, "v1", &[]);
+        let t = template("v1");
+        assert_eq!(v1, format!("web-{}", util::hash_of(&t)));
+        assert_eq!(sync_image(&api, &owner, "v1", &[]), v1);
+        assert_eq!(revisions(&api, &owner), [(v1.clone(), 1)]);
+
+        let cr = api.get_object("apps", "controllerrevisions", "default", &v1).unwrap();
+        assert_eq!(s(&cr, "/metadata/labels/app"), "web");
+        assert_eq!(s(&cr, "/metadata/labels/controller-revision-hash"), util::hash_of(&t));
+        assert_eq!(s(&cr, "/metadata/ownerReferences/0/uid"), util::uid(&owner));
+        // The data clients compare: the template replaced whole.
+        assert_eq!(cr.pointer("/data/spec/template/$patch"), Some(&json!("replace")));
+        assert_eq!(cr.pointer("/data/spec/template/metadata/creationTimestamp"), Some(&Value::Null));
+
+        let v2 = sync_image(&api, &owner, "v2", &[]);
+        assert_eq!(revisions(&api, &owner), [(v1, 1), (v2, 2)]);
+    }
+
+    #[test]
+    fn rollback_renumbers_the_old_revision() {
+        let (api, owner) = setup(None);
+        let v1 = sync_image(&api, &owner, "v1", &[]);
+        let v2 = sync_image(&api, &owner, "v2", &[]);
+        assert_eq!(sync_image(&api, &owner, "v1", &[]), v1);
+        assert_eq!(revisions(&api, &owner), [(v2, 2), (v1, 3)]);
+    }
+
+    #[test]
+    fn trims_history_but_keeps_revisions_in_use() {
+        let (api, owner) = setup(Some(1));
+        let v1 = sync_image(&api, &owner, "v1", &[]);
+        let v2 = sync_image(&api, &owner, "v2", &[]);
+        let v3 = sync_image(&api, &owner, "v3", &[]);
+        // One old revision besides the current one.
+        assert_eq!(revisions(&api, &owner), [(v2.clone(), 2), (v3.clone(), 3)]);
+        assert!(api.get_object("apps", "controllerrevisions", "default", &v1).is_none());
+
+        // Pods still on v2 keep it, beyond the limit.
+        let v4 = sync_image(&api, &owner, "v4", &[v2.clone()]);
+        assert_eq!(revisions(&api, &owner), [(v2.clone(), 2), (v3, 3), (v4.clone(), 4)]);
+        let v5 = sync_image(&api, &owner, "v5", &[v2.clone()]);
+        assert_eq!(revisions(&api, &owner), [(v2, 2), (v4, 4), (v5, 5)]);
+    }
+
+    #[test]
+    fn limit_zero_keeps_only_the_current_revision() {
+        let (api, owner) = setup(Some(0));
+        sync_image(&api, &owner, "v1", &[]);
+        let v2 = sync_image(&api, &owner, "v2", &[]);
+        assert_eq!(revisions(&api, &owner), [(v2, 2)]);
+    }
+
+    #[test]
+    fn ignores_revisions_of_other_owners() {
+        let (api, owner) = setup(None);
+        let other = api
+            .create_object("apps", "statefulsets", Some("default"),
+                json!({"apiVersion": "apps/v1", "kind": "StatefulSet", "metadata": {"name": "db"}, "spec": {"selector": {"matchLabels": {"app": "db"}}, "template": template("v1")}}))
+            .unwrap();
+        sync_image(&api, &other, "v1", &[]);
+        sync_image(&api, &other, "v2", &[]);
+        let mine = sync_image(&api, &owner, "v1", &[]);
+        assert_eq!(revisions(&api, &owner), [(mine, 1)]);
+        assert_eq!(revisions(&api, &other).len(), 2);
+    }
+
+    #[test]
+    fn template_of_gives_back_the_recorded_template() {
+        let (api, owner) = setup(None);
+        let name = sync_image(&api, &owner, "v1", &[]);
+        let mut expected = template("v1");
+        expected["metadata"]["creationTimestamp"] = Value::Null;
+        assert_eq!(template_of(&api, "default", &name), Some(expected));
+        assert_eq!(template_of(&api, "default", "missing"), None);
+    }
+}

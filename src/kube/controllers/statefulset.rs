@@ -241,3 +241,214 @@ fn pod_for(sts: &Value, template: &Value, ord: i64, revision: &str) -> Value {
     }
     pod
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn api() -> ApiState {
+        ApiState::open(None, "127.0.0.1:0".into(), false).unwrap()
+    }
+
+    fn sts(spec: Value) -> Value {
+        let mut spec = spec;
+        spec["selector"] = json!({"matchLabels": {"app": "web"}});
+        spec["template"] = json!({"metadata": {"labels": {"app": "web"}}, "spec": {"containers": [{"name": "c", "image": "nginx:1"}]}});
+        json!({"apiVersion": "apps/v1", "kind": "StatefulSet", "metadata": {"name": "web"}, "spec": spec})
+    }
+
+    fn pod_names(api: &ApiState) -> Vec<String> {
+        api.store().list("", "pods", Some("default")).0.iter().filter(|p| !util::is_deleting(p)).map(util::name).collect()
+    }
+
+    fn pod(api: &ApiState, name: &str) -> Value {
+        api.get_object("", "pods", "default", name).unwrap()
+    }
+
+    fn mark_ready(api: &ApiState, name: &str) {
+        let p = pod(api, name);
+        util::write_status(api, "", "pods", &p, json!({"phase": "Running", "conditions": [{"type": "Ready", "status": "True"}]})).unwrap();
+    }
+
+    fn set_spec(api: &ApiState, f: impl FnOnce(&mut Value)) {
+        let mut s = api.get_object("apps", "statefulsets", "default", "web").unwrap();
+        f(&mut s["spec"]);
+        api.update_object("apps", "statefulsets", s).unwrap();
+    }
+
+    fn status(api: &ApiState) -> Value {
+        api.get_object("apps", "statefulsets", "default", "web").unwrap()["status"].clone()
+    }
+
+    /// Reconcile, then make every pod Running and Ready, until nothing changes.
+    fn settle(api: &ApiState) {
+        for _ in 0..20 {
+            let before = pod_names(api);
+            reconcile(api, "default", "web").unwrap();
+            for name in pod_names(api) {
+                mark_ready(api, &name);
+            }
+            if pod_names(api) == before {
+                reconcile(api, "default", "web").unwrap();
+                if pod_names(api) == before {
+                    return;
+                }
+            }
+        }
+        panic!("statefulset did not settle: {:?}", pod_names(api));
+    }
+
+    #[test]
+    fn ordinals_come_from_the_set_name() {
+        let named = |n: &str| json!({"metadata": {"name": n}});
+        assert_eq!(ordinal_of("web", &named("web-3")), Some(3));
+        assert_eq!(ordinal_of("web", &named("web-x")), None);
+        assert_eq!(ordinal_of("web", &named("db-1")), None);
+        assert_eq!(ordinal_of("web", &named("web-a-1")), None);
+    }
+
+    #[test]
+    fn ordered_ready_creates_one_pod_at_a_time() {
+        let api = api();
+        api.create_object("apps", "statefulsets", Some("default"), sts(json!({"replicas": 3, "serviceName": "web"}))).unwrap();
+        reconcile(&api, "default", "web").unwrap();
+        assert_eq!(pod_names(&api), ["web-0"]);
+        // Not ready yet: web-1 waits.
+        reconcile(&api, "default", "web").unwrap();
+        assert_eq!(pod_names(&api), ["web-0"]);
+        let p = pod(&api, "web-0");
+        assert_eq!(s(&p, "/spec/hostname"), "web-0");
+        assert_eq!(s(&p, "/spec/subdomain"), "web");
+        assert_eq!(s(&p, "/metadata/labels/statefulset.kubernetes.io~1pod-name"), "web-0");
+        assert_eq!(s(&p, "/metadata/labels/apps.kubernetes.io~1pod-index"), "0");
+        assert!(!revision_of(&p).is_empty());
+
+        mark_ready(&api, "web-0");
+        reconcile(&api, "default", "web").unwrap();
+        assert_eq!(pod_names(&api), ["web-0", "web-1"]);
+        settle(&api);
+        assert_eq!(pod_names(&api), ["web-0", "web-1", "web-2"]);
+        let st = status(&api);
+        assert_eq!(st["replicas"], 3);
+        assert_eq!(st["readyReplicas"], 3);
+        assert_eq!(st["updatedReplicas"], 3);
+        assert_eq!(st["currentRevision"], st["updateRevision"]);
+    }
+
+    #[test]
+    fn parallel_creates_every_pod_with_its_claims() {
+        let api = api();
+        let mut set = sts(json!({
+            "replicas": 2,
+            "podManagementPolicy": "Parallel",
+            "persistentVolumeClaimRetentionPolicy": {"whenDeleted": "Delete"},
+            "volumeClaimTemplates": [{"metadata": {"name": "data", "annotations": {"a": "b"}},
+                "spec": {"accessModes": ["ReadWriteOnce"], "resources": {"requests": {"storage": "1Gi"}}}}],
+        }));
+        // A template volume of the same name is replaced by the claim.
+        set["spec"]["template"]["spec"]["volumes"] = json!([{"name": "data", "emptyDir": {}}]);
+        let created = api.create_object("apps", "statefulsets", Some("default"), set).unwrap();
+        reconcile(&api, "default", "web").unwrap();
+        assert_eq!(pod_names(&api), ["web-0", "web-1"]);
+        for ord in 0..2 {
+            let claim = format!("data-web-{ord}");
+            let pvc = api.get_object("", "persistentvolumeclaims", "default", &claim).unwrap();
+            assert_eq!(s(&pvc, "/metadata/labels/app"), "web");
+            assert_eq!(s(&pvc, "/metadata/annotations/a"), "b");
+            assert_eq!(s(&pvc, "/metadata/ownerReferences/0/uid"), util::uid(&created));
+            let volumes = pod(&api, &format!("web-{ord}"))["spec"]["volumes"].clone();
+            let data: Vec<&Value> = volumes.as_array().unwrap().iter().filter(|v| v["name"] == "data").collect();
+            assert_eq!(data, [&json!({"name": "data", "persistentVolumeClaim": {"claimName": claim}})]);
+        }
+    }
+
+    #[test]
+    fn claims_outlive_the_set_by_default() {
+        let api = api();
+        let set = sts(json!({"replicas": 1, "volumeClaimTemplates": [{"metadata": {"name": "data"}, "spec": {}}]}));
+        api.create_object("apps", "statefulsets", Some("default"), set).unwrap();
+        reconcile(&api, "default", "web").unwrap();
+        let pvc = api.get_object("", "persistentvolumeclaims", "default", "data-web-0").unwrap();
+        assert!(pvc.pointer("/metadata/ownerReferences").is_none());
+    }
+
+    #[test]
+    fn scales_down_from_the_highest_ordinal() {
+        let api = api();
+        api.create_object("apps", "statefulsets", Some("default"), sts(json!({"replicas": 3}))).unwrap();
+        settle(&api);
+        set_spec(&api, |s| s["replicas"] = json!(1));
+        reconcile(&api, "default", "web").unwrap();
+        // OrderedReady: one at a time, the highest first.
+        assert_eq!(pod_names(&api), ["web-0", "web-1"]);
+        reconcile(&api, "default", "web").unwrap();
+        assert_eq!(pod_names(&api), ["web-0"]);
+        // Status counts the pods the reconcile started with.
+        reconcile(&api, "default", "web").unwrap();
+        assert_eq!(status(&api)["replicas"], 1);
+    }
+
+    #[test]
+    fn replaces_failed_pods_and_removes_strays() {
+        let api = api();
+        let created = api.create_object("apps", "statefulsets", Some("default"), sts(json!({"replicas": 1}))).unwrap();
+        settle(&api);
+        let uid_before = util::uid(&pod(&api, "web-0"));
+        let p = pod(&api, "web-0");
+        util::write_status(&api, "", "pods", &p, json!({"phase": "Failed"})).unwrap();
+        let stray = json!({"apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": "web-extra", "ownerReferences": [util::owner_ref(&created)]},
+            "spec": {"containers": [{"name": "c", "image": "x"}]}});
+        api.create_object("", "pods", Some("default"), stray).unwrap();
+        reconcile(&api, "default", "web").unwrap();
+        assert!(api.get_object("", "pods", "default", "web-extra").is_none());
+        reconcile(&api, "default", "web").unwrap();
+        assert_eq!(pod_names(&api), ["web-0"]);
+        assert_ne!(util::uid(&pod(&api, "web-0")), uid_before);
+    }
+
+    #[test]
+    fn rolling_update_stops_at_the_partition() {
+        let api = api();
+        api.create_object("apps", "statefulsets", Some("default"), sts(json!({"replicas": 3}))).unwrap();
+        settle(&api);
+        let old_revision = revision_of(&pod(&api, "web-0"));
+        set_spec(&api, |s| {
+            s["template"]["spec"]["containers"][0]["image"] = json!("nginx:2");
+            s["updateStrategy"] = json!({"type": "RollingUpdate", "rollingUpdate": {"partition": 1}});
+        });
+        settle(&api);
+        let image = |n: &str| s(&pod(&api, n), "/spec/containers/0/image").to_string();
+        assert_eq!([image("web-0"), image("web-1"), image("web-2")], ["nginx:1", "nginx:2", "nginx:2"]);
+        assert_eq!(revision_of(&pod(&api, "web-0")), old_revision);
+        let st = status(&api);
+        assert_eq!(st["currentRevision"], old_revision);
+        assert_ne!(st["updateRevision"], old_revision);
+        assert_eq!(st["updatedReplicas"], 2);
+        assert_eq!(st["currentReplicas"], 1);
+
+        // web-0, recreated below the partition, gets the old template back.
+        api.delete_named("", "pods", "default", "web-0").unwrap();
+        settle(&api);
+        assert_eq!(image("web-0"), "nginx:1");
+
+        // Partition 0 finishes the rollout.
+        set_spec(&api, |s| s["updateStrategy"]["rollingUpdate"]["partition"] = json!(0));
+        settle(&api);
+        assert_eq!(image("web-0"), "nginx:2");
+        let st = status(&api);
+        assert_eq!(st["currentRevision"], st["updateRevision"]);
+        assert_eq!(st["currentReplicas"], 3);
+    }
+
+    #[test]
+    fn on_delete_leaves_old_pods_alone() {
+        let api = api();
+        api.create_object("apps", "statefulsets", Some("default"), sts(json!({"replicas": 2, "updateStrategy": {"type": "OnDelete"}}))).unwrap();
+        settle(&api);
+        set_spec(&api, |s| s["template"]["spec"]["containers"][0]["image"] = json!("nginx:2"));
+        settle(&api);
+        assert_eq!(s(&pod(&api, "web-1"), "/spec/containers/0/image"), "nginx:1");
+        assert_eq!(status(&api)["updatedReplicas"], 0);
+    }
+}
