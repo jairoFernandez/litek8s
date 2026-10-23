@@ -160,6 +160,21 @@ Without it, agents still try the address they dial the server at for the
 server's node, and the server learns every agent's public endpoint from its
 packets. Open UDP 51820 (`--wireguard-port`) in the VM's security group.
 
+## LoadBalancer Services on servers and nodes
+
+A LoadBalancer Service's status points at a node's `InternalIP`, and every
+server and node listens on the Service's own ports (TCP), not only on its
+NodePorts, like k3s's servicelb: an ingress controller's Service on 80 and
+443 answers on every machine's 80 and 443, so a DNS record or the
+`ExternalIP` of any node reaches it. Open those ports in the VM's security
+group. A port the machine already uses (sshd's 22, the API's 6443) stays
+with its owner and the node agent logs it; the NodePort still answers, and
+the port is tried again whenever the Services change. Two Services on one
+port: the first by namespace and name gets it. `--disable-loadbalancer-ports`
+on `apiserver` and `agent` keeps only the NodePorts (k3s's
+`--disable=servicelb`). Dev clusters publish both on the host's loopback
+instead ([dev.md](dev.md)).
+
 ## Testing it
 
 `bench/nat-e2e.sh` boots three VMs: a server with a public address and two

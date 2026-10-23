@@ -1397,6 +1397,8 @@ async fn inner_apiserver(o: InnerOptions) -> Result<()> {
         runtime: crate::kube::agent::RuntimeChoice::Crun,
         node_ip: None,
         node_external_ip: None,
+        // The dev sandbox publishes them on the host's loopback (broker).
+        loadbalancer_ports: false,
         advertise_address: None,
         network: crate::kube::join::ClusterNetwork::default(),
         token: None,

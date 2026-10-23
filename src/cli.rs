@@ -397,6 +397,8 @@ enum Command {
         no_wireguard: bool,
         #[arg(long, help = "Public address of this server's node when its own is private (a cloud VM): the overlay endpoint other nodes use")]
         node_external_ip: Option<std::net::IpAddr>,
+        #[arg(long, help = "Do not listen on LoadBalancer Services' own ports on this node, only on their NodePorts (k3s's --disable=servicelb)")]
+        disable_loadbalancer_ports: bool,
         #[arg(long, help = "Also serve the Docker Engine API on this Unix socket (crun runtime; published ports bind on 127.0.0.1)")]
         docker_socket: Option<PathBuf>,
         #[arg(long, value_name = "FILE", help = "Registry mirrors, credentials and TLS for image pulls (k3s registries.yaml format; default /etc/litek8s/registries.yaml when it exists); read at start")]
@@ -508,6 +510,8 @@ enum Command {
         no_wireguard: bool,
         #[arg(long, help = "Public address of this node when its own is private (a cloud VM with a public IP): the overlay endpoint other nodes use")]
         node_external_ip: Option<std::net::IpAddr>,
+        #[arg(long, help = "Do not listen on LoadBalancer Services' own ports on this node, only on their NodePorts (k3s's --disable=servicelb)")]
+        disable_loadbalancer_ports: bool,
         #[arg(long, value_parser = parse_duration, help = "Heartbeat grace for this node when longer than the cluster's (e.g. 15m for a laptop that sleeps)")]
         node_grace_period: Option<Duration>,
         #[arg(long, value_name = "FILE", help = "Registry mirrors, credentials and TLS for image pulls (k3s registries.yaml format; default /etc/litek8s/registries.yaml when it exists); read at start")]
@@ -760,6 +764,7 @@ pub async fn run() -> Result<()> {
             wireguard_port,
             no_wireguard,
             node_external_ip,
+            disable_loadbalancer_ports,
             docker_socket,
             registry_config,
             cluster_init,
@@ -798,6 +803,7 @@ pub async fn run() -> Result<()> {
                 runtime,
                 node_ip,
                 node_external_ip,
+                loadbalancer_ports: !disable_loadbalancer_ports,
                 advertise_address,
                 network: crate::kube::join::ClusterNetwork { cluster_cidr, node_mask: node_cidr_mask_size },
                 token,
@@ -891,7 +897,7 @@ pub async fn run() -> Result<()> {
             }
         }
         Command::Skill { reference, list, install } => skill(reference, list, install),
-        Command::Agent { join, token, node_name, node_ip, node_dir, runtime, wireguard_port, no_wireguard, node_external_ip, node_grace_period, registry_config } => {
+        Command::Agent { join, token, node_name, node_ip, node_dir, runtime, wireguard_port, no_wireguard, node_external_ip, node_grace_period, registry_config, disable_loadbalancer_ports } => {
             crate::registries::init(registry_config.as_deref())?;
             let node_name = node_name.unwrap_or_else(crate::kube::agent::default_node_name);
             let node_dir = node_dir.unwrap_or_else(crate::kube::agent::default_root_dir);
@@ -915,6 +921,7 @@ pub async fn run() -> Result<()> {
                 node_ip: node_ip.map(|ip| ip.to_string()).unwrap_or_else(crate::kube::agent::local_ip),
                 wireguard_port: (!no_wireguard).then_some(wireguard_port),
                 external_ip: node_external_ip.map(|ip| ip.to_string()),
+                loadbalancer_ports: !disable_loadbalancer_ports,
             };
             let agent = crate::kube::agent::node_agent_with(runtime, Some(node_name), Some(node_dir), network, node_grace_period).await?;
             crate::kube::metrics::spawn_memory_trim();

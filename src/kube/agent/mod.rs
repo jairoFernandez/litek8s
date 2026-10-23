@@ -912,6 +912,8 @@ pub struct NodeNetwork {
     /// This node's public address (behind 1:1 NAT, e.g. a cloud VM): the
     /// overlay endpoint other nodes use, and the Node's ExternalIP.
     pub external_ip: Option<String>,
+    /// Listen on LoadBalancer Services' own ports (see proxy.rs).
+    pub loadbalancer_ports: bool,
 }
 
 /// The pod CIDR this node had at its last join (kept in `join.json`).
@@ -994,6 +996,7 @@ pub async fn node_agent_with(
     let _ = std::fs::write(root_dir.join("join.json"), serde_json::to_vec(&saved)?);
     eprintln!("node-agent: running pods with {}", node.pointer("/status/nodeInfo/containerRuntimeVersion").and_then(Value::as_str).unwrap_or("?"));
     let agent = Agent::with_overlay(rt, AgentConfig { node_name, root_dir, node, node_ip }, overlay);
+    agent.proxy.publish_lb.store(network.loadbalancer_ports, Ordering::Relaxed);
     tokio::spawn(kubelet::serve(agent.clone(), kubelet::PORT));
     Ok(agent)
 }
