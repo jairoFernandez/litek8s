@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Rollouts that stop progressing fail**: the Deployment controller keeps
+  the `Progressing` condition as upstream does (`NewReplicaSetCreated`,
+  `ReplicaSetUpdated`, `NewReplicaSetAvailable`) and sets it to `False`,
+  `ProgressDeadlineExceeded`, when a rollout makes no progress for
+  `progressDeadlineSeconds` (default 600; paused Deployments never time
+  out). `kubectl rollout status` then fails with `exceeded its progress
+  deadline` instead of waiting, and Argo CD shows the app Degraded.
 - **An agent token that joins nodes and nothing else**: next to the join
   token, a server keeps an agent token in `<data-dir>/agent-token`
   (`K10<CA hash>::node:<secret>`, like k3s's `--agent-token`), derived from

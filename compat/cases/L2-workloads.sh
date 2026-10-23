@@ -32,6 +32,20 @@ t_deploy_rollout_undo() {
     expect_eq "$(k -n "$NS" get deploy web -o jsonpath='{.spec.template.spec.containers[0].image}')" nginx:1.27-alpine
 }
 
+case_def deploy_progress_deadline L2 120 "a rollout that cannot progress exceeds progressDeadlineSeconds"
+t_deploy_progress_deadline() {
+    use_ns
+    k -n "$NS" create deployment stuck --image=registry.invalid/none:1 >/dev/null
+    k -n "$NS" patch deployment stuck -p '{"spec":{"progressDeadlineSeconds":10}}' >/dev/null
+    local out
+    if out="$(with_timeout 100 kubectl -n "$NS" rollout status deployment/stuck --timeout=90s 2>&1)"; then
+        echo "rollout status succeeded: $out" >&2
+        return 1
+    fi
+    expect_contains "$out" "exceeded its progress deadline"
+    expect_eq "$(k -n "$NS" get deploy stuck -o jsonpath='{.status.conditions[?(@.type=="Progressing")].reason}')" ProgressDeadlineExceeded
+}
+
 case_def pod_logs L2 120 "kubectl logs returns container stdout"
 t_pod_logs() {
     use_ns
