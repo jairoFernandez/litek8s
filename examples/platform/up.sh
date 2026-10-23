@@ -215,6 +215,11 @@ for _ in $(seq 120); do
   kubectl -n openbao get pod openbao-0 -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null | grep -q true && break
   sleep 5
 done
+if ! kubectl -n openbao get pod openbao-0 -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null | grep -q true; then
+  echo "openbao: not ready after 10 minutes; Argo CD says:" >&2
+  kubectl -n argocd get application openbao -o jsonpath='  sync {.status.sync.status}, health {.status.health.status}{"\n"}  {.status.conditions[*].message}{"\n"}' >&2 || true
+  exit 1
+fi
 bao() { kubectl -n openbao exec -i openbao-0 -c openbao -- env BAO_ADDR=http://127.0.0.1:8200 BAO_TOKEN="${root:-}" bao "$@"; }
 root=""
 if [[ $(bao status -format=json 2>/dev/null | json 'd["initialized"]') == False ]]; then
