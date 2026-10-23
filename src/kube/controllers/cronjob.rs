@@ -191,8 +191,8 @@ impl Schedule {
             days: parse_field(fields[2], 1, 31, &[], 0)?,
             months: parse_field(fields[3], 1, 12, MONTHS, 1)?,
             weekdays,
-            days_restricted: !fields[2].starts_with('*'),
-            weekdays_restricted: !fields[4].starts_with('*'),
+            days_restricted: restricts(fields[2]),
+            weekdays_restricted: restricts(fields[4]),
         })
     }
 
@@ -263,6 +263,12 @@ impl Schedule {
 }
 
 /// One cron field into a membership table indexed by value (0..=max).
+/// Whether a day field narrows the days, as robfig/cron (Kubernetes's
+/// parser) decides: `*` and `?` do not, unless stepped by more than one.
+fn restricts(field: &str) -> bool {
+    !matches!(field, "*" | "?" | "*/1" | "?/1")
+}
+
 fn parse_field(field: &str, min: u32, max: u32, names: &[&str], name_base: u32) -> Option<Vec<bool>> {
     let mut set = vec![false; max as usize + 1];
     let value = |v: &str| -> Option<u32> {
@@ -364,6 +370,14 @@ mod tests {
         // Only the day of month.
         let s = Schedule::parse("0 0 15 * *").unwrap();
         assert_eq!(s.next_after(at(2026, 1, 1, 0, 0)), Some(at(2026, 1, 15, 0, 0)));
+        // `?` is `*`: the 1st of January and July only.
+        let s = Schedule::parse("0 0 1 JAN,jul ?").unwrap();
+        assert_eq!(s.next_after(at(2026, 1, 1, 0, 0)), Some(at(2026, 7, 1, 0, 0)));
+        // A step over `*` restricts (robfig/cron): odd days or Fridays.
+        let s = Schedule::parse("0 0 */2 * fri").unwrap();
+        assert_eq!(s.next_after(at(2026, 1, 2, 0, 0)), Some(at(2026, 1, 3, 0, 0)));
+        let s = Schedule::parse("0 0 */1 * fri").unwrap();
+        assert_eq!(s.next_after(at(2026, 1, 2, 0, 0)), Some(at(2026, 1, 9, 0, 0)));
     }
 
     #[test]
