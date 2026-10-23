@@ -191,7 +191,9 @@ pub fn breakdown(prev: &Sample, now: &Sample, cluster: &str, name: &dyn Fn(&str)
     // fold from 0.0: summing an empty f64 iterator yields -0.0, shown as "-0.0%".
     let containers: f64 = per.iter().fold(0.0, |a, (_, p)| a + p);
     let line = |label: String, pct: f64, note: &str| Line { label, pct, note: note.to_string(), indent: false };
-    let mut lines = vec![line(format!("litek8s ({cluster})"), litek8s, "API server, controllers, node agent")];
+    // A remote litek8s is not one of this machine's dev clusters: no name.
+    let label = if now.kind == Kind::Remote { "litek8s".to_string() } else { format!("litek8s ({cluster})") };
+    let mut lines = vec![line(label, litek8s, "API server, controllers, node agent")];
     lines.push(line("pods & containers".into(), containers, ""));
     for (id, p) in per.iter().take(3).filter(|(_, p)| *p >= 0.05) {
         lines.push(Line { label: name(id), pct: *p, note: String::new(), indent: true });
@@ -229,6 +231,23 @@ mod tests {
     fn cg(dir: &Path, usec: u64) {
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("cpu.stat"), format!("usage_usec {usec}\nuser_usec 1\nsystem_usec 1\n")).unwrap();
+    }
+
+    #[test]
+    fn a_remote_node_is_not_named_after_a_dev_cluster() {
+        let at = std::time::Instant::now();
+        let sample = |dt: u64, busy: u64, own: u64| Sample {
+            at: Some(at + std::time::Duration::from_secs(dt)),
+            total_usec: busy,
+            shown: Split { litek8s_usec: own, ..Default::default() },
+            cpus: 2.0,
+            kind: Kind::Remote,
+            ..Default::default()
+        };
+        let b = breakdown(&sample(0, 0, 0), &sample(1, 100_000, 20_000), "dev", &|id| id.to_string()).unwrap();
+        assert_eq!(b.lines[0].label, "litek8s");
+        assert!((b.lines[0].pct - 2.0).abs() < 1e-9 && (b.total_pct - 10.0).abs() < 1e-9);
+        assert_eq!(b.lines.last().unwrap().label, "rest of the machine");
     }
 
     #[test]
