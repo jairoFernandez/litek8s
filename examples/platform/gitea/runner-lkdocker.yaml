@@ -2,6 +2,10 @@
 # containers, no dockerd, no privileged pod). The socket exists on the node
 # that runs the Docker engine: a dev cluster's server node, or a server
 # started with `litek8s apiserver --docker-socket`.
+# It mounts the socket's directory, not the socket: litek8s replaces the
+# socket file when it restarts, and a mount of the file would keep the old
+# one ("Cannot connect to the Docker daemon"). act_runner finds the socket
+# through DOCKER_HOST and mounts it into job containers.
 apiVersion: apps/v1
 kind: Deployment
 metadata: {name: runner-lkdocker, namespace: gitea}
@@ -24,12 +28,13 @@ spec:
         - {name: GITEA_INSTANCE_URL, value: "http://gitea-http.gitea.svc.cluster.local:3000"}
         - {name: GITEA_RUNNER_NAME, value: runner-lkdocker}
         - {name: GITEA_RUNNER_LABELS, value: "lkdocker:docker://node:20-bookworm"}
+        - {name: DOCKER_HOST, value: "unix:///run/litek8s/docker-api/docker.sock"}
         - name: GITEA_RUNNER_REGISTRATION_TOKEN
           valueFrom: {secretKeyRef: {name: runner-token, key: token}}
         volumeMounts:
-        - {name: sock, mountPath: /var/run/docker.sock}
+        - {name: docker-api, mountPath: /run/litek8s/docker-api}
         - {name: data, mountPath: /data}
       volumes:
-      - name: sock
-        hostPath: {path: /run/litek8s/docker.sock, type: Socket}
+      - name: docker-api
+        hostPath: {path: /run/litek8s/docker-api, type: DirectoryOrCreate}
       - {name: data, emptyDir: {}}

@@ -33,9 +33,17 @@ pub fn host_socket_path() -> PathBuf {
     crate::config::paths().docker_socket
 }
 
-/// Where the engine also listens inside the sandbox/VM (what containers get
-/// when they mount the Docker socket).
-pub const INTERNAL_SOCKET: &str = "/run/litek8s/docker.sock";
+/// Where the engine also listens on the node (inside the sandbox/VM for dev
+/// clusters): what containers get when they mount the Docker socket. It is
+/// alone in its directory so that pods mount the directory (hostPath): a
+/// restart replaces the socket file, and a mount of the file itself keeps
+/// the old, dead one until the pod restarts.
+pub const INTERNAL_SOCKET_DIR: &str = "/run/litek8s/docker-api";
+pub const INTERNAL_SOCKET: &str = "/run/litek8s/docker-api/docker.sock";
+
+/// The socket's former path, still served for pods that mount it as a file
+/// (they lose it when the server restarts).
+pub const LEGACY_SOCKET: &str = "/run/litek8s/docker.sock";
 
 /// TCP port of the API on the VM's loopback (the Mac forwards its socket
 /// there over vsock).
@@ -70,12 +78,15 @@ pub(crate) async fn start(settings: Settings, images: Arc<crate::kube::agent::cr
         let l = tokio::net::UnixListener::from_std(l)?;
         tokio::spawn(api::serve_unix(engine.clone(), l));
     }
-    let _ = std::fs::remove_file(INTERNAL_SOCKET);
-    if let Some(parent) = std::path::Path::new(INTERNAL_SOCKET).parent() {
-        std::fs::create_dir_all(parent)?;
+    // Only the socket file is replaced: the directory (maybe created first
+    // by a pod's DirectoryOrCreate hostPath) stays, so mounts of it see the
+    // new socket.
+    std::fs::create_dir_all(INTERNAL_SOCKET_DIR)?;
+    for path in [INTERNAL_SOCKET, LEGACY_SOCKET] {
+        let _ = std::fs::remove_file(path);
+        let l = tokio::net::UnixListener::bind(path).with_context(|| format!("failed to listen on {path}"))?;
+        tokio::spawn(api::serve_unix(engine.clone(), l));
     }
-    let internal = tokio::net::UnixListener::bind(INTERNAL_SOCKET).with_context(|| format!("failed to listen on {INTERNAL_SOCKET}"))?;
-    tokio::spawn(api::serve_unix(engine.clone(), internal));
     if let Some(addr) = settings.tcp {
         let l = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("failed to listen on {addr}"))?;
         tokio::spawn(api::serve_tcp(engine.clone(), l));

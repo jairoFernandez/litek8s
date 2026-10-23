@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- **`litek8s ui` shows a remote cluster as a whole or node by node:** Home
+  adds up every node's CPU, memory and disk (it showed only the API
+  server's node), lists the nodes with their figures, and `n`/`N` switch to
+  one node's breakdown and back. Each node measures its machine only when
+  asked, while Home is on screen. The disk's free space is the nodes', not
+  this machine's.
+- **Connected to a remote litek8s, `litek8s ui` leaves out this machine's
+  Docker tabs** (Containers, Images, Volumes, Free space): they showed the
+  local engine, not the cluster's. They come back with a dev cluster; the
+  other tabs keep their numbers.
+- **Pods keep the Docker API across server restarts:** the Docker engine
+  also listens on `/run/litek8s/docker-api/docker.sock`, alone in its
+  directory. A pod that mounted the socket file (hostPath
+  `/run/litek8s/docker.sock`) kept the old, deleted socket after the server
+  restarted ("Cannot connect to the Docker daemon") until the pod itself
+  restarted; mount the directory instead and set `DOCKER_HOST`. The old
+  path is still served. The platform example's runners do so.
+
 ## 0.2.7
 
 - **Pods reach the API server on 443 again when the node leaves 443 to

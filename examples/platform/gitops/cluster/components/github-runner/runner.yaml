@@ -32,6 +32,9 @@ spec:
           env:
             - {name: RUNNER_ALLOW_RUNASROOT, value: "1"}
             - {name: REPOSITORY, value: <APP_REPOSITORY>}
+            # The socket's directory is mounted, not the socket: it survives
+            # litek8s restarts, which replace the socket file.
+            - {name: DOCKER_HOST, value: "unix:///run/litek8s/docker-api/docker.sock"}
             - name: GITHUB_TOKEN
               valueFrom: {secretKeyRef: {name: github-runner, key: GITHUB_TOKEN}}
           command: [bash, -c]
@@ -51,10 +54,10 @@ spec:
                 ./run.sh & wait $!
               done
           volumeMounts:
-            - {name: docker, mountPath: /var/run/docker.sock}
+            - {name: docker-api, mountPath: /run/litek8s/docker-api}
       volumes:
-        - name: docker
-          hostPath: {path: /run/litek8s/docker.sock, type: Socket}
+        - name: docker-api
+          hostPath: {path: /run/litek8s/docker-api, type: DirectoryOrCreate}
 ---
 apiVersion: external-secrets.io/v1
 kind: ExternalSecret
