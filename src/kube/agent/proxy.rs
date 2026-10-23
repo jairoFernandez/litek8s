@@ -122,7 +122,20 @@ impl Proxy {
     /// The NAT table for the current Services.
     fn rules(&self) -> String {
         let mut out = format!("*nat\n:{CHAIN} - [0:0]\n");
-        for (svc, eps) in self.services.lock().unwrap().values() {
+        for ((ns, name), (svc, eps)) in self.services.lock().unwrap().iter() {
+            // Pods reach the API server at its own address (what
+            // kubernetes.default.svc resolves to) on the Service's port
+            // (443, in clients that hardcode https://kubernetes.default.svc).
+            // When the API server does not listen there (the node leaves 443
+            // to LoadBalancer Services), send that port to the one it does.
+            if ns == "default" && name == "kubernetes" {
+                for port in svc.pointer("/spec/ports").and_then(Value::as_array).into_iter().flatten() {
+                    let Some(svc_port) = port.get("port").and_then(Value::as_u64) else { continue };
+                    for b in backends(port, eps.as_ref()).into_iter().filter(|b| u64::from(b.port) != svc_port) {
+                        let _ = writeln!(out, "-A {CHAIN} -d {}/32 -p tcp -m tcp --dport {svc_port} -j DNAT --to-destination {}:{}", b.ip, b.ip, b.port);
+                    }
+                }
+            }
             let ip = s(svc, "/spec/clusterIP");
             if ip.is_empty() || ip == "None" {
                 continue;
@@ -467,6 +480,25 @@ async fn relay_exec(client: TcpStream, session: ExecSession) {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn pods_reach_the_api_server_on_the_service_port_at_its_own_address() {
+        let proxy = Proxy::default();
+        let svc = json!({"spec": {"clusterIP": "10.43.0.1", "ports": [{"name": "https", "port": 443, "protocol": "TCP"}]}});
+        let eps = json!({"subsets": [{"addresses": [{"ip": "10.42.0.1"}], "ports": [{"name": "https", "port": 6443}]}]});
+        proxy.update("default".into(), "kubernetes".into(), Some(svc.clone()), Some(eps));
+        let rules = proxy.rules();
+        assert!(rules.contains("-A LITEK8S-SERVICES -d 10.42.0.1/32 -p tcp -m tcp --dport 443 -j DNAT --to-destination 10.42.0.1:6443\n"), "{rules}");
+        assert!(rules.contains("-d 10.43.0.1/32 -p tcp -m tcp --dport 443 -j DNAT --to-destination 10.42.0.1:6443"));
+        // Listening on 443 itself: nothing to redirect.
+        let eps = json!({"subsets": [{"addresses": [{"ip": "10.42.0.1"}], "ports": [{"name": "https", "port": 443}]}]});
+        proxy.update("default".into(), "kubernetes".into(), Some(svc.clone()), Some(eps.clone()));
+        assert!(!proxy.rules().contains("-d 10.42.0.1/32"));
+        // Only the API server's Service gets this.
+        let eps = json!({"subsets": [{"addresses": [{"ip": "10.42.0.9"}], "ports": [{"name": "https", "port": 6443}]}]});
+        proxy.update("ns".into(), "kubernetes".into(), Some(svc), Some(eps));
+        assert!(!proxy.rules().contains("-d 10.42.0.9/32"));
+    }
 
     #[test]
     fn spreads_cluster_ips_over_ready_endpoints() {
