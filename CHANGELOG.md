@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **LoadBalancer Services on servers and nodes:** every machine now listens
+  on a LoadBalancer Service's own ports (80, 443), not only on its
+  NodePorts, like k3s's servicelb: an ingress controller is reachable on a
+  cloud VM's public address. A port the machine already uses stays with its
+  owner (logged); `--disable-loadbalancer-ports` on `apiserver` / `agent`
+  keeps only the NodePorts. Dev clusters are unchanged.
+
 ## 0.2.4
 
 - **`litek8s ui --context <a remote litek8s>`:** Home's memory is the whole

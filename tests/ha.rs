@@ -55,6 +55,7 @@ impl Server {
             runtime: litek8s::kube::agent::RuntimeChoice::Docker,
             node_ip: Some([127, 0, 0, 1].into()),
             node_external_ip: None,
+            loadbalancer_ports: false,
             advertise_address: Some("127.0.0.1".into()),
             network: Default::default(),
             token: join.map(|(_, t)| t.to_string()),

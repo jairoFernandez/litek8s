@@ -87,6 +87,9 @@ pub struct ApiServerConfig {
     /// The local node's public address (its overlay endpoint; behind 1:1
     /// NAT such as a cloud VM's).
     pub node_external_ip: Option<std::net::IpAddr>,
+    /// The local node listens on LoadBalancer Services' own ports (80, 443),
+    /// like k3s's servicelb (the dev sandbox publishes them on the host).
+    pub loadbalancer_ports: bool,
     /// The address joining nodes use for this server (default: `node_ip`),
     /// for the printed join command.
     pub advertise_address: Option<String>,
@@ -554,6 +557,7 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
             node_ip: node_ip.clone(),
             wireguard_port: config.wireguard_port,
             external_ip: config.node_external_ip.map(|ip| ip.to_string()),
+            loadbalancer_ports: config.loadbalancer_ports,
         };
         match super::agent::node_agent(config.runtime, Some(node_name), node_dir, network).await {
             Ok(agent) => Some(agent),

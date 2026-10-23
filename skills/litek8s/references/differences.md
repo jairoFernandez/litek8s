@@ -39,6 +39,9 @@ macOS, the rest pass on Linux; the compatibility corpus (kubectl, Helm with
   bindings to the node address (the 5 conformance specs it fails).
 - hostPorts are not exposed on the host's localhost in dev clusters
   (NodePorts and LoadBalancer ports are).
+- LoadBalancer Services: no external load balancer; every server and node
+  listens on their ports (like k3s's servicelb), status points at a node;
+  `--disable-loadbalancer-ports` keeps only the NodePorts.
 
 ## Extras upstream does not have
 

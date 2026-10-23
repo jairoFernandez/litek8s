@@ -10,6 +10,11 @@
 //!   network, so it also works when Docker runs inside a VM).
 //! - NodePorts: plain TCP listeners on the node that relay to an endpoint,
 //!   so they answer on the node's own address wherever the runtime runs.
+//! - LoadBalancer ports: on a server or node (not the dev sandbox, which
+//!   publishes them on the host's loopback), a LoadBalancer Service's own
+//!   ports (80, 443) are listened on too, like k3s's servicelb, so its
+//!   status address (a node's) answers on them. A port the node already
+//!   uses (sshd's 22) is left alone and logged.
 //!   When the node cannot reach the endpoint's address (Docker in a VM, see
 //!   `probe.rs`), the relay goes through the pod's sandbox instead.
 
@@ -40,6 +45,11 @@ pub(crate) struct Proxy {
     /// Listeners on the host's loopback when the node runs in the dev
     /// sandbox (host port → task), see [`crate::dev::broker`].
     host_ports: Mutex<HashMap<u16, JoinHandle<()>>>,
+    /// LoadBalancer ports listened on the node's addresses (port → task).
+    lb_ports: Mutex<HashMap<u16, JoinHandle<()>>>,
+    /// Listen on LoadBalancer Services' own ports (servers and nodes; off
+    /// with --disable-loadbalancer-ports).
+    pub(crate) publish_lb: std::sync::atomic::AtomicBool,
     pub(crate) in_pod: std::sync::OnceLock<InPodDial>,
     /// The node routes to every pod address (crun, also across nodes over
     /// the overlay): a slow connect is a slow backend, not a missing route.
@@ -194,6 +204,31 @@ impl Proxy {
         ports
     }
 
+    /// (port, NodePort) of every LoadBalancer Service's TCP port whose own
+    /// port is not its NodePort, for the node's listeners.
+    fn wanted_lb_ports(&self) -> Vec<(u16, u16)> {
+        let mut ports = Vec::new();
+        for (svc, _) in self.services.lock().unwrap().values() {
+            if s(svc, "/spec/type") != "LoadBalancer" {
+                continue;
+            }
+            for port in svc.pointer("/spec/ports").and_then(Value::as_array).into_iter().flatten() {
+                if !matches!(s(port, "/protocol"), "" | "TCP") {
+                    continue;
+                }
+                let (Some(p), Some(np)) = (port.get("port").and_then(Value::as_u64), port.get("nodePort").and_then(Value::as_u64)) else { continue };
+                if p != np {
+                    ports.push((p as u16, np as u16));
+                }
+            }
+        }
+        // Two Services on one port: the first by namespace and name keeps it
+        // (a second bind would fail anyway). A stable sort keeps that order.
+        ports.sort_by_key(|(p, _)| *p);
+        ports.dedup_by_key(|(p, _)| *p);
+        ports
+    }
+
     /// (host port, NodePort) pairs to expose on the host's loopback in the
     /// dev sandbox: every NodePort, and a LoadBalancer's own ports (as
     /// Docker Desktop's Kubernetes does on localhost).
@@ -268,7 +303,36 @@ fn sync_node_ports(proxy: &Arc<Proxy>) {
         listeners.insert(port, tokio::spawn(async move { serve_node_port(proxy, port).await }));
     }
     drop(listeners);
-    if crate::dev::broker::installed() {
+    let dev = crate::dev::broker::installed();
+    if !dev && proxy.publish_lb.load(std::sync::atomic::Ordering::Relaxed) {
+        let wanted = proxy.wanted_lb_ports();
+        let mut lb = proxy.lb_ports.lock().unwrap();
+        // A port that failed to bind (its task ended) is tried again at the
+        // next change: whatever held it may have let it go.
+        lb.retain(|port, task| {
+            let keep = wanted.iter().any(|(p, _)| p == port) && !task.is_finished();
+            if !keep {
+                task.abort();
+            }
+            keep
+        });
+        for (port, node_port) in wanted {
+            if lb.contains_key(&port) {
+                continue;
+            }
+            let proxy = proxy.clone();
+            lb.insert(
+                port,
+                tokio::spawn(async move {
+                    match TcpListener::bind(("0.0.0.0", port)).await {
+                        Ok(listener) => relay_node_port(proxy, listener, node_port).await,
+                        Err(e) => eprintln!("node-agent: LoadBalancer port {port} unavailable on this node ({e}); its NodePort {node_port} still answers"),
+                    }
+                }),
+            );
+        }
+    }
+    if dev {
         let wanted = proxy.wanted_host_ports();
         let mut host = proxy.host_ports.lock().unwrap();
         host.retain(|port, task| {
@@ -415,8 +479,24 @@ mod tests {
         assert!(rules.contains("-j DNAT --to-destination 192.168.1.3:8080\n"));
         assert!(rules.ends_with("COMMIT\n"));
         assert_eq!(proxy.wanted_node_ports(), vec![30080]);
+        assert!(proxy.wanted_lb_ports().is_empty(), "a NodePort Service has no LoadBalancer port");
         assert_eq!(proxy.node_port_backends(30080).len(), 2);
         proxy.update("ns".into(), "web".into(), None, None);
         assert!(!proxy.rules().contains("DNAT"));
+    }
+
+    #[test]
+    fn lists_load_balancer_ports_once_tcp_only() {
+        let proxy = Proxy::default();
+        let lb = |ports: serde_json::Value| json!({"spec": {"clusterIP": "10.43.0.30", "type": "LoadBalancer", "ports": ports}});
+        proxy.update("traefik".into(), "traefik".into(), Some(lb(json!([
+            {"name": "web", "port": 80, "protocol": "TCP", "nodePort": 31080},
+            {"name": "websecure", "port": 443, "protocol": "TCP", "nodePort": 31443},
+            {"name": "dns", "port": 53, "protocol": "UDP", "nodePort": 31053}
+        ]))), None);
+        // Two on port 80: other/web comes first by namespace and name.
+        proxy.update("other".into(), "web".into(), Some(lb(json!([{"port": 80, "nodePort": 32080}]))), None);
+        assert_eq!(proxy.wanted_lb_ports(), vec![(80, 32080), (443, 31443)]);
+        assert_eq!(proxy.wanted_node_ports().len(), 3, "the NodePorts stay (TCP only)");
     }
 }
