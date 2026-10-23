@@ -371,8 +371,8 @@ enum Command {
         cluster_dns: std::net::SocketAddr,
         #[arg(long, help = "Do not serve cluster DNS")]
         no_cluster_dns: bool,
-        #[arg(long, default_value_t = 443, help = "Extra port on the listen address for pods (kubernetes.default.svc:443); 0 disables it")]
-        in_cluster_port: u16,
+        #[arg(long, help = "Extra port on the listen address for pods (kubernetes.default.svc:443); 0 disables it. Default 443, none when this node listens on LoadBalancer ports (an ingress wants 443; pods reach the API through its ClusterIP)")]
+        in_cluster_port: Option<u16>,
         #[arg(long, value_enum, default_value = "auto", help = "Container runtime of the local node: auto (crun on Linux when installed, else Docker), crun or docker")]
         runtime: crate::kube::agent::RuntimeChoice,
         #[arg(long, help = "The local node's address (default: the source address of the default route)")]
@@ -799,7 +799,7 @@ pub async fn run() -> Result<()> {
                 node_name,
                 node_dir,
                 cluster_dns: (!no_cluster_dns).then_some(cluster_dns),
-                in_cluster_port: (in_cluster_port != 0).then_some(in_cluster_port),
+                in_cluster_port: in_cluster_port_for(in_cluster_port, !disable_loadbalancer_ports),
                 runtime,
                 node_ip,
                 node_external_ip,
@@ -1146,6 +1146,19 @@ fn skill(reference: Option<String>, list: bool, install: Option<PathBuf>) -> Res
     Ok(())
 }
 
+
+/// The API server's extra port for pods: `--in-cluster-port` (0: none), else
+/// 443, unless the local node listens on LoadBalancer Services' ports: an
+/// ingress controller's wants 443 on every node, and pods reach the API
+/// through the `kubernetes` Service's ClusterIP whatever port it is on.
+fn in_cluster_port_for(flag: Option<u16>, loadbalancer_ports: bool) -> Option<u16> {
+    match flag {
+        Some(0) => None,
+        Some(p) => Some(p),
+        None if loadbalancer_ports => None,
+        None => Some(443),
+    }
+}
 #[cfg(test)]
 mod main_help_tests {
     use clap::CommandFactory;
@@ -1255,6 +1268,16 @@ mod main_help_tests {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn in_cluster_port_leaves_443_to_load_balancers() {
+        use super::in_cluster_port_for as f;
+        assert_eq!(f(None, true), None, "LoadBalancer ports on: 443 stays free");
+        assert_eq!(f(None, false), Some(443));
+        assert_eq!(f(Some(443), true), Some(443), "asked for explicitly");
+        assert_eq!(f(Some(0), false), None);
+        assert_eq!(f(Some(8443), true), Some(8443));
+    }
     use super::{build_watch_frame_lines, render_watch_frame_patch};
 
     #[test]

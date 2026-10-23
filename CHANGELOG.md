@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Servers leave port 443 to LoadBalancer Services:** `litek8s apiserver`
+  also listened on 443 on every address (`--in-cluster-port`), which took
+  the port an ingress controller's LoadBalancer Service wants on that
+  machine (the request reached the API server: 404). When the node listens
+  on LoadBalancer ports (the default since 0.2.5), the API server now opens
+  no extra port and pods reach it through the `kubernetes` Service's
+  ClusterIP (on 6443); `--in-cluster-port 443` keeps the old behavior.
+
 ## 0.2.5
 
 - **LoadBalancer Services on servers and nodes:** every machine now listens
