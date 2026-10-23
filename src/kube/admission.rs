@@ -394,7 +394,7 @@ async fn call(api: &ApiState, hook: &Value, a: &Attributes<'_>, obj: &Value) -> 
         "object": if a.operation == "DELETE" { Value::Null } else { obj.clone() },
         "oldObject": a.old.cloned().unwrap_or(Value::Null),
         "dryRun": a.dry_run,
-        "options": {"kind": if a.operation == "CREATE" { "CreateOptions" } else { "UpdateOptions" }, "apiVersion": "meta.k8s.io/v1"},
+        "options": {"kind": match a.operation { "CREATE" => "CreateOptions", "DELETE" => "DeleteOptions", _ => "UpdateOptions" }, "apiVersion": "meta.k8s.io/v1"},
     });
     if let Some(sub) = a.sub {
         request["subResource"] = json!(sub);
@@ -1010,6 +1010,7 @@ mod tests {
         assert_eq!(req["object"], Value::Null);
         assert_eq!(req["oldObject"], old);
         assert_eq!(req["operation"], "DELETE");
+        assert_eq!(req["options"]["kind"], "DeleteOptions");
     }
 
     #[tokio::test]
