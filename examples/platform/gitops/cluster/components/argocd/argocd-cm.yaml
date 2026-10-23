@@ -3,9 +3,12 @@ kind: ConfigMap
 metadata:
   name: argocd-cm
 data:
-  # An Application is healthy when what it deploys is: the app of apps then
-  # waits for each sync wave's Applications before the next wave (Argo CD
-  # stopped doing this by default in 1.8).
+  # An Application is healthy when what it deploys is, and is synced: the
+  # app of apps then waits for each sync wave's Applications before the next
+  # wave (Argo CD stopped doing this by default in 1.8). An Application whose
+  # manifests could not be generated yet (its chart repository unreachable)
+  # has no resources and reports Healthy; it is not synced, so the next wave
+  # (CRs of the CRDs it installs) waits for it.
   resource.customizations.health.argoproj.io_Application: |
     hs = {}
     hs.status = "Progressing"
@@ -14,6 +17,10 @@ data:
       hs.status = obj.status.health.status
       if obj.status.health.message ~= nil then
         hs.message = obj.status.health.message
+      end
+      if hs.status == "Healthy" and (obj.status.sync == nil or obj.status.sync.status ~= "Synced") then
+        hs.status = "Progressing"
+        hs.message = "waiting for the Application to sync"
       end
     end
     return hs

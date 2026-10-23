@@ -257,6 +257,16 @@ seal in `gitops/cluster/openbao.yaml`.
 
 ## Notes
 
+- **Memory.** Everything together (Gitea, Argo CD, OpenBao, Traefik,
+  cert-manager, external-secrets, Argo Workflows, Atlantis, a runner) wants
+  about 4 GiB of RAM across the cluster, and Argo CD's application
+  controller alone takes over 1 GiB while the waves land. Nodes of 2 GiB
+  without swap run out (Traefik's probes time out, the UIs stop answering):
+  use nodes of 4 GiB or more, or more of them.
+- **Waves retry without end.** An Application that fails early (CRDs of an
+  earlier wave not there yet, the API server or DNS briefly unreachable)
+  retries with backoff instead of giving up until the next commit, and the
+  app of apps waits until each one is synced, not only healthy.
 - **Client-side apply in Argo CD.** Argo CD's diff for server-side apply
   needs the server's OpenAPI models of the built-in types, which litek8s
   0.2.1 and older do not serve (`unable to resolve parseableType for

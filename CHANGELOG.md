@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **The platform example's waves no longer stall:** an Application whose
+  first sync failed (its CRDs not there yet) was never retried until the
+  next commit, and the app of apps waited on it with every later wave.
+  Applications now retry without end, and a wave waits until its
+  Applications are synced as well as healthy. The README says how much
+  memory the platform needs.
 - **`litek8s ui` shows a remote cluster as a whole or node by node:** Home
   adds up every node's CPU, memory and disk (it showed only the API
   server's node), lists the nodes with their figures, and `n`/`N` switch to

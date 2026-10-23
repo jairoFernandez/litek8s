@@ -21,8 +21,13 @@ spec:
     automated:
       prune: true
       selfHeal: true
+    # Every Application here retries without end (limit -1): Argo CD's
+    # automated sync never tries a revision again once its retries are used
+    # up, so an Application that failed early (CRDs of an earlier wave not
+    # there yet, the API server briefly unreachable) would stay OutOfSync until
+    # the next commit, and this sync would wait on it with every later wave.
     retry:
-      limit: 5
+      limit: -1
       backoff:
         duration: 5s
         maxDuration: 5m0s
