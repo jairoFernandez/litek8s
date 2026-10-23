@@ -189,7 +189,13 @@ pub(crate) fn reconcile(api: &ApiState, ns: &str, name: &str) -> Result<Requeue,
         if let Some(left) = backoff {
             requeue = Some(Duration::from_secs(left as u64));
         } else {
-            let remaining = completions.map(|c| c - succeeded - failed_indexes.len() as i64).unwrap_or(parallelism);
+            // Without completions (a work queue), a pod that succeeded means
+            // the work is done: the others finish, none is added.
+            let remaining = match completions {
+                Some(c) => c - succeeded - failed_indexes.len() as i64,
+                None if succeeded > 0 => active.len() as i64,
+                None => parallelism,
+            };
             let want = parallelism.min(remaining).max(0);
             let missing = want - active.len() as i64;
             if missing > 0 {
@@ -508,15 +514,18 @@ mod tests {
         assert_eq!(pods.len(), 2);
         succeed(&api, &pods[0]);
         reconcile_job(&api);
-        // The other worker still runs.
+        // The other worker still runs, and no new one starts once one succeeded.
         assert!(!util::condition_true(&job(&api), "Complete"));
-        assert!(!active_pods(&api).is_empty());
+        assert_eq!(active_pods(&api).len(), 1);
+        reconcile_job(&api);
+        assert_eq!(active_pods(&api).len(), 1);
         for p in active_pods(&api) {
             succeed(&api, &p);
         }
         reconcile_job(&api);
         assert!(util::condition_true(&job(&api), "Complete"));
         assert!(active_pods(&api).is_empty());
+        assert_eq!(job(&api)["status"]["succeeded"], 2);
     }
 
     #[test]
