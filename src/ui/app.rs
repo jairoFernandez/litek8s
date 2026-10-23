@@ -413,6 +413,8 @@ pub struct App {
     /// context is a remote litek8s (`--context` without `--docker-host`):
     /// its Docker API being down is no error of the cluster on screen.
     pub docker_is_local_dev: bool,
+    /// `--context` of a remote litek8s: Clusters starts on its row.
+    pub focus_context: Option<String>,
     pub kube_endpoint: String,
     pub kube_context: String,
 
@@ -501,6 +503,7 @@ impl App {
             kube_context,
             docker_error: None,
             docker_is_local_dev: false,
+            focus_context: None,
             docker_version: String::new(),
             docker_os: String::new(),
             vm_cpus: None,
@@ -943,6 +946,15 @@ impl App {
                     }
                 }
                 self.clusters = sample;
+                // Started on a remote context: select it once its row is listed.
+                if let Some(ctx) = self.focus_context.take() {
+                    let local = self.clusters.local.iter().position(|r| r.context == ctx);
+                    let other = self.clusters.others.iter().position(|(c, _)| *c == ctx).map(|i| i + self.clusters.local.len());
+                    match local.or(other) {
+                        Some(i) => self.selected[Tab::Clusters.index()] = i,
+                        None => self.focus_context = Some(ctx),
+                    }
+                }
             }
             Msg::LogLines(id, lines) => {
                 if let Some(v) = self.logs.as_mut().filter(|v| v.id == id) {

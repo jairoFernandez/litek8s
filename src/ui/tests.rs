@@ -1090,3 +1090,19 @@ fn docker_views_of_a_remote_litek8s_explain_instead_of_failing() {
     let s = render(&app, 120, 40);
     assert!(s.contains("not running (this machine's dev cluster)"), "{s}");
 }
+
+#[test]
+fn clusters_starts_on_the_remote_context() {
+    let mut app = remote_app();
+    app.focus_context = Some("lab2".into());
+    // The first sample may come before the kubeconfig lists it.
+    app.apply(Msg::Clusters(Box::default()));
+    assert_eq!(app.focus_context.as_deref(), Some("lab2"));
+    let mut sample = ClustersSample::default();
+    sample.local.push(ClusterRow { name: "dev".into(), context: "lkdev-dev".into(), ..Default::default() });
+    sample.others = vec![("orbstack".into(), None), ("lab2".into(), Some("https://100.112.25.4:6443".into()))];
+    app.apply(Msg::Clusters(Box::new(sample)));
+    app.key(key('2'));
+    assert!(matches!(app.selected_cluster(), Some(Err((c, _))) if c == "lab2"), "{:?}", app.selected_cluster());
+    assert!(app.focus_context.is_none(), "only once: moving away stays");
+}

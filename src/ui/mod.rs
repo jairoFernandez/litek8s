@@ -122,6 +122,7 @@ pub async fn run(args: UiArgs) -> Result<()> {
     let mut app = App::new(docker_ep.display.clone(), kube_ep.display.clone(), kube_context);
     app.mouse = args.mouse;
     app.docker_is_local_dev = !local && args.docker_host.is_none();
+    app.focus_context = args.context.clone().filter(|_| !local);
     app.build = build_label();
     // The context's own namespace unless -n says otherwise.
     let start_ns = args.namespace.clone().or_else(|| kube::auth::load().ok().and_then(|c| c.namespace(&app.kube_context)));
