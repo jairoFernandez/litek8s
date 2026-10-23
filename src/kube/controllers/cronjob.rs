@@ -57,19 +57,7 @@ pub(crate) fn reconcile(api: &ApiState, ns: &str, name: &str) -> Result<Requeue,
         if let Some(deadline) = i(&cj, "/spec/startingDeadlineSeconds") {
             earliest = earliest.max(now - ChronoDuration::seconds(deadline));
         }
-        // The most recent schedule time in (earliest, now], if any.
-        let mut due = None;
-        let mut t = earliest;
-        for _ in 0..1000 {
-            match schedule.next_after(t) {
-                Some(next) if next <= now => {
-                    due = Some(next);
-                    t = next;
-                }
-                _ => break,
-            }
-        }
-        if let Some(scheduled) = due {
+        if let Some(scheduled) = schedule.most_recent(earliest, now) {
             let policy = s(&cj, "/spec/concurrencyPolicy");
             let skip = policy == "Forbid" && !active.is_empty();
             if !skip {
@@ -220,6 +208,32 @@ impl Schedule {
     }
 
     /// The first matching minute strictly after `after`.
+    /// The most recent schedule time in (earliest, now], if any. Searched
+    /// back from `now` in doubling windows, so a CronJob that missed many
+    /// runs starts the latest one, as Kubernetes does, not one from where a
+    /// forward walk would give up.
+    pub(crate) fn most_recent(&self, earliest: DateTime<Utc>, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        let mut window = ChronoDuration::minutes(1);
+        loop {
+            let from = earliest.max(now - window);
+            let mut due = None;
+            let mut t = from;
+            for _ in 0..1000 {
+                match self.next_after(t) {
+                    Some(next) if next <= now => {
+                        due = Some(next);
+                        t = next;
+                    }
+                    _ => break,
+                }
+            }
+            if due.is_some() || from == earliest {
+                return due;
+            }
+            window = window * 2;
+        }
+    }
+
     pub(crate) fn next_after(&self, after: DateTime<Utc>) -> Option<DateTime<Utc>> {
         let mut t = after.with_second(0)?.with_nanosecond(0)? + ChronoDuration::minutes(1);
         let limit = after + ChronoDuration::days(366 * 5);
@@ -607,5 +621,27 @@ mod tests {
         };
         assert_eq!(reconcile_cj(&api), None);
         assert!(cj(&api).get("status").is_none_or(|s| s.get("lastScheduleTime").is_none()));
+    }
+
+    #[test]
+    fn most_recent_is_the_latest_time_however_many_were_missed() {
+        let every_minute = Schedule::parse("* * * * *").unwrap();
+        let now = at(2026, 10, 23, 12, 0) + ChronoDuration::seconds(30);
+        assert_eq!(every_minute.most_recent(now - ChronoDuration::minutes(2000), now), Some(at(2026, 10, 23, 12, 0)));
+        assert_eq!(every_minute.most_recent(at(2026, 10, 23, 12, 0), now), None);
+        let yearly = Schedule::parse("0 0 1 1 *").unwrap();
+        assert_eq!(yearly.most_recent(at(2020, 6, 1, 0, 0), now), Some(at(2026, 1, 1, 0, 0)));
+        assert_eq!(yearly.most_recent(at(2026, 2, 1, 0, 0), now), None);
+    }
+
+    #[test]
+    fn thousands_of_missed_runs_start_the_latest() {
+        let api = api();
+        create_cj(&api, json!({"schedule": "* * * * *"}));
+        let minute = this_minute();
+        set_last_schedule(&api, minute - ChronoDuration::minutes(2000));
+        reconcile_cj(&api);
+        assert_eq!(job_names(&api), [job_name_at(minute)]);
+        assert_eq!(cj(&api)["status"]["lastScheduleTime"], util::rfc3339(minute));
     }
 }
