@@ -1,14 +1,15 @@
 # Changelog
 
-## Unreleased
+## 0.2.4
 
 - **`litek8s ui --context <a remote litek8s>`:** Home's memory is the whole
   node (litek8s, pods, the operating system, cache) instead of litek8s's few
   MB against the node's RAM; the CPU and memory graphs fill instead of
   staying at "collecting…"; the CPU row reads `litek8s`, not `litek8s (dev)`.
   `u`, `d` and `R`, which act on this machine's dev clusters, are refused
-  there, and the Docker views say they read this machine's dev cluster
-  instead of showing its socket's error in red.
+  there, the header names the context (`lab2 · remote`, not `dev`), and the
+  Docker views say they read this machine's dev cluster instead of showing
+  its socket's error in red. Clusters starts on that context's row.
 - **`litek8s ui`:** `c` copies Home's API address and the selected
   context's name in Clusters, as the Kubernetes view already did for names
   and YAML.
