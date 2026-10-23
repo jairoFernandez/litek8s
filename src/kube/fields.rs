@@ -253,6 +253,21 @@ pub fn drop_nulls(v: &mut Value) {
     }
 }
 
+/// [`drop_nulls`] for a built-in resource, leaving alone the fields Go keeps
+/// as raw JSON (`runtime.RawExtension`): a ControllerRevision's `data` is
+/// stored as written, nulls included, and the controllers find their
+/// revision by comparing it.
+pub fn drop_typed_nulls(group: &str, plural: &str, v: &mut Value) {
+    let raw = match (group, plural) {
+        ("apps", "controllerrevisions") => v.as_object_mut().and_then(|m| m.remove("data")),
+        _ => None,
+    };
+    drop_nulls(v);
+    if let (Some(raw), Some(map)) = (raw, v.as_object_mut()) {
+        map.insert("data".into(), raw);
+    }
+}
+
 /// Fill in `default`s the schema declares for missing fields (also inside
 /// array items and additionalProperties), like the API server does on
 /// requests and on reads from storage. As there, a `null` in a field that is
@@ -467,6 +482,16 @@ mod tests {
         let mut d = json!({"spec": {"replicas": null, "template": {"spec": {"containers": [{"name": "c", "args": null}]}}}});
         drop_nulls(&mut d);
         assert_eq!(d, json!({"spec": {"template": {"spec": {"containers": [{"name": "c"}]}}}}));
+    }
+
+    #[test]
+    fn raw_extension_fields_keep_their_nulls() {
+        let mut cr = json!({"metadata": {"labels": null}, "data": {"spec": {"template": {"metadata": {"creationTimestamp": null}}}}});
+        drop_typed_nulls("apps", "controllerrevisions", &mut cr);
+        assert_eq!(cr, json!({"metadata": {}, "data": {"spec": {"template": {"metadata": {"creationTimestamp": null}}}}}));
+        let mut other = json!({"data": {"x": null}});
+        drop_typed_nulls("", "configmaps", &mut other);
+        assert_eq!(other, json!({"data": {}}));
     }
 
     #[test]
