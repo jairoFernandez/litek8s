@@ -1,6 +1,6 @@
 [package]
 name = "litek8s"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2024"
 description = "A lightweight Kubernetes in one binary: the real API, dev clusters, a Docker API, a terminal UI and built-in observability"
 license = "Apache-2.0"

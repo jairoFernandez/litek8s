@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.8
 
 - **The platform example's waves no longer stall:** an Application whose
   first sync failed (its CRDs not there yet) was never retried until the
