@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.7
+
+- **Pods reach the API server on 443 again when the node leaves 443 to
+  LoadBalancer Services:** since 0.2.6 the API server opens no port 443 for
+  pods on such nodes, but `kubernetes.default.svc` resolves to the API
+  server's own address, so clients that use its port 443 (Argo CD's
+  `https://kubernetes.default.svc`, pods created before the change) were
+  refused. The service proxy now sends that address's port 443 to the port
+  the API server listens on.
+
 ## 0.2.6
 
 - **Servers leave port 443 to LoadBalancer Services:** `litek8s apiserver`
