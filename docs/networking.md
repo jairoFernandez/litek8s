@@ -175,6 +175,12 @@ on `apiserver` and `agent` keeps only the NodePorts (k3s's
 `--disable=servicelb`). Dev clusters publish both on the host's loopback
 instead ([dev.md](dev.md)).
 
+A server with LoadBalancer ports leaves 443 to them: its API server opens no
+extra in-cluster port (`--in-cluster-port`, 443 otherwise), and pods reach it
+through the `kubernetes` Service's ClusterIP, which forwards to its own port
+(6443). `--in-cluster-port 443` brings the extra port back; a LoadBalancer
+Service on 443 then answers on the other nodes only.
+
 ## Testing it
 
 `bench/nat-e2e.sh` boots three VMs: a server with a public address and two

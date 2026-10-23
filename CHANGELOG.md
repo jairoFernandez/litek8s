@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+- **Servers leave port 443 to LoadBalancer Services:** `litek8s apiserver`
+  also listened on 443 on every address (`--in-cluster-port`), which took
+  the port an ingress controller's LoadBalancer Service wants on that
+  machine (the request reached the API server: 404). When the node listens
+  on LoadBalancer ports (the default since 0.2.5), the API server now opens
+  no extra port and pods reach it through the `kubernetes` Service's
+  ClusterIP (on 6443); `--in-cluster-port 443` keeps the old behavior.
+- **`--docker-socket` starts when a pod got there first:** a pod that
+  mounts the socket's path (hostPath) before the server creates it leaves
+  an empty directory there, and the server then failed to start ("Address
+  in use") until someone removed it. It now removes an empty directory or a
+  stale socket at that path, and says so when a non-empty directory is in
+  the way.
+- **Cluster DNS resolves outside names on hosts that list an IPv6
+  nameserver first:** it forwarded only to the host's first nameserver and
+  over IPv4, so on such hosts (Debian images on some clouds) every name
+  outside the cluster timed out in pods (Helm charts, image registries). It
+  now tries each nameserver, IPv4 first, over the matching address family.
+
 ## 0.2.5
 
 - **LoadBalancer Services on servers and nodes:** every machine now listens

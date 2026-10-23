@@ -103,29 +103,40 @@ async fn answer(api: &ApiState, query: &[u8], client: std::net::IpAddr) -> Optio
     } else {
         // Read per query: the host's resolver can change (DHCP in the dev
         // VM finishes after the API server starts, VPNs).
-        forward(query, upstream_resolver()).await
+        let conf = std::fs::read_to_string("/etc/resolv.conf").unwrap_or_default();
+        for upstream in upstream_resolvers(&conf) {
+            if let Some(reply) = forward(query, upstream).await {
+                return Some(reply);
+            }
+        }
+        None
     }
 }
 
-/// The first nameserver of the host, or a public resolver.
-fn upstream_resolver() -> SocketAddr {
-    std::fs::read_to_string("/etc/resolv.conf")
-        .ok()
-        .and_then(|conf| {
-            conf.lines()
-                .filter_map(|l| l.trim().strip_prefix("nameserver"))
-                .filter_map(|ip| ip.trim().parse::<std::net::IpAddr>().ok())
-                .find(|ip| !ip.is_loopback())
-        })
-        .map(|ip| SocketAddr::new(ip, 53))
-        .unwrap_or_else(|| SocketAddr::from(([1, 1, 1, 1], 53)))
+/// The host's nameservers (loopback stubs left out), IPv4 first, or a
+/// public resolver when none is left. Each is tried in turn: the first one
+/// can be unreachable from here (an IPv6 address first in the list, as on
+/// some cloud images, or a resolver that is down).
+fn upstream_resolvers(conf: &str) -> Vec<SocketAddr> {
+    let mut ips: Vec<std::net::IpAddr> = conf
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("nameserver"))
+        .filter_map(|ip| ip.trim().parse::<std::net::IpAddr>().ok())
+        .filter(|ip| !ip.is_loopback())
+        .collect();
+    ips.sort_by_key(|ip| ip.is_ipv6());
+    if ips.is_empty() {
+        ips.push(std::net::IpAddr::from([1, 1, 1, 1]));
+    }
+    ips.into_iter().map(|ip| SocketAddr::new(ip, 53)).collect()
 }
 
 async fn forward(query: &[u8], upstream: SocketAddr) -> Option<Vec<u8>> {
-    let socket = UdpSocket::bind(("0.0.0.0", 0)).await.ok()?;
+    let local: SocketAddr = if upstream.is_ipv6() { (std::net::Ipv6Addr::UNSPECIFIED, 0).into() } else { (std::net::Ipv4Addr::UNSPECIFIED, 0).into() };
+    let socket = UdpSocket::bind(local).await.ok()?;
     socket.send_to(query, upstream).await.ok()?;
     let mut buf = vec![0u8; 4096];
-    let n = tokio::time::timeout(Duration::from_secs(3), socket.recv(&mut buf)).await.ok()?.ok()?;
+    let n = tokio::time::timeout(Duration::from_secs(2), socket.recv(&mut buf)).await.ok()?.ok()?;
     buf.truncate(n);
     Some(buf)
 }
@@ -390,6 +401,14 @@ mod tests {
         q.extend_from_slice(&qtype.to_be_bytes());
         q.extend_from_slice(&CLASS_IN.to_be_bytes());
         q
+    }
+
+    #[test]
+    fn upstreams_skip_loopback_and_put_ipv4_first() {
+        let conf = "nameserver 2a01:4ff:ff00::add:2\nnameserver 127.0.0.53\nnameserver 185.12.64.2\nsearch .\n";
+        let got: Vec<String> = upstream_resolvers(conf).iter().map(|a| a.to_string()).collect();
+        assert_eq!(got, ["185.12.64.2:53", "[2a01:4ff:ff00::add:2]:53"]);
+        assert_eq!(upstream_resolvers("nameserver 127.0.0.53\n"), [SocketAddr::from(([1, 1, 1, 1], 53))]);
     }
 
     #[test]
