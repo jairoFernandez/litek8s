@@ -117,7 +117,13 @@ fn badge(app: &App, t: &Theme, room: usize) -> Vec<Span<'static>> {
         DevStatus::Down => (Health::Done, t.dim),
         DevStatus::Remote => (Health::Ok, t.info),
     };
-    let name = app.context_override.clone().unwrap_or_else(|| app.cluster.clone());
+    // A remote litek8s is named by its context, not by this machine's
+    // dev cluster the other views may still be about.
+    let name = match (&app.context_override, h.status) {
+        (Some(c), _) => c.clone(),
+        (None, DevStatus::Remote) => app.kube_context.clone(),
+        (None, _) => app.cluster.clone(),
+    };
     let mut parts: Vec<String> = Vec::new();
     match h.status {
         DevStatus::Up | DevStatus::Starting => {

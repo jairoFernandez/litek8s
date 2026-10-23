@@ -1069,6 +1069,7 @@ fn a_remote_litek8s_is_not_started_or_stopped_from_home() {
     let mut app = remote_app();
     app.apply(Msg::Home(Box::new(HomeSample { status: DevStatus::Remote, ..Default::default() })));
     let s = render(&app, 120, 40);
+    assert!(s.contains("lab2 · remote") && !s.contains("dev · remote"), "the header names the remote context:\n{s}");
     let footer = s.lines().rfind(|l| !l.trim().is_empty()).unwrap();
     assert!(!footer.contains("up") && footer.contains("copy API"), "{footer}");
     for k in ['u', 'd', 'R'] {
