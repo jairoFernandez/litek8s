@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.5
 
 - **LoadBalancer Services on servers and nodes:** every machine now listens
   on a LoadBalancer Service's own ports (80, 443), not only on its
