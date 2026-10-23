@@ -104,8 +104,12 @@ pub fn spawn(
                 }
             }
             s.disk_used = disk.as_ref().filter(|(_, _, n)| *n == name).map(|(n, _, _)| *n);
+            // The VM's data disk: cheap (one stat), every sample.
+            if remote.is_none() && cfg!(target_os = "macos") {
+                s.vm_disk = crate::dev::disk::vm_disk(&dev_home);
+            }
             s.disk_node = disk_node.clone();
-            s.disk_free = free_space(if home.is_dir() { &home } else if dev_home.is_dir() { &dev_home } else { std::path::Path::new("/") });
+            s.disk_free = crate::dev::disk::free_space(if home.is_dir() { &home } else if dev_home.is_dir() { &dev_home } else { std::path::Path::new("/") });
             s.contexts = super::ctx::detect(&cluster, state.as_ref().map(|st| st.port));
             // Where the memory goes: only while it is on screen.
             if every == VISIBLE {
@@ -178,18 +182,4 @@ async fn local_disk(port: u16) -> Option<crate::dev::disk::NodeDisk> {
         return None;
     }
     serde_json::from_slice(&body).ok()
-}
-
-/// Bytes free on the filesystem holding `path`.
-pub fn free_space(path: &std::path::Path) -> Option<u64> {
-    use std::os::unix::ffi::OsStrExt;
-    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
-    // SAFETY: statvfs fills the struct we own.
-    unsafe {
-        let mut st: libc::statvfs = std::mem::zeroed();
-        if libc::statvfs(c.as_ptr(), &mut st) != 0 {
-            return None;
-        }
-        Some(st.f_bavail as u64 * st.f_frsize as u64)
-    }
 }

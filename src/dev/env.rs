@@ -38,6 +38,9 @@ pub struct EnvState {
     pub cpus: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_mib: Option<u64>,
+    /// The macOS VM's data disk, GiB (what the image is, after growing).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_gib: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shares: Vec<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -316,7 +319,7 @@ mod tests {
     async fn serves_requests() {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("env.sock");
-        write_state(dir.path(), &EnvState { pid: std::process::id(), mode: "test".into(), started_unix_ms: 0, control: sock.clone(), cgroup: None, vm_ip: None, helper_pid: None, cpus: None, memory_mib: None, shares: Vec::new(), publish: None }).unwrap();
+        write_state(dir.path(), &EnvState { pid: std::process::id(), mode: "test".into(), started_unix_ms: 0, control: sock.clone(), cgroup: None, vm_ip: None, helper_pid: None, cpus: None, memory_mib: None, disk_gib: None, shares: Vec::new(), publish: None }).unwrap();
         tokio::spawn(serve(sock.clone(), |req| async move {
             match req {
                 Request::Start { port, .. } => Response { port: port.or(Some(1)), ..Default::default() },

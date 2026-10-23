@@ -4,6 +4,7 @@
 //! ```yaml
 //! cpus: 4              # macOS VM CPUs (default: half the Mac's, at most 8)
 //! memory: 4096         # macOS VM memory ceiling in MiB
+//! disk: 64             # macOS VM data disk in GiB (grows in place, never shrinks)
 //! shares:              # macOS: Mac directories shared at the same path
 //!   - /Users/me        # (default: $HOME)
 //! port: 6443           # API server port on localhost
@@ -76,6 +77,11 @@ pub struct DevConfig {
     /// MiB.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub memory: Option<u64>,
+    /// GiB: the macOS VM's data disk (a sparse image; only what the guest
+    /// writes takes space on the Mac). Bigger than the image grows it at
+    /// the VM's next start, data kept; it never shrinks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk: Option<u64>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub shares: Vec<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -97,7 +103,7 @@ pub fn path() -> PathBuf {
 }
 
 const HEADER: &str = "# litek8s dev settings, read by `litek8s dev up` (its flags win).\n\
-# cpus, memory (MiB) and shares are for the macOS VM; publish: localhost | all.\n\
+# cpus, memory (MiB), disk (GiB) and shares are for the macOS VM; publish: localhost | all.\n\
 # docker: project budgets and container defaults (see docs/docker.md).\n\
 # Changes apply on the next `litek8s dev up`.\n";
 
@@ -164,6 +170,11 @@ impl DevConfig {
                 out.push(format!("memory must be at most {total} MiB (this machine's RAM), not {m}"));
             }
         }
+        if let Some(d) = self.disk {
+            if !(MIN_DISK_GIB..=MAX_DISK_GIB).contains(&d) {
+                out.push(format!("disk must be between {MIN_DISK_GIB} and {MAX_DISK_GIB} GiB, not {d}"));
+            }
+        }
         if let Some(p) = self.port {
             if p < 1024 {
                 out.push(format!("port must be 1024 or above (ports below need root), not {p}"));
@@ -216,6 +227,12 @@ pub fn default_cpus() -> usize {
 
 pub const DEFAULT_MEMORY_MIB: u64 = 4096;
 
+/// The macOS VM's data disk, GiB: what a new image gets, and the bounds of
+/// `disk` (an image only grows: a smaller `disk` than it has is ignored).
+pub const DEFAULT_DISK_GIB: u64 = 64;
+pub const MIN_DISK_GIB: u64 = 16;
+pub const MAX_DISK_GIB: u64 = 4096;
+
 /// This machine's RAM in MiB (0 when unknown).
 pub fn host_memory_mib() -> u64 {
     #[cfg(target_os = "linux")]
@@ -255,7 +272,7 @@ mod tests {
         std::fs::create_dir(&share).unwrap();
         let docker = DevConfig::parse("docker:\n  projects:\n    shop: {memory: 2Gi, cpus: 1.5}\n  defaults: {memory: 1Gi}\n").unwrap().docker;
         assert_eq!(docker.projects["shop"].memory, Some(crate::docker::budget::Memory(2 << 30)));
-        let c = DevConfig { cpus: Some(1), memory: Some(2048), shares: vec![share.clone()], port: Some(7443), publish: Publish::All, docker };
+        let c = DevConfig { cpus: Some(1), memory: Some(2048), disk: Some(128), shares: vec![share.clone()], port: Some(7443), publish: Publish::All, docker };
         let path = dir.path().join("config.yaml");
         c.save_to(&path).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
@@ -272,6 +289,8 @@ mod tests {
         assert!(err.contains("cpus must be between 1"), "{err}");
         assert!(DevConfig::parse("memory: 12\n").unwrap_err().to_string().contains("at least 1024"));
         assert!(DevConfig::parse("port: 80\n").unwrap_err().to_string().contains("1024 or above"));
+        assert!(DevConfig::parse("disk: 8\n").unwrap_err().to_string().contains("disk must be between 16 and 4096 GiB"));
+        assert_eq!(DevConfig::parse("disk: 200\n").unwrap().disk, Some(200));
         assert!(DevConfig::parse("publish: everywhere\n").is_err());
         assert!(DevConfig::parse("cpu: 2\n").unwrap_err().to_string().contains("unknown field"));
         assert!(DevConfig::parse("docker: {projects: {Shop: {memory: 1Gi}}}\n").unwrap_err().to_string().contains("compose project name"));

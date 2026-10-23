@@ -69,6 +69,8 @@ pub enum DevCommand {
         memory: Option<u64>,
         #[arg(long, help = "CPUs: the macOS VM's (default: half of the Mac's), a limit on Linux (default none); shared by all clusters")]
         cpus: Option<usize>,
+        #[arg(long, value_name = "GiB", help = "macOS: the VM's data disk in GiB (default 64, a sparse image; a bigger size grows it in place at the VM's next start, data kept; it never shrinks); shared by all clusters")]
+        disk: Option<u64>,
         #[arg(long, help = "macOS: directory shared with the VM at the same path (default: $HOME; repeat for more)")]
         share: Vec<PathBuf>,
         #[arg(long, help = "Where published ports and NodePorts listen: localhost (default) or all")]
@@ -322,7 +324,7 @@ fn log_tail(home: &Path, lines: usize) -> String {
 pub async fn run(command: DevCommand) -> Result<()> {
     match command {
         DevCommand::Up { name, node: Some(node), .. } => node_up_down(&cluster::Cluster::new(&name)?, &node, true).await,
-        DevCommand::Up { name, nodes, port, no_kubeconfig, no_switch, timeout, memory, cpus, share, publish, node: None } => {
+        DevCommand::Up { name, nodes, port, no_kubeconfig, no_switch, timeout, memory, cpus, disk, share, publish, node: None } => {
             let cluster = cluster::Cluster::new(&name)?;
             if nodes.is_some_and(|n| !(1..=10).contains(&n)) {
                 bail!("--nodes: 1 to 10");
@@ -345,6 +347,7 @@ pub async fn run(command: DevCommand) -> Result<()> {
                     timeout: Duration::from_secs(timeout),
                     memory: memory.or(config.memory),
                     cpus: cpus.or(config.cpus),
+                    disk: disk.or(config.disk),
                     shares,
                     publish,
                     docker: config.docker.clone(),
@@ -383,6 +386,8 @@ pub struct UpOptions {
     pub timeout: Duration,
     pub memory: Option<u64>,
     pub cpus: Option<usize>,
+    /// The macOS VM's data disk, GiB (default [`config::DEFAULT_DISK_GIB`]).
+    pub disk: Option<u64>,
     /// Shared directories (macOS; empty: $HOME).
     pub shares: Vec<PathBuf>,
     pub publish: config::Publish,
@@ -406,6 +411,9 @@ async fn up(cluster: &cluster::Cluster, nodes: Option<u32>, opts: UpOptions) -> 
             kubeconfig::install(&kubeconfig::default_path(), &context, &server(state.port), opts.switch)?;
         }
         println!("{context} is already running ({}, {}, context {context})", state.mode, server(state.port));
+        if let Some(e) = env::running(&home) {
+            warn_settings(&e, &opts);
+        }
         send_docker_settings(cluster, &opts.docker, true).await;
         return Ok(());
     }
@@ -514,6 +522,10 @@ fn warn_settings(env: &env::EnvState, opts: &UpOptions) {
     }
     if opts.memory.is_some() && opts.memory != env.memory_mib {
         differ.push("memory");
+    }
+    // A smaller disk than the image is ignored (it never shrinks).
+    if opts.disk.zip(env.disk_gib).is_some_and(|(want, have)| want > have) {
+        differ.push("disk");
     }
     if env.publish.as_deref().is_some_and(|p| p != opts.publish.as_str()) {
         differ.push("publish");
@@ -855,6 +867,27 @@ pub fn env_state() -> Option<env::EnvState> {
     env::running(&dev_home().ok()?)
 }
 
+/// The macOS VM's data disk: what the Mac holds of it, its size, the
+/// Mac's free space and how to grow it.
+fn vm_disk_line(home: &Path) -> Option<String> {
+    let (alloc, size) = disk::vm_disk(home)?;
+    let free = disk::free_space(home).map(|f| format!(", the Mac has {:.1} GiB free", f as f64 / (1u64 << 30) as f64)).unwrap_or_default();
+    Some(format!(
+        "{:.1} of {} GiB (the VM's data disk, a sparse image{free}); more: `disk: <GiB>` in {} or `dev up --disk <GiB>`, applied when the VM starts",
+        alloc as f64 / (1u64 << 30) as f64,
+        size >> 30,
+        home_short(&config::path())
+    ))
+}
+
+/// `~/...` for a path under $HOME.
+fn home_short(p: &Path) -> String {
+    match std::env::var_os("HOME").map(PathBuf::from).and_then(|h| p.strip_prefix(h).ok().map(Path::to_path_buf)) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => p.display().to_string(),
+    }
+}
+
 /// Memory the whole VM or sandbox uses, in bytes.
 pub fn env_memory(e: &env::EnvState) -> Option<u64> {
     if let Some(cg) = &e.cgroup {
@@ -944,6 +977,11 @@ async fn status(cluster: &cluster::Cluster) -> Result<()> {
         }
         let with = if others.is_empty() { "no other cluster".to_string() } else { others.join(", ") };
         out!("  shared:   the {what} (pid {}{mem}) with {with}", e.pid);
+        if e.mode == "vm" {
+            if let Some(line) = vm_disk_line(&home) {
+                out!("  disk:     {line}");
+            }
+        }
     }
     let data = if cfg!(target_os = "macos") { format!("{} (in the VM's disk)", cluster.guest_data_dir().display()) } else { format!("{} ({})", cluster.data_dir(&home).display(), mib(dir_size(&cluster.data_dir(&home)))) };
     out!("  data:     {data}");
@@ -1097,6 +1135,11 @@ async fn list() -> Result<()> {
         };
         let used = env_memory(&e).map(|m| format!(", {} in use", mib(m))).unwrap_or_default();
         let _ = writeln!(text, "\nshared {what} ({}{size}{used})", e.mode);
+        if e.mode == "vm" {
+            if let Some(line) = dev_home().ok().and_then(|h| vm_disk_line(&h)) {
+                let _ = writeln!(text, "disk: {line}");
+            }
+        }
     }
     let _ = std::io::stdout().write_all(text.as_bytes());
     Ok(())

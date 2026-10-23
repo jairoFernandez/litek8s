@@ -317,6 +317,9 @@ pub struct HomeSample {
     /// which may be another machine's).
     pub env_cpus: Option<f64>,
     pub env_memory: Option<u64>,
+    /// macOS: the VM's data disk image, (bytes the Mac has allocated to
+    /// it, its size).
+    pub vm_disk: Option<(u64, u64)>,
     pub disk_used: Option<u64>,
     pub disk_free: Option<u64>,
     pub data_dir: String,
@@ -383,6 +386,7 @@ pub struct NewCluster {
 pub enum Field {
     Cpus,
     Memory,
+    Disk,
     Shares,
     Port,
     Publish,
@@ -846,6 +850,10 @@ impl App {
             if state.memory_mib.is_some_and(|m| m != self.config.memory.unwrap_or(crate::dev::config::DEFAULT_MEMORY_MIB)) {
                 out.push("memory");
             }
+            // The image grows when the VM starts; a smaller size is ignored.
+            if self.home.vm_disk.is_some_and(|(_, size)| self.config.disk.is_some_and(|d| d << 30 > size)) {
+                out.push("disk");
+            }
             let canon = |p: &std::path::PathBuf| p.canonicalize().unwrap_or_else(|_| p.clone());
             let want: Vec<_> = self.config.effective_shares().iter().map(canon).collect();
             let have: Vec<_> = state.shares.iter().map(canon).collect();
@@ -860,6 +868,7 @@ impl App {
         match f {
             Field::Cpus => self.config.cpus.map(|c| c.to_string()).unwrap_or_default(),
             Field::Memory => self.config.memory.map(|c| c.to_string()).unwrap_or_default(),
+            Field::Disk => self.config.disk.map(|c| c.to_string()).unwrap_or_default(),
             Field::Shares => self.config.shares.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", "),
             Field::Port => self.config.port.map(|c| c.to_string()).unwrap_or_default(),
             Field::Publish => self.config.publish.as_str().to_string(),
@@ -874,6 +883,7 @@ impl App {
         match f {
             Field::Cpus => c.cpus = num("CPUs")?.map(|n| n as usize),
             Field::Memory => c.memory = num("memory")?,
+            Field::Disk => c.disk = num("disk")?,
             Field::Port => c.port = num("port")?.map(|n| u16::try_from(n).map_err(|_| "port must be at most 65535".to_string())).transpose()?,
             Field::Shares => {
                 c.shares = v
@@ -1918,9 +1928,10 @@ pub enum Setting {
     EditFile,
 }
 
-pub const SETTINGS: [Setting; 8] = [
+pub const SETTINGS: [Setting; 9] = [
     Setting::Field(Field::Cpus),
     Setting::Field(Field::Memory),
+    Setting::Field(Field::Disk),
     Setting::Field(Field::Shares),
     Setting::Field(Field::Port),
     Setting::Field(Field::Publish),
@@ -1933,6 +1944,7 @@ pub fn field_prompt(f: Field) -> &'static str {
     match f {
         Field::Cpus => if cfg!(target_os = "macos") { "VM CPUs (empty: half the Mac's)" } else { "CPU limit (empty: none)" },
         Field::Memory => if cfg!(target_os = "macos") { "VM memory in MiB (empty: 4096)" } else { "memory limit in MiB (empty: none)" },
+        Field::Disk => "VM data disk in GiB, grows in place, never shrinks (empty: 64)",
         Field::Shares => "shared directories, comma-separated (empty: $HOME)",
         Field::Port => "API server port of the cluster dev (empty: 6443)",
         Field::Publish => "published ports: localhost or all",

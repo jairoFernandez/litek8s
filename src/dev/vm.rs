@@ -58,6 +58,9 @@ struct VmConfig {
     #[serde(default)]
     root: Option<PathBuf>,
     disk: PathBuf,
+    /// The data disk's size, GiB (the image's, after growing).
+    #[serde(default)]
+    disk_gib: u64,
     share: Option<PathBuf>,
     memory_mib: u64,
     cpus: usize,
@@ -182,10 +185,7 @@ pub fn start(home: &Path, opts: &UpOptions) -> Result<u32> {
     let state_dir = home.join("vm-state");
     std::fs::create_dir_all(&state_dir)?;
     let disk = state_dir.join("disk.img");
-    if !disk.exists() {
-        // Sparse: only what the guest writes takes space.
-        std::fs::File::create(&disk)?.set_len(64 << 30)?;
-    }
+    let disk_gib = prepare_disk(&disk, opts.disk.unwrap_or(super::config::DEFAULT_DISK_GIB))?;
     let mac_file = state_dir.join("mac");
     let mac = std::fs::read_to_string(&mac_file).map(|m| m.trim().to_string()).unwrap_or_else(|_| {
         let m = random_mac();
@@ -202,6 +202,7 @@ pub fn start(home: &Path, opts: &UpOptions) -> Result<u32> {
         initrd,
         root,
         disk,
+        disk_gib,
         share: share.map(|s| s.canonicalize().unwrap_or(s)),
         // The most the guest may use; only what it touches costs memory on the
         // Mac. Docker workloads (builds, databases) want more than pods alone.
@@ -232,6 +233,25 @@ pub fn start(home: &Path, opts: &UpOptions) -> Result<u32> {
         });
     }
     Ok(cmd.spawn().context("failed to start the dev VM")?.id())
+}
+
+/// Create the data disk image with `gib` GiB, or grow a smaller one to it
+/// (data kept: the guest grows its filesystem at boot); a bigger image
+/// stays as it is (shrinking would cut the filesystem). Sparse: only what
+/// the guest writes takes space on the Mac. The image's size in GiB.
+pub(crate) fn prepare_disk(disk: &Path, gib: u64) -> Result<u64> {
+    let want = gib << 30;
+    let have = std::fs::metadata(disk).map(|m| m.len()).ok();
+    match have {
+        None => std::fs::File::create(disk)?.set_len(want)?,
+        Some(len) if len < want => {
+            std::fs::OpenOptions::new().write(true).open(disk)?.set_len(want).with_context(|| format!("failed to grow {}", disk.display()))?;
+            eprintln!("the VM's data disk grows from {} to {gib} GiB (its filesystem follows at boot)", len >> 30);
+        }
+        Some(len) if len > want => eprintln!("note: the VM's data disk is {} GiB; a disk only grows, so disk: {gib} is ignored", len >> 30),
+        Some(_) => {}
+    }
+    Ok(std::fs::metadata(disk)?.len() >> 30)
 }
 
 /// The VM's memory as macOS accounts it: the physical footprint of the
@@ -837,6 +857,7 @@ impl Host {
                 helper_pid: None,
                 cpus: Some(self.config.cpus),
                 memory_mib: Some(self.config.memory_mib),
+                disk_gib: Some(self.config.disk_gib).filter(|g| *g > 0),
                 shares: self.config.share.iter().cloned().chain(self.config.extra_shares.iter().filter(|(t, _)| t.starts_with("share")).map(|(_, p)| p.clone())).collect(),
                 publish: Some(if self.config.publish_all { "all" } else { "localhost" }.into()),
             }),
@@ -1281,6 +1302,7 @@ mod tests {
             initrd: "/i".into(),
             root: Some("/r".into()),
             disk: "/d".into(),
+            disk_gib: 64,
             share: Some("/Users/me".into()),
             memory_mib: 2048,
             cpus: 2,
@@ -1293,5 +1315,27 @@ mod tests {
         assert!(line.contains(" litek8s.share=/Users/me litek8s.mounts=tmp:/private/tmp,share1:/Volumes/src litek8s.rosetta=1 litek8s.root=/dev/vdb litek8s.purge=ci,old litek8s.seed="), "{line}");
         assert!(line.contains(" init_on_alloc=0 swiotlb=noforce psi=1 "), "{line}");
         assert_eq!(c.mac.len(), 17);
+    }
+
+    #[test]
+    fn the_data_disk_grows_in_place_and_never_shrinks() {
+        use std::io::{Read, Seek, Write};
+        let d = tempfile::tempdir().unwrap();
+        let disk = d.path().join("disk.img");
+        assert_eq!(prepare_disk(&disk, 16).unwrap(), 16);
+        // Sparse: an empty image takes next to nothing.
+        assert!(std::os::unix::fs::MetadataExt::blocks(&std::fs::metadata(&disk).unwrap()) * 512 < 1 << 20);
+        let mut f = std::fs::OpenOptions::new().write(true).open(&disk).unwrap();
+        f.seek(std::io::SeekFrom::Start(1 << 20)).unwrap();
+        f.write_all(b"cluster data").unwrap();
+        drop(f);
+        assert_eq!(prepare_disk(&disk, 40).unwrap(), 40);
+        // Smaller than the image: kept as it is.
+        assert_eq!(prepare_disk(&disk, 20).unwrap(), 40);
+        let mut f = std::fs::File::open(&disk).unwrap();
+        f.seek(std::io::SeekFrom::Start(1 << 20)).unwrap();
+        let mut buf = [0u8; 12];
+        f.read_exact(&mut buf).unwrap();
+        assert_eq!(&buf, b"cluster data");
     }
 }

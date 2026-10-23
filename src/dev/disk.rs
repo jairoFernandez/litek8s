@@ -263,6 +263,20 @@ pub fn vm_disk(dev_home: &Path) -> Option<(u64, u64)> {
     Some((m.blocks() * 512, m.len()))
 }
 
+/// Bytes free on the filesystem holding `path`.
+pub fn free_space(path: &std::path::Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    // SAFETY: statvfs fills the struct we own.
+    unsafe {
+        let mut st: libc::statvfs = std::mem::zeroed();
+        if libc::statvfs(c.as_ptr(), &mut st) != 0 {
+            return None;
+        }
+        Some(st.f_bavail as u64 * st.f_frsize as u64)
+    }
+}
+
 /// One line of the breakdown.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Line {

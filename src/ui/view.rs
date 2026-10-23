@@ -443,14 +443,36 @@ fn figures(app: &App) -> Figures {
         (None, Some(t)) => (None, format!("- / {}", bytes(t))),
         _ => (None, "-".into()),
     };
-    let disk_text = match (h.disk_used, h.disk_free) {
+    let disk = disk_figure(h);
+    Figures { cpu, mem, disk, stack: stacked.map(|(_, s)| s) }
+}
+
+/// The disk meter. The macOS VM's: what its data disk holds against its
+/// size, or against what the Mac has left when that is less (a sparse
+/// image grows only as far as the Mac's free space), and where to grow
+/// it when it is nearly full. Elsewhere: used against used and free.
+fn disk_figure(h: &super::app::HomeSample) -> (Option<f64>, String) {
+    if let (Some((alloc, size)), Some(free)) = (h.vm_disk.filter(|(_, s)| *s > 0), h.disk_free) {
+        // What the guest's filesystem holds (the image may hold blocks the
+        // guest has freed and not trimmed yet).
+        let used = h.disk_node.as_ref().map(|(n, _, _)| n.fs_used).filter(|u| *u > 0).unwrap_or(alloc);
+        let room = size.min(used + free).max(1);
+        let ratio = used as f64 / room as f64;
+        let g = |b: u64| format!("{:.1}", b as f64 / (1u64 << 30) as f64);
+        let mut text = format!("{}/{} GiB · Mac {} free", g(used), g(size), bytes(free));
+        if ratio >= 0.8 {
+            // Out of room on the Mac: growing the VM disk does not help.
+            text.push_str(if used + free < size { " · Mac short" } else { " · grow: 8" });
+        }
+        return (Some(ratio), text);
+    }
+    let text = match (h.disk_used, h.disk_free) {
         (Some(u), Some(free)) => format!("{} used · {} free", bytes(u), bytes(free)),
         (Some(u), None) => format!("{} used", bytes(u)),
         (None, Some(free)) => format!("{} free", bytes(free)),
         _ => "-".into(),
     };
-    let disk = (h.disk_used.zip(h.disk_free).map(|(u, free)| u as f64 / (u + free).max(1) as f64), disk_text);
-    Figures { cpu, mem, disk, stack: stacked.map(|(_, s)| s) }
+    (h.disk_used.zip(h.disk_free).map(|(u, free)| u as f64 / (u + free).max(1) as f64), text)
 }
 
 /// `cpu    ▁▂▃▅  ███▍░░░░░  3% of 4 CPUs`: a label, an optional sparkline,
@@ -678,7 +700,7 @@ fn docker_figures(app: &App) -> String {
 fn docker_block(app: &App, t: &Theme, width: u16) -> ratatui::widgets::Block<'static> {
     let figures = docker_figures(app);
     let socket = app.docker_endpoint.strip_prefix("unix://").unwrap_or(&app.docker_endpoint);
-    let room = (width as usize).saturating_sub(figures.chars().count() + 16);
+    let room = (width as usize).saturating_sub(figures.chars().count() + 20);
     let title = Line::from(vec![Span::styled("docker", t.title), Span::styled(format!(" · {}", trunc_left(&home_dir_short(socket), room)), t.dim)]);
     if figures.is_empty() { t.block(title) } else { t.block_with(title, vec![Span::styled(figures, t.dim)]) }
 }
@@ -1555,6 +1577,12 @@ fn settings(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
                 Setting::Field(Field::Cpus) => ("CPU limit", default(app.setting_value(Field::Cpus), "none".into())),
                 Setting::Field(Field::Memory) if mac => ("VM memory (MiB)", default(app.setting_value(Field::Memory), crate::dev::config::DEFAULT_MEMORY_MIB.to_string())),
                 Setting::Field(Field::Memory) => ("Memory limit (MiB)", default(app.setting_value(Field::Memory), "none".into())),
+                Setting::Field(Field::Disk) if mac => {
+                    let size = app.home.vm_disk.map(|(_, size)| format!("  (now {} GiB, grows only)", size >> 30)).unwrap_or_default();
+                    let v = default(app.setting_value(Field::Disk), crate::dev::config::DEFAULT_DISK_GIB.to_string());
+                    ("VM disk (GiB)", Span::styled(format!("{}{size}", v.content), v.style))
+                }
+                Setting::Field(Field::Disk) => ("VM disk (GiB)", Span::styled("macOS VM only (the sandbox uses the host's disk)", t.dim)),
                 Setting::Field(Field::Shares) if mac => ("Shared directories", default(app.setting_value(Field::Shares), "$HOME".into())),
                 Setting::Field(Field::Shares) => ("Shared directories", Span::styled("macOS VM only (Linux uses the host's files)", t.dim)),
                 Setting::Field(Field::Port) => ("API port (dev)", default(app.setting_value(Field::Port), crate::dev::DEFAULT_PORT.to_string())),
@@ -1587,7 +1615,11 @@ fn settings(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     if !restart.is_empty() {
         lines.push(Line::styled(format!(" ⟳ Restart needed for {}: Home (1), d then u.", restart.join(", ")), t.warn));
     }
-    let platform = if mac { "CPUs, memory and shares size the macOS VM." } else { "CPU and memory limits apply to everything the dev cluster runs." };
+    let platform = if mac {
+        "CPUs, memory, disk and shares size the macOS VM; a bigger disk grows its image in place (data kept)."
+    } else {
+        "CPU and memory limits apply to everything the dev cluster runs."
+    };
     lines.push(Line::styled(format!(" {platform}"), t.dim));
     lines.push(Line::styled(" Settings apply on the next `litek8s dev up` (its flags win).", t.dim));
     lines.push(Line::from(vec![Span::styled(" Look: ", t.dim), Span::raw(look(t)), Span::styled(" (ui.yaml)", t.dim)]));

@@ -54,6 +54,25 @@ pub struct BootOptions {
     pub purge: Vec<String>,
 }
 
+/// The size of the ext4 filesystem whose superblock (the 1024 bytes at
+/// offset 1024 of the device) is `sb`, in bytes.
+pub fn ext4_bytes(sb: &[u8]) -> Option<u64> {
+    let u32_at = |o: usize| Some(u32::from_le_bytes(sb.get(o..o + 4)?.try_into().ok()?) as u64);
+    if sb.get(0x38..0x3a)? != [0x53, 0xef] {
+        return None;
+    }
+    let block = 1024u64 << u32_at(0x18)?;
+    // The high half of the block count only with the 64bit feature.
+    let high = if u32_at(0x60)? & 0x80 != 0 { u32_at(0x150)? } else { 0 };
+    Some((high << 32 | u32_at(0x04)?) * block)
+}
+
+/// Whether the data disk is bigger than its filesystem by more than a
+/// block group (the host grew the image: `disk` in the settings).
+pub fn should_grow(device: u64, fs: u64) -> bool {
+    device > fs + (128 << 20)
+}
+
 pub fn parse_cmdline(cmdline: &str) -> BootOptions {
     let mut o = BootOptions { disk: "/dev/vda".into(), ..Default::default() };
     for word in cmdline.split_whitespace() {
@@ -343,6 +362,28 @@ mod init {
         Some((*f.get(6)?, *f.get(8)?))
     }
 
+    /// Grow the data disk's filesystem to the disk (online, mounted) when
+    /// the host made the disk image bigger; nothing otherwise.
+    fn grow_filesystem(disk: &str) {
+        let Some(name) = disk.rsplit('/').next() else { return };
+        let Some(device) = std::fs::read_to_string(format!("/sys/block/{name}/size")).ok().and_then(|s| s.trim().parse::<u64>().ok()).map(|sectors| sectors * 512) else { return };
+        let mut sb = [0u8; 1024];
+        let read = std::fs::File::open(disk).and_then(|mut f| {
+            use std::io::Seek;
+            f.seek(std::io::SeekFrom::Start(1024))?;
+            f.read_exact(&mut sb)
+        });
+        let Some(fs) = read.ok().and_then(|_| super::ext4_bytes(&sb)) else { return };
+        if !super::should_grow(device, fs) {
+            return;
+        }
+        let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
+        say(&format!("growing the data disk's filesystem from {:.1} to {:.1} GiB", gib(fs), gib(device)));
+        if !run("resize2fs", &[disk]) {
+            say("resize2fs failed: the data disk keeps its old size");
+        }
+    }
+
     /// Trim the data disk at boot and then whenever it has been quiet for
     /// a while (checked every 30 s, at most once a minute): ext4 only
     /// discards block groups freed since the last trim, so a trim with
@@ -595,8 +636,9 @@ mod init {
             say(&format!("formatting {} (first boot)", opts.disk));
             run("mkfs.ext4", &["-q", "-F", "-L", "litek8s", "-E", "lazy_itable_init=1,lazy_journal_init=1", &opts.disk]);
         }
-        if let Err(e) = mount(&opts.disk, DATA_DIR, "ext4", libc::MS_NOATIME, "") {
-            say(&format!("cannot mount the data disk {}: {e}; using memory", opts.disk));
+        match mount(&opts.disk, DATA_DIR, "ext4", libc::MS_NOATIME, "") {
+            Ok(()) => grow_filesystem(&opts.disk),
+            Err(e) => say(&format!("cannot mount the data disk {}: {e}; using memory", opts.disk)),
         }
         if let Some(share) = &opts.share {
             if let Err(e) = mount("share", share, "virtiofs", 0, "") {
@@ -705,6 +747,24 @@ mod tests {
         assert_eq!(o.mounts, vec![("tmp".to_string(), "/private/tmp".to_string()), ("folders".to_string(), "/private/var/folders".to_string())]);
         assert!(o.rosetta);
         assert_eq!(parse_cmdline("console=hvc0").disk, "/dev/vda");
+    }
+
+    #[test]
+    fn reads_the_filesystem_size_from_its_superblock() {
+        let mut sb = [0u8; 1024];
+        assert_eq!(ext4_bytes(&sb), None, "not ext4");
+        sb[0x38..0x3a].copy_from_slice(&[0x53, 0xef]);
+        // 4 KiB blocks (log 2), 16 Mi blocks: 64 GiB.
+        sb[0x18..0x1c].copy_from_slice(&2u32.to_le_bytes());
+        sb[0x04..0x08].copy_from_slice(&(16u32 << 20).to_le_bytes());
+        assert_eq!(ext4_bytes(&sb), Some(64 << 30));
+        // The high half counts only with the 64bit feature.
+        sb[0x150..0x154].copy_from_slice(&1u32.to_le_bytes());
+        assert_eq!(ext4_bytes(&sb), Some(64 << 30));
+        sb[0x60..0x64].copy_from_slice(&0x80u32.to_le_bytes());
+        assert_eq!(ext4_bytes(&sb), Some((1u64 << 32 | 16 << 20) * 4096));
+        assert!(should_grow(128 << 30, 64 << 30));
+        assert!(!should_grow(64 << 30, 64 << 30) && !should_grow((64 << 30) + (64 << 20), 64 << 30));
     }
 
     #[test]

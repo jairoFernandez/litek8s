@@ -191,7 +191,8 @@ framework does not allow. Details and the experiments behind this: [bench/RESULT
 ### Disk on macOS
 
 The VM's data disk is a sparse file, `vm-state/disk.img` in the dev data
-directory (64 GiB at most; only what the guest writes takes space). Unlike
+directory (64 GiB by default, `disk` in the settings; only what the guest
+writes takes space). Unlike
 its memory, the framework does give disk space back: the virtio disk
 accepts discards (TRIM) and punches the discarded blocks out of the file.
 So the guest trims its filesystem (FITRIM on `/var/lib/litek8s`) at boot
@@ -210,6 +211,45 @@ needs them), and the Mac has the space back within a minute or so:
 | boot with 362 MB deleted from an older guest | – | given back by the first trim |
 
 `du` of `disk.img` is what counts; `ls` shows the image's 64 GiB size.
+
+#### More disk (or CPUs, memory) for the VM
+
+Images, volumes, container layers and every cluster's objects live on that
+one data disk. Home in `litek8s ui` shows how full it is
+(`disk  60.0/64.0 GiB · Mac 150 GB free · grow: 8`), and so do `litek8s
+dev status` and `dev list`:
+
+```
+  disk:     60.2 of 64 GiB (the VM's data disk, a sparse image, the Mac has 140.3 GiB free); more: `disk: <GiB>` in ~/.litek8s/config.yaml or `dev up --disk <GiB>`, applied when the VM starts
+```
+
+To give it more, set the new size and restart the VM (it stops with the
+last cluster):
+
+```bash
+litek8s dev down --all       # the VM powers off with the last cluster
+litek8s dev up --disk 128    # or `disk: 128` in ~/.litek8s/config.yaml (Settings, 8, in the UI)
+```
+
+`dev up` grows `disk.img` to the new size in place before the VM boots
+(still sparse: the Mac's free space only goes down as the guest writes),
+and the guest grows its ext4 filesystem to match right after mounting it
+(online `resize2fs`, a second or so; the VM's log says `growing the data
+disk's filesystem from 63.0 to 128.0 GiB`). Clusters, objects, images and
+volumes stay where they are. A disk only grows: a `disk` smaller than the
+image is ignored with a note (shrinking would cut the filesystem); to
+start smaller, `litek8s dev delete` every cluster, stop the VM and remove
+`vm-state/disk.img`. With clusters still running, `dev up` says the new
+size waits (`note: the VM the clusters share is running with other disk;
+they apply once every cluster is down`), and Settings says `Restart
+needed for disk`.
+
+Growing the VM disk does not help when the Mac itself is short: the
+image can only take what the Mac's disk has free, so Home says `Mac
+short` instead of `grow` then; free space on the Mac (or remove images:
+Free space, 6, in the UI, `docker image prune`, see above). CPUs (`cpus`,
+`--cpus`) and memory (`memory`, `--memory`, MiB) change the same way, at
+the VM's next start, without the one-way rule.
 
 ### Data directory
 
@@ -251,14 +291,15 @@ which `litek8s ui` edits ([ui.md](ui.md)); flags win over it:
 |---|---|---|---|
 | `cpus` | `--cpus` | the VM's CPUs (default: half the Mac's, at most 8) | a CPU limit on the sandbox (default: none) |
 | `memory` (MiB) | `--memory` | the VM's ceiling (default 4096) | a memory limit on the sandbox (default: none) |
+| `disk` (GiB) | `--disk` | the VM's data disk (default 64, 16 to 4096): a bigger size grows it in place at the VM's next start, data kept; never shrinks ([More disk](#more-disk-or-cpus-memory-for-the-vm)) | - (the sandbox uses the host's disk) |
 | `shares` | `--share` (repeatable) | directories shared at the same path (default `$HOME`) | - (the sandbox sees the host's files) |
 | `port` | `--port` | API server port of the default cluster (default 6443, a free one if taken; other clusters keep the one they got) | same |
 | `publish` | `--publish` | `localhost` (default) or `all`: where NodePorts, LoadBalancer ports and `docker run -p` ports listen | same |
 
 The file is read at `up`; `env.json` records what the VM or sandbox started
 with, each cluster's `dev.json` its own port and nodes. `cpus`, `memory`,
-`shares` and `publish` belong to the VM or sandbox all clusters share: they
-apply when the first cluster starts it.
+`disk`, `shares` and `publish` belong to the VM or sandbox all clusters
+share: they apply when the first cluster starts it.
 
 ## Images
 

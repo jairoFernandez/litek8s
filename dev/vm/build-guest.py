@@ -5,7 +5,7 @@ small initramfs.
 Everything comes from Alpine's arm64 packages, fetched and unpacked here (no
 Docker, no root): the `linux-virt` kernel (its EFI zboot image unpacked to
 the plain arm64 Image Virtualization.framework boots), the kernel modules the
-cluster needs, and crun, iptables, iproute2, e2fsprogs and busybox with
+cluster needs, and crun, iptables, iproute2, e2fsprogs (with resize2fs) and busybox with
 their libraries. `/init` is litek8s itself (a static musl build, see
 build-guest-binary.sh), which runs the cluster as PID 1.
 
@@ -35,7 +35,7 @@ import tarfile
 import urllib.request
 
 MIRROR = "https://dl-cdn.alpinelinux.org/alpine"
-PACKAGES = ["busybox-static", "crun", "iptables", "iproute2-minimal", "e2fsprogs"]
+PACKAGES = ["busybox-static", "crun", "iptables", "iproute2-minimal", "e2fsprogs", "e2fsprogs-extra"]  # extra: resize2fs (a grown data disk)
 KERNEL = "linux-virt"  # only its kernel and modules are used, not its dependencies
 # Kernel module directories to keep (everything else in linux-virt is
 # hardware the VM does not have).

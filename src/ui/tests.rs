@@ -1203,3 +1203,72 @@ fn local_docker_stays_out_of_the_cluster_figures() {
     let (_, m) = *app.history.back().unwrap();
     assert!((m as f64 - b.cluster_in_use() as f64 / (4096u64 << 20) as f64).abs() < 1e-3);
 }
+
+/// The macOS VM's data disk: what it holds against its size (or the
+/// Mac's free space, when less), where to grow it when it is nearly
+/// full, and its setting with the image's size now.
+#[test]
+fn the_vm_disk_shows_its_size_and_how_to_grow_it() {
+    let mut app = sample_app();
+    let node = |used: u64| crate::dev::disk::NodeDisk { fs_used: used, ..Default::default() };
+    let mut home = app.home.clone();
+    home.vm_disk = Some((3 << 30, 64 << 30));
+    home.disk_node = Some((node(2_000_000_000), 0, Some(3 << 30)));
+    home.disk_free = Some(150_000_000_000);
+    app.apply(Msg::Home(Box::new(home.clone())));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("1.9/64.0 GiB · Mac 150 GB free"), "{s}");
+    assert!(!s.contains("grow:"), "{s}");
+    // Nearly full: grow it in Settings.
+    home.disk_node = Some((node(60 << 30), 0, Some(61 << 30)));
+    app.apply(Msg::Home(Box::new(home.clone())));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("60.0/64.0 GiB · Mac 150 GB free · grow: 8"), "{s}");
+    // The Mac nearly full instead: a bigger VM disk would not help.
+    home.disk_free = Some(1 << 30);
+    app.apply(Msg::Home(Box::new(home.clone())));
+    assert!(render(&app, 120, 40).contains("· Mac short"));
+    home.disk_free = Some(150_000_000_000);
+    app.apply(Msg::Home(Box::new(home.clone())));
+
+    // Settings: the row, then a bigger size needs the VM to restart.
+    app.key(key('8'));
+    if cfg!(target_os = "macos") {
+        let s = render(&app, 80, 24);
+        assert!(s.contains("VM disk (GiB)") && s.contains("64 (default)  (now 64 GiB, grows only)"), "{s}");
+    }
+    app.key(key('j'));
+    app.key(key('j'));
+    app.key(code(KeyCode::Enter));
+    app.key(key('8'));
+    assert!(app.key(code(KeyCode::Enter)).is_empty(), "too small");
+    let Overlay::Input { error: Some(e), .. } = &app.overlay else { panic!("{:?}", app.overlay) };
+    assert!(e.contains("disk must be between 16 and 4096 GiB"), "{e}");
+    app.key(code(KeyCode::Backspace));
+    for c in "128".chars() {
+        app.key(key(c));
+    }
+    let effects = app.key(code(KeyCode::Enter));
+    let [Effect::SaveConfig(c)] = &effects[..] else { panic!("{effects:?}") };
+    assert_eq!(c.disk, Some(128));
+    app.apply(Msg::Config(Ok(c.clone())));
+    home.running = Some(crate::dev::DevState {
+        pid: 1,
+        port: 6443,
+        mode: "vm".into(),
+        started_unix_ms: 0,
+        cgroup: None,
+        vm_ip: None,
+        helper_pid: None,
+        cpus: Some(crate::dev::config::default_cpus()),
+        memory_mib: Some(4096),
+        shares: Vec::new(),
+        publish: Some("localhost".into()),
+        name: Some("dev".into()),
+        nodes: Some(1),
+        docker_socket: None,
+    });
+    app.apply(Msg::Home(Box::new(home)));
+    assert_eq!(app.restart_needed(), vec!["disk"]);
+    assert!(render(&app, 80, 24).contains("Restart needed for disk"));
+}

@@ -490,6 +490,7 @@ pub async fn run(publish: super::config::Publish, cpus: Option<usize>, memory_mi
             helper_pid: None,
             cpus,
             memory_mib,
+            disk_gib: None,
             shares: Vec::new(),
             publish: Some(publish.as_str().into()),
         },

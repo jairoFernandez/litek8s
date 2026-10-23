@@ -22,7 +22,7 @@ Nine views, `1`-`9` (or `tab`) to switch, `?` for the keys of each:
 | **5 Volumes** | sizes, which containers mount each, compose project; `d` remove |
 | **6 Free space** | what can be reclaimed: stopped containers, dangling images, build cache, unused images, unused volumes; select with `space`, `p` frees it |
 | **7 Kubernetes** | a cluster UI for any cluster or context (litek8s, k3s, EKS, GKE, …), k9s-style: `:` any resource (CRDs too), `/` filters and selectors, describe, YAML, edit with a server dry run and a diff, logs of pods and whole workloads, shells, port-forwards, xray trees; see [Kubernetes](#kubernetes-a-cluster-ui) |
-| **8 Settings** | CPUs, memory, shared directories, API port, where published ports listen; switch the docker and kubectl contexts to litek8s and back; edit the settings file in `$EDITOR` |
+| **8 Settings** | CPUs, memory, the VM's disk (grows in place), shared directories, API port, where published ports listen; switch the docker and kubectl contexts to litek8s and back; edit the settings file in `$EDITOR` |
 | **9 Observe** | the cluster's alerts and its pods by CPU or memory with sparklines of the last 30 minutes, from the API server's built-in metrics; every log of a pod (gone containers included), a regex search of every pod's logs, acknowledge alerts; see [Observe](#observe) and [observability.md](observability.md) |
 
 Everything that deletes or stops asks first, and says what goes: removing a
@@ -88,71 +88,81 @@ As text, 80x24 before:
  u up  d down  R delete  b breakdown  2 clusters                         ? help
 ```
 
-and after: one column, the header a single line, the meters, pods and
-containers by state, the breakdown `b` picks, where the tools point:
+and after: one column, the header a single line, the cluster's meters and
+pods by state, this cluster's Docker API in a box of its own (its
+containers, images, volumes and what they take), the breakdown `b` picks,
+and where the tools point when there is room:
 
 ```
- litek8s DEV c61b53c7c4f1  1 Home 2 3 4 5 6 7 8 9        ● ui-design · macOS VM
-╭─ ● ui-design · macOS VM · up 14m 34s ──────────────────────────── resources ─╮
-│ cpu    ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   7% of 4 CPUs · 26% of one           │
-│ memory ██▒▒░░░░░░░░░░░░░░░░░░░░░░░░░░░   6% 253 MB in use · VM limit 4.0 GiB │
-│ disk   ▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  <1% 305 MB used · 98.2 GB free       │
-│ pods   ● 6 running   ◐ 1 pending   ✕ 1 crashloop   ○ 1 completed             │
-│ ctrs   ● 2/4 running   ✕ 1 failed   ○ 1 exited   images 3 · 93.3 MB          │
+ litek8s DEV 1c5f21c16f3c · …  1 Home 2 3 4 5 6 7 8 9          ● dev · macOS VM
+╭─ ● dev · macOS VM · up 6m 18s ───────────────────────────────────── cluster ─╮
+│ cpu    ▎░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   1% of 7 CPUs · 5% of one             │
+│ memory ███████████▒▒▒▒▒▒▒▒▒▒░░░░░░░░░  36% 1.5 GiB in use · VM limit 4.0 GiB │
+│ disk   ████████▍░░░░░░░░░░░░░░░░░░░░░  28% 6.0/80.0 GiB · Mac 16.7 GB free   │
+│ pods   ● 21 running                                                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-╭─ Memory · 513 MB (what macOS charges; VM ceiling 1.0/4.0 GiB)  b: next ──────╮
-│ litek8s (ui-design)  ▏            11.8 MB  API server, controllers, node ag… │
-│ pods & containers    ▏            22.9 MB                                    │
-│ Linux kernel + base  ▌             218 MB  fixed cost: kernel, page tables   │
-│ cache                ▌             201 MB  reclaimable                       │
-│ freed, still charged ▏            58.7 MB  macOS keeps it until the VM rest… │
+╭─ docker · ~/.litek8s/docker.sock ─────────── cpu 100.0% of one · mem 200 MB ─╮
+│ ● 2/2 running   images 25 · 4.6 GB   vols 1 · 983 MB                         │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Memory · 3.2 GB (what macOS charges; VM ceiling 2.6/4.0 GiB)  b: next ──────╮
+│ litek8s (dev)        ▋             234 MB  API server, controllers, node ag… │
+│ pods                 ██▌           990 MB                                    │
+│ Docker containers    ▌             200 MB  Docker API containers, builds (n… │
+│ Linux kernel + base  ▉             342 MB  fixed cost: kernel, page tables   │
+│ cache                ██▎           880 MB  reclaimable                       │
+│ freed, still charged █▍            555 MB  macOS keeps it until the VM rest… │
 ╰────────────────────────────────────────────────────── bar: VM limit 4.0 GiB ─╯
-╭─ connections · your tools point at ──────────────────────────────────────────╮
-│ API     http://127.0.0.1:59309      ✗ docker context   default               │
-│ Docker  …itek8s/ui-design/docker.sock DOCKER_HOST      unset                 │
-│ Engine  API 27.5.1 (aarch64)        ✓ kubectl context  litek8s-ui-design     │
-╰──────────────────────────────────────────────────────────────────────────────╯
  Switch docker/kubectl to litek8s in Settings (8). Help: ?
 
-  u  up   d  down   R  delete   b  breakdown   2  clusters              ?  help
+ u up  d down  R delete  b breakdown  c copy API  2 clusters            ?  help
 ```
 
 A wide and tall terminal (here 120x40) gets the boxed header, CPU and
 memory side by side with their history (one column per sample, 2 s apart,
-for as long as Home has been on screen), disk and the workloads under them:
+for as long as Home has been on screen), disk, and the pods and the docker
+box under them:
 
 ```
-╭─ litek8s DEV c61b53c7c4f1 ───────────────────────────────────────────────────── ● ui-design · macOS VM · up 14m 30s ─╮
+╭─ litek8s DEV 1c5f21c16f3c ──────────────────────────────────────────────────────────── ● dev · macOS VM · up 6m 12s ─╮
 │  1 Home  2 Clusters  3 Containers  4 Images  5 Volumes  6 Free space  7 Kubernetes  8 Settings  9 Observe            │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
 ╭─ cpu · the VM process ────────────────────── bar: 1 CPU ─╮╭─ memory · what macOS charges… ─── bar: VM limit 4.0 GiB ─╮
-│          ▄▆▆▄▄▄▄▄▄▆▅▄▄▄▄▄▄▄▄█▆▅▄▄▅▇▅▅▅▅▅▅▅▅▁             ││                                                          │
-│         ▂███████████████████████████████████             ││                                                          │
-│         ████████████████████████████████████             ││                                                          │
-│ ▇▆▆▇▇▆▇▆████████████████████████████████████▁▁▁▁▁▁▁▁▁▁▁▁ ││                                                          │
-│ ████████████████████████████████████████████████████████ ││                                                          │
-│ ████████████████████████████████████████████████████████ ││ ▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃ │
-│ █▉░░░░░░░░░░░░░░░░░░░░░░░░░░   6% of 4 CPUs · 26% of one ││ █▒▒░░░░░░░░░░░░░░░   6% 249 MB in use · VM limit 4.0 GiB │
-│ litek8s (ui-design) ▏          0.1%  API server, contro… ││ litek8s (ui-design) ▏       12.0 MB  API server, contro… │
-│ pods & containers   █▌        25.3%                      ││ pods & containers   ▏       22.9 MB                      │
-│   pod default/burn… ▌          8.4%                      ││ Linux kernel + base ▎        214 MB  fixed cost: kernel… │
-│   pod default/burn… ▌          8.3%                      ││ cache               ▎        201 MB  reclaimable         │
-│   pod default/burn… ▌          8.2%                      ││ freed, still charg… ▏       60.8 MB  macOS keeps it unt… │
-│ guest kernel & oth… ▏          0.6%  interrupts, networ… ││                                                          │
-│ VM overhead         ▏         <0.1%  virtual devices, v… ││                                                          │
+│                                                          ││                                                          │
+│                                                     ▂    ││                                      ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁ │
+│                                      ▅▂▁▁▁▂▂▁▂▁▁▂▁▂▃█▂▁▁ ││                                      ███████████████████ │
+│ ▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░   1% of 7 CPUs · 4% of one ││ ██████▒▒▒▒▒▒░░░░░  36% 1.5 GiB in use · VM limit 4.0 GiB │
+│ litek8s (dev)       ▏          0.2%  API server, contro… ││ litek8s (dev)       ▍        234 MB  API server, contro… │
+│ pods                ▏          1.8%                      ││ pods                █▍       993 MB                      │
+│   pod openbao/open… ▏          0.4%                      ││ Docker containers   ▎        200 MB  Docker API contain… │
+│   pod argocd/argoc… ▏          0.4%                      ││ Linux kernel + base ▌        340 MB  fixed cost: kernel… │
+│   pod argocd/argoc… ▏          0.3%                      ││ cache               █▎       880 MB  reclaimable         │
+│ Docker containers   ██████   100.0%  Docker API contain… ││ freed, still charg… ▊        554 MB  macOS keeps it unt… │
+│   container burner  ██████   100.0%                      ││                                                          │
+│ guest kernel & oth… ▏          1.7%  interrupts, networ… ││                                                          │
+│ VM overhead         ▏          0.5%  virtual devices, v… ││                                                          │
 ╰──────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
-╭─ disk · litek8s and its VM disk ─────────── bar: 304 MB ─╮╭─ workloads ──────────────────────────────────────────────╮
-│ ▏░░░░░░░░░░░░░░░░░░░░░░░  <1% 304 MB used · 98.2 GB free ││ pods        ● 6 running   ◐ 1 pending   ✕ 1 crashloop    │
-│ litek8s itself      ███▌     178 MB  binary, VM kernel … ││             ○ 1 completed                                │
-│ cluster ui-design   ██       104 MB                      ││ containers  ● 2/4 running   ✕ 1 failed   ○ 1 exited      │
-│   images            ██      99.9 MB  layers shared by p… ││ images      3 · 93.3 MB                                  │
-│   container layers  ▏        823 kB  what containers wr… ││ volumes     1 · 0 B                                      │
-│   volumes           ▏        340 kB  Docker volumes, em… ││                                                          │
-│   logs              ▏       69.6 kB  pods and container… ││                                                          │
-│   objects           ▏        1.9 MB  Kubernetes objects… ││                                                          │
-│   other             ▏        1.1 MB  metadata, IP alloc… ││                                                          │
+╭─ disk · litek8s and its VM disk ─────────── bar: 7.1 GB ─╮╭─ pods ───────────────────────────────────────────────────╮
+│ █████▎░░░░░░░░░░░░░  28% 6.0/80.0 GiB · Mac 16.7 GB free ││ pods        ● 21 running                                 │
+│ litek8s itself      ▏        180 MB  binary, VM kernel … │╰──────────────────────────────────────────────────────────╯
+│ cluster dev         █████▍   6.4 GB                      │╭─ docker · …cker.sock ─── cpu 100.0% of one · mem 200 MB ─╮
+│   images            ████     4.7 GB  1.3 GB reclaimable… ││ containers  ● 2/2 running                                │
+│   container layers  ▏        1.4 MB  what containers wr… ││ images 25 · 4.6 GB   vols 1 · 983 MB                     │
+│   volumes           █▌       1.7 GB  982.5 MB reclaimab… ││                                                          │
+│   logs              ▏        4.5 MB  pods and container… ││                                                          │
+│   builds            ▏        4.1 kB  running builds, ca… ││                                                          │
+│   objects           ▏       15.8 MB  Kubernetes objects… ││                                                          │
+│   other             ▏        1.6 MB  metadata, IP alloc… ││                                                          │
 │ rest of the VM disk ▏        2.2 MB  other clusters, fi… ││                                                          │
-│ deleted in the VM   ▍       20.6 MB  disk.img gives it … ││                                                          │
+│ deleted in the VM   ▍        480 MB  disk.img gives it … ││                                                          │
+╰──────────────────────────────────────────────────────────╯╰──────────────────────────────────────────────────────────╯
+╭─ connections · your tools point at ──────────────────────────────────────────────────────────────────────────────────╮
+│ API     http://127.0.0.1:58913                          ✗ docker context   orbstack                                  │
+│ Docker  ~/.litek8s/docker.sock                            DOCKER_HOST      unset                                     │
+│ Engine  API 27.5.1 (aarch64)                            ✓ kubectl context  litek8s-dev                               │
+│ VM IP   192.168.64.57                                     kubeconfig       ~/.kube/config                            │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+ Switch docker/kubectl to litek8s in Settings (8). Help: ?
+  u  up   d  down   R  delete   b  breakdown   c  copy API   2  clusters                                        ?  help
 ```
 
 **Terminals.** Nothing needs a Nerd Font: only box-drawing and block
@@ -213,29 +223,27 @@ shown here as a default install has them (`~/.litek8s`, `~/.kube/config`,
 Home:
 
 ```
- litek8s DEV c61b53c7c4f1  1 Home 2 3 4 5 6 7 8 9        ● ui-design · macOS VM
-╭─ ● ui-design · macOS VM · up 14m 34s ──────────────────────────── resources ─╮
-│ cpu    ██░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   7% of 4 CPUs · 26% of one           │
-│ memory ██▒▒░░░░░░░░░░░░░░░░░░░░░░░░░░░   6% 253 MB in use · VM limit 4.0 GiB │
-│ disk   ▏░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  <1% 305 MB used · 98.2 GB free       │
-│ pods   ● 6 running   ◐ 1 pending   ✕ 1 crashloop   ○ 1 completed             │
-│ ctrs   ● 2/4 running   ✕ 1 failed   ○ 1 exited   images 3 · 93.3 MB          │
+ litek8s DEV 1c5f21c16f3c · …  1 Home 2 3 4 5 6 7 8 9          ● dev · macOS VM
+╭─ ● dev · macOS VM · up 6m 18s ───────────────────────────────────── cluster ─╮
+│ cpu    ▎░░░░░░░░░░░░░░░░░░░░░░░░░░░░░   1% of 7 CPUs · 5% of one             │
+│ memory ███████████▒▒▒▒▒▒▒▒▒▒░░░░░░░░░  36% 1.5 GiB in use · VM limit 4.0 GiB │
+│ disk   ████████▍░░░░░░░░░░░░░░░░░░░░░  28% 6.0/80.0 GiB · Mac 16.7 GB free   │
+│ pods   ● 21 running                                                          │
 ╰──────────────────────────────────────────────────────────────────────────────╯
-╭─ Memory · 513 MB (what macOS charges; VM ceiling 1.0/4.0 GiB)  b: next ──────╮
-│ litek8s (ui-design)  ▏            11.8 MB  API server, controllers, node ag… │
-│ pods & containers    ▏            22.9 MB                                    │
-│ Linux kernel + base  ▌             218 MB  fixed cost: kernel, page tables   │
-│ cache                ▌             201 MB  reclaimable                       │
-│ freed, still charged ▏            58.7 MB  macOS keeps it until the VM rest… │
+╭─ docker · ~/.litek8s/docker.sock ─────────── cpu 100.0% of one · mem 200 MB ─╮
+│ ● 2/2 running   images 25 · 4.6 GB   vols 1 · 983 MB                         │
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ Memory · 3.2 GB (what macOS charges; VM ceiling 2.6/4.0 GiB)  b: next ──────╮
+│ litek8s (dev)        ▋             234 MB  API server, controllers, node ag… │
+│ pods                 ██▌           990 MB                                    │
+│ Docker containers    ▌             200 MB  Docker API containers, builds (n… │
+│ Linux kernel + base  ▉             342 MB  fixed cost: kernel, page tables   │
+│ cache                ██▎           880 MB  reclaimable                       │
+│ freed, still charged █▍            555 MB  macOS keeps it until the VM rest… │
 ╰────────────────────────────────────────────────────── bar: VM limit 4.0 GiB ─╯
-╭─ connections · your tools point at ──────────────────────────────────────────╮
-│ API     http://127.0.0.1:59309      ✗ docker context   default               │
-│ Docker  …itek8s/ui-design/docker.sock DOCKER_HOST      unset                 │
-│ Engine  API 27.5.1 (aarch64)        ✓ kubectl context  litek8s-ui-design     │
-╰──────────────────────────────────────────────────────────────────────────────╯
  Switch docker/kubectl to litek8s in Settings (8). Help: ?
 
-  u  up   d  down   R  delete   b  breakdown   2  clusters              ?  help
+ u up  d down  R delete  b breakdown  c copy API  2 clusters            ?  help
 ```
 
 The memory meter is what the cluster's owners hold (litek8s, pods,
@@ -689,13 +697,14 @@ otherwise; against an API server with `--no-observability` it says so.
 The Settings view edits a small file that `litek8s dev up` reads (its flags
 win over it); `$LITEK8S_CONFIG` moves it. Every change is validated before it
 is written: CPUs between 1 and the machine's, memory between 1024 MiB and
-its RAM, a port of 1024 or above, shared directories that exist, are
+its RAM, a disk of 16 to 4096 GiB, a port of 1024 or above, shared directories that exist, are
 absolute, do not overlap and are not already shared.
 
 ```yaml
 cpus: 4              # macOS: the VM's CPUs (default: half the Mac's, at most 8)
                      # Linux: a CPU limit on everything the dev cluster runs (default: none)
 memory: 4096         # MiB; macOS: the VM's ceiling (default 4096); Linux: a limit (default: none)
+disk: 64             # GiB, macOS: the VM's data disk; bigger grows it at the VM's next start, never shrinks
 shares:              # macOS: directories shared with the VM at the same path (default: $HOME;
   - /Users/me        #   /tmp and /var/folders are always shared)
   - /Volumes/src
