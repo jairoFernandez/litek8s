@@ -408,10 +408,7 @@ async fn call(api: &ApiState, hook: &Value, a: &Attributes<'_>, obj: &Value) -> 
         .and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok());
     let (backend, server_name, path) = match config.get("url").and_then(Value::as_str) {
         Some(url) => {
-            let rest = url.strip_prefix("https://").context("webhook URL must be https")?;
-            let (authority, path) = rest.split_once('/').map(|(a, p)| (a, format!("/{p}"))).unwrap_or((rest, "/".into()));
-            let host = authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority).trim_matches(['[', ']']).to_string();
-            let addr = if authority.contains(':') { authority.to_string() } else { format!("{authority}:443") };
+            let (addr, host, path) = url_parts(url)?;
             (Backend { addr, ..Default::default() }, host, path)
         }
         None => {
@@ -457,10 +454,7 @@ pub(crate) async fn convert_objects(api: &ApiState, crd: &Value, objects: Vec<Va
     let ca = config.get("caBundle").and_then(Value::as_str).and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok());
     let (backend, server_name, path) = match config.get("url").and_then(Value::as_str) {
         Some(url) => {
-            let rest = url.strip_prefix("https://").ok_or_else(|| failed(anyhow::anyhow!("webhook URL must be https")))?;
-            let (authority, path) = rest.split_once('/').map(|(a, p)| (a, format!("/{p}"))).unwrap_or((rest, "/".into()));
-            let host = authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority).to_string();
-            let addr = if authority.contains(':') { authority.to_string() } else { format!("{authority}:443") };
+            let (addr, host, path) = url_parts(url).map_err(failed)?;
             (Backend { addr, ..Default::default() }, host, path)
         }
         None => {
@@ -648,6 +642,15 @@ pub(crate) async fn tls_dial(api: &ApiState, backend: &Backend, server_name: &st
     Ok(Box::new(tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, tcp).await?))
 }
 
+/// `https://host[:port]/path` as (dial address, TLS server name, path).
+fn url_parts(url: &str) -> Result<(String, String, String)> {
+    let rest = url.strip_prefix("https://").context("webhook URL must be https")?;
+    let (authority, path) = rest.split_once('/').map(|(a, p)| (a, format!("/{p}"))).unwrap_or((rest, "/".into()));
+    let host = authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority).trim_matches(['[', ']']).to_string();
+    let addr = if authority.contains(':') { authority.to_string() } else { format!("{authority}:443") };
+    Ok((addr, host, path))
+}
+
 async fn post(api: &ApiState, backend: &Backend, server_name: &str, path: &str, body: Vec<u8>, ca: Option<Vec<u8>>) -> Result<Value> {
     let tls = tls_dial(api, backend, server_name, ca, false).await?;
     let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(tls)).await?;
@@ -747,13 +750,18 @@ mod tests {
     /// An HTTPS server for `localhost` and `hook.default.svc` that answers
     /// every POST with `handler(path and query, body)` after `delay`.
     async fn server(delay: Duration, handler: Handler) -> Server {
+        server_on("127.0.0.1:0", delay, handler).await.unwrap()
+    }
+
+    /// None when `bind` is not available (no IPv6 loopback).
+    async fn server_on(bind: &str, delay: Duration, handler: Handler) -> Option<Server> {
         use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
         let ca_key = KeyPair::generate().unwrap();
         let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
         ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         let ca = ca_params.self_signed(&ca_key).unwrap();
         let key = KeyPair::generate().unwrap();
-        let cert = CertificateParams::new(vec!["localhost".to_string(), "hook.default.svc".to_string()])
+        let cert = CertificateParams::new(vec!["localhost".to_string(), "hook.default.svc".to_string(), "::1".to_string()])
             .unwrap()
             .signed_by(&key, &ca, &ca_key)
             .unwrap();
@@ -764,7 +772,7 @@ mod tests {
             .with_single_cert(vec![cert.der().clone()], rustls::pki_types::PrivateKeyDer::try_from(key.serialize_der()).unwrap())
             .unwrap();
         let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let listener = tokio::net::TcpListener::bind(bind).await.ok()?;
         let port = listener.local_addr().unwrap().port();
         let seen = Arc::new(Mutex::new(Vec::new()));
         let handler = Arc::new(handler);
@@ -792,7 +800,7 @@ mod tests {
                 });
             }
         });
-        Server { port, ca: base64::engine::general_purpose::STANDARD.encode(ca.pem()), seen }
+        Some(Server { port, ca: base64::engine::general_purpose::STANDARD.encode(ca.pem()), seen })
     }
 
     fn review(request: &Value, response: Value) -> (u16, Value) {
@@ -1261,6 +1269,36 @@ mod tests {
         assert_eq!(seen[0].0, "/convert");
         assert_eq!(seen[0].1["apiVersion"], "apiextensions.k8s.io/v1");
         assert_eq!(seen[0].1["request"]["objects"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn webhook_urls_split_into_address_server_name_and_path() {
+        let parts = |u: &str| url_parts(u).unwrap();
+        assert_eq!(parts("https://hook.example.com/convert?x=1"), ("hook.example.com:443".into(), "hook.example.com".into(), "/convert?x=1".into()));
+        assert_eq!(parts("https://10.0.0.1:8443"), ("10.0.0.1:8443".into(), "10.0.0.1".into(), "/".into()));
+        assert_eq!(parts("https://[::1]:8443/v"), ("[::1]:8443".into(), "::1".into(), "/v".into()));
+        assert!(url_parts("http://hook/").is_err());
+    }
+
+    #[tokio::test]
+    async fn conversion_webhooks_at_an_ipv6_address() {
+        let api = api();
+        let handler: Handler = Box::new(|_: &str, body: &Value| {
+            let objects = body.pointer("/request/objects").cloned().unwrap_or_default();
+            let converted: Vec<Value> = objects.as_array().into_iter().flatten().map(|o| {
+                let mut o = o.clone();
+                o["apiVersion"] = body["request"]["desiredAPIVersion"].clone();
+                o
+            }).collect();
+            (200, json!({"apiVersion": body["apiVersion"], "kind": "ConversionReview", "response": {"uid": body["request"]["uid"], "convertedObjects": converted, "result": {"status": "Success"}}}))
+        });
+        let Some(s) = server_on("[::1]:0", Duration::ZERO, handler).await else {
+            eprintln!("no IPv6 loopback, skipped");
+            return;
+        };
+        let conversion = json!({"strategy": "Webhook", "webhook": {"clientConfig": {"url": format!("https://[::1]:{}/", s.port), "caBundle": s.ca}}});
+        let out = convert_objects(&api, &crd(conversion), vec![widget("example.com/v1", "a")], "example.com/v2").await.unwrap();
+        assert_eq!(out[0]["apiVersion"], "example.com/v2");
     }
 
     #[tokio::test]
