@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.6
 
 - **Servers leave port 443 to LoadBalancer Services:** `litek8s apiserver`
   also listened on 443 on every address (`--in-cluster-port`), which took
