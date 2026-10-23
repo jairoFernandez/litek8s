@@ -15,6 +15,11 @@
   in use") until someone removed it. It now removes an empty directory or a
   stale socket at that path, and says so when a non-empty directory is in
   the way.
+- **Cluster DNS resolves outside names on hosts that list an IPv6
+  nameserver first:** it forwarded only to the host's first nameserver and
+  over IPv4, so on such hosts (Debian images on some clouds) every name
+  outside the cluster timed out in pods (Helm charts, image registries). It
+  now tries each nameserver, IPv4 first, over the matching address family.
 
 ## 0.2.5
 
