@@ -185,6 +185,8 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         assert!(addr.ip().is_loopback() && addr.port() != 0);
         let _conn = std::net::TcpStream::connect(addr).unwrap();
+        // Handed out non-blocking: wait for the connection.
+        listener.set_nonblocking(false).unwrap();
         assert!(listener.accept().is_ok());
         writeln!(client, "tcp nope").unwrap();
         let (byte, fd) = recv_with_fd(&client).unwrap();
