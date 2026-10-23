@@ -225,7 +225,9 @@ fn footer(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
             &[("esc", "back"), ("f", "follow"), ("w", "wrap"), ("↑↓", "scroll"), ("g/G", "top/end")]
         } else {
             match app.tab {
-                Tab::Home => &[("u", "up"), ("d", "down"), ("R", "delete"), ("b", "breakdown"), ("2", "clusters")],
+                // A remote litek8s is not started or stopped from here.
+                Tab::Home if app.home.status == DevStatus::Remote => &[("b", "breakdown"), ("c", "copy API"), ("7", "kube"), ("2", "clusters")],
+                Tab::Home => &[("u", "up"), ("d", "down"), ("R", "delete"), ("b", "breakdown"), ("c", "copy API"), ("2", "clusters")],
                 Tab::Clusters => &[("n", "new"), ("u", "up"), ("d", "down"), ("D", "delete"), ("t", "tree"), ("enter", "use")],
                 Tab::Containers => &[("l", "logs"), ("s", "shell"), ("u", "start"), ("x", "stop"), ("r", "restart"), ("d", "remove"), ("/", "filter")],
                 Tab::Images | Tab::Volumes => &[("d", "remove"), ("/", "filter"), ("6", "free space")],
@@ -636,16 +638,20 @@ fn connections(f: &mut Frame, app: &App, t: &Theme, area: Rect, wide: bool) {
     let mut left = Vec::new();
     let api_style = if app.kube_error.is_some() && !down { t.bad } else { Style::new() };
     left.push(kv("API", trunc(&app.kube_endpoint, w), api_style));
-    let docker_style = if app.docker_error.is_some() && !down { t.bad } else { Style::new() };
+    // Looking at a remote litek8s, Docker is this machine's dev cluster's:
+    // down is expected there, not a fault of the cluster on screen.
+    let docker_fault = app.docker_error.is_some() && !down && !app.docker_is_local_dev;
+    let docker_style = if docker_fault { t.bad } else { Style::new() };
     let socket = app.docker_endpoint.strip_prefix("unix://").unwrap_or(&app.docker_endpoint);
     left.push(kv("Docker", trunc_left(&home_dir_short(socket), w), docker_style));
     let engine = match &app.docker_error {
         Some(_) if down => "not running".into(),
+        Some(_) if app.docker_is_local_dev => "not running (this machine's dev cluster)".into(),
         Some(e) => trunc(e, w),
         None if app.docker_version.is_empty() => "-".into(),
         None => trunc(&format!("{} ({})", app.docker_version, app.docker_os), w),
     };
-    left.push(kv("Engine", engine, if app.docker_error.is_some() && !down { t.bad } else { t.dim }));
+    left.push(kv("Engine", engine, if docker_fault { t.bad } else { t.dim }));
     if let Some(ip) = h.vm_ip.as_ref().filter(|_| wide) {
         left.push(kv("VM IP", ip.clone(), t.dim));
     }
@@ -1122,7 +1128,7 @@ fn new_cluster(f: &mut Frame, app: &App, t: &Theme, form: &NewCluster, area: Rec
 
 fn containers(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     if let Some(e) = &app.docker_error {
-        return unavailable(f, t, area, "Containers", e, "Start the cluster (1, then u; 2 for the others) or pass --docker-host.");
+        return docker_unavailable(f, app, t, area, "Containers", e, "Start the cluster (1, then u; 2 for the others) or pass --docker-host.");
     }
     let wide = area.width >= 100;
     let rows: Vec<Row> = app
@@ -1204,7 +1210,7 @@ fn users_text(t: &Theme, list: &[String]) -> Span<'static> {
 
 fn images(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     if let Some(e) = &app.docker_error {
-        return unavailable(f, t, area, "Images", e, "");
+        return docker_unavailable(f, app, t, area, "Images", e, "");
     }
     let wide = area.width >= 100;
     let rows: Vec<Row> = app
@@ -1233,7 +1239,7 @@ fn images(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
 
 fn volumes(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     if let Some(e) = &app.docker_error {
-        return unavailable(f, t, area, "Volumes", e, "");
+        return docker_unavailable(f, app, t, area, "Volumes", e, "");
     }
     let rows: Vec<Row> = app
         .visible_volumes()
@@ -1255,7 +1261,7 @@ fn volumes(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
 
 fn space(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     if let Some(e) = &app.docker_error {
-        return unavailable(f, t, area, "Free space", e, "");
+        return docker_unavailable(f, app, t, area, "Free space", e, "");
     }
     let [list, info] = Layout::vertical([Constraint::Length(RECLAIMS.len() as u16 + 4), Constraint::Min(1)]).areas(area);
     let mut total_sel = 0;
@@ -1475,6 +1481,21 @@ fn look(t: &Theme) -> String {
     format!("{preset}, {depth}, {bg}{}", if t.ascii { ", ASCII" } else { "" })
 }
 
+/// A Docker view without its Docker API. Looking at a remote litek8s, that
+/// is this machine's dev cluster's API, down: say so, not as a failure.
+fn docker_unavailable(f: &mut Frame, app: &App, t: &Theme, area: Rect, title: &str, error: &str, hint: &str) {
+    if !app.docker_is_local_dev {
+        return unavailable(f, t, area, title, error, hint);
+    }
+    let lines = vec![
+        Line::styled(format!(" The Docker views show a Docker API: here, this machine's dev cluster's ({}), which is not running.", home_dir_short(app.docker_endpoint.strip_prefix("unix://").unwrap_or(&app.docker_endpoint))), t.dim),
+        Line::raw(""),
+        Line::styled(format!(" {} is a remote litek8s: its workloads are in Kube (7), its metrics in Obs (9).", app.kube_context), t.dim),
+        Line::styled(" Another Docker API: litek8s ui --docker-host tcp://HOST:PORT (or unix://PATH).", t.dim),
+    ];
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(t.block(title)), area);
+}
+
 fn unavailable(f: &mut Frame, t: &Theme, area: Rect, title: &str, error: &str, hint: &str) {
     let lines = vec![Line::from(vec![Span::styled(" ✕ ", t.bad), Span::styled(error.to_string(), t.bad)]), Line::raw(""), Line::styled(format!(" {hint}"), t.dim)];
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(t.block(title)), area);
@@ -1542,8 +1563,8 @@ fn input(f: &mut Frame, t: &Theme, prompt: &str, value: &str, error: Option<&str
 /// The help screen: per view, its keys (each line fits 76 columns).
 pub const HELP: &[(&str, &[(&str, &str)])] = &[
     ("Everywhere", &[("1-9 tab", "views"), ("↑↓ jk", "move"), ("/", "filter"), ("ctrl-r", "refresh"), ("q", "quit")]),
-    ("Home", &[("u", "start"), ("d", "stop (asks)"), ("R", "delete (asks)"), ("b", "memory/CPU/disk")]),
-    ("Clusters", &[("n", "new"), ("u", "start"), ("d", "stop"), ("D", "delete (asks)"), ("enter", "show / use it")]),
+    ("Home", &[("u d R", "start stop delete"), ("b", "memory/CPU/disk"), ("c", "copy API")]),
+    ("Clusters", &[("n", "new"), ("u d D", "start stop delete"), ("enter", "use it"), ("c", "copy context")]),
     ("Containers", &[("l", "logs"), ("s", "shell"), ("u x r", "start stop restart"), ("d", "remove"), ("space", "fold")]),
     ("Images", &[("d", "remove (asks)")]),
     ("Volumes", &[("d", "remove (asks)")]),
@@ -1571,6 +1592,7 @@ fn help(f: &mut Frame, t: &Theme, area: Rect) {
     lines.push(Line::styled(" kernel/VM = fixed cost; cache, reclaimable = can go (6 Free space for disk)", t.dim));
     lines.push(Line::from(vec![Span::styled(" Kubernetes (7): any cluster or context (", t.dim), Span::styled(":ctx", t.key), Span::styled("); its ? lists every key.", t.dim)]));
     lines.push(Line::styled(" Destructive actions always ask. Mouse: litek8s ui --mouse. Docs: docs/ui.md", t.dim));
+    lines.push(Line::styled(" Copy: c (and in Kubernetes c / C). Select with the mouse: option-drag (macOS)", t.dim));
     lines.push(Line::styled(" Any key closes this.", t.dim));
     f.render_widget(Paragraph::new(lines).block(t.dialog("Keys", t.accent)), r);
 }

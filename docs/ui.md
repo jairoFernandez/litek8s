@@ -368,7 +368,13 @@ report their `SharedSize`, as Docker does.
 Against a remote litek8s (`--context`), the three boxes show its API server's
 node: `GET /litek8s/v1/memory`, `/litek8s/v1/cpu` (cumulative counters, two
 samples make the percentages) and `/litek8s/v1/disk`, and its machine's
-`/proc/stat` for the rest of its CPU.
+`/proc/stat` for the rest of its CPU. Memory is the whole node's, as `free`
+sees it: litek8s, pods & containers, the operating system (kernel, its slab
+and page tables, services such as sshd or tailscaled) and the page cache, out
+of the node's RAM; the graphs fill as on a local cluster. `u`, `d` and `R`
+act on this machine's dev clusters, so Home refuses them for a remote one,
+and the Docker views (3 to 6), which read this machine's dev cluster's Docker
+API unless `--docker-host` names another, say so instead of failing.
 
 After `u` on a stopped cluster, the output of `litek8s dev up` shows under
 it (here on Linux, over SSH):
@@ -1234,8 +1240,8 @@ stripped macOS arm64 binary (33.41 MB on main c620693, 35.43 MB with it;
 | where | keys |
 |---|---|
 | everywhere | `1`-`9`/`tab`/`shift-tab` views, `↑↓`/`jk`/`PgUp`/`PgDn`/`g`/`G` move, `/` filter the list (`esc` clears), `ctrl-r` refresh, `?` help, `q` or `ctrl-c` quit |
-| Home | `u` up, `d` down (asks), `R` delete the cluster (asks), `b` the next breakdown (memory, CPU, disk) |
-| Clusters | `n` new (`tab` between name and nodes), `u` up, `d` down (asks), `D`/`del` delete (asks), `enter` show it (a local cluster: every view, then asks about `kubectl`/`docker`; another context: the Kubernetes view), `t` straight into its tree |
+| Home | `u` up, `d` down (asks), `R` delete the cluster (asks), `b` the next breakdown (memory, CPU, disk), `c` copy the API address |
+| Clusters | `n` new (`tab` between name and nodes), `u` up, `d` down (asks), `D`/`del` delete (asks), `enter` show it (a local cluster: every view, then asks about `kubectl`/`docker`; another context: the Kubernetes view), `t` straight into its tree, `c` copy its context name |
 | Containers | `l`/`enter` logs, `s` shell, `u` start, `x` stop (asks), `r` restart (asks), `d`/`del` remove (asks), `space` fold a project |
 | Images, Volumes | `d`/`del` remove (asks) |
 | Free space | `space` select a category, `p`/`enter` free the selected (asks) |
@@ -1246,6 +1252,12 @@ stripped macOS arm64 binary (33.41 MB on main c620693, 35.43 MB with it;
 
 `--mouse` turns on clicks (tabs, rows) and the wheel; it is off by default
 because it takes over the terminal's own text selection.
+
+Copying: `c` puts the shown text on the clipboard (OSC 52, which reaches
+terminals over SSH and tmux, and `pbcopy` on a Mac); in the Kubernetes view
+`c` copies a name and `C` a YAML. The terminal's own selection works too, but
+the screen redraws every 2 s, which can clear it in some terminals; on macOS,
+option-drag selects even with `--mouse`.
 
 ## Limits
 

@@ -409,6 +409,10 @@ pub struct App {
     pub status: Option<(String, bool)>,
     pub now: i64,
     pub docker_endpoint: String,
+    /// The Docker views read this machine's dev cluster while the kube
+    /// context is a remote litek8s (`--context` without `--docker-host`):
+    /// its Docker API being down is no error of the cluster on screen.
+    pub docker_is_local_dev: bool,
     pub kube_endpoint: String,
     pub kube_context: String,
 
@@ -496,6 +500,7 @@ impl App {
             kube_endpoint,
             kube_context,
             docker_error: None,
+            docker_is_local_dev: false,
             docker_version: String::new(),
             docker_os: String::new(),
             vm_cpus: None,
@@ -892,7 +897,7 @@ impl App {
                         }
                     }
                     self.cpu_prev = Some(now);
-                } else if sample.status != DevStatus::Up {
+                } else if !matches!(sample.status, DevStatus::Up | DevStatus::Remote) {
                     self.cpu = None;
                     self.cpu_prev = None;
                 }
@@ -900,8 +905,12 @@ impl App {
                 // Only while Home shows them: samples come every 2 s then,
                 // once a minute otherwise (no gaps of a minute in a line
                 // of 2 s steps).
-                if self.tab == Tab::Home && self.logs.is_none() && self.home.status == DevStatus::Up {
-                    let cpu = self.home.cpu_pct.zip(self.home_cpus()).map(|(p, c)| (p / 100.0 / c.max(1.0)) as f32);
+                // A remote litek8s graphs too: its CPU from the breakdown
+                // of its API server's counters (no local process to time).
+                let sampled = matches!(self.home.status, DevStatus::Up | DevStatus::Remote);
+                if self.tab == Tab::Home && self.logs.is_none() && sampled {
+                    let remote_cpu = || self.cpu.as_ref().filter(|_| self.home.status == DevStatus::Remote).map(|c| (c.total_pct / 100.0 / c.cpus.max(1.0)) as f32);
+                    let cpu = self.home.cpu_pct.zip(self.home_cpus()).map(|(p, c)| (p / 100.0 / c.max(1.0)) as f32).or_else(remote_cpu);
                     // Memory in use against its limit when the breakdown says
                     // (the footprint also counts pages the guest freed).
                     let in_use = self.home.memory.as_ref().and_then(|b| b.limit.filter(|l| *l > 0).map(|l| (b.in_use() as f64 / l as f64) as f32));
@@ -912,7 +921,7 @@ impl App {
                         }
                         self.history.push_back((c, m));
                     }
-                } else if self.home.status != DevStatus::Up {
+                } else if !sampled {
                     self.history.clear();
                 }
             }
@@ -1199,6 +1208,12 @@ impl App {
         match self.tab {
             Tab::Home => match code {
                 KeyCode::Char('b') => self.explain = (self.explain + 1) % 3,
+                KeyCode::Char('c') => return self.copy(self.kube_endpoint.clone(), "API address"),
+                // u, d and R act on this machine's dev clusters: not on the
+                // remote litek8s on screen.
+                KeyCode::Char('u' | 'd' | 'R') if self.home.status == DevStatus::Remote => {
+                    self.flash(format!("{} is a remote litek8s: start, stop or delete it where it was created (u, d and R act on this machine's dev clusters, in 2)", self.kube_context), true);
+                }
                 KeyCode::Char('u') if self.dev_busy.is_none() => {
                     let op = DevOp::Up { cluster: self.cluster.clone(), switch: true };
                     self.busy(op.clone());
@@ -1374,6 +1389,18 @@ impl App {
         }
     }
 
+    /// Put `text` on the clipboard (OSC 52, and pbcopy on a Mac) and say so:
+    /// a TUI that redraws every 2 s leaves the terminal's own selection
+    /// little time.
+    fn copy(&mut self, text: String, what: &str) -> Vec<Effect> {
+        if text.is_empty() {
+            self.flash(format!("no {what} to copy"), true);
+            return Vec::new();
+        }
+        self.flash(format!("copied {what}: {text}"), false);
+        vec![Effect::Kube(super::kube::state::KEffect::Copy(text))]
+    }
+
     fn clusters_key(&mut self, code: KeyCode) -> Vec<Effect> {
         if code == KeyCode::Char('n') {
             if self.dev_busy.is_some() {
@@ -1386,6 +1413,13 @@ impl App {
             return Vec::new();
         }
         let Some(sel) = self.selected_cluster() else { return Vec::new() };
+        if code == KeyCode::Char('c') {
+            let context = match &sel {
+                Ok(row) => row.context.clone(),
+                Err((context, _)) => context.clone(),
+            };
+            return self.copy(context, "context name");
+        }
         let row = match sel {
             Ok(row) => row.clone(),
             Err((context, _)) => {

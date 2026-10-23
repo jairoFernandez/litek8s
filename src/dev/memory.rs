@@ -309,14 +309,35 @@ pub fn sandbox_breakdown(sandbox_used: u64, sandbox_cache: u64, cluster: &str, s
 /// A remote litek8s: what its API server's node reports.
 pub fn node_breakdown(n: &NodeMemory) -> Breakdown {
     let u = n.usage;
-    let mem = n.meminfo.filter(|m| m.total > 0);
+    let Some(mem) = n.meminfo.filter(|m| m.total > 0) else {
+        return Breakdown {
+            total: u.litek8s + u.containers + u.cache,
+            what: "node of the API server".into(),
+            lines: vec![line("litek8s", u.litek8s, "API server, controllers, node agent", Seg::Litek8s), line("pods & containers", u.containers, "", Seg::Pods), line("cache", u.cache, "reclaimable", Seg::Cache)],
+            limit: None,
+            limit_what: "node RAM",
+            pressure: None,
+        };
+    };
+    // The whole machine, as `free` sees it: litek8s and its pods are a
+    // small part of a server's memory; the rest is the operating system
+    // (kernel, its slab and page tables, other services such as sshd or
+    // tailscaled), and the page cache it gives back under pressure.
+    let used = mem.total.saturating_sub(mem.free);
+    let cache = ((mem.cached + mem.buffers).saturating_sub(mem.shmem) + mem.slab_reclaimable).min(used);
+    let os = used.saturating_sub(cache + u.litek8s + u.containers);
     Breakdown {
-        total: u.litek8s + u.containers + u.cache,
+        total: used,
         what: "node of the API server".into(),
-        lines: vec![line("litek8s", u.litek8s, "API server, controllers, node agent", Seg::Litek8s), line("pods & containers", u.containers, "", Seg::Pods), line("cache", u.cache, "reclaimable", Seg::Cache)],
-        limit: mem.map(|m| m.total),
+        lines: vec![
+            line("litek8s", u.litek8s, "API server, controllers, node agent", Seg::Litek8s),
+            line("pods & containers", u.containers, "", Seg::Pods),
+            line("operating system", os, "kernel, system services", Seg::Base),
+            line("cache", cache, "reclaimable", Seg::Cache),
+        ],
+        limit: Some(mem.total),
         limit_what: "node RAM",
-        pressure: mem.filter(|m| m.available > 0).and_then(|m| short(m.available, m.total)),
+        pressure: if mem.available > 0 { short(mem.available, mem.total) } else { None },
     }
 }
 
@@ -413,5 +434,20 @@ mod tests {
         let json = serde_json::to_value(&n).unwrap();
         assert_eq!(json["litek8s"], 1);
         assert_eq!(node_breakdown(&n).total, 6);
+    }
+
+    #[test]
+    fn a_remote_node_counts_its_operating_system() {
+        // A 4 GiB server: 1 GiB not free, of which 600 MiB page cache
+        // and 8 MiB litek8s; the operating system holds the rest.
+        let mem = MemInfo { total: 4 << 30, free: 3 << 30, available: 3600 << 20, cached: 580 << 20, buffers: 30 << 20, shmem: 5 << 20, slab_reclaimable: 40 << 20, ..Default::default() };
+        let n = NodeMemory { node: "lab2-control-1".into(), usage: Usage { litek8s: 8 << 20, containers: 0, cache: 0 }, meminfo: Some(mem) };
+        let b = node_breakdown(&n);
+        let get = |l: &str| b.lines.iter().find(|x| x.label == l).map(|x| x.bytes).unwrap();
+        assert_eq!(b.total, 1 << 30);
+        assert_eq!(get("cache"), 645 << 20);
+        assert_eq!(get("operating system"), (1024 - 645 - 8) << 20);
+        assert_eq!(b.in_use(), (1024 - 645) << 20, "in use: everything but the cache");
+        assert_eq!((b.limit, b.limit_what), (Some(4 << 30), "node RAM"));
     }
 }

@@ -1030,3 +1030,62 @@ fn clusters_t_opens_a_cluster_in_tree_mode() {
     assert_eq!(app.tab, Tab::Kube);
     assert!(matches!(app.kube.top(), super::kube::state::View::Tree(_)));
 }
+
+/// `litek8s ui --context <a remote litek8s>`: Home samples its API server,
+/// the Docker views read this machine's (down) dev cluster.
+fn remote_app() -> App {
+    let mut app = App::new("unix:///Users/me/.litek8s/docker.sock".into(), "https://100.112.25.4:6443".into(), "lab2".into());
+    app.docker_is_local_dev = true;
+    app.apply(Msg::DockerDown("cannot connect to /Users/me/.litek8s/docker.sock: No such file or directory (os error 2)".into()));
+    app
+}
+
+#[test]
+fn a_remote_litek8s_graphs_and_names_its_node() {
+    use crate::dev::cpu::{Kind, Sample, Split};
+    let mut app = remote_app();
+    let t0 = std::time::Instant::now();
+    let mem = crate::dev::memory::MemInfo { total: 4 << 30, free: 3 << 30, available: 3600 << 20, cached: 580 << 20, buffers: 30 << 20, shmem: 5 << 20, slab_reclaimable: 40 << 20, ..Default::default() };
+    let node = crate::dev::memory::NodeMemory { node: "lab2-control-1".into(), usage: crate::dev::memory::Usage { litek8s: 8 << 20, containers: 0, cache: 0 }, meminfo: Some(mem) };
+    for i in 0..3u64 {
+        let home = HomeSample {
+            status: DevStatus::Remote,
+            memory: Some(crate::dev::memory::node_breakdown(&node)),
+            cpu_sample: Some(Sample { at: Some(t0 + std::time::Duration::from_secs(2 * i)), total_usec: 200_000 * i, shown: Split { litek8s_usec: 20_000 * i, ..Default::default() }, cpus: 2.0, kind: Kind::Remote, ..Default::default() }),
+            ..Default::default()
+        };
+        app.apply(Msg::Home(Box::new(home)));
+    }
+    // The graph fills (it stayed at "collecting…" before), CPU in shares of the node's 2 CPUs.
+    assert_eq!(app.history.len(), 2, "two intervals, two points");
+    assert!((app.history.back().unwrap().0 - 0.05).abs() < 1e-6, "{:?}", app.history);
+    let s = render(&app, 120, 40);
+    assert!(!s.contains("litek8s (dev)") && s.contains("operating system"), "{s}");
+    assert!(!s.contains("collecting"), "{s}");
+}
+
+#[test]
+fn a_remote_litek8s_is_not_started_or_stopped_from_home() {
+    let mut app = remote_app();
+    app.apply(Msg::Home(Box::new(HomeSample { status: DevStatus::Remote, ..Default::default() })));
+    let s = render(&app, 120, 40);
+    let footer = s.lines().rfind(|l| !l.trim().is_empty()).unwrap();
+    assert!(!footer.contains("up") && footer.contains("copy API"), "{footer}");
+    for k in ['u', 'd', 'R'] {
+        assert!(app.key(key(k)).is_empty(), "{k} must not act on this machine's dev cluster");
+        assert!(app.status.as_ref().is_some_and(|(m, err)| *err && m.contains("remote litek8s")), "{:?}", app.status);
+    }
+    assert_eq!(app.key(key('c')), vec![Effect::Kube(crate::ui::kube::state::KEffect::Copy("https://100.112.25.4:6443".into()))]);
+}
+
+#[test]
+fn docker_views_of_a_remote_litek8s_explain_instead_of_failing() {
+    let mut app = remote_app();
+    app.apply(Msg::Home(Box::new(HomeSample { status: DevStatus::Remote, ..Default::default() })));
+    app.key(key('3'));
+    let s = render(&app, 120, 30);
+    assert!(s.contains("this machine's dev cluster") && s.contains("lab2 is a remote litek8s") && !s.contains("✕"), "{s}");
+    app.key(key('1'));
+    let s = render(&app, 120, 40);
+    assert!(s.contains("not running (this machine's dev cluster)"), "{s}");
+}
