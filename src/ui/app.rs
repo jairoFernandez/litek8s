@@ -3,7 +3,7 @@
 //! what the backends learn arrives as [`Msg`]s. That keeps all of it
 //! testable without a terminal, Docker or a cluster.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
@@ -39,6 +39,12 @@ impl Tab {
             Tab::Settings => "Settings",
             Tab::Observe => "Observe",
         }
+    }
+
+    /// This machine's Docker (the dev clusters' engine): not part of a
+    /// remote litek8s.
+    pub fn docker(self) -> bool {
+        matches!(self, Tab::Containers | Tab::Images | Tab::Volumes | Tab::Space)
     }
 
     fn index(self) -> usize {
@@ -320,6 +326,34 @@ pub struct HomeSample {
     /// VM disk image's allocated bytes.
     pub disk_node: Option<(crate::dev::disk::NodeDisk, u64, Option<u64>)>,
     pub contexts: Contexts,
+    /// A remote litek8s: every node's machine (the App adds them up or
+    /// picks one, see [`App::scope`]).
+    pub nodes: Option<NodeReports>,
+}
+
+/// What each node of a remote litek8s reports about its machine.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NodeReports {
+    pub memory: Vec<crate::dev::memory::NodeMemory>,
+    pub cpu: Vec<crate::dev::cpu::NodeCpu>,
+    /// From the last walk (every 30 s while on screen).
+    pub disk: Vec<crate::dev::disk::NodeDisk>,
+    /// Nodes that did not report, and why.
+    pub errors: Vec<(String, String)>,
+}
+
+impl NodeReports {
+    /// Every node named in a report, in the API server's order.
+    pub fn names(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let all = self.memory.iter().map(|m| &m.node).chain(self.cpu.iter().map(|c| &c.node)).chain(self.disk.iter().map(|d| &d.node)).chain(self.errors.iter().map(|(n, _)| n));
+        for n in all {
+            if !out.contains(n) {
+                out.push(n.clone());
+            }
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -484,6 +518,17 @@ pub struct App {
     /// cluster's CPUs and memory), one per sample taken while Home is on
     /// screen: the sparklines.
     pub history: VecDeque<(f32, f32)>,
+    /// A remote litek8s with several nodes: Home shows the whole cluster
+    /// (`None`) or one node (`n`/`N` cycle).
+    pub scope: Option<String>,
+    /// The last reports of every node (see [`HomeSample::nodes`]).
+    pub node_reports: NodeReports,
+    /// Per scope ("" the whole cluster, else a node): the last CPU sample,
+    /// its breakdown and the sparklines' history, kept for every scope so
+    /// switching shows them at once.
+    scoped_cpu_prev: HashMap<String, crate::dev::cpu::Sample>,
+    pub scoped_cpu: HashMap<String, crate::dev::cpu::Breakdown>,
+    scoped_history: HashMap<String, VecDeque<(f32, f32)>>,
 }
 
 /// Samples the sparklines keep (8 minutes at Home's 2 s).
@@ -525,6 +570,11 @@ impl App {
             clusters: ClustersSample::default(),
             cpu: None,
             cpu_prev: None,
+            scope: None,
+            node_reports: NodeReports::default(),
+            scoped_cpu_prev: HashMap::new(),
+            scoped_cpu: HashMap::new(),
+            scoped_history: HashMap::new(),
             explain: 0,
             dev_busy: None,
             dev_output: VecDeque::new(),
@@ -564,6 +614,27 @@ impl App {
 
     /// The CPUs Home's figures are shares of: a Linux sandbox's limit, else
     /// what the engine sees (the VM's).
+    /// The tabs in the bar: a remote litek8s has no use for this machine's
+    /// Docker tabs (they come back with a dev cluster, in 2 Clusters).
+    /// Each keeps its number either way.
+    pub fn visible_tabs(&self) -> Vec<Tab> {
+        TABS.iter().copied().filter(|t| !(t.docker() && self.home.status == DevStatus::Remote)).collect()
+    }
+
+    fn go_tab(&mut self, tab: Tab) {
+        if tab.docker() && self.home.status == DevStatus::Remote {
+            self.flash(format!("{} is this machine's Docker, not {}'s: pick a dev cluster in 2 Clusters to use it", tab.title(), self.kube_context), false);
+            return;
+        }
+        self.tab = tab;
+    }
+
+    fn step_tab(&mut self, step: isize) {
+        let tabs = self.visible_tabs();
+        let pos = tabs.iter().position(|t| *t == self.tab).unwrap_or(0) as isize;
+        self.tab = tabs[(pos + step).rem_euclid(tabs.len() as isize) as usize];
+    }
+
     pub fn home_cpus(&self) -> Option<f64> {
         let limits = self.home.running.as_ref().filter(|s| s.mode != "vm");
         limits.and_then(|s| s.cpus).map(|c| c as u64).or(self.vm_cpus).map(|c| c as f64)
@@ -892,6 +963,18 @@ impl App {
                 if let Some(op) = self.dev_busy.as_ref().filter(|op| op.cluster() == self.cluster) {
                     sample.status = if op.starts() { DevStatus::Starting } else { DevStatus::Stopping };
                 }
+                if sample.status == DevStatus::Remote && self.tab.docker() {
+                    self.tab = Tab::Home;
+                }
+                if let Some(reports) = sample.nodes.take() {
+                    self.absorb_nodes(reports);
+                    self.home = sample;
+                    self.apply_scope();
+                    return;
+                } else if sample.status != DevStatus::Remote {
+                    self.node_reports = NodeReports::default();
+                    self.scope = None;
+                }
                 if let Some(now) = sample.cpu_sample.take() {
                     if let Some(prev) = &self.cpu_prev {
                         let name = |id: &str| self.cgroup_name(id);
@@ -1005,6 +1088,107 @@ impl App {
 
     /// The disk figure explained: the node's categories, with what the
     /// Free space view can reclaim.
+    /// Take in every node's reports: CPU percentages per scope (from the
+    /// previous sample of each), and the sparklines of every scope.
+    fn absorb_nodes(&mut self, r: NodeReports) {
+        use crate::dev::{cpu, memory};
+        let names = r.names();
+        // The whole cluster ("") and each node.
+        let mut cpus: Vec<(String, cpu::NodeCpu)> = vec![(String::new(), cpu::sum(&r.cpu, "cluster"))];
+        cpus.extend(r.cpu.iter().map(|c| (c.node.clone(), c.clone())));
+        for (key, node) in cpus {
+            let Some(now) = node.sample() else { continue };
+            if let Some(prev) = self.scoped_cpu_prev.get(&key) {
+                let name = |id: &str| self.cgroup_name(id);
+                if let Some(mut b) = cpu::breakdown(prev, &now, &self.cluster, &name) {
+                    b.what = self.scope_what(&key, &names);
+                    self.scoped_cpu.insert(key.clone(), b);
+                }
+            }
+            self.scoped_cpu_prev.insert(key, now);
+        }
+        let mut mems: Vec<(String, memory::NodeMemory)> = vec![(String::new(), memory::sum(&r.memory, "cluster"))];
+        mems.extend(r.memory.iter().map(|m| (m.node.clone(), m.clone())));
+        // Every scope's sparklines, while Home is on screen.
+        if self.tab == Tab::Home && self.logs.is_none() {
+            for (key, m) in mems {
+                let b = memory::node_breakdown(&m);
+                let mem = b.limit.filter(|l| *l > 0).map(|l| (b.in_use() as f64 / l as f64) as f32);
+                let cpu = self.scoped_cpu.get(&key).map(|c| (c.total_pct / 100.0 / c.cpus.max(1.0)) as f32);
+                if let (Some(c), Some(m)) = (cpu, mem) {
+                    let h = self.scoped_history.entry(key).or_default();
+                    if h.len() == HISTORY {
+                        h.pop_front();
+                    }
+                    h.push_back((c, m));
+                }
+            }
+        }
+        // Forget nodes that left.
+        self.scoped_cpu_prev.retain(|k, _| k.is_empty() || names.contains(k));
+        self.scoped_cpu.retain(|k, _| k.is_empty() || names.contains(k));
+        self.scoped_history.retain(|k, _| k.is_empty() || names.contains(k));
+        if self.scope.as_ref().is_some_and(|s| !names.contains(s)) {
+            self.scope = None;
+        }
+        self.node_reports = r;
+    }
+
+    /// Whose numbers Home shows: `cluster · 3 nodes` or `node <name>`.
+    fn scope_what(&self, key: &str, names: &[String]) -> String {
+        match key {
+            "" if names.len() == 1 => format!("node {}", names[0]),
+            "" => format!("cluster · {} nodes", names.len()),
+            n => format!("node {n}"),
+        }
+    }
+
+    /// Home's figures for the scope on screen: the cluster's (every node
+    /// added up) or one node's.
+    pub fn apply_scope(&mut self) {
+        use crate::dev::{disk, memory};
+        if self.home.status != DevStatus::Remote {
+            return;
+        }
+        let r = &self.node_reports;
+        let names = r.names();
+        let key = self.scope.clone().unwrap_or_default();
+        let what = self.scope_what(&key, &names);
+        let one = |n: &String| self.scope.as_ref().is_none_or(|s| s == n);
+        let mem: Vec<memory::NodeMemory> = r.memory.iter().filter(|m| one(&m.node)).cloned().collect();
+        let limit_what = if self.scope.is_none() && names.len() > 1 { "cluster RAM" } else { "node RAM" };
+        self.home.memory = (!mem.is_empty()).then(|| memory::scoped_breakdown(&memory::sum(&mem, &what), &what, limit_what));
+        let disks: Vec<disk::NodeDisk> = r.disk.iter().filter(|d| one(&d.node)).cloned().collect();
+        if disks.is_empty() {
+            self.home.disk_node = None;
+            self.home.disk_used = None;
+            self.home.disk_free = None;
+        } else {
+            let d = disk::sum(&disks, &what);
+            self.home.disk_used = Some(d.total());
+            // The nodes' own filesystems (not this machine's).
+            self.home.disk_free = (d.fs_size > 0).then(|| d.fs_size.saturating_sub(d.fs_used));
+            self.home.disk_node = Some((d, 0, None));
+        }
+        self.cpu = self.scoped_cpu.get(&key).cloned();
+        self.history = self.scoped_history.get(&key).cloned().unwrap_or_default();
+    }
+
+    /// The next (`step` 1) or previous (-1) scope: the cluster, then each node.
+    pub fn cycle_scope(&mut self, step: isize) {
+        let names = self.node_reports.names();
+        if names.len() < 2 {
+            self.flash("one node: the cluster is that node".to_string(), false);
+            return;
+        }
+        let mut all: Vec<Option<String>> = vec![None];
+        all.extend(names.into_iter().map(Some));
+        let pos = all.iter().position(|s| *s == self.scope).unwrap_or(0) as isize;
+        let next = (pos + step).rem_euclid(all.len() as isize) as usize;
+        self.scope = all[next].clone();
+        self.apply_scope();
+    }
+
     pub fn disk_breakdown(&self) -> Option<crate::dev::disk::Breakdown> {
         let (n, own, image) = self.home.disk_node.as_ref()?;
         let r = crate::dev::disk::Reclaimable {
@@ -1013,7 +1197,8 @@ impl App {
             volumes: self.reclaimable(Reclaim::UnusedVolumes).0,
         };
         Some(match (self.home.status, image) {
-            (DevStatus::Remote, _) => crate::dev::disk::node_breakdown(n, &r),
+            // What a prune would free is this machine's Docker's, not the remote nodes'.
+            (DevStatus::Remote, _) => crate::dev::disk::node_breakdown(n, &crate::dev::disk::Reclaimable::default(), &n.node),
             (_, Some(img)) => crate::dev::disk::vm_breakdown(*own, *img, n, &r, &self.cluster),
             (_, None) => crate::dev::disk::host_breakdown(*own, n, &r),
         })
@@ -1148,9 +1333,9 @@ impl App {
         match key.code {
             KeyCode::Char('q') => return vec![Effect::Quit],
             KeyCode::Char('?') | KeyCode::F(1) => self.overlay = Overlay::Help,
-            KeyCode::Char(c @ '1'..='9') => self.tab = TABS[c as usize - '1' as usize],
-            KeyCode::Tab => self.tab = TABS[(self.tab.index() + 1) % TABS.len()],
-            KeyCode::BackTab => self.tab = TABS[(self.tab.index() + TABS.len() - 1) % TABS.len()],
+            KeyCode::Char(c @ '1'..='9') => self.go_tab(TABS[c as usize - '1' as usize]),
+            KeyCode::Tab => self.step_tab(1),
+            KeyCode::BackTab => self.step_tab(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_sel(1),
             KeyCode::Up | KeyCode::Char('k') => self.move_sel(-1),
             KeyCode::PageDown => self.move_sel(10),
@@ -1220,6 +1405,9 @@ impl App {
         match self.tab {
             Tab::Home => match code {
                 KeyCode::Char('b') => self.explain = (self.explain + 1) % 3,
+                // The whole cluster or one node (a remote litek8s).
+                KeyCode::Char('n') if self.home.status == DevStatus::Remote => self.cycle_scope(1),
+                KeyCode::Char('N') if self.home.status == DevStatus::Remote => self.cycle_scope(-1),
                 KeyCode::Char('c') => return self.copy(self.kube_endpoint.clone(), "API address"),
                 // u, d and R act on this machine's dev clusters: not on the
                 // remote litek8s on screen.
@@ -1654,7 +1842,9 @@ impl App {
                 if ev.row == self.tab_row.get() {
                     let spans = self.tab_spans.borrow().clone();
                     if let Some(i) = spans.iter().position(|(a, b)| ev.column >= *a && ev.column < *b) {
-                        self.tab = TABS[i];
+                        if let Some(tab) = self.visible_tabs().get(i) {
+                            self.tab = *tab;
+                        }
                     }
                     return Vec::new();
                 }

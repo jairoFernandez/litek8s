@@ -45,6 +45,25 @@ pub struct NodeDisk {
     pub computed_unix_ms: u64,
 }
 
+/// Several nodes as one: every category and the filesystems added up.
+pub fn sum(nodes: &[NodeDisk], name: &str) -> NodeDisk {
+    let mut d = NodeDisk { node: name.to_string(), ..Default::default() };
+    for n in nodes {
+        d.images += n.images;
+        d.container_layers += n.container_layers;
+        d.volumes += n.volumes;
+        d.logs += n.logs;
+        d.builds += n.builds;
+        d.objects += n.objects;
+        d.other_nodes += n.other_nodes;
+        d.other += n.other;
+        d.fs_used += n.fs_used;
+        d.fs_size += n.fs_size;
+        d.computed_unix_ms = d.computed_unix_ms.max(n.computed_unix_ms);
+    }
+    d
+}
+
 impl NodeDisk {
     pub fn total(&self) -> u64 {
         self.images + self.container_layers + self.volumes + self.logs + self.builds + self.objects + self.other_nodes + self.other
@@ -256,7 +275,7 @@ pub struct Line {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Breakdown {
     pub total: u64,
-    pub what: &'static str,
+    pub what: String,
     pub lines: Vec<Line>,
 }
 
@@ -321,19 +340,19 @@ pub fn vm_breakdown(own: u64, image_alloc: u64, n: &NodeDisk, r: &Reclaimable, c
     lines.extend(node);
     lines.push(line("rest of the VM disk", n.fs_used.saturating_sub(n.total()), "other clusters, filesystem".into()));
     lines.push(line("deleted in the VM", image_alloc.saturating_sub(n.fs_used), "disk.img gives it back within a minute".into()));
-    Breakdown { total: own + image_alloc.max(n.fs_used), what: "litek8s and its VM disk", lines }
+    Breakdown { total: own + image_alloc.max(n.fs_used), what: "litek8s and its VM disk".into(), lines }
 }
 
 /// The Linux sandbox: litek8s's binary and the cluster's data directory.
 pub fn host_breakdown(own: u64, n: &NodeDisk, r: &Reclaimable) -> Breakdown {
     let mut lines = vec![line("litek8s itself", own, "the binary".into())];
     lines.extend(node_lines(n, r));
-    Breakdown { total: own + n.total(), what: "litek8s and the cluster's data", lines }
+    Breakdown { total: own + n.total(), what: "litek8s and the cluster's data".into(), lines }
 }
 
 /// A remote litek8s: what its API server's node reports.
-pub fn node_breakdown(n: &NodeDisk, r: &Reclaimable) -> Breakdown {
-    Breakdown { total: n.total(), what: "data of the API server's node", lines: node_lines(n, r) }
+pub fn node_breakdown(n: &NodeDisk, r: &Reclaimable, what: &str) -> Breakdown {
+    Breakdown { total: n.total(), what: what.into(), lines: node_lines(n, r) }
 }
 
 #[cfg(test)]

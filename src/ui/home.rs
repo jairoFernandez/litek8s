@@ -30,6 +30,8 @@ pub fn spawn(
         let mut cpu_prev: Option<(u64, Instant)> = None;
         let mut disk: Option<(u64, Instant, String)> = None;
         let mut disk_node: Option<(crate::dev::disk::NodeDisk, u64, Option<u64>)> = None;
+        // A remote litek8s: every node's disk from the last walk.
+        let mut node_disks: Option<Reports<crate::dev::disk::NodeDisk>> = None;
         let dev_home = crate::dev::dev_home().unwrap_or_default();
         loop {
             let name = active.lock().unwrap().clone();
@@ -70,7 +72,10 @@ pub fn spawn(
                 // The node's own account (by category) when its API server
                 // gives one; else a walk of the data directory.
                 let node = match (&remote, &state) {
-                    (Some(ep), _) => remote_disk(ep).await,
+                    (Some(ep), _) => {
+                        node_disks = all_nodes(ep, crate::kube::server::DISK_PATH, 40).await;
+                        None
+                    }
                     (None, Some(st)) => local_disk(st.port).await,
                     (None, None) => None,
                 };
@@ -83,7 +88,8 @@ pub fn spawn(
                 let total = match &disk_node {
                     Some((n, own, Some(img))) => Some(own + img.max(&n.fs_used)),
                     Some((n, own, None)) => Some(own + n.total()),
-                    None if home.is_dir() => {
+                    // A remote litek8s's disk is its nodes' (the App's).
+                    None if remote.is_none() && home.is_dir() => {
                         let h = home.clone();
                         tokio::task::spawn_blocking(move || crate::dev::data_size(&h)).await.ok()
                     }
@@ -100,7 +106,29 @@ pub fn spawn(
             // Where the memory goes: only while it is on screen.
             if every == VISIBLE {
                 (s.memory, s.cpu_sample) = match (&remote, &state) {
-                    (Some(ep), _) => (remote_memory(ep).await, remote_cpu(ep).await),
+                    // Every node, in one request each (the API server asks
+                    // its nodes in parallel); the App adds them up or picks one.
+                    (Some(ep), _) => {
+                        let (memory, cpu) = tokio::join!(all_nodes(ep, crate::kube::server::MEMORY_PATH, 5), all_nodes(ep, crate::kube::server::CPU_PATH, 5));
+                        let mut r = super::app::NodeReports::default();
+                        if let Some((m, e)) = memory {
+                            r.memory = m;
+                            r.errors = e;
+                        }
+                        if let Some((c, _)) = cpu {
+                            r.cpu = c;
+                        }
+                        if let Some((d, e)) = &node_disks {
+                            r.disk = d.clone();
+                            for (n, why) in e {
+                                if !r.errors.iter().any(|(x, _)| x == n) {
+                                    r.errors.push((n.clone(), why.clone()));
+                                }
+                            }
+                        }
+                        s.nodes = Some(r);
+                        (None, None)
+                    }
                     (None, Some(_)) => crate::dev::resources(&name).await,
                     (None, None) => (None, None),
                 };
@@ -117,17 +145,26 @@ pub fn spawn(
     })
 }
 
-/// A remote litek8s's node, from its API server.
-async fn remote_memory(ep: &super::client::Endpoint) -> Option<crate::dev::memory::Breakdown> {
-    let v = tokio::time::timeout(Duration::from_secs(3), ep.json(hyper::Method::GET, crate::kube::server::MEMORY_PATH, None)).await.ok()?.ok()?;
-    let node: crate::dev::memory::NodeMemory = serde_json::from_value(v).ok()?;
-    Some(crate::dev::memory::node_breakdown(&node))
-}
+/// Nodes' reports, and the nodes that gave none (with why).
+type Reports<T> = (Vec<T>, Vec<(String, String)>);
 
-/// A remote litek8s's node's disk, from its API server.
-async fn remote_disk(ep: &super::client::Endpoint) -> Option<crate::dev::disk::NodeDisk> {
-    let v = tokio::time::timeout(Duration::from_secs(60), ep.json(hyper::Method::GET, crate::kube::server::DISK_PATH, None)).await.ok()?.ok()?;
-    serde_json::from_value(v).ok()
+/// Every node's report at `path` (`?node=*`): the reports, and the nodes
+/// that could not give one. An API server from before per-node reports
+/// answers with its own node only.
+async fn all_nodes<T: serde::de::DeserializeOwned>(ep: &super::client::Endpoint, path: &str, secs: u64) -> Option<Reports<T>> {
+    let v = tokio::time::timeout(Duration::from_secs(secs), ep.json(hyper::Method::GET, &format!("{path}?node=*"), None)).await.ok()?.ok()?;
+    let items = match v {
+        serde_json::Value::Array(items) => items,
+        one => vec![one],
+    };
+    let (mut ok, mut failed) = (Vec::new(), Vec::new());
+    for item in items {
+        match item.get("error").and_then(|e| e.as_str()) {
+            Some(e) => failed.push((item.get("node").and_then(|n| n.as_str()).unwrap_or_default().to_string(), e.to_string())),
+            None => ok.extend(serde_json::from_value::<T>(item).ok()),
+        }
+    }
+    Some((ok, failed))
 }
 
 /// The local cluster's node's disk, from its API server.
@@ -137,21 +174,6 @@ async fn local_disk(port: u16) -> Option<crate::dev::disk::NodeDisk> {
         return None;
     }
     serde_json::from_slice(&body).ok()
-}
-
-/// A remote litek8s's node's CPU counters, from its API server.
-async fn remote_cpu(ep: &super::client::Endpoint) -> Option<crate::dev::cpu::Sample> {
-    let v = tokio::time::timeout(Duration::from_secs(3), ep.json(hyper::Method::GET, crate::kube::server::CPU_PATH, None)).await.ok()?.ok()?;
-    let node: crate::dev::cpu::NodeCpu = serde_json::from_value(v).ok()?;
-    let p = node.proc_stat?;
-    Some(crate::dev::cpu::Sample {
-        at: Some(std::time::Instant::now()),
-        total_usec: p.busy_usec,
-        shown: node.split,
-        cpus: p.cpus.max(1) as f64,
-        kind: crate::dev::cpu::Kind::Remote,
-        ..Default::default()
-    })
 }
 
 /// Bytes free on the filesystem holding `path`.

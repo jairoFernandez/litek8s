@@ -1197,20 +1197,21 @@ async fn handle(state: Arc<ApiState>, mut req: Request<Incoming>) -> Response<Bo
     if path == IMAGES_PATH && parts.method == Method::POST {
         return load_images(&state, body).await;
     }
-    if path == DISK_PATH && parts.method == Method::GET {
-        let Some(root) = state.disk_root.clone() else {
-            return ApiError::new(StatusCode::NOT_FOUND, "NotFound", "this API server keeps no data on disk").into_response();
+    if (path == DISK_PATH || path == CPU_PATH || path == MEMORY_PATH) && parts.method == Method::GET {
+        let what = path.rsplit('/').next().unwrap_or_default().to_string();
+        let node = parts.uri.query().unwrap_or_default().split('&').find_map(|kv| kv.strip_prefix("node=")).map(str::to_string);
+        return match node.as_deref() {
+            // Every node: one document per node, measured in parallel.
+            Some("*") => json_response(StatusCode::OK, &Value::Array(machine_reports(&state, &what).await)),
+            Some(n) if n != super::agent::default_node_name() => match remote_machine_report(&state, n, &what).await {
+                Ok(v) => json_response(StatusCode::OK, &v),
+                Err(e) => ApiError::new(StatusCode::NOT_FOUND, "NotFound", &format!("{e:#}")).into_response(),
+            },
+            _ => match local_machine_report(&state, &what).await {
+                Some(v) => json_response(StatusCode::OK, &v),
+                None => ApiError::new(StatusCode::NOT_FOUND, "NotFound", "this API server keeps no data on disk").into_response(),
+            },
         };
-        let node = crate::dev::disk::cached(root, super::agent::default_node_name()).await;
-        return json_response(StatusCode::OK, &serde_json::to_value(node).unwrap_or_default());
-    }
-    if path == CPU_PATH && parts.method == Method::GET {
-        let node = tokio::task::spawn_blocking(|| crate::dev::cpu::this_node(&super::agent::default_node_name())).await.unwrap_or_default();
-        return json_response(StatusCode::OK, &serde_json::to_value(node).unwrap_or_default());
-    }
-    if path == MEMORY_PATH && parts.method == Method::GET {
-        let node = tokio::task::spawn_blocking(|| crate::dev::memory::this_node(&super::agent::default_node_name())).await.unwrap_or_default();
-        return json_response(StatusCode::OK, &serde_json::to_value(node).unwrap_or_default());
     }
     let header = |name| {
         parts
@@ -1308,6 +1309,58 @@ pub const CPU_PATH: &str = "/litek8s/v1/cpu";
 /// Disk use of this server's node by category (images, layers, volumes,
 /// logs, objects, ...), from a walk at most once a minute.
 pub const DISK_PATH: &str = "/litek8s/v1/disk";
+
+/// This server's machine (`what`: cpu, memory or disk).
+async fn local_machine_report(state: &Arc<ApiState>, what: &str) -> Option<Value> {
+    let name = super::agent::default_node_name();
+    let v = match what {
+        "disk" => serde_json::to_value(crate::dev::disk::cached(state.disk_root.clone()?, name).await),
+        "cpu" => serde_json::to_value(tokio::task::spawn_blocking(move || crate::dev::cpu::this_node(&name)).await.ok()?),
+        _ => serde_json::to_value(tokio::task::spawn_blocking(move || crate::dev::memory::this_node(&name)).await.ok()?),
+    };
+    v.ok()
+}
+
+/// Another node's machine, measured by its agent.
+async fn remote_machine_report(state: &Arc<ApiState>, node: &str, what: &str) -> Result<Value> {
+    use super::agent::hub::StreamEvent;
+    if !state.hub.nodes_with_feature(super::agent::protocol::MACHINE_FEATURE).iter().any(|n| n == node) {
+        anyhow::bail!("node {node:?} is not connected or its litek8s is too old to report its machine");
+    }
+    let what_owned = what.to_string();
+    let mut h = state.hub.open_stream(node, move |stream| super::agent::protocol::Message::MachineReport { stream, what: what_owned }).await?;
+    // A disk walk can take a while the first time; the rest is a few files.
+    let limit = if what == "disk" { 30 } else { 3 };
+    let mut buf = Vec::new();
+    let read = async {
+        while let Some(ev) = h.events.recv().await {
+            match ev {
+                StreamEvent::Data { bytes, .. } => buf.extend_from_slice(&bytes),
+                StreamEvent::Done { error: Some(e), .. } => anyhow::bail!("{e}"),
+                StreamEvent::Done { .. } => break,
+            }
+        }
+        Ok(())
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(limit), read).await.map_err(|_| anyhow::anyhow!("node {node:?} did not answer in {limit}s"))??;
+    Ok(serde_json::from_slice(&buf)?)
+}
+
+/// Every node's machine: this server's, then each agent's, in parallel. A
+/// node that fails is `{"node": name, "error": ...}`.
+async fn machine_reports(state: &Arc<ApiState>, what: &str) -> Vec<Value> {
+    let local = super::agent::default_node_name();
+    let others: Vec<String> = state.hub.nodes_with_feature(super::agent::protocol::MACHINE_FEATURE).into_iter().filter(|n| *n != local).collect();
+    let (mine, theirs) = tokio::join!(
+        local_machine_report(state, what),
+        futures_util::future::join_all(others.iter().map(|n| remote_machine_report(state, n, what))),
+    );
+    let mut out: Vec<Value> = mine.into_iter().collect();
+    for (n, r) in others.iter().zip(theirs) {
+        out.push(r.unwrap_or_else(|e| serde_json::json!({"node": n, "error": format!("{e:#}")})));
+    }
+    out
+}
 
 /// Stream an uploaded image archive to disk (it can be far larger than an
 /// API request body) and import it.

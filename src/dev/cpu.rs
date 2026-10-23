@@ -116,6 +116,32 @@ pub struct NodeCpu {
     pub proc_stat: Option<ProcStat>,
 }
 
+impl NodeCpu {
+    /// The counters as a remote machine's sample, taken now.
+    pub fn sample(&self) -> Option<Sample> {
+        let p = self.proc_stat?;
+        Some(Sample {
+            at: Some(std::time::Instant::now()),
+            total_usec: p.busy_usec,
+            shown: self.split.clone(),
+            cpus: p.cpus.max(1) as f64,
+            kind: Kind::Remote,
+            ..Default::default()
+        })
+    }
+}
+
+/// Several nodes as one: their counters added up (cumulative, so the
+/// sum's rate is the sum of their rates). A node without /proc/stat leaves
+/// the whole without it.
+pub fn sum(nodes: &[NodeCpu], name: &str) -> NodeCpu {
+    let split = nodes.iter().fold(Split::default(), |a, n| a.merge(n.split.clone()));
+    let proc_stat = nodes.iter().map(|n| n.proc_stat).try_fold(ProcStat::default(), |a, p| {
+        p.map(|p| ProcStat { busy_usec: a.busy_usec + p.busy_usec, total_usec: a.total_usec + p.total_usec, cpus: a.cpus + p.cpus })
+    });
+    NodeCpu { node: name.to_string(), split, proc_stat }
+}
+
 pub fn this_node(name: &str) -> NodeCpu {
     NodeCpu { node: name.to_string(), split: node(Path::new("/sys/fs/cgroup")).unwrap_or_default(), proc_stat: proc_stat() }
 }
@@ -164,7 +190,7 @@ pub struct Breakdown {
     /// % of one CPU the figure is.
     pub total_pct: f64,
     pub cpus: f64,
-    pub what: &'static str,
+    pub what: String,
     pub lines: Vec<Line>,
 }
 
@@ -221,7 +247,7 @@ pub fn breakdown(prev: &Sample, now: &Sample, cluster: &str, name: &dyn Fn(&str)
             "the machine, busy"
         }
     };
-    Some(Breakdown { total_pct: total, cpus: now.cpus, what, lines })
+    Some(Breakdown { total_pct: total, cpus: now.cpus, what: what.to_string(), lines })
 }
 
 #[cfg(test)]

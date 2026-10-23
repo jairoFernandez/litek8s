@@ -76,21 +76,23 @@ fn tab_name(tab: Tab, tier: usize) -> &'static str {
 /// current one padded); on very narrow terminals only the current one has
 /// a name. Returns the spans and each tab's columns (for clicks).
 fn tab_spans(app: &App, t: &Theme, width: usize) -> (Vec<Span<'static>>, Vec<(u16, u16)>) {
+    // Each tab keeps its number (its key) when others are hidden.
+    let tabs: Vec<(usize, Tab)> = app.visible_tabs().into_iter().map(|tab| (TABS.iter().position(|x| *x == tab).unwrap_or(0), tab)).collect();
     for tier in 0..5 {
         let tight = tier >= 3;
         let label = |i: usize, tab: Tab| if tier == 4 && tab != app.tab { format!("{}", i + 1) } else { format!("{} {}", i + 1, tab_name(tab, tier.min(2))) };
         // A tight slot is its label and a space; the current one is padded.
         let slot = |i: usize, tab: Tab| label(i, tab).chars().count() + if !tight || tab == app.tab { 2 } else { 1 };
-        let need: usize = TABS.iter().enumerate().map(|(i, tab)| slot(i, *tab)).sum();
+        let need: usize = tabs.iter().map(|(i, tab)| slot(*i, *tab)).sum();
         if need > width && tier < 4 {
             continue;
         }
         let mut spans = Vec::new();
         let mut hit = Vec::new();
         let mut x = 0u16;
-        for (i, tab) in TABS.iter().enumerate() {
-            let l = label(i, *tab);
-            let w = slot(i, *tab) as u16;
+        for (i, tab) in &tabs {
+            let l = label(*i, *tab);
+            let w = slot(*i, *tab) as u16;
             hit.push((x, x + w));
             x += w;
             if *tab == app.tab {
@@ -232,7 +234,7 @@ fn footer(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
         } else {
             match app.tab {
                 // A remote litek8s is not started or stopped from here.
-                Tab::Home if app.home.status == DevStatus::Remote => &[("b", "breakdown"), ("c", "copy API"), ("7", "kube"), ("2", "clusters")],
+                Tab::Home if app.home.status == DevStatus::Remote => &[("n", "cluster/node"), ("b", "breakdown"), ("c", "copy API"), ("7", "kube"), ("2", "clusters")],
                 Tab::Home => &[("u", "up"), ("d", "down"), ("R", "delete"), ("b", "breakdown"), ("c", "copy API"), ("2", "clusters")],
                 Tab::Clusters => &[("n", "new"), ("u", "up"), ("d", "down"), ("D", "delete"), ("t", "tree"), ("enter", "use")],
                 Tab::Containers => &[("l", "logs"), ("s", "shell"), ("u", "start"), ("x", "stop"), ("r", "restart"), ("d", "remove"), ("/", "filter")],
@@ -418,7 +420,12 @@ fn figures(app: &App) -> Figures {
     let h = &app.home;
     let cpus = app.home_cpus();
     let mem_total = app.home_memory();
+    let remote_cpu = app.cpu.as_ref().filter(|_| h.status == DevStatus::Remote && h.cpu_pct.is_none());
     let cpu = match (h.cpu_pct, cpus) {
+        _ if remote_cpu.is_some() => {
+            let c = remote_cpu.unwrap();
+            (Some(c.total_pct / 100.0 / c.cpus.max(1.0)), format!("of {:.0} CPUs · {} of one", c.cpus, pct(c.total_pct, 0)))
+        }
         (Some(p), Some(c)) => (Some(p / 100.0 / c.max(1.0)), format!("of {c:.0} CPUs · {} of one", pct(p, 0))),
         (Some(p), None) => (Some(p / 100.0), format!("{p:.0}%")),
         (None, Some(c)) => (None, format!("{c:.0} CPUs")),
@@ -594,8 +601,15 @@ fn home(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
         pods.extend(flat(pod_chips(app, t)));
     }
     lines.push(Line::from(pods));
-    let mut ctrs = vec![Span::styled(" ctrs   ", t.dim)];
-    if engine_down {
+    let mut ctrs = vec![Span::styled(if h.status == DevStatus::Remote { " nodes  " } else { " ctrs   " }, t.dim)];
+    if h.status == DevStatus::Remote {
+        let names = app.node_reports.names();
+        ctrs.push(Span::styled(names.len().to_string(), t.bold));
+        ctrs.push(Span::raw(format!(" · showing {}", app.scope.as_deref().map(|n| format!("node {n}")).unwrap_or_else(|| "the cluster".into()))));
+        if names.len() > 1 {
+            ctrs.push(Span::styled("  n: next", t.dim));
+        }
+    } else if engine_down {
         ctrs.push(Span::styled(if down { "– (engine not running)" } else { "–" }, t.dim));
     } else {
         ctrs.extend(flat(container_chips(app, t)));
@@ -729,22 +743,69 @@ fn home_wide(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     } else {
         lines.extend(chip_lines(t, " pods        ", pod_chips(app, t), ww));
     }
-    if engine_down {
+    let remote = h.status == DevStatus::Remote;
+    if remote {
+        // A remote litek8s: its nodes (this machine's Docker is not its).
+        lines.extend(node_lines(app, t, ww));
+    } else if engine_down {
         lines.push(Line::from(vec![Span::styled(" containers  ", t.dim), Span::styled(if down { "– (engine not running)" } else { "–" }, t.dim)]));
     } else {
         lines.extend(chip_lines(t, " containers  ", container_chips(app, t), ww));
     }
-    if !engine_down {
+    if !engine_down && !remote {
         lines.push(Line::from(vec![Span::styled(" images      ", t.dim), Span::styled(app.images.len().to_string(), t.bold), Span::raw(format!(" · {}", bytes(app.images.iter().map(|i| i.size).sum())))]));
         lines.push(Line::from(vec![Span::styled(" volumes     ", t.dim), Span::styled(app.volumes.len().to_string(), t.bold), Span::raw(format!(" · {}", bytes(app.volumes.iter().filter_map(|v| v.size).sum())))]));
     }
-    f.render_widget(Paragraph::new(lines).block(t.block("workloads")), work_r);
+    f.render_widget(Paragraph::new(lines).block(t.block(if remote { "workloads · nodes" } else { "workloads" })), work_r);
     connections(f, app, t, conn, true);
     if !app.dev_output.is_empty() {
         dev_output(f, app, t, out);
     } else {
         tip(f, app, t, out);
     }
+}
+
+/// A remote litek8s's nodes: the whole cluster, then each node, with its
+/// CPU, memory and disk; the one Home shows (`n`) marked.
+fn node_lines(app: &App, t: &Theme, width: usize) -> Vec<Line<'static>> {
+    use crate::dev::{disk, memory};
+    let r = &app.node_reports;
+    let names = r.names();
+    if names.is_empty() {
+        return vec![Line::from(vec![Span::styled(" nodes       ", t.dim), Span::styled("–", t.dim)])];
+    }
+    let name_w = names.iter().map(|n| n.chars().count()).max().unwrap_or(7).clamp(11, 24);
+    let row = |label: String, key: &str, mems: Vec<memory::NodeMemory>, disks: Vec<disk::NodeDisk>, error: Option<&String>, on: bool| {
+        let mark = if on { "▸ " } else { "  " };
+        let mut spans = vec![Span::styled(format!(" {mark}{:<name_w$} ", trunc(&label, name_w)), if on { t.bold } else { Style::new() })];
+        if let Some(e) = error {
+            spans.push(Span::styled(trunc(e, width.saturating_sub(name_w + 6)), t.bad));
+            return Line::from(spans);
+        }
+        let cpu = app.scoped_cpu.get(key).map(|c| pct(c.total_pct / c.cpus.max(1.0), 0)).unwrap_or_else(|| "–".into());
+        let mem = (!mems.is_empty()).then(|| memory::scoped_breakdown(&memory::sum(&mems, ""), "", "")).and_then(|b| b.limit.map(|l| format!("{}/{}", gib(b.in_use()), gib(l)))).unwrap_or_else(|| "–".into());
+        let d = if disks.is_empty() { "–".into() } else { bytes(disk::sum(&disks, "").total()) };
+        spans.push(Span::styled("cpu ", t.dim));
+        spans.push(Span::raw(format!("{cpu:>5}  ")));
+        spans.push(Span::styled("mem ", t.dim));
+        spans.push(Span::raw(format!("{mem:<18}")));
+        if width > name_w + 48 {
+            spans.push(Span::styled("disk ", t.dim));
+            spans.push(Span::raw(d));
+        }
+        Line::from(spans)
+    };
+    let mut lines = Vec::new();
+    if names.len() > 1 {
+        lines.push(row(format!("cluster ({})", names.len()), "", r.memory.clone(), r.disk.clone(), None, app.scope.is_none()));
+    }
+    for n in &names {
+        let mems = r.memory.iter().filter(|m| m.node == *n).cloned().collect();
+        let disks = r.disk.iter().filter(|d| d.node == *n).cloned().collect();
+        let error = r.errors.iter().find(|(x, _)| x == n).map(|(_, e)| e);
+        lines.push(row(n.clone(), n, mems, disks, error, names.len() == 1 || app.scope.as_deref() == Some(n.as_str())));
+    }
+    lines
 }
 
 /// A resource in a box: its history, a meter, then its breakdown as
@@ -1569,7 +1630,7 @@ fn input(f: &mut Frame, t: &Theme, prompt: &str, value: &str, error: Option<&str
 /// The help screen: per view, its keys (each line fits 76 columns).
 pub const HELP: &[(&str, &[(&str, &str)])] = &[
     ("Everywhere", &[("1-9 tab", "views"), ("↑↓ jk", "move"), ("/", "filter"), ("ctrl-r", "refresh"), ("q", "quit")]),
-    ("Home", &[("u d R", "start stop delete"), ("b", "memory/CPU/disk"), ("c", "copy API")]),
+    ("Home", &[("u d R", "start stop delete"), ("n", "nodes"), ("b", "memory/CPU/disk"), ("c", "copy API")]),
     ("Clusters", &[("n", "new"), ("u d D", "start stop delete"), ("enter", "use it"), ("c", "copy context")]),
     ("Containers", &[("l", "logs"), ("s", "shell"), ("u x r", "start stop restart"), ("d", "remove"), ("space", "fold")]),
     ("Images", &[("d", "remove (asks)")]),

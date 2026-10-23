@@ -822,7 +822,7 @@ fn cpu_screen(lines: &[(&str, f64)]) -> String {
     app.cpu = Some(crate::dev::cpu::Breakdown {
         total_pct: lines.iter().map(|(_, p)| p).sum(),
         cpus: 16.0,
-        what: "the sandbox's cgroup",
+        what: "the sandbox's cgroup".into(),
         lines: lines.iter().map(|(l, p)| crate::dev::cpu::Line { label: l.to_string(), pct: *p, note: String::new(), indent: false }).collect(),
     });
     app.explain = 1;
@@ -1083,9 +1083,17 @@ fn a_remote_litek8s_is_not_started_or_stopped_from_home() {
 fn docker_views_of_a_remote_litek8s_explain_instead_of_failing() {
     let mut app = remote_app();
     app.apply(Msg::Home(Box::new(HomeSample { status: DevStatus::Remote, ..Default::default() })));
-    app.key(key('3'));
+    // This machine's Docker tabs are not in the bar of a remote litek8s;
+    // their keys say where they went, and the others keep their numbers.
     let s = render(&app, 120, 30);
-    assert!(s.contains("this machine's dev cluster") && s.contains("lab2 is a remote litek8s") && !s.contains("✕"), "{s}");
+    assert!(s.contains("2 Clusters  7 Kubernetes") && !s.contains("Containers"), "{s}");
+    app.key(key('3'));
+    assert_eq!(app.tab, Tab::Home);
+    assert!(app.status.as_ref().is_some_and(|(m, err)| !*err && m.contains("this machine's Docker")), "{:?}", app.status);
+    app.key(key('7'));
+    assert_eq!(app.tab, Tab::Kube);
+    app.key(KeyEvent::from(KeyCode::BackTab));
+    assert_eq!(app.tab, Tab::Clusters, "Tab skips the hidden ones");
     app.key(key('1'));
     let s = render(&app, 120, 40);
     assert!(s.contains("not running (this machine's dev cluster)"), "{s}");
@@ -1105,4 +1113,49 @@ fn clusters_starts_on_the_remote_context() {
     app.key(key('2'));
     assert!(matches!(app.selected_cluster(), Some(Err((c, _))) if c == "lab2"), "{:?}", app.selected_cluster());
     assert!(app.focus_context.is_none(), "only once: moving away stays");
+}
+
+#[test]
+fn a_remote_cluster_adds_its_nodes_up_and_shows_each_one() {
+    use crate::dev::{cpu, disk, memory};
+    let mut app = remote_app();
+    let gib = 1u64 << 30;
+    let mem = |node: &str, used: u64| memory::NodeMemory {
+        node: node.into(),
+        usage: memory::Usage { litek8s: 70 << 20, containers: used, cache: 0 },
+        meminfo: Some(memory::MemInfo { total: 2 * gib, free: gib, available: gib, ..Default::default() }),
+    };
+    let cpu = |node: &str, busy: u64| cpu::NodeCpu { node: node.into(), split: cpu::Split::default(), proc_stat: Some(cpu::ProcStat { busy_usec: busy, total_usec: busy * 10, cpus: 1 }) };
+    let dsk = |node: &str, images: u64| disk::NodeDisk { node: node.into(), images, fs_used: 10 * gib, fs_size: 40 * gib, ..Default::default() };
+    let sample = |busy: u64| {
+        let nodes = NodeReports {
+            memory: vec![mem("server-1", 100 << 20), mem("worker-1", 900 << 20)],
+            cpu: vec![cpu("server-1", busy), cpu("worker-1", busy * 2)],
+            disk: vec![dsk("server-1", 1 << 30), dsk("worker-1", 3 << 30)],
+            errors: vec![],
+        };
+        HomeSample { status: DevStatus::Remote, nodes: Some(nodes), ..Default::default() }
+    };
+    app.apply(Msg::Home(Box::new(sample(1_000_000))));
+    std::thread::sleep(std::time::Duration::from_millis(20));
+    app.apply(Msg::Home(Box::new(sample(1_010_000))));
+    // The whole cluster: RAM, CPUs and disks added up.
+    let m = app.home.memory.as_ref().unwrap();
+    assert_eq!((m.what.as_str(), m.limit, m.limit_what), ("cluster · 2 nodes", Some(4 * gib), "cluster RAM"));
+    assert_eq!(app.cpu.as_ref().map(|c| c.cpus), Some(2.0));
+    assert_eq!(app.home.disk_used, Some(4 << 30));
+    assert_eq!(app.home.disk_free, Some(60 * gib), "the nodes' filesystems, not this machine's");
+    let s = render(&app, 140, 44);
+    assert!(s.contains("cluster · 2 nodes") && s.contains("cluster (2)") && s.contains("worker-1") && s.contains("cluster/node"), "{s}");
+    // n: each node in turn, then the cluster again.
+    app.key(key('n'));
+    assert_eq!(app.scope.as_deref(), Some("server-1"));
+    let m = app.home.memory.as_ref().unwrap();
+    assert_eq!((m.what.as_str(), m.limit, m.limit_what), ("node server-1", Some(2 * gib), "node RAM"));
+    assert_eq!(app.home.disk_used, Some(1 << 30));
+    assert_eq!(app.cpu.as_ref().map(|c| c.cpus), Some(1.0));
+    app.key(key('n'));
+    assert_eq!(app.scope.as_deref(), Some("worker-1"));
+    app.key(key('n'));
+    assert_eq!(app.scope, None);
 }

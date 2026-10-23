@@ -426,6 +426,7 @@ impl<R: PodRuntime> Agent<R> {
         if self.overlay.is_some() {
             features.push(OVERLAY_STATUS_FEATURE.into());
         }
+        features.push(protocol::MACHINE_FEATURE.into());
         tx.send(Frame::Control(Message::Hello { node: self.config.node.clone(), features }))
             .await
             .ok()
@@ -557,6 +558,9 @@ impl<R: PodRuntime> Agent<R> {
             }
             Message::LogQuery { stream, query } => {
                 self.spawn_stream(link, stream, move |agent, link, _input| obs::log_query_stream(agent, link, stream, query));
+            }
+            Message::MachineReport { stream, what } => {
+                self.spawn_stream(link, stream, move |agent, link, _input| obs::machine_report(agent, link, stream, what));
             }
             Message::PortForward { stream, pod_uid, port } => {
                 let (ip, sandbox) = self.views.lock().unwrap().get(&pod_uid).map(|v| (v.ip.clone(), v.sandbox.clone())).unwrap_or_default();

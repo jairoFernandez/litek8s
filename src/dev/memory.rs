@@ -149,6 +149,32 @@ pub struct NodeMemory {
     pub meminfo: Option<MemInfo>,
 }
 
+impl std::ops::Add for MemInfo {
+    type Output = MemInfo;
+    fn add(self, o: MemInfo) -> MemInfo {
+        MemInfo {
+            total: self.total + o.total,
+            free: self.free + o.free,
+            available: self.available + o.available,
+            cached: self.cached + o.cached,
+            buffers: self.buffers + o.buffers,
+            shmem: self.shmem + o.shmem,
+            slab_reclaimable: self.slab_reclaimable + o.slab_reclaimable,
+            slab_unreclaimable: self.slab_unreclaimable + o.slab_unreclaimable,
+            kernel_stack: self.kernel_stack + o.kernel_stack,
+            page_tables: self.page_tables + o.page_tables,
+        }
+    }
+}
+
+/// Several nodes as one: every figure added up (a node without meminfo
+/// leaves the whole without it, so the sum never mixes RAM and cgroups).
+pub fn sum(nodes: &[NodeMemory], name: &str) -> NodeMemory {
+    let usage = nodes.iter().fold(Usage::default(), |a, n| a + n.usage);
+    let meminfo = nodes.iter().map(|n| n.meminfo).try_fold(MemInfo::default(), |a, m| m.map(|m| a + m));
+    NodeMemory { node: name.to_string(), usage, meminfo }
+}
+
 /// This process's node, from inside: its cgroup namespace root is the node
 /// (a dev cluster's cell); on a plain host, the litek8s process and the
 /// pods under `/sys/fs/cgroup/litek8s`.
@@ -308,14 +334,20 @@ pub fn sandbox_breakdown(sandbox_used: u64, sandbox_cache: u64, cluster: &str, s
 
 /// A remote litek8s: what its API server's node reports.
 pub fn node_breakdown(n: &NodeMemory) -> Breakdown {
+    scoped_breakdown(n, "node of the API server", "node RAM")
+}
+
+/// A remote node, or several added up (`what`: whose; `limit_what`: what
+/// the RAM is, "node RAM" or "cluster RAM").
+pub fn scoped_breakdown(n: &NodeMemory, what: &str, limit_what: &'static str) -> Breakdown {
     let u = n.usage;
     let Some(mem) = n.meminfo.filter(|m| m.total > 0) else {
         return Breakdown {
             total: u.litek8s + u.containers + u.cache,
-            what: "node of the API server".into(),
+            what: what.into(),
             lines: vec![line("litek8s", u.litek8s, "API server, controllers, node agent", Seg::Litek8s), line("pods & containers", u.containers, "", Seg::Pods), line("cache", u.cache, "reclaimable", Seg::Cache)],
             limit: None,
-            limit_what: "node RAM",
+            limit_what,
             pressure: None,
         };
     };
@@ -328,7 +360,7 @@ pub fn node_breakdown(n: &NodeMemory) -> Breakdown {
     let os = used.saturating_sub(cache + u.litek8s + u.containers);
     Breakdown {
         total: used,
-        what: "node of the API server".into(),
+        what: what.into(),
         lines: vec![
             line("litek8s", u.litek8s, "API server, controllers, node agent", Seg::Litek8s),
             line("pods & containers", u.containers, "", Seg::Pods),
@@ -336,7 +368,7 @@ pub fn node_breakdown(n: &NodeMemory) -> Breakdown {
             line("cache", cache, "reclaimable", Seg::Cache),
         ],
         limit: Some(mem.total),
-        limit_what: "node RAM",
+        limit_what,
         pressure: if mem.available > 0 { short(mem.available, mem.total) } else { None },
     }
 }

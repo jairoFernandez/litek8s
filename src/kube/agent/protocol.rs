@@ -28,6 +28,9 @@ const MAX_FRAME: usize = 16 * 1024 * 1024;
 
 pub const PROTOCOL_VERSION: &str = "litek8s-agent/v1";
 
+/// The agent answers [`Message::MachineReport`].
+pub const MACHINE_FEATURE: &str = "machine";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Message {
@@ -151,6 +154,10 @@ pub enum Message {
     /// Search this node's container logs; matching lines come back as JSON
     /// lines on the stream (`crate::obs::logs`).
     LogQuery { stream: u32, query: crate::obs::logs::LogQuery },
+    /// This node's machine as the API server's own reports it (`what`:
+    /// `cpu`, `memory` or `disk`, the bodies of `/litek8s/v1/<what>`): one
+    /// JSON document on the stream. Agents announce [`MACHINE_FEATURE`].
+    MachineReport { stream: u32, what: String },
     Resize { stream: u32, width: u16, height: u16 },
     /// The client went away: stop the stream.
     Cancel { stream: u32 },

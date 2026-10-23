@@ -180,6 +180,26 @@ async fn send_lines(link: &Link, stream: u32, lines: &[LogLine]) -> bool {
     buf.is_empty() || link.tx.send(Frame::Data { stream, channel: 1, bytes: Bytes::from(buf) }).await.is_ok()
 }
 
+/// This node's CPU counters, memory or disk (cached: a walk at most once a
+/// minute), measured only when asked (the UI's Home, while on screen).
+pub(super) async fn machine_report<R: PodRuntime>(agent: Arc<Agent<R>>, link: Arc<Link>, stream: u32, what: String) {
+    let node = agent.config().node_name.clone();
+    let value = match what.as_str() {
+        "cpu" => tokio::task::spawn_blocking(move || serde_json::to_vec(&crate::dev::cpu::this_node(&node))).await.ok(),
+        "memory" => tokio::task::spawn_blocking(move || serde_json::to_vec(&crate::dev::memory::this_node(&node))).await.ok(),
+        "disk" => Some(serde_json::to_vec(&crate::dev::disk::cached(agent.config().root_dir.clone(), node).await)),
+        other => return finish(&link, stream, None, Some(format!("no machine report {other:?}"))).await,
+    };
+    match value {
+        Some(Ok(bytes)) => {
+            if link.tx.send(Frame::Data { stream, channel: 1, bytes: Bytes::from(bytes) }).await.is_ok() {
+                finish(&link, stream, None, None).await;
+            }
+        }
+        _ => finish(&link, stream, None, Some(format!("could not measure {what}"))).await,
+    }
+}
+
 pub(super) async fn log_query_stream<R: PodRuntime>(agent: Arc<Agent<R>>, link: Arc<Link>, stream: u32, query: LogQuery) {
     let q = match Compiled::new(query) {
         Ok(q) => Arc::new(q),
