@@ -310,4 +310,302 @@ mod tests {
         assert!(Schedule::parse("61 * * * *").is_none());
         assert!(Schedule::parse("* * *").is_none());
     }
+
+    #[test]
+    fn lists_ranges_steps_and_names() {
+        let s = Schedule::parse("5,10-20/5 * * * *").unwrap();
+        let minutes: Vec<u32> = (0..60).filter(|m| s.minutes[*m as usize]).collect();
+        assert_eq!(minutes, [5, 10, 15, 20]);
+        // `a/n` runs from a to the end of the range.
+        let s = Schedule::parse("50/5 * * * *").unwrap();
+        assert_eq!(s.next_after(at(2026, 1, 1, 0, 56)), Some(at(2026, 1, 1, 1, 50)));
+        assert!(Schedule::parse("? * * * *").unwrap().minutes.iter().all(|m| *m));
+        let s = Schedule::parse("0 0 1 JAN,jul *").unwrap();
+        assert_eq!(s.next_after(at(2026, 1, 1, 0, 0)), Some(at(2026, 7, 1, 0, 0)));
+        assert_eq!(s.next_after(at(2026, 7, 1, 0, 0)), Some(at(2027, 1, 1, 0, 0)));
+        assert!(Schedule::parse("*/0 * * * *").is_none());
+        assert!(Schedule::parse("10-5 * * * *").is_none());
+        assert!(Schedule::parse("* * 0 * *").is_none());
+        assert!(Schedule::parse("* * * 13 *").is_none());
+        assert!(Schedule::parse("* * * * fun").is_none());
+        assert!(Schedule::parse("* 24 * * *").is_none());
+    }
+
+    #[test]
+    fn sunday_is_zero_or_seven() {
+        // 2026-01-04 is a Sunday.
+        for raw in ["0 12 * * 0", "0 12 * * 7", "0 12 * * SUN", "@weekly"] {
+            let s = Schedule::parse(raw).unwrap();
+            let want = if raw == "@weekly" { at(2026, 1, 4, 0, 0) } else { at(2026, 1, 4, 12, 0) };
+            assert_eq!(s.next_after(at(2026, 1, 1, 0, 0)), Some(want), "{raw}");
+        }
+    }
+
+    #[test]
+    fn day_of_month_or_day_of_week_when_both_restricted() {
+        // The 15th or any Friday; 2026-01-02 is a Friday.
+        let s = Schedule::parse("0 0 15 * fri").unwrap();
+        assert_eq!(s.next_after(at(2026, 1, 1, 0, 0)), Some(at(2026, 1, 2, 0, 0)));
+        assert_eq!(s.next_after(at(2026, 1, 9, 0, 0)), Some(at(2026, 1, 15, 0, 0)));
+        // Only the day of month.
+        let s = Schedule::parse("0 0 15 * *").unwrap();
+        assert_eq!(s.next_after(at(2026, 1, 1, 0, 0)), Some(at(2026, 1, 15, 0, 0)));
+    }
+
+    #[test]
+    fn macros_and_time_zone_prefix() {
+        let from = at(2026, 3, 10, 7, 30);
+        for (raw, want) in [
+            ("@yearly", at(2027, 1, 1, 0, 0)),
+            ("@annually", at(2027, 1, 1, 0, 0)),
+            ("@daily", at(2026, 3, 11, 0, 0)),
+            ("@midnight", at(2026, 3, 11, 0, 0)),
+            ("@hourly", at(2026, 3, 10, 8, 0)),
+            ("CRON_TZ=Europe/Madrid 0 9 * * *", at(2026, 3, 10, 9, 0)),
+            ("TZ=UTC  @hourly", at(2026, 3, 10, 8, 0)),
+        ] {
+            assert_eq!(Schedule::parse(raw).unwrap().next_after(from), Some(want), "{raw}");
+        }
+    }
+
+    #[test]
+    fn next_after_skips_months_and_gives_up_on_impossible_dates() {
+        let s = Schedule::parse("0 0 29 2 *").unwrap();
+        assert_eq!(s.next_after(at(2026, 3, 1, 0, 0)), Some(at(2028, 2, 29, 0, 0)));
+        let s = Schedule::parse("0 0 31 2 *").unwrap();
+        assert_eq!(s.next_after(at(2026, 1, 1, 0, 0)), None);
+        let s = Schedule::parse("59 23 31 12 *").unwrap();
+        assert_eq!(s.next_after(at(2026, 12, 31, 23, 59)), Some(at(2027, 12, 31, 23, 59)));
+        // Seconds are dropped: strictly after the minute.
+        let s = Schedule::parse("* * * * *").unwrap();
+        assert_eq!(s.next_after(at(2026, 1, 1, 0, 0) + ChronoDuration::seconds(59)), Some(at(2026, 1, 1, 0, 1)));
+    }
+
+    fn api() -> ApiState {
+        ApiState::open(None, "127.0.0.1:0".into(), false).unwrap()
+    }
+
+    fn create_cj(api: &ApiState, spec: Value) -> Value {
+        let mut spec = spec;
+        spec["jobTemplate"] = json!({
+            "metadata": {"labels": {"app": "tick"}, "annotations": {"note": "x"}},
+            "spec": {"template": {"spec": {"restartPolicy": "Never", "containers": [{"name": "c", "image": "busybox"}]}}},
+        });
+        let cj = json!({"apiVersion": "batch/v1", "kind": "CronJob", "metadata": {"name": "tick"}, "spec": spec});
+        api.create_object("batch", "cronjobs", Some("default"), cj).unwrap()
+    }
+
+    fn cj(api: &ApiState) -> Value {
+        api.get_object("batch", "cronjobs", "default", "tick").unwrap()
+    }
+
+    fn set_last_schedule(api: &ApiState, t: DateTime<Utc>) {
+        let c = cj(api);
+        let mut st = c.get("status").cloned().unwrap_or_else(|| json!({}));
+        st["lastScheduleTime"] = json!(util::rfc3339(t));
+        util::write_status(api, "batch", "cronjobs", &c, st).unwrap();
+    }
+
+    fn set_spec(api: &ApiState, f: impl FnOnce(&mut Value)) {
+        let mut c = cj(api);
+        f(&mut c["spec"]);
+        api.update_object("batch", "cronjobs", c).unwrap();
+    }
+
+    fn jobs(api: &ApiState) -> Vec<Value> {
+        api.store().list("batch", "jobs", Some("default")).0.into_iter().filter(|j| !util::is_deleting(j)).collect()
+    }
+
+    fn job_names(api: &ApiState) -> Vec<String> {
+        let mut names: Vec<String> = jobs(api).iter().map(util::name).collect();
+        names.sort();
+        names
+    }
+
+    /// The most recent minute boundary at or before now.
+    fn this_minute() -> DateTime<Utc> {
+        // Keep clear of the next minute, so the reconcile sees the same one.
+        if util::now().second() >= 58 {
+            std::thread::sleep(Duration::from_secs(3));
+        }
+        let now = util::now();
+        now.with_second(0).unwrap().with_nanosecond(0).unwrap()
+    }
+
+    fn job_name_at(t: DateTime<Utc>) -> String {
+        format!("tick-{}", t.timestamp() / 60)
+    }
+
+    fn finish_job(api: &ApiState, name: &str, type_: &str, completion: Option<&str>) {
+        let j = api.get_object("batch", "jobs", "default", name).unwrap();
+        let mut st = json!({"conditions": [{"type": type_, "status": "True"}]});
+        if let Some(t) = completion {
+            st["completionTime"] = json!(t);
+        }
+        util::write_status(api, "batch", "jobs", &j, st).unwrap();
+    }
+
+    fn reconcile_cj(api: &ApiState) -> Requeue {
+        reconcile(api, "default", "tick").unwrap()
+    }
+
+    #[test]
+    fn nothing_is_due_right_after_creation() {
+        let api = api();
+        create_cj(&api, json!({"schedule": "0 0 1 1 *"}));
+        let wait = reconcile_cj(&api).expect("wakes for the next run");
+        assert!(wait > Duration::from_secs(60));
+        assert!(jobs(&api).is_empty());
+        assert!(cj(&api)["status"].get("lastScheduleTime").is_none());
+    }
+
+    #[test]
+    fn creates_one_job_for_the_most_recent_missed_time() {
+        let api = api();
+        let created = create_cj(&api, json!({"schedule": "* * * * *"}));
+        let minute = this_minute();
+        set_last_schedule(&api, minute - ChronoDuration::minutes(10));
+        let wait = reconcile_cj(&api).expect("wakes for the next minute");
+        assert!(wait <= Duration::from_millis(60_200), "{wait:?}");
+        assert_eq!(job_names(&api), [job_name_at(minute)]);
+        let job = &jobs(&api)[0];
+        assert!(util::controlled_by(job, &util::uid(&created)));
+        assert_eq!(s(job, "/metadata/labels/app"), "tick");
+        assert_eq!(s(job, "/metadata/annotations/note"), "x");
+        assert_eq!(s(job, "/metadata/annotations/batch.kubernetes.io~1cronjob-scheduled-timestamp"), util::rfc3339(minute));
+        assert_eq!(s(job, "/spec/template/spec/containers/0/image"), "busybox");
+        let st = cj(&api)["status"].clone();
+        assert_eq!(st["lastScheduleTime"], util::rfc3339(minute));
+        assert_eq!(st["active"].as_array().unwrap().len(), 1);
+        assert_eq!(st["active"][0]["name"], job_name_at(minute));
+        assert_eq!(st["active"][0]["uid"], util::uid(job));
+
+        // Same minute again: no second job, the active ref is kept once.
+        reconcile_cj(&api);
+        assert_eq!(jobs(&api).len(), 1);
+        assert_eq!(cj(&api)["status"]["active"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn suspended_cronjob_creates_nothing() {
+        let api = api();
+        create_cj(&api, json!({"schedule": "* * * * *", "suspend": true}));
+        set_last_schedule(&api, this_minute() - ChronoDuration::minutes(5));
+        assert!(reconcile_cj(&api).is_some());
+        assert!(jobs(&api).is_empty());
+        set_spec(&api, |s| s["suspend"] = json!(false));
+        reconcile_cj(&api);
+        assert_eq!(jobs(&api).len(), 1);
+    }
+
+    #[test]
+    fn starting_deadline_skips_runs_missed_too_long_ago() {
+        let api = api();
+        create_cj(&api, json!({"schedule": "0 0 1 1 *", "startingDeadlineSeconds": 60}));
+        set_last_schedule(&api, util::now() - ChronoDuration::days(800));
+        reconcile_cj(&api);
+        assert!(jobs(&api).is_empty());
+        // Without the deadline the last 1 January runs.
+        set_spec(&api, |s| {
+            s.as_object_mut().unwrap().remove("startingDeadlineSeconds");
+        });
+        reconcile_cj(&api);
+        let year = util::now().year();
+        let new_year = Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0).unwrap();
+        assert_eq!(job_names(&api), [job_name_at(new_year)]);
+    }
+
+    #[test]
+    fn allow_runs_jobs_concurrently() {
+        let api = api();
+        create_cj(&api, json!({"schedule": "* * * * *"}));
+        let minute = this_minute();
+        set_last_schedule(&api, minute - ChronoDuration::minutes(2));
+        api.create_object("batch", "jobs", Some("default"), job_for(&cj(&api), "tick-old", minute)).unwrap();
+        reconcile_cj(&api);
+        assert_eq!(job_names(&api), [job_name_at(minute), "tick-old".to_string()]);
+        let active: Vec<String> = cj(&api)["status"]["active"].as_array().unwrap().iter().map(|r| s(r, "/name").to_string()).collect();
+        assert_eq!(active.len(), 2);
+        assert!(active.contains(&"tick-old".to_string()));
+    }
+
+    #[test]
+    fn forbid_skips_while_a_job_runs() {
+        let api = api();
+        create_cj(&api, json!({"schedule": "* * * * *", "concurrencyPolicy": "Forbid"}));
+        let minute = this_minute();
+        let last = minute - ChronoDuration::minutes(2);
+        set_last_schedule(&api, last);
+        api.create_object("batch", "jobs", Some("default"), job_for(&cj(&api), "tick-old", last)).unwrap();
+        reconcile_cj(&api);
+        assert_eq!(job_names(&api), ["tick-old"]);
+        // The skipped run is not recorded as scheduled.
+        let st = cj(&api)["status"].clone();
+        assert_eq!(st["lastScheduleTime"], util::rfc3339(last));
+        assert_eq!(st["active"][0]["name"], "tick-old");
+
+        finish_job(&api, "tick-old", "Complete", Some(&util::rfc3339(minute)));
+        reconcile_cj(&api);
+        assert_eq!(job_names(&api), [job_name_at(minute), "tick-old".to_string()]);
+        let st = cj(&api)["status"].clone();
+        assert_eq!(st["lastSuccessfulTime"], util::rfc3339(minute));
+        assert_eq!(st["active"].as_array().unwrap().len(), 1);
+        assert_eq!(st["active"][0]["name"], job_name_at(minute));
+    }
+
+    #[test]
+    fn replace_deletes_the_running_job() {
+        let api = api();
+        create_cj(&api, json!({"schedule": "* * * * *", "concurrencyPolicy": "Replace"}));
+        let minute = this_minute();
+        set_last_schedule(&api, minute - ChronoDuration::minutes(2));
+        api.create_object("batch", "jobs", Some("default"), job_for(&cj(&api), "tick-old", minute)).unwrap();
+        reconcile_cj(&api);
+        assert_eq!(job_names(&api), [job_name_at(minute)]);
+        let st = cj(&api)["status"].clone();
+        assert_eq!(st["active"].as_array().unwrap().len(), 1);
+        assert_eq!(st["active"][0]["name"], job_name_at(minute));
+    }
+
+    #[test]
+    fn history_limits_remove_the_oldest_finished_jobs() {
+        let api = api();
+        create_cj(&api, json!({"schedule": "0 0 1 1 *", "successfulJobsHistoryLimit": 2, "failedJobsHistoryLimit": 0}));
+        let c = cj(&api);
+        let t = util::now();
+        for n in 1..=3 {
+            let name = format!("tick-ok-{n}");
+            let mut job = job_for(&c, &name, t);
+            // Distinct, ordered creation times.
+            job["metadata"]["creationTimestamp"] = json!(util::rfc3339(t - ChronoDuration::minutes(10 - n)));
+            api.create_object("batch", "jobs", Some("default"), job).unwrap();
+            finish_job(&api, &name, "Complete", Some(&format!("2026-01-0{n}T00:00:00Z")));
+        }
+        api.create_object("batch", "jobs", Some("default"), job_for(&c, "tick-bad", t)).unwrap();
+        finish_job(&api, "tick-bad", "Failed", None);
+        api.create_object("batch", "jobs", Some("default"), job_for(&c, "tick-running", t)).unwrap();
+        reconcile_cj(&api);
+        assert_eq!(job_names(&api), ["tick-ok-2", "tick-ok-3", "tick-running"]);
+        let st = cj(&api)["status"].clone();
+        assert_eq!(st["lastSuccessfulTime"], "2026-01-03T00:00:00Z");
+        assert_eq!(st["active"].as_array().unwrap().len(), 1);
+        assert_eq!(st["active"][0]["name"], "tick-running");
+    }
+
+    #[test]
+    fn unparseable_schedule_or_missing_cronjob_does_nothing() {
+        let api = api();
+        assert_eq!(reconcile_cj(&api), None);
+        let Ok(_) = api.create_object(
+            "batch",
+            "cronjobs",
+            Some("default"),
+            json!({"apiVersion": "batch/v1", "kind": "CronJob", "metadata": {"name": "tick"},
+                "spec": {"schedule": "every day", "jobTemplate": {"spec": {"template": {"spec": {"containers": [{"name": "c", "image": "x"}]}}}}}}),
+        ) else {
+            return;
+        };
+        assert_eq!(reconcile_cj(&api), None);
+        assert!(cj(&api).get("status").is_none_or(|s| s.get("lastScheduleTime").is_none()));
+    }
 }

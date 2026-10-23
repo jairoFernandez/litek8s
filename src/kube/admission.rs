@@ -713,4 +713,843 @@ mod tests {
         let rule = json!({"operations": ["*"], "apiGroups": ["*"], "apiVersions": ["*"], "resources": ["certificaterequests/status"]});
         assert!(rule_matches(&rule, &status));
     }
+
+    use std::sync::Mutex;
+
+    use super::super::store::ObjectKey;
+
+    fn api() -> Arc<ApiState> {
+        Arc::new(ApiState::open(None, "127.0.0.1:0".into(), false).unwrap())
+    }
+
+    fn put(api: &ApiState, group: &str, plural: &str, ns: &str, obj: Value) {
+        api.store().create(ObjectKey::new(group, plural, ns, util::s(&obj, "/metadata/name")), obj).unwrap();
+    }
+
+    fn attrs<'a>(rt: &'a ResourceType, operation: &'static str) -> Attributes<'a> {
+        Attributes { rt, operation, namespace: "default", name: "p", sub: None, old: None, dry_run: false }
+    }
+
+    fn pod() -> Value {
+        json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "p", "namespace": "default", "labels": {"app": "a"}}, "spec": {"containers": [{"name": "c", "image": "nginx"}]}})
+    }
+
+    const ALL_PODS: &str = r#"[{"operations": ["CREATE", "UPDATE", "DELETE"], "apiGroups": [""], "apiVersions": ["v1"], "resources": ["pods", "pods/status"]}]"#;
+
+    type Handler = Box<dyn Fn(&str, &Value) -> (u16, Value) + Send + Sync>;
+
+    struct Server {
+        port: u16,
+        ca: String,
+        seen: Arc<Mutex<Vec<(String, Value)>>>,
+    }
+
+    /// An HTTPS server for `localhost` and `hook.default.svc` that answers
+    /// every POST with `handler(path and query, body)` after `delay`.
+    async fn server(delay: Duration, handler: Handler) -> Server {
+        use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair};
+        let ca_key = KeyPair::generate().unwrap();
+        let mut ca_params = CertificateParams::new(Vec::<String>::new()).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca = ca_params.self_signed(&ca_key).unwrap();
+        let key = KeyPair::generate().unwrap();
+        let cert = CertificateParams::new(vec!["localhost".to_string(), "hook.default.svc".to_string()])
+            .unwrap()
+            .signed_by(&key, &ca, &ca_key)
+            .unwrap();
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.der().clone()], rustls::pki_types::PrivateKeyDer::try_from(key.serialize_der()).unwrap())
+            .unwrap();
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let handler = Arc::new(handler);
+        let recorded = seen.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((tcp, _)) = listener.accept().await else { return };
+                let (acceptor, handler, seen) = (acceptor.clone(), handler.clone(), recorded.clone());
+                tokio::spawn(async move {
+                    let Ok(tls) = acceptor.accept(tcp).await else { return };
+                    let svc = hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
+                        let (handler, seen) = (handler.clone(), seen.clone());
+                        async move {
+                            let path = req.uri().to_string();
+                            let body = req.into_body().collect().await.map(|b| b.to_bytes()).unwrap_or_default();
+                            let body: Value = serde_json::from_slice(&body).unwrap_or_default();
+                            seen.lock().unwrap().push((path.clone(), body.clone()));
+                            tokio::time::sleep(delay).await;
+                            let (status, reply) = handler(&path, &body);
+                            let bytes = Bytes::from(serde_json::to_vec(&reply).unwrap());
+                            Ok::<_, std::convert::Infallible>(hyper::Response::builder().status(status).body(Full::new(bytes)).unwrap())
+                        }
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new().serve_connection(TokioIo::new(tls), svc).await;
+                });
+            }
+        });
+        Server { port, ca: base64::engine::general_purpose::STANDARD.encode(ca.pem()), seen }
+    }
+
+    fn review(request: &Value, response: Value) -> (u16, Value) {
+        let mut response = response;
+        response["uid"] = request.pointer("/request/uid").cloned().unwrap_or_default();
+        (200, json!({"apiVersion": "admission.k8s.io/v1", "kind": "AdmissionReview", "response": response}))
+    }
+
+    fn b64_patch(ops: Value) -> String {
+        base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(&ops).unwrap())
+    }
+
+    fn webhook_config(api: &ApiState, mutating: bool, name: &str, hooks: Value) {
+        let (plural, kind) = if mutating {
+            ("mutatingwebhookconfigurations", "MutatingWebhookConfiguration")
+        } else {
+            ("validatingwebhookconfigurations", "ValidatingWebhookConfiguration")
+        };
+        put(api, "admissionregistration.k8s.io", plural, "", json!({"apiVersion": "admissionregistration.k8s.io/v1", "kind": kind, "metadata": {"name": name}, "webhooks": hooks}));
+    }
+
+    fn url_hook(name: &str, s: &Server, path: &str, extra: Value) -> Value {
+        let mut hook = json!({
+            "name": name,
+            "clientConfig": {"url": format!("https://localhost:{}{path}", s.port), "caBundle": s.ca},
+            "rules": serde_json::from_str::<Value>(ALL_PODS).unwrap(),
+            "sideEffects": "None",
+            "admissionReviewVersions": ["v1"],
+        });
+        for (k, v) in extra.as_object().into_iter().flatten() {
+            hook[k] = v.clone();
+        }
+        hook
+    }
+
+    #[test]
+    fn rules_match_wildcards_subresources_versions_and_scope() {
+        let rt = rt();
+        let a = Attributes { rt: &rt, operation: "UPDATE", namespace: "x", name: "n", sub: None, old: None, dry_run: false };
+        let rule = |resources: Value| json!({"operations": ["*"], "apiGroups": ["*"], "apiVersions": ["*"], "resources": resources});
+        assert!(rule_matches(&rule(json!(["*"])), &a));
+        assert!(!rule_matches(&rule(json!(["certificaterequests/*"])), &a));
+        assert!(!rule_matches(&json!({"operations": ["UPDATE"], "apiGroups": ["cert-manager.io"], "apiVersions": ["v1alpha1"], "resources": ["*"]}), &a));
+        assert!(!rule_matches(&json!({"operations": ["UPDATE"], "apiGroups": [""], "apiVersions": ["*"], "resources": ["*"]}), &a));
+        assert!(!rule_matches(&json!({"apiGroups": ["*"], "apiVersions": ["*"], "resources": ["*"]}), &a));
+        assert!(rule_matches(&json!({"operations": ["*"], "apiGroups": ["*"], "apiVersions": ["*"], "resources": ["*"], "scope": "Namespaced"}), &a));
+
+        let status = Attributes { sub: Some("status"), ..a };
+        assert!(!rule_matches(&rule(json!(["*"])), &status));
+        assert!(rule_matches(&rule(json!(["certificaterequests/*"])), &status));
+        assert!(rule_matches(&rule(json!(["*/status"])), &status));
+        assert!(!rule_matches(&rule(json!(["*/scale"])), &status));
+        assert!(!rule_matches(&rule(json!(["orders/*"])), &status));
+
+        let cluster = ResourceType { namespaced: false, ..rt.clone() };
+        let c = Attributes { rt: &cluster, operation: "CREATE", namespace: "", name: "n", sub: None, old: None, dry_run: false };
+        assert!(rule_matches(&json!({"operations": ["CREATE"], "apiGroups": ["*"], "apiVersions": ["*"], "resources": ["*"], "scope": "Cluster"}), &c));
+        assert!(!rule_matches(&json!({"operations": ["CREATE"], "apiGroups": ["*"], "apiVersions": ["*"], "resources": ["*"], "scope": "Namespaced"}), &c));
+    }
+
+    #[test]
+    fn webhooks_without_matching_rules_or_rules_are_skipped() {
+        let api = api();
+        let pods = api.resource("", "pods").unwrap();
+        let a = attrs(&pods, "CREATE");
+        assert!(!webhook_matches(&api, &json!({"name": "h"}), &a, &pod()));
+        let rules = json!({"rules": [{"operations": ["DELETE"], "apiGroups": [""], "apiVersions": ["v1"], "resources": ["pods"]}]});
+        assert!(!webhook_matches(&api, &rules, &a, &pod()));
+        let rules = json!({"rules": [{"operations": ["CREATE"], "apiGroups": [""], "apiVersions": ["v1"], "resources": ["pods"]}], "objectSelector": null, "namespaceSelector": null});
+        assert!(webhook_matches(&api, &rules, &a, &pod()));
+    }
+
+    #[test]
+    fn object_selector_matches_the_new_or_the_old_object() {
+        let api = api();
+        let pods = api.resource("", "pods").unwrap();
+        let hook = |labels: Value| json!({"rules": serde_json::from_str::<Value>(ALL_PODS).unwrap(), "objectSelector": {"matchLabels": labels}});
+        let a = attrs(&pods, "CREATE");
+        assert!(webhook_matches(&api, &hook(json!({"app": "a"})), &a, &pod()));
+        assert!(!webhook_matches(&api, &hook(json!({"app": "b"})), &a, &pod()));
+        let old = json!({"metadata": {"name": "p", "labels": {"app": "b"}}});
+        let update = Attributes { old: Some(&old), ..attrs(&pods, "UPDATE") };
+        assert!(webhook_matches(&api, &hook(json!({"app": "b"})), &update, &pod()));
+        assert!(!webhook_matches(&api, &hook(json!({"app": "c"})), &update, &pod()));
+        let expr = json!({"rules": serde_json::from_str::<Value>(ALL_PODS).unwrap(), "objectSelector": {"matchExpressions": [{"key": "app", "operator": "Exists"}]}});
+        assert!(webhook_matches(&api, &expr, &a, &pod()));
+    }
+
+    #[test]
+    fn namespace_selector_reads_the_namespace_labels_and_its_name_label() {
+        let api = api();
+        put(&api, "", "namespaces", "", json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "prod", "labels": {"env": "prod"}}}));
+        put(&api, "", "namespaces", "", json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "bare"}}));
+        let pods = api.resource("", "pods").unwrap();
+        let hook = |labels: Value| json!({"rules": [{"operations": ["*"], "apiGroups": ["*"], "apiVersions": ["*"], "resources": ["*"]}], "namespaceSelector": {"matchLabels": labels}});
+        let in_ns = |ns: &'static str| Attributes { namespace: ns, ..attrs(&pods, "CREATE") };
+        assert!(webhook_matches(&api, &hook(json!({"env": "prod"})), &in_ns("prod"), &pod()));
+        assert!(!webhook_matches(&api, &hook(json!({"env": "prod"})), &in_ns("bare"), &pod()));
+        assert!(webhook_matches(&api, &hook(json!({"kubernetes.io/metadata.name": "bare"})), &in_ns("bare"), &pod()));
+        assert!(webhook_matches(&api, &hook(json!({"kubernetes.io/metadata.name": "ghost"})), &in_ns("ghost"), &pod()));
+        assert!(!webhook_matches(&api, &hook(json!({"env": "prod"})), &in_ns("ghost"), &pod()));
+        // An empty selector matches everything.
+        assert!(webhook_matches(&api, &json!({"rules": [{"operations": ["*"], "apiGroups": ["*"], "apiVersions": ["*"], "resources": ["*"]}], "namespaceSelector": {}}), &in_ns("ghost"), &pod()));
+
+        // Cluster-scoped objects are not filtered, a Namespace by its own labels.
+        let nodes = api.resource("", "nodes").unwrap();
+        let node = Attributes { namespace: "", ..attrs(&nodes, "CREATE") };
+        assert!(webhook_matches(&api, &hook(json!({"env": "prod"})), &node, &json!({"metadata": {"name": "n1"}})));
+        let namespaces = api.resource("", "namespaces").unwrap();
+        let ns = Attributes { namespace: "", name: "new", ..attrs(&namespaces, "CREATE") };
+        assert!(webhook_matches(&api, &hook(json!({"env": "dev"})), &ns, &json!({"metadata": {"name": "new", "labels": {"env": "dev"}}})));
+        assert!(!webhook_matches(&api, &hook(json!({"env": "prod"})), &ns, &json!({"metadata": {"name": "new", "labels": {"env": "dev"}}})));
+        assert!(webhook_matches(&api, &hook(json!({"kubernetes.io/metadata.name": "new"})), &ns, &json!({"metadata": {"name": "new"}})));
+    }
+
+    #[test]
+    fn match_conditions_skip_a_webhook_only_when_one_is_false() {
+        let api = api();
+        let pods = api.resource("", "pods").unwrap();
+        let hook = |exprs: &[&str]| {
+            let conds: Vec<Value> = exprs.iter().enumerate().map(|(i, e)| json!({"name": format!("c{i}"), "expression": e})).collect();
+            json!({"rules": serde_json::from_str::<Value>(ALL_PODS).unwrap(), "matchConditions": conds})
+        };
+        let a = attrs(&pods, "CREATE");
+        assert!(webhook_matches(&api, &hook(&["object.metadata.name == 'p'", "request.operation == 'CREATE'"]), &a, &pod()));
+        assert!(!webhook_matches(&api, &hook(&["object.metadata.name == 'p'", "request.namespace == 'other'"]), &a, &pod()));
+        // An error still calls the webhook.
+        assert!(webhook_matches(&api, &hook(&["object.metadata.nope.deeper == 1"]), &a, &pod()));
+        assert!(webhook_matches(&api, &json!({"rules": serde_json::from_str::<Value>(ALL_PODS).unwrap(), "matchConditions": []}), &a, &pod()));
+        let old = pod();
+        let delete = Attributes { old: Some(&old), ..attrs(&pods, "DELETE") };
+        assert!(webhook_matches(&api, &hook(&["object == null && oldObject.metadata.name == 'p'"]), &delete, &pod()));
+        let dry = Attributes { dry_run: true, sub: Some("status"), ..attrs(&pods, "UPDATE") };
+        assert!(webhook_matches(&api, &hook(&["request.dryRun && request.subResource == 'status' && request.userInfo.username == 'system:admin'"]), &dry, &pod()));
+    }
+
+    #[tokio::test]
+    async fn admit_without_configurations_or_for_webhook_configurations_returns_the_object() {
+        let api = api();
+        let pods = api.resource("", "pods").unwrap();
+        assert_eq!(admit(&api, &attrs(&pods, "CREATE"), pod()).await.unwrap(), pod());
+        // A configuration whose webhook cannot be reached does not apply to its own group.
+        webhook_config(&api, false, "v", json!([{"name": "v.example.com", "clientConfig": {"url": "https://127.0.0.1:1/"}, "rules": [{"operations": ["*"], "apiGroups": ["*"], "apiVersions": ["*"], "resources": ["*"]}]}]));
+        let vwc = api.resource("admissionregistration.k8s.io", "validatingwebhookconfigurations").unwrap();
+        let obj = json!({"metadata": {"name": "x"}});
+        assert_eq!(admit(&api, &Attributes { namespace: "", ..attrs(&vwc, "CREATE") }, obj.clone()).await.unwrap(), obj);
+        assert!(admit(&api, &attrs(&pods, "CREATE"), pod()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn mutating_webhooks_patch_in_name_order_and_get_an_admission_review() {
+        let api = api();
+        let s = server(
+            Duration::ZERO,
+            Box::new(|path: &str, body: &Value| {
+                let op = if path.starts_with("/first") {
+                    json!([{"op": "add", "path": "/metadata/labels/first", "value": "yes"}])
+                } else {
+                    // Sees the first webhook's change.
+                    let seen = body.pointer("/request/object/metadata/labels/first").cloned().unwrap_or_default();
+                    json!([{"op": "add", "path": "/metadata/labels/second", "value": seen}])
+                };
+                review(body, json!({"allowed": true, "patchType": "JSONPatch", "patch": b64_patch(op)}))
+            }),
+        )
+        .await;
+        webhook_config(&api, true, "b-second", json!([url_hook("second.example.com", &s, "/second", json!({"timeoutSeconds": 7}))]));
+        webhook_config(&api, true, "a-first", json!([url_hook("first.example.com", &s, "/first?x=1", json!({}))]));
+        let pods = api.resource("", "pods").unwrap();
+        let out = admit(&api, &attrs(&pods, "CREATE"), pod()).await.unwrap();
+        assert_eq!(out["metadata"]["labels"], json!({"app": "a", "first": "yes", "second": "yes"}));
+
+        let seen = s.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].0, "/first?x=1&timeout=10s");
+        assert_eq!(seen[1].0, "/second?timeout=7s");
+        let review = &seen[0].1;
+        assert_eq!(review["apiVersion"], "admission.k8s.io/v1");
+        assert_eq!(review["kind"], "AdmissionReview");
+        let req = &review["request"];
+        assert_eq!(req["uid"].as_str().unwrap().len(), 32);
+        assert_ne!(req["uid"], seen[1].1["request"]["uid"]);
+        assert_eq!(req["kind"], json!({"group": "", "version": "v1", "kind": "Pod"}));
+        assert_eq!(req["resource"], json!({"group": "", "version": "v1", "resource": "pods"}));
+        assert_eq!(req["requestKind"], req["kind"]);
+        assert_eq!(req["requestResource"], req["resource"]);
+        assert_eq!((req["name"].as_str(), req["namespace"].as_str(), req["operation"].as_str()), (Some("p"), Some("default"), Some("CREATE")));
+        assert_eq!(req["object"], pod());
+        assert_eq!(req["oldObject"], Value::Null);
+        assert_eq!(req["dryRun"], false);
+        assert_eq!(req["options"]["kind"], "CreateOptions");
+        assert_eq!(req["userInfo"]["username"], "system:admin");
+        assert!(req.get("subResource").is_none());
+    }
+
+    #[tokio::test]
+    async fn update_and_delete_requests_carry_the_old_object_and_subresource() {
+        let api = api();
+        let s = server(Duration::ZERO, Box::new(|_: &str, body: &Value| review(body, json!({"allowed": true})))).await;
+        webhook_config(&api, false, "v", json!([url_hook("v.example.com", &s, "", json!({}))]));
+        let pods = api.resource("", "pods").unwrap();
+        let old = json!({"metadata": {"name": "p", "labels": {"app": "old"}}});
+        let update = Attributes { old: Some(&old), sub: Some("status"), dry_run: true, ..attrs(&pods, "UPDATE") };
+        admit(&api, &update, pod()).await.unwrap();
+        let delete = Attributes { old: Some(&old), ..attrs(&pods, "DELETE") };
+        admit(&api, &delete, pod()).await.unwrap();
+        let seen = s.seen.lock().unwrap().clone();
+        assert_eq!(seen[0].0, "/?timeout=10s");
+        let req = &seen[0].1["request"];
+        assert_eq!(req["subResource"], "status");
+        assert_eq!(req["oldObject"], old);
+        assert_eq!(req["dryRun"], true);
+        assert_eq!(req["options"]["kind"], "UpdateOptions");
+        let req = &seen[1].1["request"];
+        assert_eq!(req["object"], Value::Null);
+        assert_eq!(req["oldObject"], old);
+        assert_eq!(req["operation"], "DELETE");
+    }
+
+    #[tokio::test]
+    async fn validating_webhooks_deny_with_the_api_server_wording() {
+        let cases = [
+            (json!({"code": 403, "message": "no privileged pods"}), StatusCode::FORBIDDEN, "Forbidden", "admission webhook \"v.example.com\" denied the request: no privileged pods"),
+            (json!({"code": 422, "reason": "bad spec"}), StatusCode::UNPROCESSABLE_ENTITY, "Invalid", "admission webhook \"v.example.com\" denied the request: bad spec"),
+            (json!({"code": 404, "message": ""}), StatusCode::NOT_FOUND, "NotFound", "admission webhook \"v.example.com\" denied the request without explanation"),
+            (json!({"code": 409, "message": "taken"}), StatusCode::CONFLICT, "Conflict", "admission webhook \"v.example.com\" denied the request: taken"),
+            (json!({"code": 200, "message": "low code"}), StatusCode::BAD_REQUEST, "BadRequest", "admission webhook \"v.example.com\" denied the request: low code"),
+            (json!({"code": 503, "message": "other code"}), StatusCode::SERVICE_UNAVAILABLE, "BadRequest", "admission webhook \"v.example.com\" denied the request: other code"),
+            (Value::Null, StatusCode::BAD_REQUEST, "BadRequest", "admission webhook \"v.example.com\" denied the request without explanation"),
+        ];
+        for (status, code, reason, message) in cases {
+            let api = api();
+            let reply = json!({"allowed": false, "status": status});
+            let s = server(Duration::ZERO, Box::new(move |_: &str, body: &Value| review(body, reply.clone()))).await;
+            webhook_config(&api, false, "v", json!([url_hook("v.example.com", &s, "/validate", json!({}))]));
+            let pods = api.resource("", "pods").unwrap();
+            let err = admit(&api, &attrs(&pods, "CREATE"), pod()).await.unwrap_err();
+            assert_eq!((err.code, err.reason, err.message.as_str()), (code, reason, message));
+        }
+    }
+
+    #[tokio::test]
+    async fn validating_webhooks_do_not_patch() {
+        let api = api();
+        let patch = b64_patch(json!([{"op": "add", "path": "/metadata/labels/x", "value": "y"}]));
+        let s = server(Duration::ZERO, Box::new(move |_: &str, body: &Value| review(body, json!({"allowed": true, "patch": patch})))).await;
+        webhook_config(&api, false, "v", json!([url_hook("v.example.com", &s, "/", json!({}))]));
+        let pods = api.resource("", "pods").unwrap();
+        assert_eq!(admit(&api, &attrs(&pods, "CREATE"), pod()).await.unwrap(), pod());
+    }
+
+    #[tokio::test]
+    async fn invalid_or_undecodable_patches() {
+        let api = api();
+        let bad = b64_patch(json!([{"op": "replace", "path": "/spec/nothing/here", "value": 1}]));
+        let s = server(Duration::ZERO, Box::new(move |_: &str, body: &Value| review(body, json!({"allowed": true, "patch": bad})))).await;
+        webhook_config(&api, true, "m", json!([url_hook("m.example.com", &s, "/", json!({}))]));
+        let pods = api.resource("", "pods").unwrap();
+        let err = admit(&api, &attrs(&pods, "CREATE"), pod()).await.unwrap_err();
+        assert_eq!((err.code, err.reason), (StatusCode::INTERNAL_SERVER_ERROR, "InternalError"));
+        assert!(err.message.starts_with("admission webhook \"m.example.com\" returned an invalid patch: "), "{}", err.message);
+
+        // Not base64, or not a JSON array: ignored.
+        for patch in [json!("%%%"), json!(b64_patch(json!({"op": "add"})))] {
+            let api = self::api();
+            let s = server(Duration::ZERO, Box::new(move |_: &str, body: &Value| review(body, json!({"allowed": true, "patch": patch})))).await;
+            webhook_config(&api, true, "m", json!([url_hook("m.example.com", &s, "/", json!({}))]));
+            assert_eq!(admit(&api, &attrs(&pods, "CREATE"), pod()).await.unwrap(), pod());
+        }
+    }
+
+    #[tokio::test]
+    async fn failure_policy_ignore_skips_unreachable_or_broken_webhooks() {
+        let s = server(Duration::ZERO, Box::new(|_: &str, _: &Value| (500, json!({"error": "boom"})))).await;
+        let pods = api().resource("", "pods").unwrap();
+        let hooks = [
+            json!({"name": "down.example.com", "clientConfig": {"url": "https://127.0.0.1:1/"}, "rules": serde_json::from_str::<Value>(ALL_PODS).unwrap()}),
+            url_hook("broken.example.com", &s, "/", json!({})),
+            json!({"name": "plain.example.com", "clientConfig": {"url": "http://127.0.0.1:1/"}, "rules": serde_json::from_str::<Value>(ALL_PODS).unwrap()}),
+            json!({"name": "nosvc.example.com", "clientConfig": {"service": {"namespace": "default", "name": "missing"}}, "rules": serde_json::from_str::<Value>(ALL_PODS).unwrap()}),
+        ];
+        let wanted = [
+            "failed to call webhook: Post \"https://127.0.0.1:1/?timeout=10s\": failed to connect to 127.0.0.1:1",
+            "webhook answered 500 Internal Server Error: {\"error\":\"boom\"}",
+            "webhook URL must be https",
+            "service \"default/missing\" not found",
+        ];
+        for (hook, want) in hooks.iter().zip(wanted) {
+            for (policy, mutating) in [("Ignore", true), ("Ignore", false), ("Fail", true), ("Fail", false)] {
+                let api = api();
+                let mut hook = hook.clone();
+                hook["failurePolicy"] = json!(policy);
+                let name = util::s(&hook, "/name").to_string();
+                webhook_config(&api, mutating, "c", json!([hook]));
+                let result = admit(&api, &attrs(&pods, "CREATE"), pod()).await;
+                if policy == "Ignore" {
+                    assert_eq!(result.unwrap(), pod());
+                    continue;
+                }
+                let err = result.unwrap_err();
+                assert_eq!((err.code, err.reason), (StatusCode::INTERNAL_SERVER_ERROR, "InternalError"));
+                let prefix = format!("Internal error occurred: failed calling webhook \"{name}\": ");
+                assert!(err.message.starts_with(&prefix) && err.message.contains(want), "{}", err.message);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_webhook_without_a_response_or_with_bad_json_fails() {
+        let pods = api().resource("", "pods").unwrap();
+        let s = server(Duration::ZERO, Box::new(|_: &str, _: &Value| (200, json!({"kind": "AdmissionReview"})))).await;
+        let api = api();
+        webhook_config(&api, false, "v", json!([url_hook("v.example.com", &s, "/", json!({}))]));
+        let err = admit(&api, &attrs(&pods, "CREATE"), pod()).await.unwrap_err();
+        assert!(err.message.ends_with("webhook returned no response"), "{}", err.message);
+    }
+
+    #[tokio::test]
+    async fn slow_webhooks_time_out_after_timeout_seconds() {
+        let api = api();
+        let s = server(Duration::from_millis(1500), Box::new(|_: &str, body: &Value| review(body, json!({"allowed": true})))).await;
+        // 0 is raised to the 1 s minimum.
+        webhook_config(&api, false, "v", json!([url_hook("v.example.com", &s, "/slow", json!({"timeoutSeconds": 0}))]));
+        let pods = api.resource("", "pods").unwrap();
+        let started = std::time::Instant::now();
+        let err = admit(&api, &attrs(&pods, "CREATE"), pod()).await.unwrap_err();
+        assert!(started.elapsed() < Duration::from_millis(1400));
+        let url = format!("https://localhost:{}/slow?timeout=1s", s.port);
+        assert_eq!(err.message, format!("Internal error occurred: failed calling webhook \"v.example.com\": failed to call webhook: Post \"{url}\": context deadline exceeded"));
+    }
+
+    #[tokio::test]
+    async fn the_ca_bundle_is_checked() {
+        let api = api();
+        let s = server(Duration::ZERO, Box::new(|_: &str, body: &Value| review(body, json!({"allowed": true})))).await;
+        let other = server(Duration::ZERO, Box::new(|_: &str, body: &Value| review(body, json!({"allowed": true})))).await;
+        let mut hook = url_hook("v.example.com", &s, "/", json!({}));
+        hook["clientConfig"]["caBundle"] = json!(other.ca);
+        webhook_config(&api, false, "v", json!([hook]));
+        let pods = api.resource("", "pods").unwrap();
+        assert!(admit(&api, &attrs(&pods, "CREATE"), pod()).await.is_err());
+        // Without one, the system roots do not know the test CA either.
+        let api = self::api();
+        let mut hook = url_hook("v.example.com", &s, "/", json!({}));
+        hook["clientConfig"].as_object_mut().unwrap().remove("caBundle");
+        webhook_config(&api, false, "v", json!([hook]));
+        assert!(admit(&api, &attrs(&pods, "CREATE"), pod()).await.is_err());
+        assert!(s.seen.lock().unwrap().is_empty());
+    }
+
+    fn service(api: &ApiState, port: u16, endpoints: Value) {
+        put(api, "", "services", "default", json!({"apiVersion": "v1", "kind": "Service", "metadata": {"name": "hook", "namespace": "default"}, "spec": {"ports": [{"name": "metrics", "port": 9090}, {"name": "https", "port": 443, "targetPort": port}]}}));
+        if !endpoints.is_null() {
+            put(api, "", "endpoints", "default", json!({"apiVersion": "v1", "kind": "Endpoints", "metadata": {"name": "hook", "namespace": "default"}, "subsets": endpoints}));
+        }
+    }
+
+    #[tokio::test]
+    async fn service_webhooks_are_called_at_a_ready_endpoint() {
+        let api = api();
+        let s = server(Duration::ZERO, Box::new(|_: &str, body: &Value| review(body, json!({"allowed": false, "status": {"message": "from the service"}})))).await;
+        service(
+            &api,
+            s.port,
+            json!([
+                {"notReadyAddresses": [{"ip": "10.0.0.9"}], "ports": [{"name": "https", "port": 1}]},
+                {"addresses": [{"ip": "127.0.0.1"}], "ports": [{"name": "metrics", "port": 1}, {"name": "https", "port": s.port}]},
+            ]),
+        );
+        let hook = json!({
+            "name": "svc.example.com",
+            "clientConfig": {"service": {"namespace": "default", "name": "hook", "path": "/validate"}, "caBundle": s.ca},
+            "rules": serde_json::from_str::<Value>(ALL_PODS).unwrap(),
+        });
+        webhook_config(&api, false, "v", json!([hook]));
+        let pods = api.resource("", "pods").unwrap();
+        let err = admit(&api, &attrs(&pods, "CREATE"), pod()).await.unwrap_err();
+        assert_eq!(err.message, "admission webhook \"svc.example.com\" denied the request: from the service");
+        assert_eq!(s.seen.lock().unwrap()[0].0, "/validate?timeout=10s");
+    }
+
+    #[test]
+    fn resolve_service_picks_the_named_port_of_a_ready_address() {
+        let api = api();
+        let err = |r: Result<Backend>| format!("{:#}", r.err().unwrap());
+        assert_eq!(err(resolve_service(&api, "default", "hook", 443)), "service \"default/hook\" not found");
+        service(&api, 8443, Value::Null);
+        assert_eq!(err(resolve_service(&api, "default", "hook", 443)), "no endpoints for service \"default/hook\"");
+
+        let api = self::api();
+        service(&api, 8443, json!([{"notReadyAddresses": [{"ip": "10.0.0.9"}], "ports": [{"port": 1}]}, {"addresses": [{"ip": "10.0.0.8"}]}]));
+        assert_eq!(err(resolve_service(&api, "default", "hook", 443)), "no ready endpoints for service \"default/hook\"");
+
+        let api = self::api();
+        service(
+            &api,
+            8443,
+            json!([{"addresses": [{"ip": "10.0.0.7", "nodeName": "n1", "targetRef": {"kind": "Pod", "uid": "u-1"}}], "ports": [{"name": "metrics", "port": 9100}, {"name": "https", "port": 8443}]}]),
+        );
+        let b = resolve_service(&api, "default", "hook", 443).unwrap();
+        assert_eq!((b.addr.as_str(), b.node.as_str(), b.pod_uid.as_str(), b.port), ("10.0.0.7:8443", "n1", "u-1", 8443));
+        // An unknown port falls back to the first one.
+        let b = resolve_service(&api, "default", "hook", 1234).unwrap();
+        assert_eq!(b.addr, "10.0.0.7:9100");
+
+        let api = self::api();
+        put(&api, "", "services", "default", json!({"metadata": {"name": "hook", "namespace": "default"}, "spec": {}}));
+        assert_eq!(err(resolve_service(&api, "default", "hook", 443)), "service \"default/hook\" has no port 443");
+    }
+
+    #[tokio::test]
+    async fn the_tunnel_is_not_used_for_backends_without_a_pod() {
+        let api = api();
+        let backend = Backend { addr: "127.0.0.1:1".into(), ..Default::default() };
+        let e = dial(&api, &backend).await.err().unwrap();
+        assert_eq!(format!("{e}"), "failed to connect to 127.0.0.1:1");
+    }
+
+    fn crd(conversion: Value) -> Value {
+        json!({"metadata": {"name": "widgets.example.com"}, "spec": {"group": "example.com", "conversion": conversion}})
+    }
+
+    fn widget(version: &str, name: &str) -> Value {
+        json!({"apiVersion": version, "kind": "Widget", "metadata": {"name": name, "uid": format!("uid-{name}"), "labels": {"l": name}, "annotations": {"a": name}}, "spec": {"size": 1}})
+    }
+
+    #[tokio::test]
+    async fn conversion_without_a_webhook_relabels() {
+        let api = api();
+        let objects = vec![widget("example.com/v1", "a"), widget("example.com/v2", "b")];
+        let out = convert_objects(&api, &crd(json!({"strategy": "None"})), objects.clone(), "example.com/v2").await.unwrap();
+        assert_eq!(out[0]["apiVersion"], "example.com/v2");
+        assert_eq!(out[0]["spec"], objects[0]["spec"]);
+        assert_eq!(out[1], objects[1]);
+        // Nothing to convert: the webhook is not called.
+        let hook = crd(json!({"strategy": "Webhook", "webhook": {"clientConfig": {"url": "https://127.0.0.1:1/"}}}));
+        let same = vec![widget("example.com/v2", "b")];
+        assert_eq!(convert_objects(&api, &hook, same.clone(), "example.com/v2").await.unwrap(), same);
+    }
+
+    #[tokio::test]
+    async fn conversion_webhooks_convert_and_keep_the_metadata() {
+        let api = api();
+        let s = server(
+            Duration::ZERO,
+            Box::new(|_: &str, body: &Value| {
+                let desired = body.pointer("/request/desiredAPIVersion").cloned().unwrap_or_default();
+                let converted: Vec<Value> = body.pointer("/request/objects").and_then(Value::as_array).into_iter().flatten().map(|o| {
+                    json!({"apiVersion": desired, "kind": "Widget", "metadata": {"name": "renamed", "labels": {"l": "changed"}}, "spec": {"sizeV2": o["spec"]["size"]}})
+                }).collect();
+                (200, json!({"apiVersion": body["apiVersion"], "kind": "ConversionReview", "response": {"uid": body["request"]["uid"], "convertedObjects": converted, "result": {"status": "Success"}}}))
+            }),
+        )
+        .await;
+        let conversion = json!({"strategy": "Webhook", "webhook": {"conversionReviewVersions": ["v1beta1", "v1"], "clientConfig": {"url": format!("https://localhost:{}/convert", s.port), "caBundle": s.ca}}});
+        let objects = vec![widget("example.com/v1", "a"), widget("example.com/v2", "b"), widget("example.com/v1", "c")];
+        let out = convert_objects(&api, &crd(conversion), objects.clone(), "example.com/v2").await.unwrap();
+        assert_eq!(out[0]["apiVersion"], "example.com/v2");
+        assert_eq!(out[0]["spec"], json!({"sizeV2": 1}));
+        assert_eq!(out[0]["metadata"], objects[0]["metadata"]);
+        assert_eq!(out[1], objects[1]);
+        assert_eq!(out[2]["metadata"], objects[2]["metadata"]);
+        let seen = s.seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, "/convert");
+        assert_eq!(seen[0].1["apiVersion"], "apiextensions.k8s.io/v1");
+        assert_eq!(seen[0].1["request"]["objects"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn conversion_webhook_failures() {
+        let api = api();
+        let s = server(
+            Duration::ZERO,
+            Box::new(|path: &str, body: &Value| match path {
+                "/fail" => (200, json!({"response": {"result": {"status": "Failure", "message": "cannot convert"}}})),
+                "/fail-quietly" => (200, json!({"response": {"result": {"status": "Failure"}}})),
+                "/short" => (200, json!({"response": {"convertedObjects": []}})),
+                _ => (200, json!({"apiVersion": body["apiVersion"]})),
+            }),
+        )
+        .await;
+        let objects = vec![widget("example.com/v1", "a")];
+        let run = |config: Value| {
+            let api = api.clone();
+            let objects = objects.clone();
+            async move {
+                let conversion = json!({"strategy": "Webhook", "webhook": {"clientConfig": config}});
+                convert_objects(&api, &crd(conversion), objects, "example.com/v2").await.unwrap_err().message
+            }
+        };
+        let url = |p: &str| json!({"url": format!("https://localhost:{}{p}", s.port), "caBundle": s.ca});
+        assert_eq!(run(url("/fail")).await, "conversion webhook for widgets.example.com failed: cannot convert");
+        assert_eq!(run(url("/fail-quietly")).await, "conversion webhook for widgets.example.com failed: conversion failed");
+        assert_eq!(run(url("/short")).await, "conversion webhook for widgets.example.com failed: returned 0 objects for 1");
+        assert_eq!(run(json!({"url": "http://localhost/"})).await, "conversion webhook for widgets.example.com failed: webhook URL must be https");
+        assert_eq!(run(json!({"service": {"namespace": "default", "name": "hook"}})).await, "conversion webhook for widgets.example.com failed: service \"default/hook\" not found");
+        // Without `v1` among conversionReviewVersions, a v1beta1 review; no convertedObjects at all.
+        let conversion = json!({"strategy": "Webhook", "webhook": {"clientConfig": url("/")}});
+        let err = convert_objects(&api, &crd(conversion), objects.clone(), "example.com/v2").await.unwrap_err();
+        assert_eq!(err.message, "conversion webhook for widgets.example.com failed: returned 0 objects for 1");
+        assert_eq!(s.seen.lock().unwrap().last().unwrap().1["apiVersion"], "apiextensions.k8s.io/v1beta1");
+    }
+
+    #[tokio::test]
+    async fn conversion_webhooks_behind_a_service() {
+        let api = api();
+        let s = server(
+            Duration::ZERO,
+            Box::new(|_: &str, body: &Value| {
+                let objs: Vec<Value> = body["request"]["objects"].as_array().unwrap().iter().map(|o| {
+                    let mut o = o.clone();
+                    o["apiVersion"] = body["request"]["desiredAPIVersion"].clone();
+                    o
+                }).collect();
+                (200, json!({"response": {"convertedObjects": objs}}))
+            }),
+        )
+        .await;
+        service(&api, s.port, json!([{"addresses": [{"ip": "127.0.0.1"}], "ports": [{"name": "https", "port": s.port}]}]));
+        let conversion = json!({"strategy": "Webhook", "webhook": {"clientConfig": {"service": {"namespace": "default", "name": "hook", "port": 443, "path": "/convert"}, "caBundle": s.ca}}});
+        let out = convert_objects(&api, &crd(conversion), vec![widget("example.com/v1", "a")], "example.com/v2").await.unwrap();
+        assert_eq!(out[0]["apiVersion"], "example.com/v2");
+        assert_eq!(s.seen.lock().unwrap()[0].0, "/convert");
+    }
+
+    const GROUP: &str = "admissionregistration.k8s.io";
+
+    fn policy(api: &ApiState, name: &str, spec: Value) {
+        put(api, GROUP, "validatingadmissionpolicies", "", json!({"apiVersion": "admissionregistration.k8s.io/v1", "kind": "ValidatingAdmissionPolicy", "metadata": {"name": name}, "spec": spec}));
+    }
+
+    fn binding(api: &ApiState, name: &str, spec: Value) {
+        put(api, GROUP, "validatingadmissionpolicybindings", "", json!({"apiVersion": "admissionregistration.k8s.io/v1", "kind": "ValidatingAdmissionPolicyBinding", "metadata": {"name": name}, "spec": spec}));
+    }
+
+    fn pod_constraints() -> Value {
+        json!({"resourceRules": [{"operations": ["CREATE", "UPDATE"], "apiGroups": [""], "apiVersions": ["v1"], "resources": ["pods"]}]})
+    }
+
+    fn denial(api: &ApiState, a: &Attributes, obj: &Value) -> Option<(StatusCode, &'static str, String)> {
+        validating_policies(api, a, obj).err().map(|e| (e.code, e.reason, e.message))
+    }
+
+    #[test]
+    fn policies_deny_with_message_reason_and_message_expression() {
+        let api = api();
+        let pods = api.resource("", "pods").unwrap();
+        let a = attrs(&pods, "CREATE");
+        assert_eq!(denial(&api, &a, &pod()), None);
+        policy(
+            &api,
+            "labels",
+            json!({"matchConstraints": pod_constraints(), "validations": [
+                {"expression": "has(object.metadata.labels)"},
+                {"expression": "object.metadata.labels.app != 'a'", "messageExpression": "'app ' + object.metadata.labels.app + ' is reserved'", "reason": "Forbidden"},
+            ]}),
+        );
+        // A policy without a binding does nothing; a binding to a missing policy neither.
+        assert_eq!(denial(&api, &a, &pod()), None);
+        binding(&api, "ghost", json!({"policyName": "missing", "validationActions": ["Deny"]}));
+        assert_eq!(denial(&api, &a, &pod()), None);
+        binding(&api, "labels-binding", json!({"policyName": "labels", "validationActions": ["Deny"]}));
+        assert_eq!(
+            denial(&api, &a, &pod()),
+            Some((StatusCode::FORBIDDEN, "Forbidden", "ValidatingAdmissionPolicy 'labels' with binding 'labels-binding' denied request: app a is reserved".into()))
+        );
+        let unlabeled = json!({"metadata": {"name": "p", "namespace": "default"}});
+        assert_eq!(
+            denial(&api, &a, &unlabeled),
+            Some((StatusCode::UNPROCESSABLE_ENTITY, "Invalid", "ValidatingAdmissionPolicy 'labels' with binding 'labels-binding' denied request: failed expression: has(object.metadata.labels)".into()))
+        );
+        let other = json!({"metadata": {"name": "p", "namespace": "default", "labels": {"app": "b"}}});
+        assert_eq!(denial(&api, &a, &other), None);
+        // Not matched: another resource, an excluded operation.
+        let secrets = api.resource("", "secrets").unwrap();
+        assert_eq!(denial(&api, &attrs(&secrets, "CREATE"), &unlabeled), None);
+        let old = pod();
+        assert_eq!(denial(&api, &Attributes { old: Some(&old), ..attrs(&pods, "DELETE") }, &pod()), None);
+    }
+
+    #[test]
+    fn policy_messages_and_reasons() {
+        let api = api();
+        let pods = api.resource("", "pods").unwrap();
+        policy(
+            &api,
+            "p",
+            json!({"validations": [
+                {"expression": "object.metadata.name != 'unauth'", "message": "who are you", "reason": "Unauthorized"},
+                {"expression": "object.metadata.name != 'big'", "message": "too big", "reason": "RequestEntityTooLarge"},
+                {"expression": "object.metadata.name != 'blank'", "messageExpression": "' '", "message": "fallback"},
+                {"expression": "object.metadata.name != 'broken'", "messageExpression": "1 +", "message": "fallback too"},
+            ]}),
+        );
+        binding(&api, "b", json!({"policyName": "p"}));
+        let deny = |name: &'static str| {
+            let a = Attributes { name, ..attrs(&pods, "CREATE") };
+            denial(&api, &a, &json!({"metadata": {"name": name}})).map(|(code, reason, m)| (code, reason, m.rsplit(": ").next().unwrap().to_string()))
+        };
+        assert_eq!(deny("unauth"), Some((StatusCode::UNAUTHORIZED, "Unauthorized", "who are you".into())));
+        assert_eq!(deny("big"), Some((StatusCode::PAYLOAD_TOO_LARGE, "RequestEntityTooLarge", "too big".into())));
+        assert_eq!(deny("blank"), Some((StatusCode::UNPROCESSABLE_ENTITY, "Invalid", "fallback".into())));
+        assert_eq!(deny("broken"), Some((StatusCode::UNPROCESSABLE_ENTITY, "Invalid", "fallback too".into())));
+        assert_eq!(deny("fine"), None);
+    }
+
+    #[test]
+    fn policies_with_only_warn_or_audit_actions_do_not_deny() {
+        let api = api();
+        let pods = api.resource("", "pods").unwrap();
+        policy(&api, "p", json!({"validations": [{"expression": "false"}, {"expression": "1 + 'a'"}]}));
+        binding(&api, "b", json!({"policyName": "p", "validationActions": ["Warn", "Audit"]}));
+        assert_eq!(denial(&api, &attrs(&pods, "CREATE"), &pod()), None);
+    }
+
+    #[test]
+    fn policy_errors_follow_the_failure_policy() {
+        let pods = api().resource("", "pods").unwrap();
+        for (validation, want) in [
+            ("object.metadata.missing.field == 1", "expression 'object.metadata.missing.field == 1' resulted in error: "),
+            ("object.metadata.name", "expression 'object.metadata.name' resulted in a "),
+        ] {
+            for fail in ["Fail", "Ignore"] {
+                let api = api();
+                policy(&api, "p", json!({"failurePolicy": fail, "validations": [{"expression": validation}]}));
+                binding(&api, "b", json!({"policyName": "p", "validationActions": ["Deny"]}));
+                let got = denial(&api, &attrs(&pods, "CREATE"), &pod());
+                if fail == "Ignore" {
+                    assert_eq!(got, None);
+                    continue;
+                }
+                let (code, reason, message) = got.unwrap();
+                assert_eq!((code, reason), (StatusCode::UNPROCESSABLE_ENTITY, "Invalid"));
+                let prefix = format!("ValidatingAdmissionPolicy 'p' with binding 'b' denied request: {want}");
+                assert!(message.starts_with(&prefix), "{message}");
+            }
+        }
+        // A failed validation is reported before an error of a later one.
+        let api = api();
+        policy(&api, "p", json!({"validations": [{"expression": "1 + 'a'"}, {"expression": "false", "message": "plain no"}]}));
+        binding(&api, "b", json!({"policyName": "p"}));
+        assert_eq!(denial(&api, &attrs(&pods, "CREATE"), &pod()).unwrap().2, "ValidatingAdmissionPolicy 'p' with binding 'b' denied request: plain no");
+    }
+
+    #[test]
+    fn policy_variables_and_match_conditions() {
+        let api = api();
+        let pods = api.resource("", "pods").unwrap();
+        policy(
+            &api,
+            "p",
+            json!({
+                "variables": [
+                    {"name": "app", "expression": "object.metadata.labels.app"},
+                    {"name": "loud", "expression": "variables.app + '!'"},
+                ],
+                "matchConditions": [{"name": "only-labeled", "expression": "has(object.metadata.labels)"}],
+                "validations": [{"expression": "variables.loud != 'a!'", "messageExpression": "'got ' + variables.loud"}],
+            }),
+        );
+        binding(&api, "b", json!({"policyName": "p"}));
+        let a = attrs(&pods, "CREATE");
+        assert_eq!(denial(&api, &a, &pod()).unwrap().2, "ValidatingAdmissionPolicy 'p' with binding 'b' denied request: got a!");
+        // The match condition is false: the policy does not apply.
+        assert_eq!(denial(&api, &a, &json!({"metadata": {"name": "p"}})), None);
+
+        let api = self::api();
+        policy(&api, "p", json!({"variables": [{"name": "bad", "expression": "object.nope.deeper"}], "validations": [{"expression": "true"}]}));
+        binding(&api, "b", json!({"policyName": "p"}));
+        let message = denial(&api, &a, &pod()).unwrap().2;
+        assert!(message.contains("variable 'bad' resulted in error: "), "{message}");
+
+        let api = self::api();
+        policy(&api, "p", json!({"matchConditions": [{"name": "boom", "expression": "object.nope.deeper"}], "validations": [{"expression": "true"}]}));
+        binding(&api, "b", json!({"policyName": "p"}));
+        let message = denial(&api, &a, &pod()).unwrap().2;
+        assert!(message.contains("matchCondition 'boom' resulted in error: "), "{message}");
+    }
+
+    #[test]
+    fn policy_and_binding_match_resources_and_exclusions() {
+        let api = api();
+        put(&api, "", "namespaces", "", json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "prod", "labels": {"env": "prod"}}}));
+        let pods = api.resource("", "pods").unwrap();
+        let mut constraints = pod_constraints();
+        constraints["excludeResourceRules"] = json!([{"operations": ["UPDATE"], "apiGroups": [""], "apiVersions": ["v1"], "resources": ["pods"]}]);
+        policy(&api, "p", json!({"matchConstraints": constraints, "validations": [{"expression": "namespaceObject.metadata.name != 'prod'", "message": "not in prod"}]}));
+        binding(&api, "b", json!({"policyName": "p", "matchResources": {"namespaceSelector": {"matchLabels": {"env": "prod"}}, "objectSelector": {"matchLabels": {"app": "a"}}}}));
+        let in_prod = |op: &'static str| Attributes { namespace: "prod", ..attrs(&pods, op) };
+        assert_eq!(denial(&api, &in_prod("CREATE"), &pod()).unwrap().2, "ValidatingAdmissionPolicy 'p' with binding 'b' denied request: not in prod");
+        let old = pod();
+        assert_eq!(denial(&api, &Attributes { old: Some(&old), ..in_prod("UPDATE") }, &pod()), None);
+        assert_eq!(denial(&api, &attrs(&pods, "CREATE"), &pod()), None);
+        assert_eq!(denial(&api, &in_prod("CREATE"), &json!({"metadata": {"name": "p", "labels": {"app": "b"}}})), None);
+    }
+
+    #[test]
+    fn policy_params_come_from_the_param_ref() {
+        let api = api();
+        let pods = api.resource("", "pods").unwrap();
+        put(&api, "", "configmaps", "default", json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "limits", "namespace": "default"}, "data": {"blocked": "p"}}));
+        put(&api, "", "configmaps", "other", json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "limits", "namespace": "other"}, "data": {"blocked": "q"}}));
+        policy(
+            &api,
+            "p",
+            json!({"paramKind": {"apiVersion": "v1", "kind": "ConfigMap"}, "validations": [{"expression": "object.metadata.name != params.data.blocked", "messageExpression": "'blocked by ' + params.metadata.namespace"}]}),
+        );
+        let a = attrs(&pods, "CREATE");
+        // The request's namespace by default.
+        binding(&api, "b", json!({"policyName": "p", "paramRef": {"name": "limits"}}));
+        assert_eq!(denial(&api, &a, &pod()).unwrap().2, "ValidatingAdmissionPolicy 'p' with binding 'b' denied request: blocked by default");
+
+        let with_binding = |spec: Value| {
+            let api = self::api();
+            put(&api, "", "configmaps", "other", json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "limits", "namespace": "other"}, "data": {"blocked": "p"}}));
+            policy(&api, "p", json!({"paramKind": {"apiVersion": "v1", "kind": "ConfigMap"}, "validations": [{"expression": "object.metadata.name != params.data.blocked"}]}));
+            binding(&api, "b", spec);
+            denial(&api, &attrs(&pods, "CREATE"), &pod()).map(|d| d.2)
+        };
+        assert!(with_binding(json!({"policyName": "p", "paramRef": {"name": "limits", "namespace": "other"}})).is_some());
+        assert_eq!(with_binding(json!({"policyName": "p", "paramRef": {"name": "limits", "parameterNotFoundAction": "Allow"}})), None);
+        assert_eq!(
+            with_binding(json!({"policyName": "p", "paramRef": {"name": "limits", "parameterNotFoundAction": "Deny"}})).unwrap(),
+            "ValidatingAdmissionPolicy 'p' with binding 'b' denied request: failed to configure binding: no params found for policy binding with `Deny` parameterNotFoundAction"
+        );
+        assert_eq!(with_binding(json!({"policyName": "p", "paramRef": {"name": "limits"}, "validationActions": ["Warn"]})), None);
+        assert!(with_binding(json!({"policyName": "p"})).is_some());
+    }
+
+    #[test]
+    fn cluster_scoped_params_and_policy_on_delete() {
+        let api = api();
+        let nodes = api.resource("", "nodes").unwrap();
+        policy(
+            &api,
+            "p",
+            json!({"paramKind": {"apiVersion": "admissionregistration.k8s.io/v1", "kind": "ValidatingAdmissionPolicy"}, "validations": [{"expression": "object == null && oldObject.metadata.name != params.metadata.name", "message": "keep it"}]}),
+        );
+        binding(&api, "b", json!({"policyName": "p", "paramRef": {"name": "p"}}));
+        let old = json!({"metadata": {"name": "p"}});
+        let a = Attributes { namespace: "", old: Some(&old), ..attrs(&nodes, "DELETE") };
+        assert_eq!(denial(&api, &a, &old).unwrap().2, "ValidatingAdmissionPolicy 'p' with binding 'b' denied request: keep it");
+        let other = json!({"metadata": {"name": "n2"}});
+        assert_eq!(denial(&api, &Attributes { old: Some(&other), ..a }, &other), None);
+    }
+
+    #[tokio::test]
+    async fn admit_runs_validating_policies_after_webhooks() {
+        let api = api();
+        let patch = b64_patch(json!([{"op": "add", "path": "/metadata/labels/team", "value": "x"}]));
+        let s = server(Duration::ZERO, Box::new(move |_: &str, body: &Value| review(body, json!({"allowed": true, "patch": patch})))).await;
+        webhook_config(&api, true, "m", json!([url_hook("m.example.com", &s, "/", json!({}))]));
+        policy(&api, "p", json!({"validations": [{"expression": "object.metadata.labels.team != 'x'", "message": "team x is full"}]}));
+        binding(&api, "b", json!({"policyName": "p"}));
+        let pods = api.resource("", "pods").unwrap();
+        let err = admit(&api, &attrs(&pods, "CREATE"), pod()).await.unwrap_err();
+        assert_eq!(err.message, "ValidatingAdmissionPolicy 'p' with binding 'b' denied request: team x is full");
+    }
 }

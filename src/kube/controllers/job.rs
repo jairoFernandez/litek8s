@@ -376,5 +376,450 @@ mod tests {
         let set: BTreeSet<i64> = [0, 2, 3, 4, 7].into_iter().collect();
         assert_eq!(format_indexes(&set), "0,2-4,7");
         assert_eq!(parse_indexes("0,2-4,7"), set);
+        assert_eq!(parse_indexes(" 1 , x, 3-a,5"), [1, 5].into_iter().collect());
+        assert_eq!(format_indexes(&BTreeSet::new()), "");
+    }
+
+    fn api() -> ApiState {
+        ApiState::open(None, "127.0.0.1:0".into(), false).unwrap()
+    }
+
+    fn create_job(api: &ApiState, spec: Value) -> Value {
+        let mut spec = spec;
+        spec["template"] = json!({"spec": {"restartPolicy": "Never", "containers": [{"name": "main", "image": "busybox"}]}});
+        let job = json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "pi"}, "spec": spec});
+        api.create_object("batch", "jobs", Some("default"), job).unwrap()
+    }
+
+    fn job(api: &ApiState) -> Value {
+        api.get_object("batch", "jobs", "default", "pi").unwrap()
+    }
+
+    fn set_spec(api: &ApiState, f: impl FnOnce(&mut Value)) {
+        let mut j = job(api);
+        f(&mut j["spec"]);
+        api.update_object("batch", "jobs", j).unwrap();
+    }
+
+    fn reconcile_job(api: &ApiState) -> Requeue {
+        reconcile(api, "default", "pi").unwrap()
+    }
+
+    fn active_pods(api: &ApiState) -> Vec<Value> {
+        let mut pods: Vec<Value> = api.store().list("", "pods", Some("default")).0.into_iter().filter(util::is_active).collect();
+        pods.sort_by_key(|p| (pod_index(p), util::name(p)));
+        pods
+    }
+
+    fn terminate(api: &ApiState, pod: &Value, exit_code: i64, extra: Value) {
+        let phase = if exit_code == 0 { "Succeeded" } else { "Failed" };
+        let mut terminated = json!({"exitCode": exit_code});
+        if let Some(t) = extra.get("finishedAt") {
+            terminated["finishedAt"] = t.clone();
+        }
+        let mut status = json!({"phase": phase, "containerStatuses": [{"name": "main", "state": {"terminated": terminated}}]});
+        if let Some(c) = extra.get("conditions") {
+            status["conditions"] = c.clone();
+        }
+        util::write_status(api, "", "pods", pod, status).unwrap();
+    }
+
+    fn succeed(api: &ApiState, pod: &Value) {
+        terminate(api, pod, 0, json!({}));
+    }
+
+    fn fail(api: &ApiState, pod: &Value, exit_code: i64) {
+        terminate(api, pod, exit_code, json!({}));
+    }
+
+    fn condition_of(job: &Value, type_: &str) -> Option<(String, String)> {
+        util::condition(job, type_).map(|c| (s(c, "/status").to_string(), s(c, "/reason").to_string()))
+    }
+
+    #[test]
+    fn runs_parallelism_pods_until_completions_succeed() {
+        let api = api();
+        let created = create_job(&api, json!({"completions": 3, "parallelism": 2}));
+        assert_eq!(reconcile_job(&api), None);
+        let pods = active_pods(&api);
+        assert_eq!(pods.len(), 2);
+        for p in &pods {
+            assert!(util::name(p).starts_with("pi-"));
+            assert_eq!(s(p, "/metadata/labels/job-name"), "pi");
+            assert!(util::controlled_by(p, &util::uid(&created)));
+        }
+        let st = job(&api)["status"].clone();
+        assert!(st["startTime"].is_string());
+        assert!(st.get("completedIndexes").is_none());
+
+        reconcile_job(&api);
+        assert_eq!(job(&api)["status"]["active"], 2);
+        succeed(&api, &pods[0]);
+        reconcile_job(&api);
+        // One left to run, one running: still two at a time at most.
+        let pods = active_pods(&api);
+        assert_eq!(pods.len(), 2);
+        assert_eq!(job(&api)["status"]["succeeded"], 1);
+
+        succeed(&api, &pods[0]);
+        reconcile_job(&api);
+        // Two succeeded, one running: no new pod.
+        assert_eq!(active_pods(&api).len(), 1);
+        succeed(&api, &active_pods(&api)[0]);
+        reconcile_job(&api);
+        let j = job(&api);
+        assert_eq!(condition_of(&j, "Complete"), Some(("True".into(), "CompletionsReached".into())));
+        assert_eq!(condition_of(&j, "SuccessCriteriaMet"), Some(("True".into(), "CompletionsReached".into())));
+        assert_eq!(j["status"]["succeeded"], 3);
+        assert_eq!(j["status"]["active"], 0);
+        assert!(j["status"]["completionTime"].is_string());
+        // Finished: nothing more happens and no TTL means no requeue.
+        assert_eq!(reconcile_job(&api), None);
+        assert!(active_pods(&api).is_empty());
+    }
+
+    #[test]
+    fn completion_removes_pods_still_running() {
+        let api = api();
+        create_job(&api, json!({"completions": 1, "parallelism": 2}));
+        reconcile_job(&api);
+        // parallelism is capped by the completions left.
+        let pods = active_pods(&api);
+        assert_eq!(pods.len(), 1);
+        succeed(&api, &pods[0]);
+        api.create_object("", "pods", Some("default"), {
+            let mut extra = util::pod_from_template(&job(&api)["spec"]["template"], &job(&api), &[]);
+            extra["metadata"]["name"] = json!("pi-extra");
+            extra
+        })
+        .unwrap();
+        reconcile_job(&api);
+        assert!(util::condition_true(&job(&api), "Complete"));
+        assert!(active_pods(&api).is_empty());
+    }
+
+    #[test]
+    fn work_queue_completes_when_one_succeeded_and_none_run() {
+        let api = api();
+        create_job(&api, json!({"parallelism": 2}));
+        assert!(job(&api).pointer("/spec/completions").is_none());
+        reconcile_job(&api);
+        let pods = active_pods(&api);
+        assert_eq!(pods.len(), 2);
+        succeed(&api, &pods[0]);
+        reconcile_job(&api);
+        // The other worker still runs.
+        assert!(!util::condition_true(&job(&api), "Complete"));
+        assert!(!active_pods(&api).is_empty());
+        for p in active_pods(&api) {
+            succeed(&api, &p);
+        }
+        reconcile_job(&api);
+        assert!(util::condition_true(&job(&api), "Complete"));
+        assert!(active_pods(&api).is_empty());
+    }
+
+    #[test]
+    fn backoff_limit_fails_the_job() {
+        let api = api();
+        create_job(&api, json!({"backoffLimit": 1}));
+        reconcile_job(&api);
+        fail(&api, &active_pods(&api)[0], 1);
+        reconcile_job(&api);
+        // One failure is within the limit: a replacement runs.
+        assert_eq!(active_pods(&api).len(), 1);
+        assert_eq!(job(&api)["status"]["failed"], 1);
+        assert!(!util::condition_true(&job(&api), "Failed"));
+        fail(&api, &active_pods(&api)[0], 1);
+        reconcile_job(&api);
+        let j = job(&api);
+        assert_eq!(condition_of(&j, "Failed"), Some(("True".into(), "BackoffLimitExceeded".into())));
+        assert_eq!(condition_of(&j, "FailureTarget"), Some(("True".into(), "BackoffLimitExceeded".into())));
+        assert_eq!(j["status"]["failed"], 2);
+        assert!(active_pods(&api).is_empty());
+        assert!(j["status"].get("completionTime").is_none());
+    }
+
+    #[test]
+    fn waits_out_the_backoff_after_a_recent_failure() {
+        let api = api();
+        create_job(&api, json!({}));
+        reconcile_job(&api);
+        let finished = util::rfc3339(util::now());
+        terminate(&api, &active_pods(&api)[0], 1, json!({"finishedAt": finished}));
+        let requeue = reconcile_job(&api).expect("requeued for the backoff");
+        assert!(requeue <= Duration::from_secs(10) && requeue >= Duration::from_secs(8), "{requeue:?}");
+        assert!(active_pods(&api).is_empty());
+
+        // A failure longer ago than the delay is retried at once.
+        let api = self::api();
+        create_job(&api, json!({}));
+        reconcile_job(&api);
+        let finished = util::rfc3339(util::now() - chrono::Duration::seconds(30));
+        terminate(&api, &active_pods(&api)[0], 1, json!({"finishedAt": finished}));
+        assert_eq!(reconcile_job(&api), None);
+        assert_eq!(active_pods(&api).len(), 1);
+    }
+
+    #[test]
+    fn pod_failure_policy_fail_job_matches_exit_codes() {
+        let api = api();
+        create_job(&api, json!({"backoffLimit": 6, "podFailurePolicy": {"rules": [
+            {"action": "FailJob", "onExitCodes": {"containerName": "main", "operator": "In", "values": [42]}},
+        ]}}));
+        reconcile_job(&api);
+        // Exit code 1 matches no rule and counts toward the backoff limit.
+        fail(&api, &active_pods(&api)[0], 1);
+        reconcile_job(&api);
+        assert!(!util::condition_true(&job(&api), "Failed"));
+        let pod = active_pods(&api)[0].clone();
+        fail(&api, &pod, 42);
+        reconcile_job(&api);
+        let j = job(&api);
+        assert_eq!(condition_of(&j, "Failed"), Some(("True".into(), "PodFailurePolicy".into())));
+        let message = s(util::condition(&j, "Failed").unwrap(), "/message").to_string();
+        assert_eq!(
+            message,
+            format!("Container main for pod default/{} failed with exit code 42 matching FailJob rule at index 0", util::name(&pod))
+        );
+        assert_eq!(j["status"]["failed"], 2);
+    }
+
+    #[test]
+    fn pod_failure_policy_ignores_matching_failures() {
+        let api = api();
+        create_job(&api, json!({"backoffLimit": 0, "podFailurePolicy": {"rules": [
+            {"action": "Ignore", "onPodConditions": [{"type": "DisruptionTarget"}]},
+            {"action": "Ignore", "onExitCodes": {"operator": "NotIn", "values": [1, 2]}},
+            {"action": "Count", "onExitCodes": {"containerName": "other", "operator": "In", "values": [1]}},
+        ]}}));
+        reconcile_job(&api);
+        terminate(&api, &active_pods(&api)[0], 1, json!({"conditions": [{"type": "DisruptionTarget", "status": "True"}]}));
+        reconcile_job(&api);
+        // Not counted: backoffLimit 0 is not exceeded and the pod is replaced.
+        assert_eq!(job(&api)["status"]["failed"], 0);
+        assert_eq!(active_pods(&api).len(), 1);
+        fail(&api, &active_pods(&api)[0], 7);
+        reconcile_job(&api);
+        assert_eq!(job(&api)["status"]["failed"], 0);
+        assert_eq!(active_pods(&api).len(), 1);
+        // Exit code 2 matches no rule (the Count rule names another container).
+        fail(&api, &active_pods(&api)[0], 2);
+        reconcile_job(&api);
+        assert_eq!(condition_of(&job(&api), "Failed"), Some(("True".into(), "BackoffLimitExceeded".into())));
+    }
+
+    #[test]
+    fn indexed_pods_carry_their_completion_index() {
+        let api = api();
+        create_job(&api, json!({"completions": 3, "parallelism": 2, "completionMode": "Indexed"}));
+        reconcile_job(&api);
+        let pods = active_pods(&api);
+        assert_eq!(pods.iter().map(pod_index).collect::<Vec<_>>(), [Some(0), Some(1)]);
+        for (idx, p) in pods.iter().enumerate() {
+            assert!(util::name(p).starts_with(&format!("pi-{idx}-")));
+            assert_eq!(s(p, "/spec/hostname"), format!("pi-{idx}"));
+            assert_eq!(s(p, "/metadata/labels/batch.kubernetes.io~1job-completion-index"), idx.to_string());
+            let env = &p["spec"]["containers"][0]["env"];
+            assert_eq!(env[0], json!({"name": "JOB_COMPLETION_INDEX", "value": idx.to_string()}));
+        }
+        succeed(&api, &pods[1]);
+        reconcile_job(&api);
+        // Index 1 is done, index 0 runs: the free index 2 starts.
+        assert_eq!(active_pods(&api).iter().map(pod_index).collect::<Vec<_>>(), [Some(0), Some(2)]);
+        assert_eq!(job(&api)["status"]["completedIndexes"], "1");
+
+        // A failed index is retried under the same index.
+        let pods = active_pods(&api);
+        fail(&api, &pods[0], 1);
+        succeed(&api, &pods[1]);
+        reconcile_job(&api);
+        assert_eq!(active_pods(&api).iter().map(pod_index).collect::<Vec<_>>(), [Some(0)]);
+        assert_eq!(job(&api)["status"]["completedIndexes"], "1-2");
+        succeed(&api, &active_pods(&api)[0]);
+        reconcile_job(&api);
+        let j = job(&api);
+        assert!(util::condition_true(&j, "Complete"));
+        assert_eq!(j["status"]["completedIndexes"], "0-2");
+        assert_eq!(j["status"]["succeeded"], 3);
+        assert_eq!(j["status"]["failed"], 1);
+        assert!(j["status"].get("failedIndexes").is_none());
+    }
+
+    #[test]
+    fn backoff_limit_per_index_fails_the_index_then_the_job() {
+        let api = api();
+        create_job(&api, json!({"completions": 2, "parallelism": 2, "completionMode": "Indexed", "backoffLimitPerIndex": 0}));
+        reconcile_job(&api);
+        let pods = active_pods(&api);
+        fail(&api, &pods[0], 1);
+        reconcile_job(&api);
+        // Index 0 used up its retries; index 1 still runs, so the job goes on.
+        let j = job(&api);
+        assert_eq!(j["status"]["failedIndexes"], "0");
+        assert!(!util::condition_true(&j, "Failed"));
+        assert_eq!(active_pods(&api).iter().map(pod_index).collect::<Vec<_>>(), [Some(1)]);
+        succeed(&api, &pods[1]);
+        reconcile_job(&api);
+        let j = job(&api);
+        assert_eq!(condition_of(&j, "Failed"), Some(("True".into(), "FailedIndexes".into())));
+        assert_eq!(j["status"]["completedIndexes"], "1");
+        assert!(!util::condition_true(&j, "Complete"));
+    }
+
+    #[test]
+    fn max_failed_indexes_fails_the_job_early() {
+        let api = api();
+        create_job(&api, json!({"completions": 3, "parallelism": 3, "completionMode": "Indexed",
+            "backoffLimitPerIndex": 1, "maxFailedIndexes": 0}));
+        reconcile_job(&api);
+        let pod0 = active_pods(&api)[0].clone();
+        fail(&api, &pod0, 1);
+        reconcile_job(&api);
+        // One retry per index: index 0 runs again.
+        assert_eq!(active_pods(&api).iter().map(pod_index).collect::<Vec<_>>(), [Some(0), Some(1), Some(2)]);
+        assert_eq!(job(&api)["status"]["failedIndexes"], "");
+        fail(&api, &active_pods(&api)[0], 1);
+        reconcile_job(&api);
+        let j = job(&api);
+        assert_eq!(condition_of(&j, "Failed"), Some(("True".into(), "MaxFailedIndexesExceeded".into())));
+        assert_eq!(j["status"]["failedIndexes"], "0");
+        assert!(active_pods(&api).is_empty());
+    }
+
+    #[test]
+    fn fail_index_rule_fails_only_that_index() {
+        let api = api();
+        create_job(&api, json!({"completions": 2, "parallelism": 2, "completionMode": "Indexed", "backoffLimitPerIndex": 3,
+            "podFailurePolicy": {"rules": [{"action": "FailIndex", "onExitCodes": {"operator": "In", "values": [3]}}]}}));
+        reconcile_job(&api);
+        let pods = active_pods(&api);
+        fail(&api, &pods[1], 3);
+        reconcile_job(&api);
+        assert_eq!(job(&api)["status"]["failedIndexes"], "1");
+        assert_eq!(active_pods(&api).iter().map(pod_index).collect::<Vec<_>>(), [Some(0)]);
+        succeed(&api, &pods[0]);
+        reconcile_job(&api);
+        assert_eq!(condition_of(&job(&api), "Failed"), Some(("True".into(), "FailedIndexes".into())));
+    }
+
+    #[test]
+    fn success_policy_completes_on_the_named_indexes() {
+        let api = api();
+        create_job(&api, json!({"completions": 3, "parallelism": 3, "completionMode": "Indexed",
+            "successPolicy": {"rules": [{"succeededIndexes": "1-2"}]}}));
+        reconcile_job(&api);
+        let pods = active_pods(&api);
+        succeed(&api, &pods[1]);
+        reconcile_job(&api);
+        assert!(!util::condition_true(&job(&api), "Complete"));
+        succeed(&api, &pods[2]);
+        reconcile_job(&api);
+        let j = job(&api);
+        assert_eq!(condition_of(&j, "Complete"), Some(("True".into(), "SuccessPolicy".into())));
+        assert_eq!(condition_of(&j, "SuccessCriteriaMet"), Some(("True".into(), "SuccessPolicy".into())));
+        // Index 0 was still running and is stopped.
+        assert!(active_pods(&api).is_empty());
+        assert_eq!(j["status"]["completedIndexes"], "1-2");
+    }
+
+    #[test]
+    fn success_policy_counts() {
+        let rule = |r: Value| json!({"spec": {"successPolicy": {"rules": [r]}}});
+        let set = |v: &[i64]| v.iter().copied().collect::<BTreeSet<i64>>();
+        assert!(success_policy_met(&rule(json!({"succeededCount": 2})), &set(&[0, 4])));
+        assert!(!success_policy_met(&rule(json!({"succeededCount": 3})), &set(&[0, 4])));
+        assert!(success_policy_met(&rule(json!({"succeededIndexes": "0-3", "succeededCount": 1})), &set(&[2])));
+        assert!(!success_policy_met(&rule(json!({"succeededIndexes": "0-3", "succeededCount": 2})), &set(&[2, 5])));
+        assert!(!success_policy_met(&rule(json!({})), &set(&[0])));
+        assert!(!success_policy_met(&json!({"spec": {}}), &set(&[0])));
+    }
+
+    #[test]
+    fn suspend_stops_pods_and_resume_starts_them() {
+        let api = api();
+        create_job(&api, json!({"completions": 2, "parallelism": 2, "suspend": true}));
+        reconcile_job(&api);
+        let j = job(&api);
+        assert!(active_pods(&api).is_empty());
+        assert_eq!(condition_of(&j, "Suspended"), Some(("True".into(), "JobSuspended".into())));
+        assert!(j["status"].get("startTime").is_none());
+
+        set_spec(&api, |s| s["suspend"] = json!(false));
+        reconcile_job(&api);
+        let j = job(&api);
+        assert_eq!(active_pods(&api).len(), 2);
+        assert_eq!(condition_of(&j, "Suspended"), Some(("False".into(), "JobResumed".into())));
+        assert!(j["status"]["startTime"].is_string());
+
+        set_spec(&api, |s| s["suspend"] = json!(true));
+        reconcile_job(&api);
+        assert!(active_pods(&api).is_empty());
+        assert_eq!(condition_of(&job(&api), "Suspended"), Some(("True".into(), "JobSuspended".into())));
+        assert_eq!(job(&api)["status"]["active"], 0);
+    }
+
+    #[test]
+    fn active_deadline_fails_the_job() {
+        let api = api();
+        create_job(&api, json!({"activeDeadlineSeconds": 60}));
+        reconcile_job(&api);
+        assert_eq!(active_pods(&api).len(), 1);
+        assert!(!util::condition_true(&job(&api), "Failed"));
+        let j = job(&api);
+        let mut st = j["status"].clone();
+        st["startTime"] = json!(util::rfc3339(util::now() - chrono::Duration::seconds(61)));
+        util::write_status(&api, "batch", "jobs", &j, st).unwrap();
+        reconcile_job(&api);
+        let j = job(&api);
+        assert_eq!(condition_of(&j, "Failed"), Some(("True".into(), "DeadlineExceeded".into())));
+        assert!(active_pods(&api).is_empty());
+    }
+
+    #[test]
+    fn ttl_after_finished_deletes_the_job() {
+        let api = api();
+        create_job(&api, json!({"ttlSecondsAfterFinished": 100}));
+        reconcile_job(&api);
+        succeed(&api, &active_pods(&api)[0]);
+        reconcile_job(&api);
+        assert!(util::condition_true(&job(&api), "Complete"));
+        let left = reconcile_job(&api).expect("requeued until the TTL");
+        assert!(left > Duration::from_secs(95) && left <= Duration::from_secs(100), "{left:?}");
+        assert!(api.get_object("batch", "jobs", "default", "pi").is_some());
+
+        // A failed job without completionTime counts from its condition.
+        let j = job(&api);
+        let mut st = j["status"].clone();
+        st.as_object_mut().unwrap().remove("completionTime");
+        st["conditions"] = json!([{"type": "Failed", "status": "True", "lastTransitionTime": util::rfc3339(util::now() - chrono::Duration::seconds(200))}]);
+        util::write_status(&api, "batch", "jobs", &j, st).unwrap();
+        assert_eq!(reconcile_job(&api), None);
+        assert!(api.get_object("batch", "jobs", "default", "pi").is_none());
+        // Gone: nothing to do.
+        assert_eq!(reconcile_job(&api), None);
+    }
+
+    #[test]
+    fn ttl_zero_deletes_a_finished_job_at_once() {
+        let api = api();
+        create_job(&api, json!({"ttlSecondsAfterFinished": 0}));
+        reconcile_job(&api);
+        fail(&api, &active_pods(&api)[0], 1);
+        set_spec(&api, |s| s["backoffLimit"] = json!(0));
+        reconcile_job(&api);
+        assert!(util::condition_true(&job(&api), "Failed"));
+        assert_eq!(reconcile_job(&api), None);
+        assert!(api.get_object("batch", "jobs", "default", "pi").is_none());
+    }
+
+    #[test]
+    fn failed_container_reports_the_first_nonzero_exit() {
+        let pod = json!({"status": {"containerStatuses": [
+            {"name": "a", "state": {"terminated": {"exitCode": 0}}},
+            {"name": "b", "state": {"terminated": {"exitCode": 5}}},
+        ]}});
+        assert_eq!(failed_container(&pod), ("b".to_string(), 5));
+        assert_eq!(failed_container(&json!({})), (String::new(), 0));
     }
 }
