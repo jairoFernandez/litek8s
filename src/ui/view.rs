@@ -382,20 +382,24 @@ fn gib(b: u64) -> String {
 /// (litek8s, pods, other clusters, the base, then cache and freed pages,
 /// which are not in use); colored by the guest's own pressure. macOS's
 /// footprint of the VM also counts pages the guest freed long ago, so it
-/// can exceed the VM's size while the guest has plenty available.
+/// can exceed the VM's size while the guest has plenty available. The
+/// Docker API's containers are left out: they are not the cluster's (the
+/// docker box shows them).
 fn memory_stack(t: &Theme, b: &crate::dev::memory::Breakdown) -> Option<((Option<f64>, String), Stack)> {
     use crate::dev::memory::Seg;
     let limit = b.limit.filter(|l| *l > 0)?;
-    let in_use = b.in_use();
+    let in_use = b.cluster_in_use();
     let all: u64 = b.lines.iter().map(|l| l.bytes).sum();
     let scale = all.max(limit) as f64;
     let parts = b
         .lines
         .iter()
+        .filter(|l| l.seg != Seg::Docker)
         .map(|l| {
             let (style, glyph) = match l.seg {
                 Seg::Litek8s => (t.accent.remove_modifier(Modifier::BOLD), "█"),
                 Seg::Pods => (t.info, "█"),
+                Seg::Docker => (t.warn, "█"),
                 Seg::Others => (t.marked.remove_modifier(Modifier::BOLD), "█"),
                 Seg::Base => (t.done, "█"),
                 Seg::Cache => (t.dim, "▒"),
@@ -421,7 +425,7 @@ fn figures(app: &App) -> Figures {
     let cpus = app.home_cpus();
     let mem_total = app.home_memory();
     let remote_cpu = app.cpu.as_ref().filter(|_| h.status == DevStatus::Remote && h.cpu_pct.is_none());
-    let cpu = match (h.cpu_pct, cpus) {
+    let cpu = match (app.cluster_cpu_pct(), cpus) {
         _ if remote_cpu.is_some() => {
             let c = remote_cpu.unwrap();
             (Some(c.total_pct / 100.0 / c.cpus.max(1.0)), format!("of {:.0} CPUs · {} of one", c.cpus, pct(c.total_pct, 0)))
@@ -556,10 +560,14 @@ fn home(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     // One column: the resources, where the tools point, then the
     // breakdowns (`b` picks which comes first) while there is room.
     let out_rows = if app.dev_output.is_empty() { 1 } else { output_rows(app, area.width) };
-    let res_h = 7u16.min(area.height);
+    let remote = h.status == DevStatus::Remote;
+    // A remote litek8s: its nodes in the box; else this machine's Docker
+    // in a box of its own under the cluster's.
+    let res_h = if remote { 7u16 } else { 6 }.min(area.height);
+    let docker_h = if remote { 0 } else { 3u16.min(area.height.saturating_sub(res_h)) };
     // The breakdown `b` picked first, then the connections if they fit,
     // then the other breakdowns while there is room.
-    let mut avail = area.height.saturating_sub(res_h + out_rows);
+    let mut avail = area.height.saturating_sub(res_h + docker_h + out_rows);
     let all = explain_boxes(app);
     let n = all.len();
     let mut boxes: Vec<(&Explain, u16)> = Vec::new();
@@ -577,8 +585,15 @@ fn home(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     }
     let conn_h = if avail >= 5 { 5 } else { 0 };
     let rows: u16 = boxes.iter().map(|(_, r)| r).sum();
-    let [res, explained, conn, out, _] =
-        Layout::vertical([Constraint::Length(res_h), Constraint::Length(rows), Constraint::Length(conn_h), Constraint::Length(out_rows), Constraint::Fill(1)]).areas(area);
+    let [res, docker, explained, conn, out, _] = Layout::vertical([
+        Constraint::Length(res_h),
+        Constraint::Length(docker_h),
+        Constraint::Length(rows),
+        Constraint::Length(conn_h),
+        Constraint::Length(out_rows),
+        Constraint::Fill(1),
+    ])
+    .areas(area);
 
     let w = res.width.saturating_sub(2) as usize;
     let history = (w >= 88 && !app.history.is_empty()).then_some(());
@@ -601,24 +616,28 @@ fn home(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
         pods.extend(flat(pod_chips(app, t)));
     }
     lines.push(Line::from(pods));
-    let mut ctrs = vec![Span::styled(if h.status == DevStatus::Remote { " nodes  " } else { " ctrs   " }, t.dim)];
-    if h.status == DevStatus::Remote {
+    if remote {
+        let mut nodes = vec![Span::styled(" nodes  ", t.dim)];
         let names = app.node_reports.names();
-        ctrs.push(Span::styled(names.len().to_string(), t.bold));
-        ctrs.push(Span::raw(format!(" · showing {}", app.scope.as_deref().map(|n| format!("node {n}")).unwrap_or_else(|| "the cluster".into()))));
+        nodes.push(Span::styled(names.len().to_string(), t.bold));
+        nodes.push(Span::raw(format!(" · showing {}", app.scope.as_deref().map(|n| format!("node {n}")).unwrap_or_else(|| "the cluster".into()))));
         if names.len() > 1 {
-            ctrs.push(Span::styled("  n: next", t.dim));
+            nodes.push(Span::styled("  n: next", t.dim));
         }
-    } else if engine_down {
-        ctrs.push(Span::styled(if down { "– (engine not running)" } else { "–" }, t.dim));
-    } else {
-        ctrs.extend(flat(container_chips(app, t)));
-        ctrs.push(Span::styled("images ", t.dim));
-        ctrs.push(Span::raw(format!("{} · {}", app.images.len(), bytes(app.images.iter().map(|i| i.size).sum()))));
+        lines.push(Line::from(nodes));
     }
-    lines.push(Line::from(ctrs));
     let state = badge(app, t, (res.width as usize).saturating_sub(18));
-    f.render_widget(Paragraph::new(lines).block(t.block_with(Line::from(state), vec![Span::styled("resources", t.dim)])), res);
+    f.render_widget(Paragraph::new(lines).block(t.block_with(Line::from(state), vec![Span::styled("cluster", t.dim)])), res);
+    if docker_h > 0 {
+        let mut line = vec![Span::raw(" ")];
+        if engine_down {
+            line.push(Span::styled(if down { "– (engine not running)" } else { "–" }, t.dim));
+        } else {
+            line.extend(flat(container_chips(app, t)));
+            line.extend(docker_store_spans(app, t, false));
+        }
+        f.render_widget(Paragraph::new(Line::from(line)).block(docker_block(app, t, docker.width)), docker);
+    }
 
     if conn_h > 0 {
         connections(f, app, t, conn, false);
@@ -633,6 +652,46 @@ fn home(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     } else {
         tip(f, app, t, out);
     }
+}
+
+/// What the Docker API's containers take, apart from the cluster's
+/// figures: on the cluster's own socket, their share of the VM or sandbox
+/// (from the breakdowns); on another engine (`--docker-host`), only what
+/// that engine says it has.
+fn docker_figures(app: &App) -> String {
+    if app.docker_error.is_some() {
+        return String::new();
+    }
+    if !app.docker_is_cluster {
+        return match (app.vm_cpus, app.vm_memory) {
+            (Some(c), Some(m)) => format!("its engine: {c} CPUs · {}", bytes(m)),
+            (Some(c), None) => format!("its engine: {c} CPUs"),
+            _ => String::new(),
+        };
+    }
+    let cpu = app.cpu.as_ref().map(|c| format!("cpu {} of one", pct(c.docker_pct, 1)));
+    let mem = app.home.memory.as_ref().map(|m| format!("mem {}", bytes(m.docker())));
+    [cpu, mem].into_iter().flatten().collect::<Vec<_>>().join(" · ")
+}
+
+/// The docker box's border: whose socket, and what its containers take.
+fn docker_block(app: &App, t: &Theme, width: u16) -> ratatui::widgets::Block<'static> {
+    let figures = docker_figures(app);
+    let socket = app.docker_endpoint.strip_prefix("unix://").unwrap_or(&app.docker_endpoint);
+    let room = (width as usize).saturating_sub(figures.chars().count() + 16);
+    let title = Line::from(vec![Span::styled("docker", t.title), Span::styled(format!(" · {}", trunc_left(&home_dir_short(socket), room)), t.dim)]);
+    if figures.is_empty() { t.block(title) } else { t.block_with(title, vec![Span::styled(figures, t.dim)]) }
+}
+
+/// `images 3 · 235 MB   volumes 2 · 52 MB` (volumes when `always` or
+/// there are some).
+fn docker_store_spans(app: &App, t: &Theme, always: bool) -> Vec<Span<'static>> {
+    let mut spans = vec![Span::styled("images ", t.dim), Span::raw(format!("{} · {}", app.images.len(), bytes(app.images.iter().map(|i| i.size).sum())))];
+    if always || !app.volumes.is_empty() {
+        spans.push(Span::styled("   vols ", t.dim));
+        spans.push(Span::raw(format!("{} · {}", app.volumes.len(), bytes(app.volumes.iter().filter_map(|v| v.size).sum()))));
+    }
+    spans
 }
 
 fn tip(f: &mut Frame, app: &App, t: &Theme, out: Rect) {
@@ -713,7 +772,8 @@ fn home_wide(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     let (mem_b, cpu_b, disk_b) = (find(0), find(1), find(2));
     let lines_of = |b: Option<&Explain>| b.map(|b| b.lines.len() as u16).unwrap_or(0);
     let need_a = 4 + lines_of(cpu_b).max(lines_of(mem_b));
-    let need_b = (3 + lines_of(disk_b)).max(6);
+    // The pods' box and the docker box (containers, images) beside disk.
+    let need_b = (3 + lines_of(disk_b)).max(if h.status == DevStatus::Remote { 6 } else { 7 });
     let room = area.height.saturating_sub(conn_h + out_rows);
     // Room to spare goes to the history graphs (up to 8 rows).
     let graph_h = 1 + room.saturating_sub(need_a + need_b).min(7);
@@ -747,16 +807,24 @@ fn home_wide(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     if remote {
         // A remote litek8s: its nodes (this machine's Docker is not its).
         lines.extend(node_lines(app, t, ww));
-    } else if engine_down {
-        lines.push(Line::from(vec![Span::styled(" containers  ", t.dim), Span::styled(if down { "– (engine not running)" } else { "–" }, t.dim)]));
+        f.render_widget(Paragraph::new(lines).block(t.block("workloads · nodes")), work_r);
     } else {
-        lines.extend(chip_lines(t, " containers  ", container_chips(app, t), ww));
+        // The cluster's pods, then the Docker API's containers in a box of
+        // their own: they run on the node but are not the cluster's.
+        let pods_h = (lines.len() as u16 + 2).min(work_r.height.saturating_sub(3));
+        let [pods_r, docker_r] = Layout::vertical([Constraint::Length(pods_h), Constraint::Fill(1)]).areas(work_r);
+        f.render_widget(Paragraph::new(lines).block(t.block("pods")), pods_r);
+        let mut dl = Vec::new();
+        if engine_down {
+            dl.push(Line::from(vec![Span::styled(" containers  ", t.dim), Span::styled(if down { "– (engine not running)" } else { "–" }, t.dim)]));
+        } else {
+            dl.extend(chip_lines(t, " containers  ", container_chips(app, t), ww));
+            let mut store = vec![Span::raw(" ")];
+            store.extend(docker_store_spans(app, t, true));
+            dl.push(Line::from(store));
+        }
+        f.render_widget(Paragraph::new(dl).block(docker_block(app, t, docker_r.width)), docker_r);
     }
-    if !engine_down && !remote {
-        lines.push(Line::from(vec![Span::styled(" images      ", t.dim), Span::styled(app.images.len().to_string(), t.bold), Span::raw(format!(" · {}", bytes(app.images.iter().map(|i| i.size).sum())))]));
-        lines.push(Line::from(vec![Span::styled(" volumes     ", t.dim), Span::styled(app.volumes.len().to_string(), t.bold), Span::raw(format!(" · {}", bytes(app.volumes.iter().filter_map(|v| v.size).sum())))]));
-    }
-    f.render_widget(Paragraph::new(lines).block(t.block(if remote { "workloads · nodes" } else { "workloads" })), work_r);
     connections(f, app, t, conn, true);
     if !app.dev_output.is_empty() {
         dev_output(f, app, t, out);

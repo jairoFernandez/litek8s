@@ -27,11 +27,25 @@ impl Split {
         self.cgroups.iter().map(|(_, u)| u).sum()
     }
 
+    pub fn pods_usec(&self) -> u64 {
+        self.cgroups.iter().filter(|(id, _)| !is_docker(id)).map(|(_, u)| u).sum()
+    }
+
+    /// The Docker API's containers and builds.
+    pub fn docker_usec(&self) -> u64 {
+        self.cgroups.iter().filter(|(id, _)| is_docker(id)).map(|(_, u)| u).sum()
+    }
+
     fn merge(mut self, o: Split) -> Split {
         self.litek8s_usec += o.litek8s_usec;
         self.cgroups.extend(o.cgroups);
         self
     }
+}
+
+/// A Docker API container's or build's cgroup id (not a pod's).
+pub fn is_docker(id: &str) -> bool {
+    id.starts_with("docker/") || id.starts_with("build/")
 }
 
 pub fn usage_usec(dir: &Path) -> Option<u64> {
@@ -192,6 +206,9 @@ pub struct Breakdown {
     pub cpus: f64,
     pub what: String,
     pub lines: Vec<Line>,
+    /// % of one CPU the Docker API's containers and builds took (in the
+    /// total, not in the cluster's share).
+    pub docker_pct: f64,
 }
 
 /// Percentages between two samples; `name` turns a cgroup id into a pod or
@@ -215,14 +232,24 @@ pub fn breakdown(prev: &Sample, now: &Sample, cluster: &str, name: &dyn Fn(&str)
         .collect();
     per.sort_by(|a, b| b.1.total_cmp(&a.1));
     // fold from 0.0: summing an empty f64 iterator yields -0.0, shown as "-0.0%".
-    let containers: f64 = per.iter().fold(0.0, |a, (_, p)| a + p);
+    let sum = |docker: bool| per.iter().filter(|(id, _)| is_docker(id) == docker).fold(0.0, |a, (_, p)| a + p);
+    let (pods, docker) = (sum(false), sum(true));
+    let containers = pods + docker;
     let line = |label: String, pct: f64, note: &str| Line { label, pct, note: note.to_string(), indent: false };
     // A remote litek8s is not one of this machine's dev clusters: no name.
     let label = if now.kind == Kind::Remote { "litek8s".to_string() } else { format!("litek8s ({cluster})") };
     let mut lines = vec![line(label, litek8s, "API server, controllers, node agent")];
-    lines.push(line("pods & containers".into(), containers, ""));
-    for (id, p) in per.iter().take(3).filter(|(_, p)| *p >= 0.05) {
-        lines.push(Line { label: name(id), pct: *p, note: String::new(), indent: true });
+    // Pods, then the Docker API's containers (on the node, not in the
+    // cluster), each with its busiest three.
+    let has_docker = per.iter().any(|(id, _)| is_docker(id));
+    for (of_docker, label, value, note) in [(false, "pods", pods, ""), (true, "Docker containers", docker, crate::dev::memory::DOCKER_NOTE)] {
+        if of_docker && !has_docker && now.kind == Kind::Remote {
+            continue;
+        }
+        lines.push(line(label.into(), value, note));
+        for (id, p) in per.iter().filter(|(id, _)| is_docker(id) == of_docker).take(3).filter(|(_, p)| *p >= 0.05) {
+            lines.push(Line { label: name(id), pct: *p, note: String::new(), indent: true });
+        }
     }
     if now.others > 0 {
         lines.push(line(format!("other clusters ({})", now.others), pct(now.others_usec, prev.others_usec), "litek8s and pods of the rest"));
@@ -247,7 +274,7 @@ pub fn breakdown(prev: &Sample, now: &Sample, cluster: &str, name: &dyn Fn(&str)
             "the machine, busy"
         }
     };
-    Some(Breakdown { total_pct: total, cpus: now.cpus, what: what.to_string(), lines })
+    Some(Breakdown { total_pct: total, cpus: now.cpus, what: what.to_string(), lines, docker_pct: docker })
 }
 
 #[cfg(test)]
@@ -313,7 +340,10 @@ mod tests {
         assert!((b.total_pct - 40.0).abs() < 1e-6);
         let get = |l: &str| b.lines.iter().find(|x| x.label == l).unwrap().pct;
         assert!((get("litek8s (dev)") - 5.0).abs() < 1e-6);
-        assert!((get("pods & containers") - 21.0).abs() < 1e-6);
+        assert!((get("pods") - 20.0).abs() < 1e-6);
+        // The Docker API's container is not a pod: its own line.
+        assert!((get("Docker containers") - 1.0).abs() < 1e-6);
+        assert!((get("n:docker/w") - 1.0).abs() < 1e-6);
         assert!((get("n:pod_x") - 20.0).abs() < 1e-6);
         assert!((get("guest kernel & other") - 2.0).abs() < 1e-6);
         assert!((get("VM overhead") - 10.0).abs() < 1e-6);

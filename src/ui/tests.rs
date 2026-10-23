@@ -68,6 +68,8 @@ fn sample_app() -> App {
         api: "http://127.0.0.1:6443".into(),
         cpu_pct: Some(12.0),
         mem_used: Some(1_200_000_000),
+        env_cpus: Some(4.0),
+        env_memory: Some(4_294_967_296),
         disk_used: Some(2_300_000_000),
         disk_free: Some(150_000_000_000),
         data_dir: "/Users/me/Library/Application Support/dev.litek8s/dev".into(),
@@ -553,13 +555,13 @@ fn home_says_dash_while_the_engine_is_down() {
 fn home_explains_the_memory_figure() {
     let mut app = sample_app();
     let mem = crate::dev::memory::parse_meminfo("MemTotal: 3934000 kB\nMemFree: 3700000 kB\nCached: 125000 kB\nShmem: 51200 kB\nSReclaimable: 10000 kB\nSUnreclaim: 35000 kB\n");
-    let shown = crate::dev::memory::Usage { litek8s: 12 << 20, containers: 30 << 20, cache: 0 };
+    let shown = crate::dev::memory::Usage { litek8s: 12 << 20, pods: 30 << 20, docker: 0, cache: 0 };
     let mut home = app.home.clone();
     home.memory = Some(crate::dev::memory::vm_breakdown(421 << 20, 4096 << 20, &mem, 0, None, "dev", shown, &[]));
     app.apply(Msg::Home(Box::new(home)));
     let s = render(&app, 80, 24);
     assert!(s.contains("Memory · 441 MB (what macOS charges the VM)"), "{s}");
-    assert!(s.contains("litek8s (dev)") && s.contains("12.6 MB") && s.contains("pods & containers"), "{s}");
+    assert!(s.contains("litek8s (dev)") && s.contains("12.6 MB") && s.contains(" pods ") && s.contains("Docker containers"), "{s}");
     assert!(s.contains("Linux kernel + base") && s.contains("fixed cost: kernel") && s.contains("reclaimable"), "{s}");
     assert!(s.contains("✓ docker context"), "the contexts still fit:\n{s}");
     app.key(key('?'));
@@ -662,15 +664,15 @@ fn home_collapses_on_small_terminals() {
     }
     assert_eq!(app.history.len(), 31);
     let wide = render(&app, 120, 40);
-    assert!(wide.contains("─ cpu ") && wide.contains("─ memory ") && wide.contains("─ workloads "), "{wide}");
+    assert!(wide.contains("─ cpu ") && wide.contains("─ memory ") && wide.contains("─ pods ") && wide.contains("─ docker "), "{wide}");
     // The graph: block columns rising to the right.
     assert!(wide.contains("▁") || wide.contains("▂"), "{wide}");
     let narrow = render(&app, 80, 24);
-    assert!(narrow.contains("─ resources ─") && !narrow.contains("─ workloads "), "{narrow}");
+    assert!(narrow.contains("─ cluster ─") && narrow.contains("─ docker ") && !narrow.contains("─ pods "), "{narrow}");
     assert!(!narrow.contains('▁') && !narrow.contains('▂'), "no sparkline at 80 columns:\n{narrow}");
     // A bit wider, the sparklines come back in the single column.
     let mid = render(&app, 96, 30);
-    assert!(mid.contains("─ resources ─") && (mid.contains('▆') || mid.contains('█')), "{mid}");
+    assert!(mid.contains("─ cluster ─") && (mid.contains('▆') || mid.contains('█')), "{mid}");
 }
 
 /// The history is kept only while Home is on screen (no gaps of a
@@ -779,7 +781,7 @@ fn memory_meter_is_in_use_against_the_limit_not_the_footprint() {
     let mut app = sample_app();
     app.kube.theme = theme(Preset::Default, Depth::True, false, Some(Bg::Dark));
     let t = *app.theme();
-    let shown = crate::dev::memory::Usage { litek8s: 40 << 20, containers: 600 << 20, cache: 0 };
+    let shown = crate::dev::memory::Usage { litek8s: 40 << 20, pods: 600 << 20, docker: 0, cache: 0 };
     let roomy = crate::dev::memory::parse_meminfo("MemTotal: 4000000 kB\nMemFree: 2600000 kB\nMemAvailable: 3500000 kB\nCached: 1000000 kB\nSUnreclaim: 40000 kB\n");
     let mut home = app.home.clone();
     home.mem_used = Some(4_300_000_000);
@@ -808,7 +810,7 @@ fn memory_meter_is_in_use_against_the_limit_not_the_footprint() {
     assert!(mem < 0.5, "{mem}");
     // A guest with 100 MB available is short: red, and it says so.
     let tight = crate::dev::memory::parse_meminfo("MemTotal: 4000000 kB\nMemFree: 50000 kB\nMemAvailable: 100000 kB\nCached: 80000 kB\nSUnreclaim: 40000 kB\n");
-    home.memory = Some(crate::dev::memory::vm_breakdown(4_300_000_000, 4096 << 20, &tight, 0, None, "dev", crate::dev::memory::Usage { litek8s: 40 << 20, containers: 3500 << 20, cache: 0 }, &[]));
+    home.memory = Some(crate::dev::memory::vm_breakdown(4_300_000_000, 4096 << 20, &tight, 0, None, "dev", crate::dev::memory::Usage { litek8s: 40 << 20, pods: 3500 << 20, docker: 0, cache: 0 }, &[]));
     app.apply(Msg::Home(Box::new(home)));
     let s = render(&app, 80, 24);
     assert!(s.contains("· short"), "{s}");
@@ -824,6 +826,7 @@ fn cpu_screen(lines: &[(&str, f64)]) -> String {
         cpus: 16.0,
         what: "the sandbox's cgroup".into(),
         lines: lines.iter().map(|(l, p)| crate::dev::cpu::Line { label: l.to_string(), pct: *p, note: String::new(), indent: false }).collect(),
+        docker_pct: 0.0,
     });
     app.explain = 1;
     render(&app, 80, 24)
@@ -877,12 +880,12 @@ fn memory_and_disk_bars_name_their_scale() {
     let mut app = sample_app();
     let mem = crate::dev::memory::parse_meminfo("MemTotal: 4000000 kB\nMemFree: 3000000 kB\nMemAvailable: 3500000 kB\nCached: 100000 kB\n");
     let mut home = app.home.clone();
-    home.memory = Some(crate::dev::memory::vm_breakdown(600 << 20, 4096 << 20, &mem, 0, None, "dev", crate::dev::memory::Usage { litek8s: 12 << 20, containers: 2048 << 20, cache: 0 }, &[]));
+    home.memory = Some(crate::dev::memory::vm_breakdown(600 << 20, 4096 << 20, &mem, 0, None, "dev", crate::dev::memory::Usage { litek8s: 12 << 20, pods: 2048 << 20, docker: 0, cache: 0 }, &[]));
     app.apply(Msg::Home(Box::new(home)));
     let s = render(&app, 80, 24);
     assert!(s.contains("bar: VM limit 4.0 GiB"), "{s}");
     // 2 GiB of pods is half of the 4 GiB limit: half a bar.
-    let full = s.lines().find(|l| l.contains(" pods & containers ")).unwrap();
+    let full = s.lines().find(|l| l.contains(" pods ") && l.contains("GB")).unwrap();
     let bar: String = full.chars().filter(|c| "█▉▊▋▌▍▎▏".contains(*c)).collect();
     let litek8s: String = s.lines().find(|l| l.contains(" litek8s (dev) ")).unwrap().chars().filter(|c| "█▉▊▋▌▍▎▏".contains(*c)).collect();
     assert!(bar.chars().count() >= 5 && bar.chars().count() <= 7, "{s}");
@@ -891,7 +894,7 @@ fn memory_and_disk_bars_name_their_scale() {
     // Under a GiB the meter says MB: a sliver never reads "0.0 GiB".
     let mut home = app.home.clone();
     let idle = crate::dev::memory::parse_meminfo("MemTotal: 4000000 kB\nMemFree: 3900000 kB\nMemAvailable: 3950000 kB\nCached: 20000 kB\n");
-    home.memory = Some(crate::dev::memory::vm_breakdown(600 << 20, 4096 << 20, &idle, 0, None, "dev", crate::dev::memory::Usage { litek8s: 12 << 20, containers: 20 << 20, cache: 0 }, &[]));
+    home.memory = Some(crate::dev::memory::vm_breakdown(600 << 20, 4096 << 20, &idle, 0, None, "dev", crate::dev::memory::Usage { litek8s: 12 << 20, pods: 20 << 20, docker: 0, cache: 0 }, &[]));
     app.apply(Msg::Home(Box::new(home)));
     let s = render(&app, 80, 24);
     assert!(s.contains(" MB in use · VM limit 4.0 GiB") && !s.contains("0.0 GiB in use"), "{s}");
@@ -1046,7 +1049,7 @@ fn a_remote_litek8s_graphs_and_names_its_node() {
     let mut app = remote_app();
     let t0 = std::time::Instant::now();
     let mem = crate::dev::memory::MemInfo { total: 4 << 30, free: 3 << 30, available: 3600 << 20, cached: 580 << 20, buffers: 30 << 20, shmem: 5 << 20, slab_reclaimable: 40 << 20, ..Default::default() };
-    let node = crate::dev::memory::NodeMemory { node: "lab2-control-1".into(), usage: crate::dev::memory::Usage { litek8s: 8 << 20, containers: 0, cache: 0 }, meminfo: Some(mem) };
+    let node = crate::dev::memory::NodeMemory { node: "lab2-control-1".into(), usage: crate::dev::memory::Usage { litek8s: 8 << 20, pods: 0, docker: 0, cache: 0 }, meminfo: Some(mem) };
     for i in 0..3u64 {
         let home = HomeSample {
             status: DevStatus::Remote,
@@ -1122,7 +1125,7 @@ fn a_remote_cluster_adds_its_nodes_up_and_shows_each_one() {
     let gib = 1u64 << 30;
     let mem = |node: &str, used: u64| memory::NodeMemory {
         node: node.into(),
-        usage: memory::Usage { litek8s: 70 << 20, containers: used, cache: 0 },
+        usage: memory::Usage { litek8s: 70 << 20, pods: used, docker: 0, cache: 0 },
         meminfo: Some(memory::MemInfo { total: 2 * gib, free: gib, available: gib, ..Default::default() }),
     };
     let cpu = |node: &str, busy: u64| cpu::NodeCpu { node: node.into(), split: cpu::Split::default(), proc_stat: Some(cpu::ProcStat { busy_usec: busy, total_usec: busy * 10, cpus: 1 }) };
@@ -1158,4 +1161,45 @@ fn a_remote_cluster_adds_its_nodes_up_and_shows_each_one() {
     assert_eq!(app.scope.as_deref(), Some("worker-1"));
     app.key(key('n'));
     assert_eq!(app.scope, None);
+}
+
+/// The Docker API's containers run on the cluster's node but are not the
+/// cluster's: Home's cluster figures leave them out and its docker box
+/// shows them; another engine's capacity (`--docker-host`) never becomes
+/// the cluster's.
+#[test]
+fn local_docker_stays_out_of_the_cluster_figures() {
+    use crate::dev::cpu::{Kind, Sample, Split};
+    let mut app = sample_app();
+    // Another engine with more CPUs and memory than the VM.
+    app.docker_is_cluster = false;
+    app.apply(Msg::DockerInfo { version: "28.0".into(), cpus: Some(16), memory: Some(32 << 30), os: "Docker Desktop".into() });
+    let s = render(&app, 80, 24);
+    assert!(s.contains("3% of 4 CPUs · 12% of one") && s.contains("1.2 GB of 4.3 GB"), "the VM's size, not the engine's:\n{s}");
+    assert!(s.contains("─ docker ") && s.contains("its engine: 16 CPUs · 34.4 GB"), "{s}");
+    assert!(!s.contains("of 16 CPUs"), "{s}");
+
+    // The cluster's own Docker API: 1 GiB and 6% of a CPU are Docker's.
+    app.docker_is_cluster = true;
+    let mem = crate::dev::memory::parse_meminfo("MemTotal: 4000000 kB\nMemFree: 2000000 kB\nMemAvailable: 3000000 kB\nCached: 100000 kB\n");
+    let t0 = std::time::Instant::now();
+    let split = |pod: u64, docker: u64| Split { litek8s_usec: 0, cgroups: vec![("pod_x".into(), pod), ("docker/abc".into(), docker)] };
+    for (at, total, pod, docker) in [(t0, 0, 0, 0), (t0 + std::time::Duration::from_secs(1), 120_000, 40_000, 60_000)] {
+        let mut home = app.home.clone();
+        home.cpu_pct = Some(12.0);
+        home.memory = Some(crate::dev::memory::vm_breakdown(2 << 30, 4096 << 20, &mem, 0, None, "dev", crate::dev::memory::Usage { litek8s: 50 << 20, pods: 200 << 20, docker: 1 << 30, cache: 0 }, &[]));
+        home.cpu_sample = Some(Sample { at: Some(at), total_usec: total, shown: split(pod, docker), guest_busy_usec: Some(total), cpus: 4.0, kind: Kind::Vm, ..Default::default() });
+        app.apply(Msg::Home(Box::new(home)));
+    }
+    let s = render(&app, 80, 24);
+    assert!(s.contains("─ docker ") && s.contains("cpu 6.0% of one · mem 1.1 GB"), "{s}");
+    // 12% of one CPU for the VM, 6% of it Docker's: the cluster is 6%.
+    assert!(s.contains("2% of 4 CPUs · 6% of one"), "{s}");
+    let b = app.home.memory.as_ref().unwrap();
+    assert_eq!(b.cluster_in_use(), b.in_use() - (1 << 30));
+    // Without Docker's GiB the cluster holds under one.
+    assert!(b.cluster_in_use() < 1 << 30 && s.contains("1.1 GB in use · VM limit") && !s.contains("GiB in use"), "{s}");
+    // The sparkline's memory is the cluster's share too.
+    let (_, m) = *app.history.back().unwrap();
+    assert!((m as f64 - b.cluster_in_use() as f64 / (4096u64 << 20) as f64).abs() < 1e-3);
 }

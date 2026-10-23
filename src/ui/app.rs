@@ -312,6 +312,11 @@ pub struct HomeSample {
     pub vm_ip: Option<String>,
     pub cpu_pct: Option<f64>,
     pub mem_used: Option<u64>,
+    /// What the VM or sandbox has: CPUs and memory (bytes), what the
+    /// cluster's figures are a share of (never the Docker engine's /info,
+    /// which may be another machine's).
+    pub env_cpus: Option<f64>,
+    pub env_memory: Option<u64>,
     pub disk_used: Option<u64>,
     pub disk_free: Option<u64>,
     pub data_dir: String,
@@ -447,6 +452,10 @@ pub struct App {
     /// context is a remote litek8s (`--context` without `--docker-host`):
     /// its Docker API being down is no error of the cluster on screen.
     pub docker_is_local_dev: bool,
+    /// The Docker views show the shown cluster's own Docker API (its
+    /// socket), whose containers run on the cluster's node: Home can say
+    /// what they take. Not with `--docker-host` another engine.
+    pub docker_is_cluster: bool,
     /// `--context` of a remote litek8s: Clusters starts on its row.
     pub focus_context: Option<String>,
     pub kube_endpoint: String,
@@ -548,6 +557,7 @@ impl App {
             kube_context,
             docker_error: None,
             docker_is_local_dev: false,
+            docker_is_cluster: true,
             focus_context: None,
             docker_version: String::new(),
             docker_os: String::new(),
@@ -635,15 +645,26 @@ impl App {
         self.tab = tabs[(pos + step).rem_euclid(tabs.len() as isize) as usize];
     }
 
+    /// The CPUs Home's figure is a share of: the sandbox's limit, else the
+    /// VM's or the sandbox's machine's. Not the Docker engine's: the Docker
+    /// views may show another engine (`--docker-host`).
     pub fn home_cpus(&self) -> Option<f64> {
         let limits = self.home.running.as_ref().filter(|s| s.mode != "vm");
-        limits.and_then(|s| s.cpus).map(|c| c as u64).or(self.vm_cpus).map(|c| c as f64)
+        limits.and_then(|s| s.cpus).map(|c| c as f64).or(self.home.env_cpus)
     }
 
     /// The memory Home's figure is a share of (bytes), the same way.
     pub fn home_memory(&self) -> Option<u64> {
         let limits = self.home.running.as_ref().filter(|s| s.mode != "vm");
-        limits.and_then(|s| s.memory_mib).map(|m| m << 20).or(self.vm_memory)
+        limits.and_then(|s| s.memory_mib).map(|m| m << 20).or(self.home.env_memory)
+    }
+
+    /// The cluster's CPU, % of one CPU: the VM or sandbox less what the
+    /// Docker API's containers took (they run there, but are not the
+    /// cluster's).
+    pub fn cluster_cpu_pct(&self) -> Option<f64> {
+        let docker = self.cpu.as_ref().filter(|_| self.home.status != DevStatus::Remote).map(|c| c.docker_pct).unwrap_or(0.0);
+        self.home.cpu_pct.map(|p| (p - docker).max(0.0))
     }
 
     pub fn sel(&self) -> usize {
@@ -996,10 +1017,10 @@ impl App {
                 let sampled = matches!(self.home.status, DevStatus::Up | DevStatus::Remote);
                 if self.tab == Tab::Home && self.logs.is_none() && sampled {
                     let remote_cpu = || self.cpu.as_ref().filter(|_| self.home.status == DevStatus::Remote).map(|c| (c.total_pct / 100.0 / c.cpus.max(1.0)) as f32);
-                    let cpu = self.home.cpu_pct.zip(self.home_cpus()).map(|(p, c)| (p / 100.0 / c.max(1.0)) as f32).or_else(remote_cpu);
+                    let cpu = self.cluster_cpu_pct().zip(self.home_cpus()).map(|(p, c)| (p / 100.0 / c.max(1.0)) as f32).or_else(remote_cpu);
                     // Memory in use against its limit when the breakdown says
                     // (the footprint also counts pages the guest freed).
-                    let in_use = self.home.memory.as_ref().and_then(|b| b.limit.filter(|l| *l > 0).map(|l| (b.in_use() as f64 / l as f64) as f32));
+                    let in_use = self.home.memory.as_ref().and_then(|b| b.limit.filter(|l| *l > 0).map(|l| (b.cluster_in_use() as f64 / l as f64) as f32));
                     let mem = in_use.or_else(|| self.home.mem_used.zip(self.home_memory()).map(|(u, t)| (u as f64 / t.max(1) as f64) as f32));
                     if let (Some(c), Some(m)) = (cpu, mem) {
                         if self.history.len() == HISTORY {

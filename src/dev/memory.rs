@@ -1,5 +1,5 @@
 //! Where a node's memory goes, in words a user can act on: litek8s itself,
-//! pods and containers, page cache; and, for the macOS VM, what the guest
+//! pods, Docker containers and builds, page cache; and, for the macOS VM, what the guest
 //! kernel costs, what the guest freed but macOS still charges for, and how
 //! much of its memory the guest may use now (its ceiling, see
 //! [`super::balloon`]).
@@ -24,16 +24,29 @@ use serde::{Deserialize, Serialize};
 pub struct Usage {
     /// litek8s's own processes: API server, controllers, node agent, shims.
     pub litek8s: u64,
-    /// Pods, Docker containers and image builds.
-    pub containers: u64,
+    /// Pods. (On the wire `containers`: litek8s before the Docker split
+    /// counted Docker containers and builds in it too.)
+    #[serde(rename = "containers")]
+    pub pods: u64,
+    /// Docker API containers and image builds: on the node, not in the
+    /// cluster.
+    #[serde(default)]
+    pub docker: u64,
     /// File pages (page cache) charged to the node: reclaimable.
     pub cache: u64,
+}
+
+impl Usage {
+    /// Pods and Docker containers together.
+    pub fn workloads(&self) -> u64 {
+        self.pods + self.docker
+    }
 }
 
 impl std::ops::Add for Usage {
     type Output = Usage;
     fn add(self, o: Usage) -> Usage {
-        Usage { litek8s: self.litek8s + o.litek8s, containers: self.containers + o.containers, cache: self.cache + o.cache }
+        Usage { litek8s: self.litek8s + o.litek8s, pods: self.pods + o.pods, docker: self.docker + o.docker, cache: self.cache + o.cache }
     }
 }
 
@@ -62,20 +75,24 @@ fn anon(dir: &Path) -> Option<u64> {
     stat_field(dir, "anon")
 }
 
-/// In use by the cgroups of pods, containers and builds under `root`.
-fn containers(root: &Path) -> u64 {
+/// In use by the cgroups of pods, and of Docker containers and builds,
+/// under `root`.
+fn containers(root: &Path) -> (u64, u64) {
     let base = root.join("litek8s");
-    let mut dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&base)
+    let pods: u64 = std::fs::read_dir(&base)
         .into_iter()
         .flatten()
         .flatten()
         .filter(|e| e.file_name().to_string_lossy().starts_with("pod"))
-        .map(|e| e.path())
-        .collect();
-    for sub in ["docker", "build"] {
-        dirs.extend(std::fs::read_dir(base.join(sub)).into_iter().flatten().flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).map(|e| e.path()));
-    }
-    dirs.iter().filter_map(|d| anon(d)).sum()
+        .filter_map(|e| anon(&e.path()))
+        .sum();
+    let docker = ["docker", "build"]
+        .iter()
+        .flat_map(|sub| std::fs::read_dir(base.join(sub)).into_iter().flatten().flatten())
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+        .filter_map(|e| anon(&e.path()))
+        .sum();
+    (pods, docker)
 }
 
 /// One node: `root` is its cgroup (a cell's, as the host sees it, or
@@ -83,8 +100,8 @@ fn containers(root: &Path) -> u64 {
 pub fn node(root: &Path) -> Option<Usage> {
     let (_, file) = cgroup(root)?;
     let own = anon(root)?;
-    let containers = containers(root);
-    Some(Usage { litek8s: own.saturating_sub(containers), containers, cache: file })
+    let (pods, docker) = containers(root);
+    Some(Usage { litek8s: own.saturating_sub(pods + docker), pods, docker, cache: file })
 }
 
 /// A cluster's nodes: `dir` holds one cgroup per node (`cells/<cluster>`).
@@ -186,7 +203,8 @@ pub fn this_node(name: &str) -> NodeMemory {
             .and_then(|s| s.lines().find_map(|l| l.strip_prefix("RssAnon:")?.split_whitespace().next()?.parse::<u64>().ok()))
             .unwrap_or(0)
             * 1024;
-        Usage { litek8s: own, containers: containers(root), cache: 0 }
+        let (pods, docker) = containers(root);
+        Usage { litek8s: own, pods, docker, cache: 0 }
     });
     NodeMemory { node: name.to_string(), usage, meminfo: meminfo() }
 }
@@ -206,6 +224,9 @@ pub struct Line {
 pub enum Seg {
     Litek8s,
     Pods,
+    /// Docker API containers and builds: on the cluster's node, not part
+    /// of the cluster.
+    Docker,
     Others,
     /// The kernel, the VM's base, the sandbox's own processes.
     Base,
@@ -246,6 +267,28 @@ impl Breakdown {
     pub fn in_use(&self) -> u64 {
         self.lines.iter().filter(|l| l.seg.in_use()).map(|l| l.bytes).sum()
     }
+
+    /// What the Docker API's containers and builds hold.
+    pub fn docker(&self) -> u64 {
+        self.lines.iter().filter(|l| l.seg == Seg::Docker).map(|l| l.bytes).sum()
+    }
+
+    /// In use without the Docker API's containers: the cluster's share.
+    pub fn cluster_in_use(&self) -> u64 {
+        self.in_use().saturating_sub(self.docker())
+    }
+}
+
+/// The note on the Docker containers' line.
+pub const DOCKER_NOTE: &str = "Docker API containers, builds (not the cluster)";
+
+/// litek8s, its pods and the Docker API's containers.
+fn workload_lines(label: String, u: Usage, docker_always: bool) -> Vec<Line> {
+    let mut lines = vec![line(label, u.litek8s, "API server, controllers, node agent", Seg::Litek8s), line("pods", u.pods, "", Seg::Pods)];
+    if docker_always || u.docker > 0 {
+        lines.push(line("Docker containers", u.docker, DOCKER_NOTE, Seg::Docker));
+    }
+    lines
 }
 
 fn line(label: impl Into<String>, bytes: u64, note: &'static str, seg: Seg) -> Line {
@@ -278,11 +321,11 @@ pub fn vm_breakdown(footprint: u64, vm_bytes: u64, mem: &MemInfo, balloon: u64, 
     let in_guest = vm_bytes.saturating_sub(mem.free + balloon);
     // What is left (the VM's init, cell manager, DHCP client; the cgroups'
     // own kernel memory) goes with the fixed cost.
-    let attributed = kernel + cache + shown.litek8s + shown.containers + other.litek8s + other.containers;
+    let attributed = kernel + cache + shown.litek8s + shown.workloads() + other.litek8s + other.workloads();
     kernel += in_guest.saturating_sub(attributed);
-    let mut lines = vec![line(format!("litek8s ({cluster})"), shown.litek8s, "API server, controllers, node agent", Seg::Litek8s), line("pods & containers", shown.containers, "", Seg::Pods)];
+    let mut lines = workload_lines(format!("litek8s ({cluster})"), shown, true);
     if !others.is_empty() {
-        lines.push(line(format!("other clusters ({})", others.len()), other.litek8s + other.containers, "litek8s and pods of the rest", Seg::Others));
+        lines.push(line(format!("other clusters ({})", others.len()), other.litek8s + other.workloads(), "litek8s, pods and Docker of the rest", Seg::Others));
     }
     lines.push(line("Linux kernel + base", kernel, "fixed cost: kernel, page tables", Seg::Base));
     lines.push(line("cache", cache, "reclaimable", Seg::Cache));
@@ -315,10 +358,10 @@ pub fn vm_breakdown(footprint: u64, vm_bytes: u64, mem: &MemInfo, balloon: u64, 
 #[allow(clippy::too_many_arguments)]
 pub fn sandbox_breakdown(sandbox_used: u64, sandbox_cache: u64, cluster: &str, shown: Usage, others: &[Usage], limit: Option<u64>, host: Option<&MemInfo>) -> Breakdown {
     let other = others.iter().fold(Usage::default(), |a, b| a + *b);
-    let rest = sandbox_used.saturating_sub(shown.litek8s + shown.containers + other.litek8s + other.containers);
-    let mut lines = vec![line(format!("litek8s ({cluster})"), shown.litek8s, "API server, controllers, node agent", Seg::Litek8s), line("pods & containers", shown.containers, "", Seg::Pods)];
+    let rest = sandbox_used.saturating_sub(shown.litek8s + shown.workloads() + other.litek8s + other.workloads());
+    let mut lines = workload_lines(format!("litek8s ({cluster})"), shown, true);
     if !others.is_empty() {
-        lines.push(line(format!("other clusters ({})", others.len()), other.litek8s + other.containers, "litek8s and pods of the rest", Seg::Others));
+        lines.push(line(format!("other clusters ({})", others.len()), other.litek8s + other.workloads(), "litek8s, pods and Docker of the rest", Seg::Others));
     }
     lines.push(line("sandbox", rest, "supervisor, pasta, cell manager, their kernel memory", Seg::Base));
     lines.push(line("cache", sandbox_cache, "reclaimable (file pages)", Seg::Cache));
@@ -343,9 +386,9 @@ pub fn scoped_breakdown(n: &NodeMemory, what: &str, limit_what: &'static str) ->
     let u = n.usage;
     let Some(mem) = n.meminfo.filter(|m| m.total > 0) else {
         return Breakdown {
-            total: u.litek8s + u.containers + u.cache,
+            total: u.litek8s + u.workloads() + u.cache,
             what: what.into(),
-            lines: vec![line("litek8s", u.litek8s, "API server, controllers, node agent", Seg::Litek8s), line("pods & containers", u.containers, "", Seg::Pods), line("cache", u.cache, "reclaimable", Seg::Cache)],
+            lines: workload_lines("litek8s".into(), u, false).into_iter().chain([line("cache", u.cache, "reclaimable", Seg::Cache)]).collect(),
             limit: None,
             limit_what,
             pressure: None,
@@ -357,16 +400,14 @@ pub fn scoped_breakdown(n: &NodeMemory, what: &str, limit_what: &'static str) ->
     // tailscaled), and the page cache it gives back under pressure.
     let used = mem.total.saturating_sub(mem.free);
     let cache = ((mem.cached + mem.buffers).saturating_sub(mem.shmem) + mem.slab_reclaimable).min(used);
-    let os = used.saturating_sub(cache + u.litek8s + u.containers);
+    let os = used.saturating_sub(cache + u.litek8s + u.workloads());
     Breakdown {
         total: used,
         what: what.into(),
-        lines: vec![
-            line("litek8s", u.litek8s, "API server, controllers, node agent", Seg::Litek8s),
-            line("pods & containers", u.containers, "", Seg::Pods),
-            line("operating system", os, "kernel, system services", Seg::Base),
-            line("cache", cache, "reclaimable", Seg::Cache),
-        ],
+        lines: workload_lines("litek8s".into(), u, false)
+            .into_iter()
+            .chain([line("operating system", os, "kernel, system services", Seg::Base), line("cache", cache, "reclaimable", Seg::Cache)])
+            .collect(),
         limit: Some(mem.total),
         limit_what,
         pressure: if mem.available > 0 { short(mem.available, mem.total) } else { None },
@@ -386,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn splits_a_node_into_litek8s_pods_and_cache() {
+    fn splits_a_node_into_litek8s_pods_docker_and_cache() {
         let d = tempfile::tempdir().unwrap();
         let cell = d.path().join("cells/ci/0");
         // The cell holds 10 MiB of kernel memory (slab for files it read)
@@ -396,18 +437,37 @@ mod tests {
         write(&cell.join("litek8s/docker/1234"), 6 << 20, 1 << 20, 4 << 20);
         write(&cell.join("litek8s/shims"), 2 << 20, 0, 2 << 20);
         let u = node(&cell).unwrap();
-        assert_eq!(u, Usage { litek8s: 28 << 20, containers: 32 << 20, cache: 30 << 20 });
+        assert_eq!(u, Usage { litek8s: 28 << 20, pods: 28 << 20, docker: 4 << 20, cache: 30 << 20 });
         write(&d.path().join("cells/ci/1"), 10 << 20, 2 << 20, 7 << 20);
         let all = cluster(&d.path().join("cells/ci")).unwrap();
-        assert_eq!(all, Usage { litek8s: 35 << 20, containers: 32 << 20, cache: 32 << 20 });
+        assert_eq!(all, Usage { litek8s: 35 << 20, pods: 28 << 20, docker: 4 << 20, cache: 32 << 20 });
         assert!(cluster(&d.path().join("cells/none")).is_none());
+    }
+
+    #[test]
+    fn docker_is_its_own_line_and_reads_older_nodes() {
+        // An agent from before the split sends pods and Docker together.
+        let old: Usage = serde_json::from_str(r#"{"litek8s":1,"containers":2,"cache":3}"#).unwrap();
+        assert_eq!(old, Usage { litek8s: 1, pods: 2, docker: 0, cache: 3 });
+        let u = Usage { litek8s: 1, pods: 2, docker: 5, cache: 3 };
+        assert_eq!(serde_json::to_value(u).unwrap(), serde_json::json!({"litek8s": 1, "containers": 2, "docker": 5, "cache": 3}));
+        let mem = parse_meminfo("MemTotal: 4000000 kB\nMemFree: 3000000 kB\nMemAvailable: 3500000 kB\n");
+        let b = vm_breakdown(600 << 20, 4096 << 20, &mem, 0, None, "dev", Usage { litek8s: 10 << 20, pods: 100 << 20, docker: 300 << 20, cache: 0 }, &[]);
+        let get = |l: &str| b.lines.iter().find(|x| x.label == l).map(|x| (x.bytes, x.seg));
+        assert_eq!(get("pods"), Some((100 << 20, Seg::Pods)));
+        assert_eq!(get("Docker containers"), Some((300 << 20, Seg::Docker)));
+        assert_eq!(b.docker(), 300 << 20);
+        assert_eq!(b.cluster_in_use(), b.in_use() - (300 << 20));
+        // A remote node without Docker containers has no Docker line.
+        let n = NodeMemory { node: "x".into(), usage: Usage { litek8s: 1, pods: 2, docker: 0, cache: 3 }, meminfo: None };
+        assert!(node_breakdown(&n).lines.iter().all(|l| l.seg != Seg::Docker));
     }
 
     #[test]
     fn explains_the_vm_footprint() {
         let mem = parse_meminfo("MemTotal: 3934000 kB\nMemFree: 3700000 kB\nBuffers: 0 kB\nCached: 125000 kB\nShmem: 51200 kB\nSReclaimable: 10000 kB\nSUnreclaim: 35000 kB\nKernelStack: 2000 kB\nPageTables: 1000 kB\n");
         assert_eq!(mem.total, 3934000 * 1024);
-        let shown = Usage { litek8s: 12 << 20, containers: 0, cache: 3 << 20 };
+        let shown = Usage { litek8s: 12 << 20, pods: 0, docker: 0, cache: 3 << 20 };
         let b = vm_breakdown(600 << 20, 4096 << 20, &mem, 0, None, "dev", shown, &[]);
         assert_eq!(b.total, 600 << 20);
         assert_eq!(b.what, "what macOS charges the VM");
@@ -427,9 +487,9 @@ mod tests {
         let sum: u64 = b.lines.iter().filter(|l| !l.label.starts_with("freed")).map(|l| l.bytes).sum();
         assert_eq!(sum, in_guest);
         assert_eq!(get("freed"), Some((600u64 << 20) - in_guest));
-        let b = vm_breakdown(421 << 20, 4096 << 20, &mem, 0, None, "dev", shown, &[Usage { litek8s: 2 << 20, containers: 1 << 20, cache: 0 }]);
-        assert_eq!(b.lines[2].label, "other clusters (1)");
-        assert_eq!(b.lines[2].bytes, 3 << 20);
+        let b = vm_breakdown(421 << 20, 4096 << 20, &mem, 0, None, "dev", shown, &[Usage { litek8s: 2 << 20, pods: 1 << 20, docker: 0, cache: 0 }]);
+        assert_eq!(b.lines[3].label, "other clusters (1)");
+        assert_eq!(b.lines[3].bytes, 3 << 20);
         // A 1 GiB ceiling: 3 GiB in the balloon, counted as used in
         // MemTotal (the framework's driver deflates on OOM). The guest
         // uses what it used before; the title says how much it may use.
@@ -448,7 +508,7 @@ mod tests {
 
     #[test]
     fn explains_the_sandbox() {
-        let b = sandbox_breakdown(100 << 20, 40 << 20, "dev", Usage { litek8s: 8 << 20, containers: 50 << 20, cache: 5 << 20 }, &[], None, None);
+        let b = sandbox_breakdown(100 << 20, 40 << 20, "dev", Usage { litek8s: 8 << 20, pods: 50 << 20, docker: 0, cache: 5 << 20 }, &[], None, None);
         assert_eq!(b.total, 140 << 20);
         assert_eq!(b.lines.iter().find(|l| l.label == "sandbox").unwrap().bytes, 42 << 20);
         assert_eq!(b.in_use(), 100 << 20);
@@ -462,7 +522,7 @@ mod tests {
         let b = sandbox_breakdown(100 << 20, 40 << 20, "dev", Usage::default(), &[], None, Some(&host));
         assert_eq!((b.limit, b.limit_what), (Some(32 << 30), "host RAM"));
         assert!((b.pressure.unwrap() - 0.25).abs() < 1e-9);
-        let n = NodeMemory { node: "x".into(), usage: Usage { litek8s: 1, containers: 2, cache: 3 }, meminfo: None };
+        let n = NodeMemory { node: "x".into(), usage: Usage { litek8s: 1, pods: 2, docker: 0, cache: 3 }, meminfo: None };
         let json = serde_json::to_value(&n).unwrap();
         assert_eq!(json["litek8s"], 1);
         assert_eq!(node_breakdown(&n).total, 6);
@@ -473,7 +533,7 @@ mod tests {
         // A 4 GiB server: 1 GiB not free, of which 600 MiB page cache
         // and 8 MiB litek8s; the operating system holds the rest.
         let mem = MemInfo { total: 4 << 30, free: 3 << 30, available: 3600 << 20, cached: 580 << 20, buffers: 30 << 20, shmem: 5 << 20, slab_reclaimable: 40 << 20, ..Default::default() };
-        let n = NodeMemory { node: "lab2-control-1".into(), usage: Usage { litek8s: 8 << 20, containers: 0, cache: 0 }, meminfo: Some(mem) };
+        let n = NodeMemory { node: "lab2-control-1".into(), usage: Usage { litek8s: 8 << 20, pods: 0, docker: 0, cache: 0 }, meminfo: Some(mem) };
         let b = node_breakdown(&n);
         let get = |l: &str| b.lines.iter().find(|x| x.label == l).map(|x| x.bytes).unwrap();
         assert_eq!(b.total, 1 << 30);

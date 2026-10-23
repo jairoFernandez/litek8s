@@ -289,12 +289,13 @@ impl Collector {
         let labels = |name: &str, key: &str, value: &str| l(&[("__name__", name), ("job", "litek8s"), ("instance", &self.node), ("node", &self.node), (key, value)]);
         if Path::new("/sys/fs/cgroup/cgroup.controllers").exists() {
             let mem = crate::dev::memory::this_node(&self.node);
-            for (owner, v) in [("litek8s", mem.usage.litek8s), ("pods", mem.usage.containers), ("cache", mem.usage.cache)] {
+            for (owner, v) in [("litek8s", mem.usage.litek8s), ("pods", mem.usage.pods), ("docker", mem.usage.docker), ("cache", mem.usage.cache)] {
                 out.push((labels("litek8s_node_memory_bytes", "owner", owner), v as f64));
             }
             if let Some(split) = crate::dev::cpu::node(Path::new("/sys/fs/cgroup")) {
                 out.push((labels("litek8s_node_cpu_seconds_total", "owner", "litek8s"), split.litek8s_usec as f64 / 1e6));
-                out.push((labels("litek8s_node_cpu_seconds_total", "owner", "pods"), split.containers_usec() as f64 / 1e6));
+                out.push((labels("litek8s_node_cpu_seconds_total", "owner", "pods"), split.pods_usec() as f64 / 1e6));
+                out.push((labels("litek8s_node_cpu_seconds_total", "owner", "docker"), split.docker_usec() as f64 / 1e6));
             }
         }
         let fresh = self.disk.as_ref().is_some_and(|(at, _)| at.elapsed() < DISK_EVERY);

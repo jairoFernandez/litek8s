@@ -50,6 +50,10 @@ pub fn spawn(
                     s.uptime_s = crate::dev::now_ms().saturating_sub(st.started_unix_ms) / 1000;
                     s.api = format!("http://127.0.0.1:{}", st.port);
                     s.vm_ip = st.vm_ip.clone();
+                    // The VM's size, or the sandbox's machine (its limits,
+                    // when set, are in the cluster's state).
+                    s.env_cpus = env.as_ref().and_then(|e| e.cpus).map(|c| c as f64).or_else(|| (st.mode != "vm").then(|| std::thread::available_parallelism().map(|n| n.get() as f64).unwrap_or(1.0)));
+                    s.env_memory = env.as_ref().and_then(|e| e.memory_mib).map(|m| m << 20);
                     s.mem_used = env.as_ref().and_then(crate::dev::env_memory).or_else(|| crate::dev::memory_used(st));
                     if let Some(ns) = env.as_ref().and_then(crate::dev::env_cpu_time_ns).or_else(|| crate::dev::cpu_time_ns(st)) {
                         let now = Instant::now();

@@ -15,7 +15,7 @@ Nine views, `1`-`9` (or `tab`) to switch, `?` for the keys of each:
 
 | view | what it gives you |
 |---|---|
-| **1 Home** | the shown cluster's state (up, down, starting, stopping), mode, uptime; CPU, memory and disk of the VM or rootless sandbox; the Docker socket and API server; whether `docker` and `kubectl` point at it. `u` up, `d` down, `R` delete (asks first) |
+| **1 Home** | the shown cluster's state (up, down, starting, stopping), mode, uptime; its CPU, memory and disk against what the VM or rootless sandbox has; in a box of its own, the Docker socket's containers, images and volumes and what they take; the API server; whether `docker` and `kubectl` point at it. `u` up, `d` down, `R` delete (asks first) |
 | **2 Clusters** | the local clusters (state, API port, nodes, memory, age) and your kubeconfig's other contexts; `n` new (name, nodes), `u`/`d` up/down, `D` delete, `enter` shows it in every view (and offers to point `kubectl` and `docker` at it); see [Clusters](#clusters) |
 | **3 Containers** | `docker ps -a`, grouped by compose project, with each project's memory against its budget, CPUs and OOM kills: `l` logs (follow), `s` a shell in the container, `u`/`x`/`r` start/stop/restart, `d` remove; on a project row they act on the whole project, `space` folds it |
 | **4 Images** | sizes, age, which containers and pods use each; `d` remove |
@@ -239,7 +239,8 @@ Home:
 ```
 
 The memory meter is what the cluster's owners hold (litek8s, pods,
-other clusters, the kernel and base) against the VM's `--memory`, the
+other clusters, the kernel and base; not the Docker API's containers,
+which the docker box shows) against the VM's `--memory`, the
 sandbox's limit or, without one, the host's RAM, as stacked parts; cache
 (`▒`, dim) and pages the guest freed but macOS still charges (`▒`, darker)
 follow, and do not count as in use. Its percentage is colored by how short
@@ -273,8 +274,9 @@ compat corpus):
 | line | what it is | from |
 |---|---|---|
 | litek8s (cluster) | the shown cluster's own processes (API server, controllers, node agent, crun shims) on all its nodes | its cells' cgroups: usage less file pages, less the pods' |
-| pods & containers | its pods, Docker containers and image builds | the `pod*`, `docker/*`, `build/*` cgroups under each node |
-| other clusters | the same two for every other running cluster, together | their cells |
+| pods | its pods | the `pod*` cgroups under each node |
+| Docker containers | the cluster's Docker API's containers and image builds: they run on its node, but are not the cluster's (the cluster meter leaves them out, the docker box shows them) | the `docker/*`, `build/*` cgroups under each node |
+| other clusters | the same three for every other running cluster, together | their cells |
 | Linux kernel + base (macOS) | what the VM costs before anything runs: memory the kernel sets aside at boot (its image and the page structures, ~3.5 % of the VM's size), its unreclaimable slab, stacks and page tables, and tmpfs (an older guest's initramfs, the root filesystem held in RAM); also the VM's own init, cell manager and DHCP client | the VM's size less `MemTotal` and the balloon, `/proc/meminfo` |
 | sandbox (Linux) | the supervisor, pasta and the cell manager | the sandbox's cgroup less the clusters' |
 | cache | file pages: images, logs, the binary; the kernel drops them under pressure | `/proc/meminfo` (VM) or the sandbox's `file` pages |
@@ -312,15 +314,25 @@ three busy pods:
 | line | what it is | from |
 |---|---|---|
 | litek8s (cluster) | the shown cluster's own processes on all its nodes | its cells' `cpu.stat` less its pods' |
-| pods & containers, and the top 3 | every pod, Docker container and build of the cluster, the busiest by name | the `pod*`, `docker/*`, `build/*` cgroups (`usage_usec`) |
+| pods, and the top 3 | every pod of the cluster, the busiest by name | the `pod*` cgroups (`usage_usec`) |
+| Docker containers, and the top 3 | the cluster's Docker API's containers and builds | the `docker/*`, `build/*` cgroups |
 | other clusters | the rest of the clusters together | their cells |
 | guest kernel & other (macOS) | busy time the guest does not account to a cluster: interrupts, the network stack, the VM's init | the guest's `/proc/stat` less the clusters |
 | VM overhead (macOS) | what the VM process ran beyond the guest's busy time: virtual devices, vCPU exits | the VM process's CPU time (macOS) less the guest's `/proc/stat` |
 | sandbox (Linux) | the supervisor, pasta and the cell manager | the sandbox's cgroup less the clusters' |
 
 The title's figure is the VM process's CPU time as macOS counts it, or the
-sandbox's cgroup; the cpu meter says the same as `6% of 4 CPUs · 26% of
-one`.
+sandbox's cgroup. The cluster's cpu meter is that less the Docker
+containers' share, and its memory meter what is in use less theirs: the
+Docker API's containers run in the same VM or sandbox, but they are not
+the cluster's, so Home puts them in the docker box under the cluster
+(`docker · ~/.litek8s/docker.sock ── cpu 6.0% of one · mem 1.1 GB`, then
+the containers by state, images and volumes). Both meters are against
+the VM's `--cpus` and `--memory` (or the sandbox's limits, else the
+machine's CPUs), never against the Docker engine's `/info`: with
+`--docker-host` the Docker views show another engine, and the docker box
+then gives that engine's own size (`its engine: 16 CPUs · 34.4 GB`)
+instead of the cluster's.
 
 Disk, on the Mac with the workloads above (the walk is at most a minute
 old):
