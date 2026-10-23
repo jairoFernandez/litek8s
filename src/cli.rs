@@ -775,7 +775,7 @@ pub async fn run() -> Result<()> {
             crate::registries::init(registry_config.as_deref())?;
             let docker = match &docker_socket {
                 Some(path) => {
-                    let _ = std::fs::remove_file(path);
+                    clear_socket_path(path)?;
                     if let Some(parent) = path.parent() {
                         std::fs::create_dir_all(parent)?;
                     }
@@ -1159,6 +1159,20 @@ fn in_cluster_port_for(flag: Option<u16>, loadbalancer_ports: bool) -> Option<u1
         None => Some(443),
     }
 }
+
+/// Make room for a unix socket at `path`: remove a stale socket, or the
+/// empty directory a pod's hostPath mount leaves when it starts before the
+/// socket exists. Anything else there is an error, not ours to delete.
+fn clear_socket_path(path: &std::path::Path) -> anyhow::Result<()> {
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("failed to inspect {}", path.display())),
+        Ok(m) if m.is_dir() => std::fs::remove_dir(path)
+            .with_context(|| format!("{} is a directory that is not empty; remove it so the Docker API can listen there", path.display())),
+        Ok(_) => std::fs::remove_file(path).with_context(|| format!("failed to remove stale {}", path.display())),
+    }
+}
+
 #[cfg(test)]
 mod main_help_tests {
     use clap::CommandFactory;
@@ -1268,6 +1282,26 @@ mod main_help_tests {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn a_socket_path_is_cleared_of_stale_sockets_and_empty_dirs() {
+        let dir = std::env::temp_dir().join(format!("litek8s-sock-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("docker.sock");
+        clear_socket_path(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        clear_socket_path(&path).unwrap();
+        assert!(!path.exists());
+        drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
+        clear_socket_path(&path).unwrap();
+        assert!(!path.exists());
+        std::fs::create_dir_all(path.join("x")).unwrap();
+        assert!(clear_socket_path(&path).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
 
     #[test]
     fn in_cluster_port_leaves_443_to_load_balancers() {

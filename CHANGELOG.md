@@ -9,6 +9,12 @@
   on LoadBalancer ports (the default since 0.2.5), the API server now opens
   no extra port and pods reach it through the `kubernetes` Service's
   ClusterIP (on 6443); `--in-cluster-port 443` keeps the old behavior.
+- **`--docker-socket` starts when a pod got there first:** a pod that
+  mounts the socket's path (hostPath) before the server creates it leaves
+  an empty directory there, and the server then failed to start ("Address
+  in use") until someone removed it. It now removes an empty directory or a
+  stale socket at that path, and says so when a non-empty directory is in
+  the way.
 
 ## 0.2.5
 
