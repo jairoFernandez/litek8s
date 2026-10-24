@@ -14,6 +14,7 @@ git_provider="$(platform_get provider)"; git_provider="${git_provider:-gitea}"
 gitops_repo="$(platform_get gitops_repo)"; gitops_repo="${gitops_repo:-gitops}"
 app_repo="$(platform_get app_repo)"; app_repo="${app_repo:-metaphor}"
 domain="$(platform_get domain)"; domain="${domain:-${DOMAIN:-localhost}}"
+cd_controller="$(platform_get cd)"; cd_controller="${cd_controller:-argocd}"
 if [[ $git_provider == github && -z ${GITHUB_TOKEN:-} && -z ${GITHUB_TOKEN_FILE:-} ]]; then
   GITHUB_TOKEN="$(secret_value github-runner github-runner GITHUB_TOKEN)"
 fi
@@ -101,10 +102,11 @@ sed 's/^/  /' <<<"$out"
 port="$(kubectl -n traefik get svc traefik -o jsonpath='{.spec.ports[?(@.name=="websecure")].port}')"
 secret_value cert-manager platform-ca 'ca\.crt' >"$ca"
 deadline=$((SECONDS + timeout))
-urls=("https://argocd.$domain:$port/healthz")
+urls=()
+[[ $cd_controller == argocd ]] && urls+=("https://argocd.$domain:$port/healthz")
 [[ $git_provider == gitea ]] && urls+=("https://gitea.$domain:$port/api/healthz")
 kubectl -n openbao get ingress openbao >/dev/null 2>&1 && urls+=("https://openbao.$domain:$port/v1/sys/health")
-for url in "${urls[@]}"; do
+for url in ${urls[@]+"${urls[@]}"}; do
   until code="$(curl -s -o /dev/null -w '%{http_code}' --cacert "$ca" "$url")" && [[ $code == 200 ]]; do
     if [[ $SECONDS -ge $deadline ]]; then echo "https: $url -> $code (timeout)"; exit 1; fi
     sleep 5

@@ -105,6 +105,28 @@ Remove it all: `kubectl delete namespace argocd` first (or Argo CD puts
 things back), then the namespaces of the components, then
 `helm -n gitea uninstall gitea; kubectl delete namespace gitea`.
 
+## With litecd instead of Argo CD
+
+`CD_CONTROLLER=litecd` puts [litecd](https://github.com/jairoFernandez/litecd),
+a GitOps controller in Rust that reads Argo CD's Applications unchanged, in
+Argo CD's place: the same gitops repository, Applications, waves, health
+check for Applications and Gitea webhook (litecd answers on
+`argocd-server/api/webhook`); `components/argocd` then installs litecd, and
+the Application `argocd` keeps it up to date. There is no web UI
+(`kubectl -n argocd get applications`). It needs a litecd checkout
+(`LITECD_DIR`, default next to this repository) and its image in the
+cluster:
+
+```bash
+DOCKER_HOST=unix://$HOME/.litek8s/docker.sock ../litecd/deploy/build.sh
+CD_CONTROLLER=litecd examples/platform/up.sh
+examples/platform/smoke.sh
+```
+
+On a dev cluster (2026-10-23, litecd 317ec06 plus fixes) all of `smoke.sh`
+passes; litecd takes 28 MiB with the 12 Applications synced (93 MiB at
+its peak) and 0.4 % of a CPU idle, against Argo CD's 723 MiB.
+
 ## On GitHub
 
 `GIT_PROVIDER=github` keeps the repositories on GitHub instead of Gitea:

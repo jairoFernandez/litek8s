@@ -21,6 +21,10 @@
 # DOMAIN           web UIs at https://<app>.$DOMAIN (default localhost:
 #                  browsers and curl resolve *.localhost to this machine)
 # HTTP_PORT/HTTPS_PORT  the ingress's LoadBalancer ports (default 80/443)
+# CD_CONTROLLER    argocd (default) or litecd: litecd, a GitOps controller
+#                  that reads the same Applications, in Argo CD's place
+#                  (LITECD_DIR: its checkout, default next to this one; the
+#                  image litecd:dev in the cluster, from its deploy/build.sh)
 set -euo pipefail
 dir="$(cd "$(dirname "$0")" && pwd)"
 . "$dir/lib.sh"
@@ -33,11 +37,18 @@ cluster="${CLUSTER_NAME:-mgmt}"
 domain="${DOMAIN:-localhost}"
 http_port="${HTTP_PORT:-80}"
 https_port="${HTTPS_PORT:-443}"
+cd_controller="${CD_CONTROLLER:-argocd}"
+litecd_dir="${LITECD_DIR:-$dir/../../../litecd}"
 
 case "$platform_mode" in
   lk) ;;
   dind) echo "PLATFORM_MODE=dind: not yet (README, \"Platform modes\")" >&2; exit 1 ;;
   *) echo "PLATFORM_MODE: lk, not $platform_mode" >&2; exit 1 ;;
+esac
+case "$cd_controller" in
+  argocd) ;;
+  litecd) [[ -d $litecd_dir/deploy/install ]] || { echo "CD_CONTROLLER=litecd: no deploy/install in LITECD_DIR=$litecd_dir" >&2; exit 1; } ;;
+  *) echo "CD_CONTROLLER: argocd or litecd, not $cd_controller" >&2; exit 1 ;;
 esac
 case "$git_provider" in
   gitea) ;;
@@ -103,6 +114,31 @@ else
   rm -f "$c/atlantis.yaml" "$render/atlantis.yaml"
   tofu_state_ns=github-iac
 fi
+# litecd in Argo CD's place: components/argocd installs litecd (the same
+# CRDs, its Deployment, argocd-cm with the platform's health check for
+# Applications), and the Application argocd keeps it up to date.
+if [[ $cd_controller == litecd ]]; then
+  a="$c/components/argocd"
+  rm -f "$a/ingress.yaml" "$a/argocd-cmd-params-cm.yaml"
+  mkdir -p "$a/litecd"
+  cp -R "$litecd_dir/deploy/install/." "$a/litecd/"
+  cat >"$a/kustomization.yaml" <<'KUSTOMIZATION'
+# litecd, managed by itself after up.sh applies it once.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: argocd
+
+resources:
+  - namespace.yaml
+  - litecd/crds/application-crd.yaml
+  - litecd/crds/appproject-crd.yaml
+  - litecd/litecd.yaml
+
+patches:
+  - path: argocd-cm.yaml
+    target: {kind: ConfigMap, name: argocd-cm}
+KUSTOMIZATION
+fi
 https_suffix=""; [[ $https_port == 443 ]] || https_suffix=":$https_port"
 find "$render" \( -name '*.yaml' -o -name '*.tf' \) -exec perl -pi -e "s#<CLUSTER_NAME>#$cluster#g; s#<GITOPS_REPO_URL>#$repo_url#g;
   s#<DOMAIN_NAME>#$domain#g; s#<INGRESS_HTTP_PORT>#$http_port#g; s#<INGRESS_HTTPS_PORT>#$https_port#g;
@@ -159,17 +195,25 @@ fi
 
 # ---- Argo CD -------------------------------------------------------------------
 
-# Once; then Argo CD manages itself from the repository.
-if ! kubectl -n argocd get deploy argocd-server >/dev/null 2>&1; then
-  kubectl apply --server-side --force-conflicts -k "$render/registry/clusters/$cluster/components/argocd" >/dev/null
+# Once; then Argo CD (or litecd) manages itself from the repository.
+if [[ $cd_controller == litecd ]]; then
+  if ! kubectl -n argocd get deploy litecd >/dev/null 2>&1; then
+    kubectl apply --server-side --force-conflicts -k "$render/registry/clusters/$cluster/components/argocd" >/dev/null
+  fi
+  kubectl -n argocd rollout status deploy/litecd --timeout 10m >/dev/null
+  echo "litecd: ready"
+else
+  if ! kubectl -n argocd get deploy argocd-server >/dev/null 2>&1; then
+    kubectl apply --server-side --force-conflicts -k "$render/registry/clusters/$cluster/components/argocd" >/dev/null
+  fi
+  kubectl -n argocd rollout status deploy/argocd-repo-server --timeout 10m >/dev/null
+  kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout 10m >/dev/null
+  echo "argocd: ready"
 fi
-kubectl -n argocd rollout status deploy/argocd-repo-server --timeout 10m >/dev/null
-kubectl -n argocd rollout status statefulset/argocd-application-controller --timeout 10m >/dev/null
-echo "argocd: ready"
 
 kubectl -n argocd create configmap platform --from-literal=provider="$git_provider" --from-literal=owner="$owner" \
   --from-literal=gitops_repo="$gitops_repo" --from-literal=app_repo="$app_repo" --from-literal=domain="$domain" \
-  --from-literal=https_port="$https_port" --from-literal=mode="$platform_mode" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  --from-literal=https_port="$https_port" --from-literal=mode="$platform_mode" --from-literal=cd="$cd_controller" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 # Read access to the gitops repository: a Gitea token of its own, or the
 # GitHub token.
@@ -299,9 +343,15 @@ GitHub:  https://github.com/$owner/$gitops_repo and https://github.com/$owner/$a
          (pull requests to $gitops_repo that change terraform/: tofu plan as a comment, apply on merge)
 EOF
 fi
-cat <<EOF
+if [[ $cd_controller == argocd ]]; then
+  cat <<EOF
 Argo CD: https://argocd.$domain$port  user admin, password:
            kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d
+EOF
+else
+  echo "litecd:  kubectl -n argocd get applications   (no web UI)"
+fi
+cat <<EOF
 Argo Workflows: https://argo.$domain$port  token:
            kubectl -n argo create token argo-workflows-server --duration 12h   (paste as "Bearer <token>")
 App:     https://metaphor-development.$domain$port  (push to $owner/$app_repo to deploy)
