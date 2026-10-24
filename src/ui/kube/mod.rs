@@ -9,6 +9,7 @@ pub mod draw;
 pub mod exec;
 pub mod filter;
 pub mod forward;
+pub mod gitops;
 pub mod informer;
 pub mod ops;
 pub mod resources;

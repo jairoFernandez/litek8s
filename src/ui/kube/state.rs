@@ -16,6 +16,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseEvent, Mou
 
 use super::command::{self, Cmd, History, Ns};
 use super::filter::{Filter, Mode};
+use super::gitops;
 use super::resources::{Catalog, Resource, builtins};
 use super::table::{Column, Health, Row, Snapshot, compare_cells};
 use super::treeview::TreeView;
@@ -152,6 +153,10 @@ pub enum KEffect {
     Cordon { nodes: Vec<String>, on: bool },
     Drain { nodes: Vec<String> },
     Trigger(ObjRef),
+    /// Argo CD Applications: start a sync, ask for a refresh, stop a sync.
+    AppSync { objs: Vec<ObjRef>, prune: bool },
+    AppRefresh { objs: Vec<ObjRef>, hard: bool },
+    AppTerminate(ObjRef),
     Containers { obj: ObjRef, purpose: Purpose },
     Logs { id: u64, target: LogTarget, previous: bool, tail: u32, max_streams: usize },
     StopLogs(u64),
@@ -181,6 +186,7 @@ impl KEffect {
         match self {
             KEffect::Edit { .. } | KEffect::Apply { .. } | KEffect::Delete { .. } | KEffect::Scale { .. } | KEffect::Restart(_) | KEffect::Undo(_) => true,
             KEffect::Cordon { .. } | KEffect::Drain { .. } | KEffect::Trigger(_) | KEffect::Shell { .. } => true,
+            KEffect::AppSync { .. } | KEffect::AppRefresh { .. } | KEffect::AppTerminate(_) => true,
             KEffect::Containers { purpose: Purpose::Shell, .. } => true,
             KEffect::Plugin { plugin, .. } => plugin.mutates,
             KEffect::Kubectl { args, .. } => kubectl_mutates(args),
@@ -1937,8 +1943,15 @@ impl KubeUi {
     /// The actions the selected row's type has (the `m` menu, the help).
     pub fn actions(&self) -> Vec<Action> {
         let Some(t) = self.top_table() else { return Vec::new() };
-        let kind = t.res.kind.as_str();
-        let mut v = vec![act("enter", if drills(kind) { "show what it runs" } else { "describe" }, KeyCode::Enter, N), act("d", "describe", KeyCode::Char('d'), N), act("y", "YAML", KeyCode::Char('y'), N)];
+        let kind = if gitops::is_app(&t.res) { "ArgoApplication" } else { t.res.kind.as_str() };
+        let enter = if drills(kind) {
+            "show what it runs"
+        } else if kind == "ArgoApplication" {
+            "its resources"
+        } else {
+            "describe"
+        };
+        let mut v = vec![act("enter", enter, KeyCode::Enter, N), act("d", "describe", KeyCode::Char('d'), N), act("y", "YAML", KeyCode::Char('y'), N)];
         if kind != "Container" {
             v.push(act("e", "edit", KeyCode::Char('e'), N));
             v.push(act("ctrl-d", "delete", KeyCode::Char('d'), CTRL));
@@ -1994,6 +2007,14 @@ impl KubeUi {
             }
             "Namespace" => v.push(act("u", "use it", KeyCode::Char('u'), N)),
             "Secret" => v.push(act("x", "decode", KeyCode::Char('x'), N)),
+            "ArgoApplication" => {
+                v.push(act("s", "sync", KeyCode::Char('s'), N));
+                v.push(act("p", "sync and prune", KeyCode::Char('p'), N));
+                v.push(act("r", "refresh", KeyCode::Char('r'), N));
+                v.push(act("R", "hard refresh", KeyCode::Char('R'), N));
+                v.push(act("T", "terminate the sync", KeyCode::Char('T'), N));
+                v.push(act("x", "its resources", KeyCode::Char('x'), N));
+            }
             _ => {}
         }
         if kind != "Container" && kind != "Node" {
@@ -2115,7 +2136,7 @@ impl KubeUi {
                 self.push(View::Forwards { sel: 0 });
                 return Some(Vec::new());
             }
-            KeyCode::Char('t') | KeyCode::Char('T') if !ctrl && !(key.code == KeyCode::Char('T') && res.kind == "CronJob") => {
+            KeyCode::Char('t') | KeyCode::Char('T') if !ctrl && !(key.code == KeyCode::Char('T') && (res.kind == "CronJob" || gitops::is_app(&res))) => {
                 // The tree of this view's namespace, on the selected object.
                 let ns = if res.namespaced { t.ns.clone() } else { self.namespace.clone() };
                 let focus = row.as_ref().and_then(|r| tree_kind(&res).map(|k| crate::tree::Row { depth: 0, kind: Some(k), ns: r.ns.clone(), name: r.name.clone(), detail: String::new(), health: Health::Ok }.key()));
@@ -2139,6 +2160,11 @@ impl KubeUi {
         };
         let obj = ObjRef { res: res.clone(), ns: r.ns.clone(), name: r.name.clone() };
         let targets = t.targets();
+        if gitops::is_app(&res)
+            && let Some(effects) = self.app_key(key.code, ctrl, obj.clone(), targets.clone())
+        {
+            return Some(self.guard(effects));
+        }
         let effects = match (key.code, ctrl, kind.as_str()) {
             (KeyCode::Enter, false, _) => return Some(self.drill(obj, &r)),
             (KeyCode::Char('d'), false, "Container") => return Some(self.describe(self.container_pod().unwrap_or(obj))),
@@ -2330,6 +2356,55 @@ impl KubeUi {
             _ => Vec::new(),
         };
         Some(effects.into_iter().map(k).collect())
+    }
+
+    /// Keys of Argo CD's Applications (`None`: not theirs; the common ones
+    /// apply): `enter`/`x` the resources tree, `s`/`p` sync (and prune),
+    /// `r`/`R` refresh (hard), `T` terminate the running sync.
+    fn app_key(&mut self, code: KeyCode, ctrl: bool, obj: ObjRef, targets: Vec<ObjRef>) -> Option<Vec<Effect>> {
+        if ctrl {
+            return None;
+        }
+        let labels = |objs: &[ObjRef]| {
+            let mut l: Vec<String> = objs.iter().take(6).map(ObjRef::label).collect();
+            if objs.len() > 6 {
+                l.push(format!("and {} more", objs.len() - 6));
+            }
+            l
+        };
+        Some(match code {
+            KeyCode::Enter | KeyCode::Char('x') => {
+                let id = self.id();
+                let ns = Some(obj.ns.clone());
+                self.push(View::Xray(XrayView { id, res: obj.res.clone(), ns: ns.clone(), nodes: Vec::new(), folded: BTreeSet::new(), sel: 0, offset: Cell::new(0), height: Cell::new(10), loading: true, error: None }));
+                vec![k(KEffect::Xray { id, res: obj.res, ns })]
+            }
+            KeyCode::Char('s') | KeyCode::Char('p') => {
+                if self.read_only() {
+                    return Some(Vec::new());
+                }
+                let prune = code == KeyCode::Char('p');
+                let what = if prune { "Sync and prune" } else { "Sync" };
+                let mut lines = labels(&targets);
+                lines.push(if prune { "Applies what git has and deletes what it no longer has (an operation, as argocd app sync --prune).".into() } else { "Applies what git has (an operation on the app, as argocd app sync).".into() });
+                self.overlay = Overlay::Confirm(Confirm { title: format!("{what} {}?", if targets.len() == 1 { obj.label() } else { format!("{} apps", targets.len()) }), lines, action: ConfirmAction::Run(vec![KEffect::AppSync { objs: targets, prune }]) });
+                Vec::new()
+            }
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                if self.read_only() {
+                    return Some(Vec::new());
+                }
+                vec![k(KEffect::AppRefresh { objs: targets, hard: code == KeyCode::Char('R') })]
+            }
+            KeyCode::Char('T') => {
+                if self.read_only() {
+                    return Some(Vec::new());
+                }
+                self.overlay = Overlay::Confirm(Confirm { title: format!("Terminate the sync of {}?", obj.label()), lines: vec!["Stops its running operation (as argocd app terminate-op).".into()], action: ConfirmAction::Run(vec![KEffect::AppTerminate(obj)]) });
+                Vec::new()
+            }
+            _ => return None,
+        })
     }
 
     /// The pod of the containers view on top.
@@ -2649,6 +2724,13 @@ impl KubeUi {
                     });
                 }
                 let Some(obj) = n.obj else { return Some(Vec::new()) };
+                // An app row: sync, refresh, terminate as in its table.
+                if gitops::is_app(&obj.res)
+                    && key.code != KeyCode::Char('x')
+                    && let Some(e) = self.app_key(key.code, ctrl, obj.clone(), vec![obj.clone()])
+                {
+                    return Some(e);
+                }
                 return Some(match (key.code, ctrl) {
                     (KeyCode::Char('d'), false) => self.describe(obj),
                     (KeyCode::Char('y'), false) => self.yaml(obj),
@@ -3063,6 +3145,7 @@ fn help_lines(ui: &KubeUi) -> Vec<String> {
             (":ns [name]", "switch namespace (no name: the namespaces list)"),
             (":tree [ns]", "nodes, workloads down their owners, services → pods (-A, --all)"),
             (":xray deploy", "owner tree: deploy/sts/ds/job/cronjob/rs → pods → containers"),
+            (":apps", "Argo CD Applications: enter their resources, s sync, r refresh"),
             (":kubectl ...", "run kubectl on this context and namespace (also :! and !)"),
             (":aliases", "every resource type the cluster serves"),
             (":pf", "running port-forwards;  :q quit"),

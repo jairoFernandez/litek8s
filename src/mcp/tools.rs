@@ -12,6 +12,7 @@ use tokio::sync::Mutex;
 
 use super::{McpArgs, diagnose, guard};
 use crate::ui::client::{Endpoint, Lines, enc};
+use crate::ui::kube_gitops as gitops;
 use crate::ui::kube_ops as ops;
 use crate::ui::kube_resources::{Catalog, Resource};
 use crate::ui::kube_state::{ObjRef, Propagation};
@@ -321,6 +322,51 @@ pub const TOOLS: &[Tool] = &[
         narrow: "",
     },
     Tool {
+        name: "applications_list",
+        description: "Argo CD Applications (argoproj.io; served by Argo CD or any controller that reads its manifests): each one's project, source, destination, sync and health status, revision, automated or not, last operation and conditions. Read-only.",
+        schema: || obj(json!({"namespace": {"type": "string", "description": "default: all namespaces"}, "context": ctx_prop()}), &[]),
+        mutating: false,
+        destructive: false,
+        narrow: "Give a namespace.",
+    },
+    Tool {
+        name: "application_status",
+        description: "One Argo CD Application in detail: its summary, the resources that are out of sync, not healthy or to be pruned (with health messages), the running or last operation (phase, message, resources that failed), recent history and events. Answers why an app is OutOfSync or Degraded. Read-only.",
+        schema: || obj(json!({"name": {"type": "string"}, "namespace": {"type": "string", "description": "the Application's namespace (default argocd)"}, "all_resources": {"type": "boolean", "description": "list every resource, not only the ones that need attention"}, "context": ctx_prop()}), &["name"]),
+        mutating: false,
+        destructive: false,
+        narrow: "Leave all_resources off.",
+    },
+    Tool {
+        name: "application_sync",
+        description: "Sync an Argo CD Application: writes the operation the argocd CLI writes (the app's sync options; prune: also delete what git no longer has; revision: another than the target). Its controller runs it; wait_seconds waits for the result. Changes the cluster: needs confirm: true; without it reports what is out of sync and would be pruned.",
+        schema: || {
+            obj(
+                json!({
+                    "name": {"type": "string"},
+                    "namespace": {"type": "string", "description": "default argocd"},
+                    "prune": {"type": "boolean", "description": "delete resources git no longer has (default false)"},
+                    "revision": {"type": "string", "description": "a branch, tag or commit (default: the app's target revision)"},
+                    "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 600, "description": "wait for the operation to finish (default 0: return at once)"},
+                    "confirm": confirm_prop(),
+                    "context": ctx_prop(),
+                }),
+                &["name"],
+            )
+        },
+        mutating: true,
+        destructive: true,
+        narrow: "",
+    },
+    Tool {
+        name: "application_refresh",
+        description: "Ask an Argo CD Application's controller to compare it with git again now (hard: also render its manifests again, past caches), as the refresh annotation does; returns its sync and health after the refresh when wait_seconds allows.",
+        schema: || obj(json!({"name": {"type": "string"}, "namespace": {"type": "string", "description": "default argocd"}, "hard": {"type": "boolean"}, "wait_seconds": {"type": "integer", "minimum": 0, "maximum": 120, "description": "wait for the refresh (default 10)"}, "context": ctx_prop()}), &["name"]),
+        mutating: true,
+        destructive: false,
+        narrow: "",
+    },
+    Tool {
         name: "docker_ps",
         description: "Containers of a dev cluster's Docker API (docker ps; these are runtime containers, not pods). Read-only.",
         schema: || obj(json!({"all": {"type": "boolean", "description": "also stopped ones"}, "cluster": cluster_prop()}), &[]),
@@ -417,6 +463,10 @@ impl Server {
                     "query" | "query_range" => promql(&k, name == "query_range", a).await,
                     "alerts_list" => alerts_list(&k, a).await,
                     "alert_silence" => alert_silence(&k, a).await,
+                    "applications_list" => self.applications_list(&k, a).await,
+                    "application_status" => self.application_status(&k, a).await,
+                    "application_sync" => self.application_sync(&k, a).await,
+                    "application_refresh" => self.application_refresh(&k, a).await,
                     "alert_unsilence" => {
                         let n = req(a, "name")?;
                         k.ep.json(Method::DELETE, &format!("{}/{}", crate::obs::cli::SILENCES, enc(n)), None).await?;
@@ -777,6 +827,126 @@ impl Server {
         let msg = ops::delete(&k.ep, &[r], Propagation::Background, force).await?;
         Ok(json!({"deleted": true, "message": msg}))
     }
+}
+
+/// Argo CD's Applications.
+impl Server {
+    async fn app_resource(&self, k: &Kube) -> Result<Resource> {
+        let find = |c: &Catalog| c.list.iter().find(|r| gitops::is_app(r)).cloned();
+        if let Some(r) = find(&self.catalog(k, false).await?) {
+            return Ok(r);
+        }
+        find(&self.catalog(k, true).await?).context("this cluster has no Argo CD Applications (no applications.argoproj.io CRD)")
+    }
+
+    async fn app(&self, k: &Kube, a: &Value) -> Result<(ObjRef, Value)> {
+        let r = ObjRef { res: self.app_resource(k).await?, ns: opt(a, "namespace").unwrap_or("argocd").into(), name: req(a, "name")?.into() };
+        let app = ops::get(&k.ep, &r).await?;
+        Ok((r, app))
+    }
+
+    async fn applications_list(&self, k: &Kube, a: &Value) -> Result<Value> {
+        let res = self.app_resource(k).await?;
+        let l = k.ep.json(Method::GET, &res.list_path(opt(a, "namespace")), None).await?;
+        let items: Vec<Value> = l["items"].as_array().into_iter().flatten().map(gitops::summary).collect();
+        let attention = items.iter().filter(|i| i["sync"] != "Synced" || i["health"] != "Healthy").count();
+        Ok(json!({"applications": items, "not_synced_or_healthy": attention}))
+    }
+
+    async fn application_status(&self, k: &Kube, a: &Value) -> Result<Value> {
+        let (r, mut app) = self.app(k, a).await?;
+        let catalog = self.catalog(k, false).await?;
+        let find = |group: &str, kind: &str| catalog.list.iter().find(|x| x.group == group && x.kind == kind).cloned();
+        gitops::fill_health(&k.ep, &mut app, &find).await;
+        let all = a.get("all_resources").and_then(Value::as_bool).unwrap_or(false);
+        let resources = gitops::resources(&app);
+        let total = resources.len();
+        let shown: Vec<Value> = resources
+            .into_iter()
+            .filter(|x| all || x["sync"] != "Synced" || x.get("health").is_some_and(|h| h != "Healthy") || x.get("requiresPruning").is_some())
+            .collect();
+        let mut out = json!({"application": gitops::summary(&app), "resources_total": total});
+        out[if all { "resources" } else { "resources_needing_attention" }] = json!(shown);
+        if let Some(op) = app.pointer("/status/operationState") {
+            let failed: Vec<Value> = op
+                .pointer("/syncResult/resources")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|x| x["status"] != "Synced" || (x.get("hookType").is_some() && x.get("hookPhase").is_some_and(|p| p != "Succeeded")))
+                .map(|x| json!({"kind": x["kind"], "namespace": x["namespace"], "name": x["name"], "status": x["status"], "message": x["message"], "hookType": x["hookType"], "hookPhase": x["hookPhase"]}))
+                .collect();
+            out["operation"] = json!({"phase": op["phase"], "message": op["message"], "initiatedBy": op.pointer("/operation/initiatedBy"), "revision": op.pointer("/syncResult/revision"), "retryCount": op["retryCount"], "startedAt": op["startedAt"], "finishedAt": op["finishedAt"], "resources_not_synced": failed});
+        }
+        if let Some(h) = app.pointer("/status/history").and_then(Value::as_array) {
+            out["history"] = json!(h.iter().rev().take(3).map(|e| json!({"id": e["id"], "revision": e["revision"], "revisions": e["revisions"], "deployedAt": e["deployedAt"]})).collect::<Vec<_>>());
+        }
+        let uid = app.pointer("/metadata/uid").and_then(Value::as_str).unwrap_or_default().to_string();
+        out["events"] = json!(diagnose::compact_events(&ops::events(&k.ep, &r, &uid).await));
+        Ok(out)
+    }
+
+    async fn application_sync(&self, k: &Kube, a: &Value) -> Result<Value> {
+        let (r, app) = self.app(k, a).await?;
+        let prune = a.get("prune").and_then(Value::as_bool).unwrap_or(false);
+        let revision = opt(a, "revision");
+        let res = gitops::resources(&app);
+        let out_of_sync: Vec<String> = res.iter().filter(|x| x["sync"] == "OutOfSync" && x.get("requiresPruning").is_none()).map(res_label).collect();
+        let to_prune: Vec<String> = res.iter().filter(|x| x.get("requiresPruning").is_some()).map(res_label).collect();
+        let mut would = json!({"would_sync": r.label(), "context": k.context, "operation": gitops::sync_operation(&app, "litek8s-mcp", prune, revision), "out_of_sync": out_of_sync});
+        if prune {
+            would["would_prune"] = json!(to_prune);
+        } else if !to_prune.is_empty() {
+            would["note"] = json!(format!("{} resources git no longer has stay (prune: true deletes them)", to_prune.len()));
+        }
+        if let Err(preview) = guard::confirmed(a, would) {
+            return Ok(preview);
+        }
+        let msg = gitops::sync(&k.ep, &r, "litek8s-mcp", prune, revision).await?;
+        let wait = a.get("wait_seconds").and_then(Value::as_u64).unwrap_or(0);
+        if wait == 0 {
+            return Ok(json!({"started": true, "message": msg, "hint": "application_status shows its progress"}));
+        }
+        let deadline = Instant::now() + Duration::from_secs(wait);
+        loop {
+            let app = ops::get(&k.ep, &r).await?;
+            let done = !app["operation"].is_object() && app.pointer("/status/operationState/phase").and_then(Value::as_str).is_some_and(|p| p != "Running" && p != "Terminating");
+            if done || Instant::now() >= deadline {
+                let mut out = json!({"started": true, "finished": done, "application": gitops::summary(&app)});
+                if !done {
+                    out["hint"] = json!("still running: application_status shows its progress");
+                }
+                return Ok(out);
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    async fn application_refresh(&self, k: &Kube, a: &Value) -> Result<Value> {
+        let (r, _) = self.app(k, a).await?;
+        let hard = a.get("hard").and_then(Value::as_bool).unwrap_or(false);
+        let msg = gitops::refresh(&k.ep, &r, hard).await?;
+        let wait = a.get("wait_seconds").and_then(Value::as_u64).unwrap_or(10);
+        let deadline = Instant::now() + Duration::from_secs(wait);
+        loop {
+            let app = ops::get(&k.ep, &r).await?;
+            // The controller drops the annotation once it has refreshed.
+            let pending = app.pointer(&format!("/metadata/annotations/{}", gitops::REFRESH.replace('/', "~1"))).is_some();
+            if !pending || Instant::now() >= deadline {
+                let mut out = json!({"message": msg, "refreshed": !pending, "application": gitops::summary(&app)});
+                if pending {
+                    out["hint"] = json!("not refreshed yet: is its controller (Argo CD or another) running?");
+                }
+                return Ok(out);
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+}
+
+fn res_label(x: &Value) -> String {
+    let ns = x["namespace"].as_str().filter(|n| !n.is_empty()).map(|n| format!("{n}/")).unwrap_or_default();
+    format!("{}/{ns}{}", x["kind"].as_str().unwrap_or_default(), x["name"].as_str().unwrap_or_default())
 }
 
 fn opt<'a>(a: &'a Value, k: &str) -> Option<&'a str> {

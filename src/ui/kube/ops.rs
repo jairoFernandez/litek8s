@@ -507,6 +507,16 @@ fn workload_health(o: &Value) -> (Health, String) {
 pub async fn xray(ep: &Endpoint, catalog_pods: &Resource, find: &HashMap<String, Resource>, res: &Resource, ns: Option<&str>) -> Result<Vec<XNode>> {
     let gv = res.api_version();
     let roots = list_json(ep, &ns_path(&gv, &res.plural, ns.filter(|_| res.namespaced))).await;
+    if super::gitops::is_app(res) {
+        // Apps down their resources, child apps under their parent.
+        let mut apps = roots;
+        apps.sort_by(|a, b| (meta(a, "namespace"), meta(a, "name")).cmp(&(meta(b, "namespace"), meta(b, "name"))));
+        let by_kind = |group: &str, kind: &str| find.get(&format!("{group}/{kind}")).cloned();
+        for a in apps.iter_mut() {
+            super::gitops::fill_health(ep, a, &by_kind).await;
+        }
+        return Ok(super::gitops::tree(&apps, res, &by_kind, ns.is_none()));
+    }
     let need_pods = !matches!(res.kind.as_str(), "Namespace");
     let pods = if need_pods { list_json(ep, &ns_path("v1", "pods", ns)).await } else { Vec::new() };
     let rss = if res.kind == "Deployment" { list_json(ep, &ns_path("apps/v1", "replicasets", ns)).await } else { Vec::new() };

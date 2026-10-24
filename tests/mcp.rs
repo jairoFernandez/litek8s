@@ -17,6 +17,46 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::TcpListener;
 use tokio::process::{Child, ChildStdin, ChildStdout};
 
+/// Argo CD's Application CRD, reduced to what the API server needs.
+const APP_CRD: &str = "apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata: {name: applications.argoproj.io}
+spec:
+  group: argoproj.io
+  scope: Namespaced
+  names: {kind: Application, plural: applications, singular: application, shortNames: [app, apps], listKind: ApplicationList}
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    schema: {openAPIV3Schema: {type: object, x-kubernetes-preserve-unknown-fields: true}}
+    additionalPrinterColumns:
+    - {name: Sync Status, type: string, jsonPath: .status.sync.status}
+    - {name: Health Status, type: string, jsonPath: .status.health.status}
+";
+
+/// An app with the status a GitOps controller would have written.
+const APP: &str = "apiVersion: v1
+kind: Namespace
+metadata: {name: argocd}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata: {name: web, namespace: argocd}
+spec:
+  project: default
+  source: {repoURL: 'https://git.example.com/web.git', path: deploy, targetRevision: main}
+  destination: {server: 'https://kubernetes.default.svc', namespace: web}
+  syncPolicy: {automated: {prune: false}, syncOptions: [CreateNamespace=true]}
+status:
+  sync: {status: OutOfSync, revision: 0123456789abcdef0123456789abcdef01234567}
+  health: {status: Degraded}
+  resources:
+  - {group: apps, version: v1, kind: Deployment, namespace: web, name: web, status: OutOfSync, health: {status: Degraded, message: exceeded its progress deadline}}
+  - {version: v1, kind: Service, namespace: web, name: web, status: Synced, health: {status: Healthy}}
+  - {version: v1, kind: ConfigMap, namespace: web, name: old, status: OutOfSync, requiresPruning: true}
+";
+
 async fn start_api() -> Result<String> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?.to_string();
@@ -272,6 +312,42 @@ async fn drives_a_litek8s_cluster_over_stdio() -> Result<()> {
     assert_eq!(r["count"], 0, "no nodes, no logs: {r}");
     let r = m.ok("events", json!({"namespace": "default"})).await?;
     assert!(r["events"].is_array(), "{r}");
+
+    // Argo CD Applications, with no controller: their status as one would
+    // write it, a sync as the operation it leaves for one.
+    let r = m.ok("applications_list", json!({})).await;
+    assert!(r.is_err(), "no Application CRD yet");
+    m.ok("apply", json!({"manifest": APP_CRD})).await?;
+    let mut applied = Value::Null;
+    for _ in 0..50 {
+        applied = m.ok("apply", json!({"manifest": APP})).await?;
+        if applied["objects"][1]["error"].is_null() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(applied["objects"][1]["error"].is_null(), "{applied}");
+    let r = m.ok("applications_list", json!({})).await?;
+    assert_eq!(r["applications"][0]["name"], "web", "{r}");
+    assert_eq!((r["applications"][0]["sync"].clone(), r["applications"][0]["health"].clone()), (json!("OutOfSync"), json!("Degraded")), "{r}");
+    assert_eq!(r["not_synced_or_healthy"], 1);
+    let r = m.ok("application_status", json!({"name": "web"})).await?;
+    let attention = r["resources_needing_attention"].as_array().unwrap();
+    assert_eq!(attention.len(), 2, "the Deployment and the ConfigMap to prune, not the Service: {r}");
+    assert_eq!(attention[0]["message"], "exceeded its progress deadline", "{r}");
+    assert_eq!(r["resources_total"], 3);
+    let r = m.ok("application_sync", json!({"name": "web"})).await?;
+    assert_eq!(r["confirmed"], false, "{r}");
+    assert_eq!(r["out_of_sync"], json!(["Deployment/web/web"]), "{r}");
+    assert!(r["note"].as_str().unwrap().contains("prune"), "{r}");
+    let r = m.ok("application_sync", json!({"name": "web", "prune": true, "confirm": true})).await?;
+    assert_eq!(r["started"], true, "{r}");
+    let r = m.ok("get", json!({"kind": "applications.argoproj.io", "name": "web", "namespace": "argocd"})).await?;
+    assert_eq!(r["object"]["operation"], json!({"initiatedBy": {"username": "litek8s-mcp"}, "sync": {"syncStrategy": {"hook": {}}, "syncOptions": ["CreateNamespace=true"], "prune": true}}), "{r}");
+    let (err, msg) = m.call("application_sync", json!({"name": "web", "confirm": true})).await?;
+    assert!(err && msg.as_str().unwrap().contains("already has an operation"), "{msg}");
+    let r = m.ok("application_refresh", json!({"name": "web", "wait_seconds": 0})).await?;
+    assert_eq!(r["refreshed"], false, "no controller takes the annotation off: {r}");
 
     // A big result is cut to --max-output with a hint.
     for i in 0..60 {

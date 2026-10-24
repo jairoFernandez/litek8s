@@ -50,7 +50,8 @@ They refuse kube contexts that are not litek8s (use kubectl for those). \
 Start with clusters_list or cluster_status; pass `context` (litek8s-<cluster name>) to target a cluster. \
 For a pod that is not Ready or crash-looping, call diagnose_pod first: one result with conditions, container states, last exit, probes, events and recent logs. \
 Use logs_search for logs across pods (also of deleted containers) and query/query_range for PromQL (recipes in the resource litek8s://skill/references/observability.md). \
-delete, cluster_down and cluster_delete need confirm: true; without it they report what they would do. \
+GitOps: applications_list and application_status say which Argo CD Applications are out of sync or unhealthy and why; application_sync and application_refresh drive them. \
+delete, application_sync, cluster_down and cluster_delete need confirm: true; without it they report what they would do. \
 Read litek8s://skill/SKILL.md for when to use litek8s vs kubectl and how it differs from upstream Kubernetes.";
 
 pub async fn run(args: McpArgs) -> Result<()> {

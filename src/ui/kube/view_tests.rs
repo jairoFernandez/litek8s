@@ -928,3 +928,69 @@ fn w_remembers_in_ui_yaml_and_explains_where_it_cannot() {
     assert_eq!(app.kube.overlay, Overlay::None);
     assert!(app.status.as_ref().is_some_and(|(m, _)| m.contains("is a litek8s cluster")));
 }
+
+fn argo_app() -> App {
+    let mut app = app();
+    let mut list = super::resources::builtins();
+    list.push(super::resources::Resource { group: "argoproj.io".into(), version: "v1alpha1".into(), plural: "applications".into(), singular: "application".into(), kind: "Application".into(), namespaced: true, short: vec!["app".into(), "apps".into()], ..Default::default() });
+    app.apply(Msg::Kube(KMsg::Discovery(Ok(list))));
+    app.key(key(':'));
+    typing(&mut app, "apps -n argocd");
+    app.key(code(KeyCode::Enter));
+    let rows = vec![obj_row("argocd", "web", "a1", None, &["web", "OutOfSync", "Degraded", ""], Health::Bad, json!({}))];
+    app.apply(Msg::Kube(KMsg::Data(wk("argoproj.io/v1alpha1/applications", Some("argocd")), test_snapshot(&[("Name", 0), ("Sync Status", 0), ("Health Status", 0), ("Age", 0)], rows))));
+    app
+}
+
+#[test]
+fn argo_applications_sync_refresh_terminate_and_resources() {
+    let mut app = argo_app();
+    let s = render(&app, 80, 24);
+    assert!(s.contains("applications.argoproj.io(argocd) [1]") && s.contains("OutOfSync") && s.contains("Degraded"), "{s}");
+    // s and p: a sync (and prune), asked first.
+    app.key(key('s'));
+    assert!(matches!(&app.kube.overlay, Overlay::Confirm(c) if c.title == "Sync app/argocd/web?"), "{:?}", app.kube.overlay);
+    let effects = kube_effects(app.key(key('y')));
+    assert!(matches!(&effects[..], [KEffect::AppSync { objs, prune: false }] if objs.len() == 1 && objs[0].name == "web"), "{effects:?}");
+    app.key(key('p'));
+    let effects = kube_effects(app.key(key('y')));
+    assert!(matches!(&effects[..], [KEffect::AppSync { prune: true, .. }]), "{effects:?}");
+    // r and R: refreshes, at once.
+    let effects = kube_effects(app.key(key('r')));
+    assert!(matches!(&effects[..], [KEffect::AppRefresh { hard: false, .. }]), "{effects:?}");
+    let effects = kube_effects(app.key(KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT)));
+    assert!(matches!(&effects[..], [KEffect::AppRefresh { hard: true, .. }]), "{effects:?}");
+    // T terminates the sync here, not the tree.
+    app.key(KeyEvent::new(KeyCode::Char('T'), KeyModifiers::SHIFT));
+    assert!(matches!(&app.kube.overlay, Overlay::Confirm(c) if c.title.contains("Terminate")), "{:?}", app.kube.overlay);
+    let effects = kube_effects(app.key(key('y')));
+    assert!(matches!(&effects[..], [KEffect::AppTerminate(o)] if o.name == "web"), "{effects:?}");
+    assert!(effects.iter().all(KEffect::mutates));
+    // The m menu lists them.
+    let labels: Vec<&str> = app.kube.actions().iter().map(|a| a.label).collect();
+    assert!(labels.contains(&"sync and prune") && labels.contains(&"hard refresh"), "{labels:?}");
+    // enter: its resources, from its status; s on its row syncs from there.
+    let effects = kube_effects(app.key(code(KeyCode::Enter)));
+    let [KEffect::Xray { id, res, .. }] = &effects[..] else { panic!("{effects:?}") };
+    let status = json!({"metadata": {"namespace": "argocd", "name": "web"}, "status": {"sync": {"status": "OutOfSync"}, "health": {"status": "Degraded"},
+        "resources": [{"group": "apps", "kind": "Deployment", "namespace": "web", "name": "web", "status": "OutOfSync", "health": {"status": "Degraded", "message": "exceeded its progress deadline"}},
+                      {"kind": "Service", "namespace": "web", "name": "web", "status": "Synced", "health": {"status": "Healthy"}}]}});
+    let nodes = super::gitops::tree(&[status], res, &|_, _| None, false);
+    app.apply(Msg::Kube(KMsg::Xray { id: *id, nodes, error: None }));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("✕ app web  OutOfSync · Degraded") && s.contains("deployment web/web  OutOfSync · Degraded: exceeded") && s.contains("● service web/web  Synced · Healthy"), "{s}");
+    assert!(s.contains("sync") && s.contains("refresh"), "footer: {s}");
+    app.key(key('s'));
+    assert!(matches!(&app.kube.overlay, Overlay::Confirm(c) if c.title.starts_with("Sync")), "{:?}", app.kube.overlay);
+}
+
+#[test]
+fn argo_applications_are_read_only_on_other_clusters() {
+    let mut app = argo_app();
+    app.apply(Msg::Kube(KMsg::Identified { context: "prod".into(), litek8s: false }));
+    app.key(key('s'));
+    assert!(matches!(app.kube.overlay, Overlay::None), "{:?}", app.kube.overlay);
+    assert!(kube_effects(app.key(key('r'))).is_empty());
+    let (msg, err) = app.status.clone().unwrap();
+    assert!(err && msg.contains("not a litek8s cluster"), "{msg}");
+}

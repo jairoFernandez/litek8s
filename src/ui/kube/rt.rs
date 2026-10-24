@@ -449,6 +449,27 @@ pub async fn effect(run: &mut crate::ui::Runtime, e: KEffect, terminal: &mut cra
             });
         }
         KEffect::Trigger(obj) => rt.spawn(async move { done(ops::trigger(&ep, &obj).await) }),
+        KEffect::AppSync { objs, prune } => rt.spawn(async move {
+            let mut said = Vec::new();
+            for o in &objs {
+                match super::gitops::sync(&ep, o, "litek8s ui", prune, None).await {
+                    Ok(m) => said.push(m),
+                    Err(e) => return done(Err(e)),
+                }
+            }
+            done(Ok(if said.len() == 1 { said.remove(0) } else { format!("{} apps syncing", said.len()) }))
+        }),
+        KEffect::AppRefresh { objs, hard } => rt.spawn(async move {
+            let mut said = Vec::new();
+            for o in &objs {
+                match super::gitops::refresh(&ep, o, hard).await {
+                    Ok(m) => said.push(m),
+                    Err(e) => return done(Err(e)),
+                }
+            }
+            done(Ok(if said.len() == 1 { said.remove(0) } else { format!("{} apps refreshing", said.len()) }))
+        }),
+        KEffect::AppTerminate(obj) => rt.spawn(async move { done(super::gitops::terminate(&ep, &obj).await) }),
         KEffect::Containers { obj, purpose } => {
             rt.spawn(async move {
                 match ops::get(&ep, &obj).await {
@@ -557,7 +578,16 @@ pub async fn effect(run: &mut crate::ui::Runtime, e: KEffect, terminal: &mut cra
         }
         KEffect::Xray { id, res, ns } => {
             let pods = app.kube.catalog.find("pods").cloned().unwrap_or_default();
-            let kinds: HashMap<String, Resource> = ["ReplicaSet", "Job"].iter().filter_map(|k| app.kube.catalog.list.iter().find(|r| r.kind == *k && (r.group == "apps" || r.group == "batch")).map(|r| (k.to_string(), r.clone()))).collect();
+            let kinds: HashMap<String, Resource> = if super::gitops::is_app(&res) {
+                // An app's resources can be of any type: by `group/Kind`.
+                let mut m = HashMap::new();
+                for r in &app.kube.catalog.list {
+                    m.entry(format!("{}/{}", r.group, r.kind)).or_insert_with(|| r.clone());
+                }
+                m
+            } else {
+                ["ReplicaSet", "Job"].iter().filter_map(|k| app.kube.catalog.list.iter().find(|r| r.kind == *k && (r.group == "apps" || r.group == "batch")).map(|r| (k.to_string(), r.clone()))).collect()
+            };
             rt.spawn(async move {
                 let r = ops::xray(&ep, &pods, &kinds, &res, ns.as_deref()).await;
                 let msg = match r {

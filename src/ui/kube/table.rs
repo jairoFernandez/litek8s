@@ -385,6 +385,8 @@ fn health(kind: &str, columns: &[Column], r: &Row) -> Health {
                 Health::Ok
             }
         }
+        // Argo CD's Applications: their Sync Status and Health Status columns.
+        "Application" if r.cell(columns, "Health Status").is_some() => super::gitops::health_of(cell("Health Status"), cell("Sync Status")),
         "PersistentVolumeClaim" | "PersistentVolume" => match cell("Status") {
             "Bound" => Health::Ok,
             "Pending" | "Released" => Health::Warn,

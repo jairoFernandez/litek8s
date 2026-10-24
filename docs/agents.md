@@ -46,6 +46,9 @@ per line), protocol versions 2025-06-18, 2025-03-26 and 2024-11-05:
 | `logs_search` | the built-in log search across pods and nodes, including deleted containers | |
 | `query`, `query_range` | PromQL on the built-in metrics | |
 | `alerts_list`, `alert_silence`, `alert_unsilence` | alerts and silences | silences |
+| `applications_list`, `application_status` | Argo CD Applications (`argoproj.io`, whichever controller reconciles them): sync, health, revision, last operation, conditions; one app's resources that are out of sync, not healthy or to be pruned, with health messages (read from the live objects where the status has none, as with Argo CD v3: `health_from: live object`), its operation's failed resources, history and events | |
+| `application_sync` | write the sync operation the argocd CLI writes (the app's sync options, `prune`, `revision`), `wait_seconds` for its result; without `confirm` it lists what is out of sync and what would be pruned | yes, `confirm` |
+| `application_refresh` | the refresh annotation (`hard` too); answers once the controller has taken it | yes |
 | `docker_ps`, `docker_images`, `docker_logs` | a dev cluster's Docker API | |
 
 Every tool that talks to a cluster takes `context` (default: `--context`,
@@ -65,7 +68,7 @@ ui, CONFORMANCE), compiled into the binary.
   litek8s, and a context pointing at a production cluster is refused with
   a message saying to use kubectl. Docker tools refuse an engine whose
   `/version` platform is not `litek8s`.
-- **Confirmation.** `delete`, `cluster_down` and `cluster_delete` change
+- **Confirmation.** `delete`, `application_sync`, `cluster_down` and `cluster_delete` change
   nothing without `confirm: true`; without it they answer what would happen
   (`would_delete`, the cluster's status). The tools carry MCP annotations
   (`readOnlyHint`, `destructiveHint`) so clients can ask the user.

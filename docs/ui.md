@@ -885,6 +885,7 @@ as numbers, `2/3` by its counts, `512Mi` and `250m` by size.
 | `c` / `u` / `r` | node | cordon / uncordon / drain (evictions, honoring PodDisruptionBudgets; DaemonSet pods stay) |
 | `T` | cronjob | run it now (a Job from its template) |
 | `x` | secret / workloads | decode its data / its xray tree |
+| `enter`, `x` / `s` / `p` / `r` / `R` / `T` | Argo CD Application | its resources / sync (asks) / sync and prune (asks) / refresh / hard refresh / terminate the running sync (asks); see [Applications](#argo-cd-applications) |
 | `o` / `J` / `E` | pod / anything owned / anything | its node / its owner / its events |
 | `c` / `C` | anything | copy the name / the YAML (OSC 52, so it works over SSH) |
 | `n` / `0` | | pick a namespace / all namespaces and back |
@@ -962,6 +963,46 @@ connection counts.
 
 `enter` folds a branch; `d`, `y`, `e`, `l`, `s`, `ctrl-d` act on the row's
 object (on a container row: its logs and shell); `ctrl-r` reloads it.
+
+### Argo CD Applications
+
+`:apps` (or `:applications`) lists Argo CD's Applications with their Sync
+Status and Health Status columns, colored by both (Degraded red; out of
+sync, Progressing or Missing yellow). They are read and driven through the
+Kubernetes API alone, so this works with Argo CD or any controller that
+reconciles its `argoproj.io` manifests, on any cluster:
+
+| key | does |
+|---|---|
+| `enter`, `x` | the apps of the namespace down their resources, from each app's status: sync and health of every resource, the health message (`exceeded its progress deadline`), `to prune`, hooks; an app another app manages (app of apps) is drawn under its parent |
+| `s` | sync: writes the `operation` the argocd CLI writes (the app's sync options, the hook strategy), after asking; refused while another operation runs |
+| `p` | the same with prune: what git no longer has is deleted |
+| `r` / `R` | refresh / hard refresh (the `argocd.argoproj.io/refresh` annotation) |
+| `T` | terminate the running sync (as `argocd app terminate-op`), after asking |
+
+```
+╭─ xray applications(argocd) ──────────────────────────────────────────────────╮
+│ ▾ ✕ app web  OutOfSync · Degraded @ 0123456                                  │
+│     ✕ deployment web/web  OutOfSync · Degraded: exceeded its progress deadli…│
+│     ● service web/web  Synced · Healthy                                      │
+│     ◐ configmap web/old  OutOfSync, to prune                                 │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ esc back  enter fold  s sync  r refresh  d describe  ^r reload           ?  help
+```
+
+Argo CD v3 keeps each resource's health out of the Application's status
+(`resourceHealthSource: appTree`: it lives in Argo CD's own cache); where
+the status has none, the tree reads the live object and judges it the way
+Argo CD does for the kinds that say why an app is not Healthy
+(Deployments, StatefulSets, DaemonSets, ReplicaSets, Jobs, Pods, PVCs: a
+failed Job's message, a rollout past its progress deadline, a crash loop).
+
+On an app row of that tree `s`, `p`, `r`, `R`, `T` act on it, on a
+resource row `d`, `y`, `e`, `l` act on the object; `ctrl-r` reloads it.
+Syncs, refreshes and terminations are changes: read-only clusters refuse
+them like any other. The same reads and actions are tools of
+[`litek8s mcp`](agents.md) (`applications_list`, `application_status`,
+`application_sync`, `application_refresh`).
 
 ### tree
 
@@ -1067,7 +1108,7 @@ selects rows with a click and scrolls with the wheel.
 | tables | `:` command, `/` filter, `t` tree, `W` write mode, `!` kubectl, `?` help, `m` actions, `enter` open, `esc` back, `n` namespace, `0` all namespaces, `space` mark, `<` `>` `O` `N` `A` `S` sort, `ctrl-w` wide, `ctrl-z` faults, `ctrl-r` reload, `f` port-forwards, and [the actions](#acting-on-objects) |
 | pagers (describe, YAML, kubectl, help) | `/` search, `n`/`N` next/previous match, `w` wrap, `←→` scroll sideways, `e` edit, `y`/`d` YAML/describe, `m` managedFields, `c` copy, `ctrl-s` save, `esc` back |
 | logs | `f` follow/pause, `/` filter, `t` timestamps, `w` wrap, `p` previous, `c` copy, `x` clear, `ctrl-s` save, `esc` back |
-| xray | `enter` fold, `d` `y` `e` `l` `s` `ctrl-d` on the row, `ctrl-r` reload |
+| xray | `enter` fold, `d` `y` `e` `l` `s` `ctrl-d` on the row, `ctrl-r` reload; on an Application row `s` `p` `r` `R` `T` |
 | tree | `t`/`esc` back, `space` fold, `←` `→` fold/up and unfold, `enter` describe, `d` `y` `e` `l` `s` `F` `c` `ctrl-d` on the row, `/` filter, `0` all namespaces, `H` old ReplicaSets, `ctrl-r` reload |
 
 `1`-`8` and `tab` still switch views, `q` quits.
