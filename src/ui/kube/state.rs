@@ -514,10 +514,23 @@ pub struct XrayView {
     pub offset: Cell<usize>,
     pub height: Cell<usize>,
     pub loading: bool,
+    /// What it shows changed while it was loading: load again after.
+    pub stale: bool,
     pub error: Option<String>,
 }
 
 impl XrayView {
+    /// The list whose changes reload it: apps' (their status says what
+    /// their resources do).
+    pub fn live_key(&self) -> Option<WatchKey> {
+        gitops::is_app(&self.res).then(|| WatchKey { res: self.res.id(), ns: self.ns.clone(), fields: String::new() })
+    }
+
+    /// The node that is `n` again after a reload.
+    fn same(a: &XNode, b: &XNode) -> bool {
+        a.depth == b.depth && a.kind == b.kind && a.name == b.name && a.container_of == b.container_of
+    }
+
     /// Node indices shown (children of folded nodes hidden).
     pub fn shown(&self) -> Vec<usize> {
         let mut out = Vec::new();
@@ -834,6 +847,13 @@ impl KubeUi {
                     }
                 }
             }
+            if let View::Xray(x) = v {
+                if let Some(key) = x.live_key() {
+                    if !out.iter().any(|(_, k)| *k == key) {
+                        out.push((x.res.clone(), key));
+                    }
+                }
+            }
         }
         if let Some(ns) = self.catalog.find("namespaces") {
             let key = WatchKey { res: ns.id(), ns: None, fields: String::new() };
@@ -937,7 +957,22 @@ impl KubeUi {
                 self.discovery_error = Some(e);
             }
             KMsg::Data(key, snap) => {
-                self.data.insert(key.clone(), snap);
+                // The first list is what the xray that asked for it loads.
+                let changed = self.data.insert(key.clone(), snap).is_some();
+                if changed {
+                    for v in &mut self.views {
+                        if let View::Xray(x) = v {
+                            if x.live_key().as_ref() == Some(&key) {
+                                if x.loading {
+                                    x.stale = true;
+                                } else {
+                                    x.loading = true;
+                                    self.pending.push(KEffect::Xray { id: x.id, res: x.res.clone(), ns: x.ns.clone() });
+                                }
+                            }
+                        }
+                    }
+                }
                 // Only what is on screen is recomputed now; the rest when shown.
                 match self.views.last() {
                     Some(View::Table(_)) => self.refresh_top(),
@@ -1078,10 +1113,22 @@ impl KubeUi {
                 for v in &mut self.views {
                     if let View::Xray(x) = v {
                         if x.id == id {
-                            x.nodes = nodes.clone();
+                            // A reload keeps the cursor and the folds on the same nodes.
+                            let old = std::mem::replace(&mut x.nodes, nodes.clone());
+                            let find = |n: &XNode| x.nodes.iter().position(|m| XrayView::same(n, m));
+                            if !old.is_empty() {
+                                x.folded = x.folded.iter().filter_map(|&i| old.get(i).and_then(find)).collect();
+                                if let Some(i) = old.get(x.sel).and_then(find) {
+                                    x.sel = i;
+                                }
+                            }
                             x.loading = false;
                             x.error = error.clone();
                             x.sel = x.sel.min(x.nodes.len().saturating_sub(1));
+                            if std::mem::take(&mut x.stale) {
+                                x.loading = true;
+                                self.pending.push(KEffect::Xray { id, res: x.res.clone(), ns: x.ns.clone() });
+                            }
                         }
                     }
                 }
@@ -1595,7 +1642,7 @@ impl KubeUi {
                 let id = self.id();
                 self.views.truncate(1);
                 let ns_eff = ns.clone().filter(|_| res.namespaced);
-                self.push(View::Xray(XrayView { id, res: res.clone(), ns: ns_eff.clone(), nodes: Vec::new(), folded: BTreeSet::new(), sel: 0, offset: Cell::new(0), height: Cell::new(10), loading: true, error: None }));
+                self.push(View::Xray(XrayView { id, res: res.clone(), ns: ns_eff.clone(), nodes: Vec::new(), folded: BTreeSet::new(), sel: 0, offset: Cell::new(0), height: Cell::new(10), loading: true, stale: false, error: None }));
                 return vec![k(KEffect::Xray { id, res, ns: ns_eff })];
             }
             Cmd::Resource { name, ns, filter } => {
@@ -2290,7 +2337,7 @@ impl KubeUi {
             (KeyCode::Char('x'), false, "Deployment" | "StatefulSet" | "DaemonSet" | "ReplicaSet" | "Job" | "CronJob") => {
                 let id = self.id();
                 let ns = Some(obj.ns.clone());
-                let mut x = XrayView { id, res: res.clone(), ns: ns.clone(), nodes: Vec::new(), folded: BTreeSet::new(), sel: 0, offset: Cell::new(0), height: Cell::new(10), loading: true, error: None };
+                let mut x = XrayView { id, res: res.clone(), ns: ns.clone(), nodes: Vec::new(), folded: BTreeSet::new(), sel: 0, offset: Cell::new(0), height: Cell::new(10), loading: true, stale: false, error: None };
                 x.nodes.clear();
                 self.push(View::Xray(x));
                 // The tree of all of them; the selected one first.
@@ -2376,7 +2423,7 @@ impl KubeUi {
             KeyCode::Enter | KeyCode::Char('x') => {
                 let id = self.id();
                 let ns = Some(obj.ns.clone());
-                self.push(View::Xray(XrayView { id, res: obj.res.clone(), ns: ns.clone(), nodes: Vec::new(), folded: BTreeSet::new(), sel: 0, offset: Cell::new(0), height: Cell::new(10), loading: true, error: None }));
+                self.push(View::Xray(XrayView { id, res: obj.res.clone(), ns: ns.clone(), nodes: Vec::new(), folded: BTreeSet::new(), sel: 0, offset: Cell::new(0), height: Cell::new(10), loading: true, stale: false, error: None }));
                 vec![k(KEffect::Xray { id, res: obj.res, ns })]
             }
             KeyCode::Char('s') | KeyCode::Char('p') => {

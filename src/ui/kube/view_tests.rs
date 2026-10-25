@@ -994,3 +994,43 @@ fn argo_applications_are_read_only_on_other_clusters() {
     let (msg, err) = app.status.clone().unwrap();
     assert!(err && msg.contains("not a litek8s cluster"), "{msg}");
 }
+
+#[test]
+fn argo_applications_tree_reloads_when_the_apps_change() {
+    let mut app = argo_app();
+    let effects = kube_effects(app.key(code(KeyCode::Enter)));
+    let [KEffect::Xray { id, res, .. }] = &effects[..] else { panic!("{effects:?}") };
+    let (id, res) = (*id, res.clone());
+    let key = wk("argoproj.io/v1alpha1/applications", Some("argocd"));
+    let rows = |health: &str| vec![obj_row("argocd", "web", "a1", None, &["web", "Synced", health, ""], Health::Ok, json!({}))];
+    let data = |app: &mut App, health: &str| app.apply(Msg::Kube(KMsg::Data(key.clone(), test_snapshot(&[("Name", 0), ("Sync Status", 0), ("Health Status", 0), ("Age", 0)], rows(health)))));
+    let status = |health: &str| {
+        json!({"metadata": {"namespace": "argocd", "name": "web"}, "status": {"sync": {"status": "Synced"}, "health": {"status": health},
+            "resources": [{"group": "apps", "kind": "Deployment", "namespace": "web", "name": "web", "status": "Synced", "health": {"status": health}},
+                          {"kind": "Service", "namespace": "web", "name": "web", "status": "Synced", "health": {"status": "Healthy"}}]}})
+    };
+    // The apps stay watched while the tree shows.
+    let _ = app.kube.take_effects();
+    assert!(app.kube.wanted().iter().any(|(_, k)| *k == key));
+    // A change while the first load runs: one more load after it, not two at once.
+    data(&mut app, "Progressing");
+    assert!(app.kube.take_effects().iter().all(|e| !matches!(e, KEffect::Xray { .. })));
+    app.apply(Msg::Kube(KMsg::Xray { id, nodes: super::gitops::tree(&[status("Progressing")], &res, &|_, _| None, false), error: None }));
+    let again = app.kube.take_effects();
+    assert!(matches!(&again[..], [KEffect::Xray { id: i, .. }] if *i == id), "{again:?}");
+    // The cursor on the service and the app folded stay where they were.
+    app.key(code(KeyCode::Down));
+    app.key(code(KeyCode::Down));
+    let Some(View::Xray(x)) = app.kube.views.last_mut() else { panic!() };
+    assert_eq!(x.nodes[x.sel].kind, "service");
+    x.folded.insert(0);
+    app.apply(Msg::Kube(KMsg::Xray { id, nodes: super::gitops::tree(&[status("Healthy")], &res, &|_, _| None, false), error: None }));
+    let Some(View::Xray(x)) = app.kube.views.last() else { panic!() };
+    assert!(!x.loading && x.folded.contains(&0) && x.nodes[x.sel].kind == "service", "{:?} {:?}", x.folded, x.nodes[x.sel]);
+    // Another change: loaded at once; leaving the tree stops watching.
+    data(&mut app, "Healthy");
+    assert!(app.kube.take_effects().iter().any(|e| matches!(e, KEffect::Xray { .. })));
+    app.key(code(KeyCode::Esc));
+    data(&mut app, "Degraded");
+    assert!(app.kube.take_effects().iter().all(|e| !matches!(e, KEffect::Xray { .. })));
+}

@@ -974,7 +974,7 @@ reconciles its `argoproj.io` manifests, on any cluster:
 
 | key | does |
 |---|---|
-| `enter`, `x` | the apps of the namespace down their resources, from each app's status: sync and health of every resource, the health message (`exceeded its progress deadline`), `to prune`, hooks; an app another app manages (app of apps) is drawn under its parent |
+| `enter`, `x` | the apps of the namespace down their resources, from each app's status: sync and health of every resource, the health message (`exceeded its progress deadline`), `to prune`, hooks; an app another app manages (app of apps) is drawn under its parent; it follows the apps live (loaded again when one changes, cursor and folds kept) |
 | `s` | sync: writes the `operation` the argocd CLI writes (the app's sync options, the hook strategy), after asking; refused while another operation runs |
 | `p` | the same with prune: what git no longer has is deleted |
 | `r` / `R` | refresh / hard refresh (the `argocd.argoproj.io/refresh` annotation) |
