@@ -778,7 +778,7 @@ pub fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
             v
         }
         View::Logs(_) => vec![("esc", "back"), ("f", "follow"), ("/", "filter"), ("t", "time"), ("w", "wrap"), ("p", "previous"), ("^s", "save")],
-        View::Xray(x) if super::gitops::is_app(&x.res) => vec![("esc", "back"), ("enter", "fold"), ("s", "sync"), ("r", "refresh"), ("d", "describe"), ("^r", "reload")],
+        View::Xray(x) if super::gitops::is_app(&x.res) => vec![("esc", "back"), ("enter", "fold"), ("s", "sync"), ("D", "diff"), ("r", "refresh"), ("d", "describe")],
         View::Xray(_) => vec![("esc", "back"), ("enter", "fold"), ("d", "describe"), ("l", "logs"), ("s", "shell")],
         View::Tree(_) => vec![("t/esc", "back"), ("space", "fold"), ("enter", "describe"), ("/", "filter"), ("l", "logs"), ("0", "all ns")],
         View::Forwards { .. } => vec![("esc", "back"), ("d", "stop")],

@@ -194,7 +194,7 @@ pub fn diff_style(line: &str, t: &Theme) -> Style {
         t.ok
     } else if line.starts_with('-') {
         t.bad
-    } else if line.starts_with("@@") {
+    } else if line.starts_with("@@") || line.starts_with("=== ") {
         t.accent
     } else {
         Style::new()

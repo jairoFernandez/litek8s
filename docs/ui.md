@@ -975,6 +975,7 @@ reconciles its `argoproj.io` manifests, on any cluster:
 | key | does |
 |---|---|
 | `enter`, `x` | the apps of the namespace down their resources, from each app's status: sync and health of every resource, the health message (`exceeded its progress deadline`), `to prune`, hooks; an app another app manages (app of apps) is drawn under its parent; it follows the apps live (loaded again when one changes, cursor and folds kept) |
+| `D` | the diff with git: per resource out of sync, missing or to prune, `-` live and `+` git, only the fields git sets, Secret values masked. Read from the Secret `<app>.diff` next to the app (key `diff.json`, label `gitops.litek8s.dev/diff`), which the controller writes after each comparison: `{revisions, resources: [{group, version, kind, namespace, name, status, desired, live, omitted}]}`, the live object cut to the fields of `desired` (plus those the last apply set), `null` for the side that does not exist. Argo CD keeps its diffs in argocd-server instead (`argocd app diff`) |
 | `s` | sync: writes the `operation` the argocd CLI writes (the app's sync options, the hook strategy), after asking; refused while another operation runs |
 | `p` | the same with prune: what git no longer has is deleted |
 | `r` / `R` | refresh / hard refresh (the `argocd.argoproj.io/refresh` annotation) |

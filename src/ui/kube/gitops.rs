@@ -334,6 +334,64 @@ fn app_nodes<'a>(app: &'a Value, depth: u8, res: &Resource, find: &dyn Fn(&str, 
     }
 }
 
+/// What an app's diff is, where a controller publishes it: a Secret
+/// `<app>.diff` next to the app (label `gitops.litek8s.dev/diff`), its
+/// `diff.json` `{revisions, resources: [{group, version, kind, namespace,
+/// name, status, desired, live, omitted}]}` with, per resource out of sync,
+/// what git wants and the live object cut to those fields (null for the
+/// side that does not exist; Secret values masked). Argo CD itself keeps
+/// its diffs in argocd-server; then there is none.
+pub fn diff_secret(app: &str) -> String {
+    format!("{app}.diff")
+}
+
+/// The published diff of an app; none if there is no such Secret.
+pub async fn diff_doc(ep: &Endpoint, ns: &str, name: &str) -> Result<Option<Value>> {
+    use base64::Engine as _;
+    let path = format!("/api/v1/namespaces/{ns}/secrets/{}", diff_secret(name));
+    let resp = ep.send(Method::GET, &path, None, Vec::new()).await?;
+    let status = resp.status();
+    let data = http_body_util::BodyExt::collect(resp.into_body()).await?.to_bytes();
+    if status == hyper::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    crate::ui::client::check(status, &data)?;
+    let secret: Value = serde_json::from_slice(&data)?;
+    let raw = base64::engine::general_purpose::STANDARD.decode(s(&secret, "/data/diff.json"))?;
+    Ok(Some(serde_json::from_slice(&raw)?))
+}
+
+/// The diff as unified-diff lines: per resource `-` live, `+` git.
+pub fn diff_lines(app: &Value, doc: Option<&Value>) -> Vec<String> {
+    let sync = s(app, "/status/sync/status");
+    let Some(doc) = doc else {
+        return vec![if sync == "Synced" {
+            "In sync: nothing differs from git.".to_string()
+        } else {
+            format!("{} but its controller published no diff (Argo CD keeps diffs in argocd-server: argocd app diff {}).", if sync.is_empty() { "Not compared yet" } else { sync }, s(app, "/metadata/name"))
+        }];
+    };
+    let revs: Vec<&str> = doc["revisions"].as_array().into_iter().flatten().filter_map(Value::as_str).map(short_rev).collect();
+    let mut out = vec![format!("{} at {}; - live, + git", if sync.is_empty() { "?" } else { sync }, if revs.is_empty() { "?".to_string() } else { revs.join(", ") })];
+    let yaml = |v: &Value| if v.is_null() { String::new() } else { super::yaml::to_yaml(v, false) };
+    for r in doc["resources"].as_array().into_iter().flatten() {
+        let ns = s(r, "/namespace");
+        let name = if ns.is_empty() { s(r, "/name").to_string() } else { format!("{ns}/{}", s(r, "/name")) };
+        out.push(String::new());
+        out.push(format!("=== {} {name}: {}", s(r, "/kind").to_lowercase(), s(r, "/status")));
+        if r["omitted"] == true {
+            out.push("(too big to publish)".into());
+            continue;
+        }
+        let lines = super::yaml::unified(&yaml(&r["live"]), &yaml(&r["desired"]), 3);
+        if lines.is_empty() {
+            out.push("(the same fields; they differ only in form, as the server's dry run says)".into());
+        }
+        out.extend(lines);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,5 +466,25 @@ mod tests {
         assert_eq!(s["automated"], true);
         assert_eq!(s["conditions"], json!([{"type": "SyncError", "message": "x"}]));
         assert_eq!(resources(&app), vec![json!({"kind": "ConfigMap", "name": "c", "sync": "Synced"})]);
+    }
+
+    #[test]
+    fn diff_lines_per_resource_live_against_git() {
+        let app = json!({"metadata": {"name": "web"}, "status": {"sync": {"status": "OutOfSync"}}});
+        assert!(diff_lines(&app, None)[0].contains("argocd app diff web"));
+        let synced = json!({"status": {"sync": {"status": "Synced"}}});
+        assert!(diff_lines(&synced, None)[0].starts_with("In sync"));
+        let doc = json!({"revisions": ["0123456789abcdef0123456789abcdef01234567"], "resources": [
+            {"kind": "Deployment", "namespace": "web", "name": "web", "status": "OutOfSync", "desired": {"spec": {"replicas": 3}}, "live": {"spec": {"replicas": 1}}},
+            {"kind": "Service", "namespace": "web", "name": "web", "status": "Missing", "desired": {"spec": {"type": "ClusterIP"}}, "live": null},
+            {"kind": "ConfigMap", "namespace": "web", "name": "big", "status": "OutOfSync", "omitted": true}]});
+        let l = diff_lines(&app, Some(&doc));
+        assert_eq!(l[0], "OutOfSync at 0123456; - live, + git");
+        let at = |h: &str| l.iter().position(|x| x == h).unwrap_or_else(|| panic!("{h}: {l:?}"));
+        let d = at("=== deployment web/web: OutOfSync");
+        assert!(l[d + 1..].iter().take(5).any(|x| x == "-  replicas: 1") && l[d + 1..].iter().take(5).any(|x| x == "+  replicas: 3"), "{l:?}");
+        let m = at("=== service web/web: Missing");
+        assert!(l[m + 2..].iter().take(2).all(|x| x.starts_with('+')), "{l:?}");
+        assert_eq!(l[at("=== configmap web/big: OutOfSync") + 1], "(too big to publish)");
     }
 }

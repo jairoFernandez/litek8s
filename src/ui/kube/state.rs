@@ -157,6 +157,8 @@ pub enum KEffect {
     AppSync { objs: Vec<ObjRef>, prune: bool },
     AppRefresh { objs: Vec<ObjRef>, hard: bool },
     AppTerminate(ObjRef),
+    /// An app's published diff into pager `id`.
+    AppDiff { id: u64, obj: ObjRef },
     Containers { obj: ObjRef, purpose: Purpose },
     Logs { id: u64, target: LogTarget, previous: bool, tail: u32, max_streams: usize },
     StopLogs(u64),
@@ -2060,6 +2062,7 @@ impl KubeUi {
                 v.push(act("r", "refresh", KeyCode::Char('r'), N));
                 v.push(act("R", "hard refresh", KeyCode::Char('R'), N));
                 v.push(act("T", "terminate the sync", KeyCode::Char('T'), N));
+                v.push(act("D", "diff with git", KeyCode::Char('D'), N));
                 v.push(act("x", "its resources", KeyCode::Char('x'), N));
             }
             _ => {}
@@ -2442,6 +2445,13 @@ impl KubeUi {
                     return Some(Vec::new());
                 }
                 vec![k(KEffect::AppRefresh { objs: targets, hard: code == KeyCode::Char('R') })]
+            }
+            KeyCode::Char('D') => {
+                let id = self.id();
+                let mut p = Pager::new(id, format!("diff {} (- live, + git)", obj.label()), PagerKind::Diff);
+                p.obj = Some(obj.clone());
+                self.push(View::Pager(p));
+                vec![k(KEffect::AppDiff { id, obj })]
             }
             KeyCode::Char('T') => {
                 if self.read_only() {
@@ -3192,7 +3202,7 @@ fn help_lines(ui: &KubeUi) -> Vec<String> {
             (":ns [name]", "switch namespace (no name: the namespaces list)"),
             (":tree [ns]", "nodes, workloads down their owners, services → pods (-A, --all)"),
             (":xray deploy", "owner tree: deploy/sts/ds/job/cronjob/rs → pods → containers"),
-            (":apps", "Argo CD Applications: enter their resources, s sync, r refresh"),
+            (":apps", "Argo CD Applications: enter their resources, D diff, s sync, r refresh"),
             (":kubectl ...", "run kubectl on this context and namespace (also :! and !)"),
             (":aliases", "every resource type the cluster serves"),
             (":pf", "running port-forwards;  :q quit"),

@@ -336,6 +336,22 @@ async fn drives_a_litek8s_cluster_over_stdio() -> Result<()> {
     assert_eq!(attention.len(), 2, "the Deployment and the ConfigMap to prune, not the Service: {r}");
     assert_eq!(attention[0]["message"], "exceeded its progress deadline", "{r}");
     assert_eq!(r["resources_total"], 3);
+    // Its diff: none published yet, then the one a controller writes.
+    let r = m.ok("application_diff", json!({"name": "web"})).await?;
+    assert_eq!(r["published"], false, "{r}");
+    assert!(r["message"].as_str().unwrap().contains("argocd app diff web"), "{r}");
+    let doc = json!({"revisions": ["0123456789abcdef0123456789abcdef01234567"], "resources": [
+        {"group": "apps", "version": "v1", "kind": "Deployment", "namespace": "web", "name": "web", "status": "OutOfSync",
+         "desired": {"spec": {"replicas": 3}}, "live": {"spec": {"replicas": 1}}},
+        {"group": "", "version": "v1", "kind": "ConfigMap", "namespace": "web", "name": "old", "status": "Prune", "desired": null, "live": {"data": {"k": "v"}}}]});
+    use base64::Engine as _;
+    let secret = format!("apiVersion: v1\nkind: Secret\nmetadata: {{name: web.diff, namespace: argocd}}\ndata: {{diff.json: {}}}\n", base64::engine::general_purpose::STANDARD.encode(doc.to_string()));
+    m.ok("apply", json!({"manifest": secret})).await?;
+    let r = m.ok("application_diff", json!({"name": "web"})).await?;
+    assert_eq!(r["published"], true, "{r}");
+    let d = r["resources"][0]["diff"].as_str().unwrap();
+    assert!(d.contains("-  replicas: 1") && d.contains("+  replicas: 3"), "{d}");
+    assert!(r["resources"][1]["diff"].as_str().unwrap().contains("-  k: v"), "{r}");
     let r = m.ok("application_sync", json!({"name": "web"})).await?;
     assert_eq!(r["confirmed"], false, "{r}");
     assert_eq!(r["out_of_sync"], json!(["Deployment/web/web"]), "{r}");

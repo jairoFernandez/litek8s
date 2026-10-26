@@ -338,6 +338,14 @@ pub const TOOLS: &[Tool] = &[
         narrow: "Leave all_resources off.",
     },
     Tool {
+        name: "application_diff",
+        description: "What differs between git and the cluster for an Argo CD Application: per resource out of sync, missing or to be pruned, a unified diff (- live, + git) of the fields git sets, Secret values masked. From the diff its controller publishes (a Secret <app>.diff next to the app); Argo CD itself does not publish one (then: argocd app diff). Read-only.",
+        schema: || obj(json!({"name": {"type": "string"}, "namespace": {"type": "string", "description": "the Application's namespace (default argocd)"}, "context": ctx_prop()}), &["name"]),
+        mutating: false,
+        destructive: false,
+        narrow: "Fix one resource at a time; application_status lists them.",
+    },
+    Tool {
         name: "application_sync",
         description: "Sync an Argo CD Application: writes the operation the argocd CLI writes (the app's sync options; prune: also delete what git no longer has; revision: another than the target). Its controller runs it; wait_seconds waits for the result. Changes the cluster: needs confirm: true; without it reports what is out of sync and would be pruned.",
         schema: || {
@@ -465,6 +473,7 @@ impl Server {
                     "alert_silence" => alert_silence(&k, a).await,
                     "applications_list" => self.applications_list(&k, a).await,
                     "application_status" => self.application_status(&k, a).await,
+                    "application_diff" => self.application_diff(&k, a).await,
                     "application_sync" => self.application_sync(&k, a).await,
                     "application_refresh" => self.application_refresh(&k, a).await,
                     "alert_unsilence" => {
@@ -851,6 +860,32 @@ impl Server {
         let items: Vec<Value> = l["items"].as_array().into_iter().flatten().map(gitops::summary).collect();
         let attention = items.iter().filter(|i| i["sync"] != "Synced" || i["health"] != "Healthy").count();
         Ok(json!({"applications": items, "not_synced_or_healthy": attention}))
+    }
+
+    async fn application_diff(&self, k: &Kube, a: &Value) -> Result<Value> {
+        let (_, app) = self.app(k, a).await?;
+        let ns = app.pointer("/metadata/namespace").and_then(Value::as_str).unwrap_or_default();
+        let name = app.pointer("/metadata/name").and_then(Value::as_str).unwrap_or_default();
+        let sync = app.pointer("/status/sync/status").cloned().unwrap_or(Value::Null);
+        let Some(doc) = gitops::diff_doc(&k.ep, ns, name).await? else {
+            return Ok(json!({"application": name, "sync": sync, "published": false, "message": gitops::diff_lines(&app, None).join("\n")}));
+        };
+        let resources: Vec<Value> = doc["resources"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|r| {
+                let yaml = |v: &Value| if v.is_null() { String::new() } else { crate::ui::kube_yaml::to_yaml(v, false) };
+                let mut x = json!({"group": r["group"], "kind": r["kind"], "namespace": r["namespace"], "name": r["name"], "status": r["status"]});
+                if r["omitted"] == true {
+                    x["omitted"] = json!("too big to publish");
+                } else {
+                    x["diff"] = json!(crate::ui::kube_yaml::unified(&yaml(&r["live"]), &yaml(&r["desired"]), 3).join("\n"));
+                }
+                x
+            })
+            .collect();
+        Ok(json!({"application": name, "sync": sync, "published": true, "revisions": doc["revisions"], "resources": resources}))
     }
 
     async fn application_status(&self, k: &Kube, a: &Value) -> Result<Value> {

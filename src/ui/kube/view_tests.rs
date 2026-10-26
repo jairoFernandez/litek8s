@@ -966,6 +966,14 @@ fn argo_applications_sync_refresh_terminate_and_resources() {
     let effects = kube_effects(app.key(key('y')));
     assert!(matches!(&effects[..], [KEffect::AppTerminate(o)] if o.name == "web"), "{effects:?}");
     assert!(effects.iter().all(KEffect::mutates));
+    // D: its diff with git, in a pager, also where nothing may change.
+    let effects = kube_effects(app.key(KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT)));
+    let [KEffect::AppDiff { id, obj }] = &effects[..] else { panic!("{effects:?}") };
+    assert!(obj.name == "web" && !effects[0].mutates());
+    app.apply(Msg::Kube(KMsg::Pager { id: *id, lines: vec!["=== deployment web/web: OutOfSync".into(), "-  replicas: 1".into(), "+  replicas: 3".into()], append: false, done: true, error: None }));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("diff app/argocd/web") && s.contains("+  replicas: 3"), "{s}");
+    app.key(code(KeyCode::Esc));
     // The m menu lists them.
     let labels: Vec<&str> = app.kube.actions().iter().map(|a| a.label).collect();
     assert!(labels.contains(&"sync and prune") && labels.contains(&"hard refresh"), "{labels:?}");

@@ -470,6 +470,17 @@ pub async fn effect(run: &mut crate::ui::Runtime, e: KEffect, terminal: &mut cra
             done(Ok(if said.len() == 1 { said.remove(0) } else { format!("{} apps refreshing", said.len()) }))
         }),
         KEffect::AppTerminate(obj) => rt.spawn(async move { done(super::gitops::terminate(&ep, &obj).await) }),
+        KEffect::AppDiff { id, obj } => {
+            let out = rt.pager(id);
+            rt.spawn(async move {
+                let r = async {
+                    let app = ep.json(Method::GET, &obj.res.object_path(&obj.ns, &obj.name), None).await?;
+                    let doc = super::gitops::diff_doc(&ep, &obj.ns, &obj.name).await?;
+                    Ok(super::gitops::diff_lines(&app, doc.as_ref()))
+                };
+                out(r.await)
+            });
+        }
         KEffect::Containers { obj, purpose } => {
             rt.spawn(async move {
                 match ops::get(&ep, &obj).await {

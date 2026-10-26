@@ -25,7 +25,7 @@ server `litek8s mcp`) or the `litek8s` CLI for those, kubectl for the rest.
 | logs across pods, namespaces, deleted containers | `logs_search` (`grep`, `since`, `selector`), or `litek8s logs -l app=x --grep ERROR --since 1h -o json` |
 | CPU, memory, restarts, network over time | `query` / `query_range` (PromQL), or `litek8s query '...' -o json`; recipes: references/observability.md |
 | what is wrong right now | `alerts_list`; `litek8s alerts -o json` |
-| GitOps: Argo CD Applications synced? why OutOfSync or Degraded? sync one | `applications_list`, `application_status` (the resources that need attention, with messages), `application_sync` (`confirm: true`; `prune` deletes what git dropped), `application_refresh` |
+| GitOps: Argo CD Applications synced? why OutOfSync or Degraded? sync one | `applications_list`, `application_status` (the resources that need attention, with messages), `application_diff` (live against git, per resource), `application_sync` (`confirm: true`; `prune` deletes what git dropped), `application_refresh` |
 | Docker containers/images on a dev cluster | `docker_ps`, `docker_images`, `docker_logs`; or `DOCKER_HOST=unix://$HOME/.litek8s/docker.sock docker ...` |
 
 ## Rules
