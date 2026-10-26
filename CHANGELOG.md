@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.2.9
+
+- **Argo CD Applications in `litek8s ui` and `litek8s mcp`, through the
+  Kubernetes API alone** (no argocd-server, no `argocd` CLI): `:apps` lists
+  them with sync, health and revision; the tree of an app shows its
+  resources and follows them live; `s` syncs (an `operation`, as the CLI
+  writes it), `r` refreshes, terminate stops a running sync. Any controller
+  that serves the Application CRD works. MCP tools
+  `applications_list`, `application_status`, `application_sync`,
+  `application_refresh`.
+- **An app's diff with git:** `D` in the Applications views and the MCP tool
+  `application_diff` show, per resource, the live object against git. They
+  read it from a Secret `<app>.diff` (key `diff.json`) that the controller
+  publishes; without one the view says so (Argo CD keeps its diffs in
+  argocd-server: `argocd app diff`). The format is in docs/ui.md.
+- **The dev VM's disk has a size to set:** `disk:` in config.yaml, `dev up
+  --disk` and Settings grow the 64 GiB image in place (sparse, data kept,
+  ext4 grown online). `dev status`/`dev list` and Home show its use against
+  that size and the Mac's free space.
+- **Home keeps Docker API containers out of the cluster's figures:** the
+  meters are against the VM's or sandbox's own size, and the Docker
+  socket's containers, images and volumes are in a box of their own.
+- **StatefulSets and DaemonSets find their ControllerRevision again**
+  (`creationTimestamp: null` in its data was dropped, so every reconcile
+  tried to create it and rollbacks did not renumber it).
+- Jobs: a work queue without completions starts no new pod once one
+  succeeded. CronJobs: `?` in a day field matches every day and a stepped
+  `*` restricts, as robfig/cron; after many missed runs the latest starts.
+  Admission: DELETE reviews carry DeleteOptions; conversion webhooks at an
+  IPv6 address.
+
 ## 0.2.8
 
 - **The platform example's waves no longer stall:** an Application whose
