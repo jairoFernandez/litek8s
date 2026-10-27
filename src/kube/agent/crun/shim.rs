@@ -233,6 +233,10 @@ mod linux {
     fn crun(o: &Opts) -> Command {
         let mut c = Command::new(&o.crun);
         let log = o.bundle.join("crun.log");
+        // With NOTIFY_SOCKET set (litek8s started from a systemd notify unit
+        // or a shell that inherited one), `crun start` waits for READY=1 from
+        // the container, so it returns only when the container exits.
+        c.env_remove("NOTIFY_SOCKET");
         c.arg("--root").arg(&o.root).arg("--log").arg(format!("file:{}", log.display()));
         c
     }
