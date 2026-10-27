@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.2.10
+
+- **`docker run -d` and pod starts return at once again when litek8s
+  inherited `NOTIFY_SOCKET`** (started from a systemd notify unit, or from a
+  shell or agent tool that has it): `crun start` waited for the container's
+  READY=1, so the call lasted as long as the container, a server's
+  forever, and `docker compose up -d` never returned. crun no longer gets
+  the variable, as with containerd and Docker.
+- `litek8s dev delete` or `dev down` of the last running cluster no longer
+  ends with "the dev environment closed the connection": the reply reaches
+  the client before the environment stops.
+- Docs and skill: name the Docker socket on every command
+  (`DOCKER_HOST=unix://... docker ...`); an `export` in one agent shell call
+  does not reach the next, which then talks to the machine's own Docker.
+
 ## 0.2.9
 
 - **Argo CD Applications in `litek8s ui` and `litek8s mcp`, through the
