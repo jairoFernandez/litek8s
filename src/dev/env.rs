@@ -249,11 +249,14 @@ pub async fn request(home: &Path, req: &Request, timeout: Duration) -> Result<Re
 }
 
 /// Serve control requests on `path` with `handle` (one at a time: starting
-/// and stopping cells is quick, and ordering keeps them simple).
+/// and stopping cells is quick, and ordering keeps them simple). `handle`
+/// also says whether its reply is the last (no cluster runs any more):
+/// this returns once that reply is written, so the environment can go
+/// without cutting off the client that stopped the last cluster.
 pub async fn serve<F, Fut>(path: PathBuf, handle: F) -> Result<()>
 where
     F: Fn(Request) -> Fut,
-    Fut: std::future::Future<Output = Response>,
+    Fut: std::future::Future<Output = (Response, bool)>,
 {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::remove_file(&path);
@@ -267,13 +270,17 @@ where
         if tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await.is_err() {
             continue;
         }
-        let reply = match serde_json::from_str::<Request>(&line) {
+        let (reply, last) = match serde_json::from_str::<Request>(&line) {
             Ok(req) => handle(req).await,
-            Err(e) => Response::error(format!("bad request: {e}")),
+            Err(e) => (Response::error(format!("bad request: {e}")), false),
         };
         let mut out = serde_json::to_vec(&reply).unwrap_or_default();
         out.push(b'\n');
         let _ = write.write_all(&out).await;
+        if last {
+            let _ = write.shutdown().await;
+            return Ok(());
+        }
     }
 }
 
@@ -320,10 +327,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sock = dir.path().join("env.sock");
         write_state(dir.path(), &EnvState { pid: std::process::id(), mode: "test".into(), started_unix_ms: 0, control: sock.clone(), cgroup: None, vm_ip: None, helper_pid: None, cpus: None, memory_mib: None, disk_gib: None, shares: Vec::new(), publish: None }).unwrap();
-        tokio::spawn(serve(sock.clone(), |req| async move {
+        let server = tokio::spawn(serve(sock.clone(), |req| async move {
             match req {
-                Request::Start { port, .. } => Response { port: port.or(Some(1)), ..Default::default() },
-                _ => Response::error("no"),
+                Request::Start { port, .. } => (Response { port: port.or(Some(1)), running: vec!["a".into()], ..Default::default() }, false),
+                // The last cluster: the reply still reaches the client.
+                Request::Stop { .. } => (Response::default(), true),
+                _ => (Response::error("no"), false),
             }
         }));
         for _ in 0..100 {
@@ -336,5 +345,8 @@ mod tests {
         assert_eq!(r.port, Some(7));
         let r = request(dir.path(), &Request::Stats, Duration::from_secs(2)).await.unwrap();
         assert_eq!(r.error.as_deref(), Some("no"));
+        let r = request(dir.path(), &Request::Stop { name: "a".into() }, Duration::from_secs(2)).await.unwrap();
+        assert!(r.error.is_none() && r.running.is_empty());
+        tokio::time::timeout(Duration::from_secs(2), server).await.expect("serve returns after the last reply").unwrap().unwrap();
     }
 }

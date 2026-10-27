@@ -349,23 +349,25 @@ impl Env {
         self.clusters.lock().unwrap().keys().cloned().collect()
     }
 
-    fn handle(self: &Arc<Self>, req: Request) -> Response {
+    /// The reply, and whether it is the last (no cluster left: the
+    /// sandbox goes once it is written).
+    fn handle(self: &Arc<Self>, req: Request) -> (Response, bool) {
         let result = match req {
             Request::Start { name, port, nodes, registries } => self.start(&name, port, nodes.max(1), registries).map(Some),
             Request::Stop { name } => self.stop(&name).map(|_| None),
             Request::Node { name, node, up } => {
                 let r = self.cell_request(&CellRequest::Node { name, node, up }, &[]);
                 return match r {
-                    Ok(()) => Response { running: self.names(), ..Default::default() },
-                    Err(e) => Response::error(format!("{e:#}")),
+                    Ok(()) => (Response { running: self.names(), ..Default::default() }, false),
+                    Err(e) => (Response::error(format!("{e:#}")), false),
                 };
             }
             // The host deletes a cluster's files itself.
-            Request::Purge { .. } => return Response { running: self.names(), ..Default::default() },
+            Request::Purge { .. } => return (Response { running: self.names(), ..Default::default() }, false),
             Request::Stats => {
                 let names = self.names();
                 let stats = super::env::cell_stats(&self.base.join("sandbox")).into_iter().filter(|s| names.contains(&s.name)).collect();
-                return Response { stats, running: names, ..Default::default() };
+                return (Response { stats, running: names, ..Default::default() }, false);
             }
             Request::Shutdown => {
                 for n in self.names() {
@@ -375,13 +377,12 @@ impl Env {
             }
         };
         let running = self.names();
-        if running.is_empty() {
-            self.done.notify_one();
-        }
-        match result {
+        let last = running.is_empty();
+        let reply = match result {
             Ok(port) => Response { port, running, ..Default::default() },
             Err(e) => Response { running, ..Response::error(format!("{e:#}")) },
-        }
+        };
+        (reply, last)
     }
 }
 
@@ -474,10 +475,20 @@ pub async fn run(publish: super::config::Publish, cpus: Option<usize>, memory_mi
         done: tokio::sync::Notify::new(),
     });
     let handler = env.clone();
-    let server = tokio::spawn(super::env::serve(control.clone(), move |req| {
-        let env = handler.clone();
-        async move { tokio::task::spawn_blocking(move || env.handle(req)).await.unwrap_or_else(|e| Response::error(e)) }
-    }));
+    let served = env.clone();
+    let path = control.clone();
+    let server = tokio::spawn(async move {
+        let r = super::env::serve(path, move |req| {
+            let env = handler.clone();
+            async move { tokio::task::spawn_blocking(move || env.handle(req)).await.unwrap_or_else(|e| (Response::error(e), false)) }
+        })
+        .await;
+        if r.is_ok() {
+            // The last reply went out: the sandbox stops now.
+            served.done.notify_one();
+        }
+        r
+    });
     super::env::write_state(
         &home,
         &EnvState {

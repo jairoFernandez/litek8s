@@ -744,7 +744,9 @@ impl Shared {
         }
     }
 
-    async fn handle(self: Arc<Self>, req: Request) -> Response {
+    /// The reply, and whether it is the last (no cluster left: the VM
+    /// goes once it is written).
+    async fn handle(self: Arc<Self>, req: Request) -> (Response, bool) {
         let result = match req {
             Request::Start { name, port, nodes, registries } => self.start(&name, port, nodes.max(1), registries).await.map(Some),
             Request::Stop { name } => self.stop(&name).await.map(|_| None),
@@ -754,7 +756,7 @@ impl Shared {
                     Ok(_) => Response::default(),
                     Err(e) => Response::error(format!("{e:#}")),
                 };
-                return Response { running: self.names(), ..r };
+                return (Response { running: self.names(), ..r }, false);
             }
             Request::Purge { name } => {
                 let r = match self.vm.cells(&CellRequest::Purge { name }).await {
@@ -762,7 +764,7 @@ impl Shared {
                     Ok(_) => Response::default(),
                     Err(e) => Response::error(format!("{e:#}")),
                 };
-                return Response { running: self.names(), ..r };
+                return (Response { running: self.names(), ..r }, false);
             }
             Request::Stats => {
                 return match self.vm.stats().await {
@@ -771,9 +773,9 @@ impl Shared {
                         let memory_limit = m.controller.as_ref().map(|c| c.limit());
                         let balloon = m.last.map(|r| r.balloon);
                         drop(m);
-                        Response { stats: s.cells, meminfo: s.meminfo, proc_stat: s.proc_stat, memory_limit, balloon, running: self.names(), ..Default::default() }
+                        (Response { stats: s.cells, meminfo: s.meminfo, proc_stat: s.proc_stat, memory_limit, balloon, running: self.names(), ..Default::default() }, false)
                     }
-                    Err(e) => Response::error(format!("{e:#}")),
+                    Err(e) => (Response::error(format!("{e:#}")), false),
                 };
             }
             Request::Shutdown => {
@@ -784,13 +786,12 @@ impl Shared {
             }
         };
         let running = self.names();
-        if running.is_empty() {
-            self.done.notify_one();
-        }
-        match result {
+        let last = running.is_empty();
+        let reply = match result {
             Ok(port) => Response { port, running, ..Default::default() },
             Err(e) => Response { running, ..Response::error(format!("{e:#}")) },
-        }
+        };
+        (reply, last)
     }
 
     /// A memory report from the guest: move the ceiling if it calls for it.
@@ -936,7 +937,16 @@ impl Host {
                             let _ = std::fs::remove_file(purge_file(&self.config.home));
                         }
                         let handler = shared.clone();
-                        server = Some(tokio::spawn(super::env::serve(control.clone(), move |req| handler.clone().handle(req))));
+                        let served = shared.clone();
+                        let path = control.clone();
+                        server = Some(tokio::spawn(async move {
+                            let r = super::env::serve(path, move |req| handler.clone().handle(req)).await;
+                            if r.is_ok() {
+                                // The last reply went out: the VM stops now.
+                                served.done.notify_one();
+                            }
+                            r
+                        }));
                         if let Err(e) = super::env::write_state(&self.config.home, &env) {
                             eprintln!("dev-vm: {e:#}");
                         }
