@@ -37,6 +37,13 @@ otherwise get from `kubectl describe pod`, `kubectl logs --previous`,
   free one when 6443 is busy (see `cluster_status.server`).
 - A NodePort not reachable on localhost: another cluster holds the same
   port (its log says "not exposed").
+- Docker results that contradict each other (`created` yet its port
+  answers, a container missing from `ps`, `port is already allocated`,
+  a call that seems to hang): first make sure every command went to
+  litek8s. Put `DOCKER_HOST=unix://...` on each command (an `export` does
+  not survive between shell calls) and check `docker version --format
+  '{{.Server.Platform.Name}}'` says `litek8s`. The machine's own Docker
+  may hold the same host ports (`docker ps` with `DOCKER_HOST` unset).
 
 ## The API server / tools
 

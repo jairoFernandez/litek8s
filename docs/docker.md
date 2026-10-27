@@ -34,6 +34,17 @@ docker context create litek8s --docker host=unix://$HOME/.litek8s/docker.sock
 docker context use litek8s        # docker context use default (or orbstack) to go back
 ```
 
+With both engines up, check which one a shell talks to before trusting a
+result: `docker version --format '{{.Server.Platform.Name}}'` says
+`litek8s` here. Scripts and AI agents should put
+`DOCKER_HOST=unix://...` on each command rather than rely on an earlier
+`export`: an agent's shell tool often starts a new shell per call, so the
+variable is gone and the command reaches the other engine, which looks
+like litek8s misbehaving (a container stuck in `created` while "its" port
+answers is the other engine's container holding that port). A port the
+other engine already publishes fails here with `port is already
+allocated`.
+
 The socket is `$LITEK8S_DOCKER_SOCKET` if set. `litek8s dev down` stops the
 containers with the cluster; `dev up` brings back the ones with a restart
 policy (`always`, `unless-stopped`), as Docker does after a reboot.

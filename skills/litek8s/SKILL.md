@@ -44,6 +44,11 @@ server `litek8s mcp`) or the `litek8s` CLI for those, kubectl for the rest.
 - **Scratch work** goes in its own cluster: `cluster_up name=<task>`, then
   `cluster_delete name=<task> confirm=true` when done. A cluster costs a few
   MiB and starts in ~1-2 s once the VM/sandbox runs.
+- **Docker: name the socket on every command**
+  (`DOCKER_HOST=unix://$HOME/.litek8s/N/docker.sock docker ...`). An
+  `export` in one shell call does not reach the next, and the command then
+  hits the machine's own Docker; check with `docker version --format
+  '{{.Server.Platform.Name}}'` (says `litek8s`). references/docker.md.
 - **Big results are cut** (`_truncated` with a hint): narrow with
   namespace, label_selector, grep, since, limit rather than asking again.
 
