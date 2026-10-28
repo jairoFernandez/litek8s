@@ -107,7 +107,7 @@ async fn identify(others: &[(String, Option<String>)]) -> std::collections::BTre
         let answers = futures_util::future::join_all(stale.iter().map(|name| {
             let ep = cfg.as_ref().and_then(|c| super::kube::endpoint_for(&c.doc, name, std::path::Path::new(".")).ok());
             async move {
-                let Some(mut anon) = ep else { return None };
+                let mut anon = ep?;
                 anon.headers.clear();
                 anon.creds = None;
                 match tokio::time::timeout(ASK_TIMEOUT, anon.json(hyper::Method::GET, "/version", None)).await {
