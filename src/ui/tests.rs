@@ -465,6 +465,7 @@ fn clusters_sample() -> ClustersSample {
             row("old", DevStatus::Down, None, 1, None, None),
         ],
         others: vec![("home".into(), Some("https://192.168.1.10:6443".into())), ("orbstack".into(), Some("https://127.0.0.1:26443".into()))],
+        others_litek8s: [("home".to_string(), true), ("orbstack".to_string(), false)].into_iter().collect(),
         env_mode: Some("vm".into()),
         env_memory: Some(412_000_000),
         env_cpus: Some(4),
@@ -482,6 +483,11 @@ fn clusters_view_lists_local_clusters_and_other_contexts() {
     assert!(s.contains("Local clusters") && s.contains("4 CPUs") && s.contains("412 MB used"), "{s}");
     assert!(s.contains("› dev") && s.contains("● up") && s.contains("127.0.0.1:50213") && s.contains("2/3") && s.contains("96.0 MB"), "{s}");
     assert!(s.contains("Other kubeconfig contexts") && s.contains("https://192.168.1.10:6443"), "{s}");
+    // A remote litek8s cluster says so; another cluster is read-only.
+    let home = s.lines().find(|l| l.contains("home") && l.contains("192.168.1.10")).unwrap();
+    assert!(home.contains("litek8s"), "{home}");
+    let orb = s.lines().find(|l| l.contains("orbstack")).unwrap();
+    assert!(orb.contains("read-only"), "{orb}");
     assert!(s.lines().last().unwrap().contains("n  new"), "{s}");
     // Start a stopped one: no question; stop and delete ask.
     app.key(key('G'));

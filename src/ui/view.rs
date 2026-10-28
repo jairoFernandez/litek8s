@@ -1218,15 +1218,21 @@ fn clusters(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
             .iter()
             .map(|(name, server)| {
                 let current = app.context_override.as_deref() == Some(name);
+                let kind = match c.others_litek8s.get(name) {
+                    Some(true) => Span::styled("litek8s", t.ok),
+                    Some(false) => Span::styled("read-only", t.dim),
+                    None => Span::styled("-", t.dim),
+                };
                 Row::new(vec![
                     Cell::from(Line::from(vec![Span::styled(if current { "› " } else { "  " }, t.accent), Span::styled(name.clone(), if current { t.accent } else { Style::new() })])),
+                    Cell::from(kind),
                     Cell::from(Span::styled(server.clone().unwrap_or_else(|| "-".into()), t.dim)),
                 ])
             })
             .collect();
         let mut state = TableState::default().with_selected(sel.checked_sub(c.local.len()));
-        let table = Table::new(rows, [Constraint::Percentage(40), Constraint::Fill(1)])
-            .block(t.block_with("Other kubeconfig contexts", vec![Span::styled("read-only by default · enter: Kubernetes view", t.dim)]))
+        let table = Table::new(rows, [Constraint::Percentage(35), Constraint::Length(10), Constraint::Fill(1)])
+            .block(t.block_with("Other kubeconfig contexts", vec![Span::styled("non-litek8s read-only · enter: Kubernetes view", t.dim)]))
             .column_spacing(1)
             .highlight_spacing(HighlightSpacing::Always)
             .highlight_symbol(Span::styled("▌", t.accent))

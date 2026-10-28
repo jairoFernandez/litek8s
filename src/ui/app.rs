@@ -206,6 +206,9 @@ pub struct ClustersSample {
     pub local: Vec<ClusterRow>,
     /// (context, server)
     pub others: Vec<(String, Option<String>)>,
+    /// Which of `others` are litek8s API servers (by their `/version`);
+    /// missing while unknown or unreachable.
+    pub others_litek8s: std::collections::BTreeMap<String, bool>,
     /// `vm`, `rootless`, `root` when one runs.
     pub env_mode: Option<String>,
     pub env_memory: Option<u64>,
