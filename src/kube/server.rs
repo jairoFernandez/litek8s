@@ -1285,7 +1285,8 @@ async fn handle(state: Arc<ApiState>, mut req: Request<Incoming>, conn: &super::
     }
     if (path == DISK_PATH || path == CPU_PATH || path == MEMORY_PATH) && parts.method == Method::GET {
         let what = path.rsplit('/').next().unwrap_or_default().to_string();
-        let node = parts.uri.query().unwrap_or_default().split('&').find_map(|kv| kv.strip_prefix("node=")).map(str::to_string);
+        // Decoded like every other query parameter: kubectl sends `node=%2A` for `*`.
+        let node = parse_query(parts.uri.query()).remove("node");
         return match node.as_deref() {
             // Every node: one document per node, measured in parallel.
             Some("*") => json_response(StatusCode::OK, &Value::Array(machine_reports(&state, &what).await)),

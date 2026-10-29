@@ -105,6 +105,13 @@ async fn reports_where_its_nodes_memory_goes() -> Result<()> {
     let (code, cpu) = get(&addr, "/litek8s/v1/cpu").await?;
     assert_eq!(code, 200);
     assert!(cpu["litek8s_usec"].is_u64() && cpu["cgroups"].is_array(), "{cpu}");
+    // Every node, with `*` as clients send it: literal (the UI) or
+    // percent-encoded (kubectl get --raw '...?node=*').
+    for q in ["*", "%2A"] {
+        let (code, all) = get(&addr, &format!("/litek8s/v1/memory?node={q}")).await?;
+        assert_eq!(code, 200, "node={q}: {all}");
+        assert!(all.as_array().is_some_and(|a| !a.is_empty() && a[0]["litek8s"].is_u64()), "node={q}: {all}");
+    }
     // An in-memory server keeps nothing on disk.
     let (code, _) = get(&addr, "/litek8s/v1/disk").await?;
     assert_eq!(code, 404);

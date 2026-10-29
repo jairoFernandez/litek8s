@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **`litek8s ui --context <remote litek8s>` shows that cluster while a dev
+  cluster runs here**: Home took the local dev cluster's state (its VM's
+  CPU and memory, uptime, "macOS VM", Docker socket) and showed it under the
+  remote cluster, with the remote's pods; the remote's own nodes never
+  filled the graphs. A remote context now always shows its nodes.
+- `/litek8s/v1/{memory,cpu,disk}?node=...` decodes the query like every other
+  parameter: `kubectl get --raw '/litek8s/v1/memory?node=*'` (sent as
+  `%2A`) answered 404.
+
 ## 0.2.12
 
 - **The API server authenticates clients and enforces RBAC** (breaking for
