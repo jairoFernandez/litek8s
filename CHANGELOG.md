@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.2.11
+
+- **CRD columns with filters show their values**: `kubectl get` printed
+  READY and STATUS empty for cert-manager's Certificates (and every column
+  written like `.status.conditions[?(@.type=="Ready")].status`, as
+  external-secrets and Argo use), so issued certificates looked unready.
+  Printer columns now evaluate filters (`==`, `!=`, presence), `[*]`,
+  negative indexes and quoted keys, join several matches with commas, and
+  show columns with a priority above 0 only with `-o wide`, as upstream.
+- **The platform example signs with Let's Encrypt on request**:
+  `ISSUER=letsencrypt` makes every Ingress name a ClusterIssuer
+  `letsencrypt` (ACME HTTP-01 through Traefik), so a platform on a server
+  (`DOMAIN=<public IP>.sslip.io`, port 80 open) has UIs browsers trust with
+  no CA to install; `ACME_EMAIL` and `ACME_SERVER` are optional. `up.sh`
+  refuses it for `localhost` and other private names; the default stays
+  `platform-ca`. litecd's `e2e/platform.patch` still applies.
+- **`litek8s ui`'s Observe view shows each pod's CPU and memory against its
+  limit**, so a pod near its ceiling stands out: `used/limit` and the
+  share, green to red and bold from 90 %. Limits are summed over the
+  containers and sidecars, and a pod with any container without a limit
+  has none. Without a limit the request stands in (`r` before the share);
+  with neither, `/—`. Memory is in Mi/Gi, as limits are written. At 80
+  columns one sparkline is left, the sorted resource's; wide terminals
+  keep both.
+- **`sudo litek8s dev setup` installs what the rootless dev cluster lacks**:
+  as root it now installs crun, uidmap, passt, iproute2 and iptables with
+  apt, dnf, yum, zypper, apk or pacman before the AppArmor profile, and the
+  hints name the binary by its full path (`sudo /home/you/.local/bin/litek8s
+  dev setup`): sudo's secure_path leaves out `~/.local/bin`, where
+  install.sh puts litek8s, so the bare `sudo litek8s` was "command not
+  found". Checked on a fresh Ubuntu 26.04 (sudo-rs; crun, uidmap and passt
+  missing).
+
 ## 0.2.10
 
 - **`docker run -d` and pod starts return at once again when litek8s
