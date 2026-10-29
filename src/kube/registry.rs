@@ -10,8 +10,11 @@ use serde_json::Value;
 pub struct PrinterColumn {
     pub name: String,
     pub type_: String,
-    /// A simple dotted JSONPath such as `.spec.replicas`.
+    /// The column's JSONPath, e.g. `.spec.replicas` or
+    /// `.status.conditions[?(@.type=="Ready")].status` (`table::json_path`).
     pub json_path: String,
+    /// 0: always shown; above 0: only with `kubectl get -o wide`.
+    pub priority: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,6 +317,7 @@ pub fn crd_types(crd: &Value) -> Result<Vec<ResourceType>> {
                             name: s(c, "/name")?,
                             type_: s(c, "/type").unwrap_or_else(|| "string".into()),
                             json_path: s(c, "/jsonPath")?,
+                            priority: c.get("priority").and_then(Value::as_i64).unwrap_or(0),
                         })
                     })
                     .collect()

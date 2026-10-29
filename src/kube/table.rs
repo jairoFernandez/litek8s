@@ -408,24 +408,178 @@ fn replicas(v: &Value) -> i64 {
     v.pointer("/spec/replicas").and_then(Value::as_i64).unwrap_or(1)
 }
 
-/// Evaluate a simple dotted JSONPath (`.spec.size`, `.status.conditions[0].type`).
-fn json_path(v: &Value, path: &str) -> Value {
-    let mut cur = v;
-    for seg in path.trim_start_matches('.').split('.').filter(|s| !s.is_empty()) {
-        let (field, index) = match seg.split_once('[') {
-            Some((f, rest)) => (f, rest.trim_end_matches(']').parse::<usize>().ok()),
-            None => (seg, None),
-        };
-        let Some(next) = cur.get(field) else { return Value::Null };
-        cur = match index {
-            Some(i) => match next.get(i) {
-                Some(x) => x,
-                None => return Value::Null,
-            },
-            None => next,
-        };
+/// One step of a printer column's JSONPath.
+#[derive(Debug, PartialEq)]
+enum Step {
+    Field(String),
+    Index(i64),
+    Wildcard,
+    /// `[?(@.a.b == "x")]`, `!=`, or `[?(@.a)]` (the field is present).
+    Filter { path: Vec<String>, op: Option<(bool, Value)> },
+}
+
+/// Parse the JSONPath of an `additionalPrinterColumns` entry: `.a.b`,
+/// `.a[0]`, `.a[-1]`, `.a[*]`, `.a['b.c']`, `.a[?(@.type=="Ready")].status`.
+/// `None` for anything else (kubectl then shows an empty cell too).
+fn parse_json_path(path: &str) -> Option<Vec<Step>> {
+    let p = path.trim();
+    let p = p.strip_prefix('{').and_then(|p| p.strip_suffix('}')).unwrap_or(p).trim();
+    let p = p.strip_prefix('$').unwrap_or(p);
+    let b = p.as_bytes();
+    let mut steps = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'.' => {
+                let start = i + 1;
+                let mut j = start;
+                while j < b.len() && b[j] != b'.' && b[j] != b'[' {
+                    j += 1;
+                }
+                if j > start {
+                    steps.push(Step::Field(p[start..j].to_string()));
+                }
+                i = j;
+            }
+            b'[' => {
+                let close = matching_bracket(p, i)?;
+                let inner = p[i + 1..close].trim();
+                steps.push(parse_bracket(inner)?);
+                i = close + 1;
+            }
+            _ => {
+                // A path without a leading dot: `spec.size`.
+                let mut j = i;
+                while j < b.len() && b[j] != b'.' && b[j] != b'[' {
+                    j += 1;
+                }
+                steps.push(Step::Field(p[i..j].to_string()));
+                i = j;
+            }
+        }
     }
-    cur.clone()
+    Some(steps)
+}
+
+/// The `]` closing the `[` at `open`, skipping quoted strings and nested brackets.
+fn matching_bracket(p: &str, open: usize) -> Option<usize> {
+    let mut depth = 0;
+    let mut quote: Option<char> = None;
+    for (k, c) in p[open..].char_indices() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '[') => depth += 1,
+            (None, ']') => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(open + k);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn unquote(s: &str) -> Option<&str> {
+    let s = s.trim();
+    (s.len() >= 2 && (s.starts_with('"') && s.ends_with('"') || s.starts_with('\'') && s.ends_with('\'')))
+        .then(|| &s[1..s.len() - 1])
+}
+
+fn parse_bracket(inner: &str) -> Option<Step> {
+    if inner == "*" {
+        return Some(Step::Wildcard);
+    }
+    if let Ok(n) = inner.parse::<i64>() {
+        return Some(Step::Index(n));
+    }
+    if let Some(key) = unquote(inner) {
+        return Some(Step::Field(key.to_string()));
+    }
+    let expr = inner.strip_prefix('?')?.trim().strip_prefix('(')?.strip_suffix(')')?.trim();
+    let (lhs, op) = match expr.find("==").map(|k| (k, true)).or_else(|| expr.find("!=").map(|k| (k, false))) {
+        Some((k, eq)) => {
+            let rhs = expr[k + 2..].trim();
+            let value = match unquote(rhs) {
+                Some(s) => Value::String(s.to_string()),
+                None => serde_json::from_str(rhs).ok()?,
+            };
+            (expr[..k].trim(), Some((eq, value)))
+        }
+        None => (expr, None),
+    };
+    let rel = lhs.strip_prefix('@')?;
+    let path = rel.split('.').filter(|s| !s.is_empty()).map(str::to_string).collect();
+    Some(Step::Filter { path, op })
+}
+
+/// Compare like kubectl's JSONPath: numbers by value, strings to strings.
+fn filter_matches(item: &Value, path: &[String], op: &Option<(bool, Value)>) -> bool {
+    let mut cur = item;
+    for f in path {
+        match cur.get(f) {
+            Some(x) => cur = x,
+            None => return false,
+        }
+    }
+    match op {
+        None => !cur.is_null(),
+        Some((eq, want)) => {
+            let same = match (cur, want) {
+                (Value::Number(a), Value::Number(b)) => a.as_f64() == b.as_f64(),
+                (a, b) => a == b,
+            };
+            same == *eq
+        }
+    }
+}
+
+/// Evaluate a printer column's JSONPath on `v`. Several matches are joined
+/// with commas, as kubectl prints them; no match is an empty cell.
+fn json_path(v: &Value, path: &str) -> Value {
+    let Some(steps) = parse_json_path(path) else { return Value::Null };
+    let mut cur: Vec<&Value> = vec![v];
+    for step in &steps {
+        let mut next = Vec::new();
+        for x in cur {
+            match step {
+                Step::Field(f) => next.extend(x.get(f.as_str())),
+                Step::Index(n) => {
+                    if let Some(a) = x.as_array() {
+                        let i = if *n < 0 { a.len() as i64 + n } else { *n };
+                        next.extend(usize::try_from(i).ok().and_then(|i| a.get(i)));
+                    }
+                }
+                Step::Wildcard => match x {
+                    Value::Array(a) => next.extend(a.iter()),
+                    Value::Object(m) => next.extend(m.values()),
+                    _ => {}
+                },
+                Step::Filter { path, op } => {
+                    if let Some(a) = x.as_array() {
+                        next.extend(a.iter().filter(|item| filter_matches(item, path, op)));
+                    }
+                }
+            }
+        }
+        cur = next;
+    }
+    match cur.as_slice() {
+        [] => Value::Null,
+        [one] => (*one).clone(),
+        many => Value::String(
+            many.iter()
+                .map(|x| match x {
+                    Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+    }
 }
 
 /// Build a Table for `objects`. `include_object` adds each row's
@@ -440,7 +594,7 @@ pub fn build(rt: &ResourceType, objects: &[Value], rv: u64, include_object: bool
         for col in &rt.printer_columns {
             let path = col.json_path.clone();
             let is_age = col.type_ == "date";
-            defs.push(json!({"name": col.name, "type": if is_age { "string" } else { col.type_.as_str() }, "format": "", "description": "", "priority": 0}));
+            defs.push(json!({"name": col.name, "type": if is_age { "string" } else { col.type_.as_str() }, "format": "", "description": "", "priority": col.priority}));
             extractors.push(Box::new(move |v| {
                 let cell = json_path(v, &path);
                 if is_age {
@@ -508,5 +662,56 @@ pub fn age(timestamp: &str) -> String {
         _ if d < 8 => format!("{d}d{}h", h % 24),
         _ if d < 365 * 2 => format!("{d}d"),
         _ => format!("{}y", d / 365),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cert() -> Value {
+        json!({
+            "spec": {"secretName": "web-tls", "dnsNames": ["a.test", "b.test"], "issuerRef": {"name": "le"}},
+            "metadata": {"annotations": {"cert-manager.io/issuer": "le"}},
+            "status": {"conditions": [
+                {"type": "Issuing", "status": "False", "message": "done"},
+                {"type": "Ready", "status": "True", "message": "Certificate is up to date", "observedGeneration": 1},
+            ]}
+        })
+    }
+
+    #[test]
+    fn json_path_plain_fields_and_indexes() {
+        let c = cert();
+        assert_eq!(json_path(&c, ".spec.secretName"), json!("web-tls"));
+        assert_eq!(json_path(&c, ".spec.issuerRef.name"), json!("le"));
+        assert_eq!(json_path(&c, ".status.conditions[0].type"), json!("Issuing"));
+        assert_eq!(json_path(&c, ".status.conditions[-1].type"), json!("Ready"));
+        assert_eq!(json_path(&c, ".status.conditions[5].type"), Value::Null);
+        assert_eq!(json_path(&c, ".spec.missing"), Value::Null);
+        assert_eq!(json_path(&c, "{.spec.secretName}"), json!("web-tls"));
+    }
+
+    #[test]
+    fn json_path_filters_like_cert_manager_columns() {
+        let c = cert();
+        // cert-manager's own column, with spaces around ==.
+        assert_eq!(json_path(&c, r#".status.conditions[?(@.type == "Ready")].status"#), json!("True"));
+        assert_eq!(json_path(&c, r#".status.conditions[?(@.type=="Ready")].message"#), json!("Certificate is up to date"));
+        assert_eq!(json_path(&c, ".status.conditions[?(@.type=='Ready')].status"), json!("True"));
+        assert_eq!(json_path(&c, r#".status.conditions[?(@.type != "Ready")].type"#), json!("Issuing"));
+        assert_eq!(json_path(&c, ".status.conditions[?(@.observedGeneration == 1)].type"), json!("Ready"));
+        assert_eq!(json_path(&c, ".status.conditions[?(@.observedGeneration)].type"), json!("Ready"));
+        assert_eq!(json_path(&c, r#".status.conditions[?(@.type == "Gone")].status"#), Value::Null);
+        // No status yet: an empty cell, as kubectl shows it.
+        assert_eq!(json_path(&json!({}), r#".status.conditions[?(@.type == "Ready")].status"#), Value::Null);
+    }
+
+    #[test]
+    fn json_path_wildcards_and_quoted_keys() {
+        let c = cert();
+        assert_eq!(json_path(&c, ".spec.dnsNames[*]"), json!("a.test,b.test"));
+        assert_eq!(json_path(&c, ".status.conditions[*].type"), json!("Issuing,Ready"));
+        assert_eq!(json_path(&c, ".metadata.annotations['cert-manager.io/issuer']"), json!("le"));
     }
 }
