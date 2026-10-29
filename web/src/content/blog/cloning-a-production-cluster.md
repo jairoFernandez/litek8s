@@ -4,7 +4,6 @@ description: "We copied a running production cluster onto litek8s without touchi
 date: 2026-10-29
 tags: [migration, rbac, networkpolicy, gitops]
 docs: [auth, networking, clusters, agents]
-draft: true
 translation: es/clonar-un-cluster-de-produccion
 ---
 
@@ -132,6 +131,14 @@ needs.
 
 On the copy, a pod outside a database's allowed clients now gets nothing
 from it, while the application it belongs to still connects.
+
+## In 0.2.12
+
+Everything above (the JSON Patch and WebSocket fixes, authentication and
+RBAC with the audit mode, NetworkPolicy enforcement) ships in litek8s
+0.2.12. Upgrading a server made with an earlier release: read
+[Upgrading a cluster made with an earlier litek8s](/docs/auth/#upgrading-a-cluster-made-with-an-earlier-litek8s)
+first, since contexts with the old placeholder token get 401.
 
 ## What is left
 

@@ -4,7 +4,6 @@ description: "Copiamos un cluster de producción en marcha a litek8s sin tocarlo
 date: 2026-10-29
 tags: [migración, rbac, networkpolicy, gitops]
 docs: [auth, networking, clusters, agents]
-draft: true
 lang: es
 translation: cloning-a-production-cluster
 ---
@@ -142,6 +141,15 @@ kubelet.
 En la copia, un pod que no está entre los clientes permitidos de una base de
 datos ya no obtiene nada de ella, mientras que la aplicación a la que
 pertenece sigue conectándose.
+
+## En la 0.2.12
+
+Todo lo anterior (los arreglos de JSON Patch y WebSocket, la autenticación y
+RBAC con el modo audit, la aplicación de NetworkPolicies) sale en litek8s
+0.2.12. Para actualizar un servidor creado con una versión anterior, lee
+primero
+[Actualizar un cluster creado con una versión anterior](/es/docs/auth/#actualizar-un-cluster-creado-con-una-versión-anterior):
+los contextos con el token de relleno viejo reciben 401.
 
 ## Lo que falta
 
