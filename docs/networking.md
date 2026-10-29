@@ -181,6 +181,83 @@ through the `kubernetes` Service's ClusterIP, which forwards to its own port
 (6443). `--in-cluster-port 443` brings the extra port back; a LoadBalancer
 Service on 443 then answers on the other nodes only.
 
+## NetworkPolicies
+
+Nodes running pods on crun enforce NetworkPolicies with iptables; nothing
+else is needed (no CNI plugin, no policy controller). The Docker runtime
+(macOS servers) does not.
+
+The API server does the selecting: for every pod it works out whether a
+policy selects it (ingress, egress or both, from `policyTypes` or their
+default: Egress only for policies with egress rules) and what is allowed,
+as addresses and port numbers: `podSelector` and `namespaceSelector` peers
+become the matching pods' IPs (the namespace's `kubernetes.io/metadata.name`
+label included), an `ipBlock` its CIDR with the `except` ranges cut out,
+named ports the number the target pod (ingress) or each destination pod
+(egress) gives that name. It sends each node the rules of its pods,
+recomputed when pods, namespaces or policies change (batched over 100 ms,
+only what changed), and a pod's own rules before the pod. The agent loads
+a pod's rules when its sandbox gets its address, before the first
+container starts, so a selected pod has no moment without them.
+
+On each node, one chain per isolated pod address, behind `LITEK8S-NETPOL`:
+
+- `LITEK8S-FORWARD` jumps to it first, which sees traffic between pods of
+  the node (bridged; iptables sees it through `br_netfilter` with
+  `net.bridge.bridge-nf-call-iptables=1`, which the agent sets up when the
+  first isolated pod appears), traffic arriving from and leaving to other
+  nodes over the overlay, and traffic to anything outside. Service traffic
+  is filtered after the ClusterIP's DNAT and before the masquerade, so the
+  real backend and the real client are matched.
+- `INPUT -i litek8s0` jumps to it: pods talking to the node itself, which
+  is where the cluster DNS and the API server answer on the node they run on.
+
+A packet to an isolated pod goes through its ingress chain, a packet from
+one through its egress chain (between two pods of one node, both): allowed
+peers and ports return, anything else is dropped. Replies (conntrack
+ESTABLISHED/RELATED) always pass. So across nodes ingress is decided on the
+destination's node and egress on the source's.
+
+The cluster DNS is not a pod: the API server answers it. A policy peer that
+would select CoreDNS (`namespaceSelector` matching `kube-system`, or none
+in a policy of `kube-system`, and a `podSelector` matching `k8s-app:
+kube-dns`, or an empty one) allows the DNS address in the pods'
+resolv.conf; its port names are `dns` (UDP 53) and `dns-tcp` (TCP 53). An
+egress policy without such a peer (or an ipBlock containing that address)
+leaves the pod without DNS, as upstream. The usual rule works as it is:
+
+```yaml
+egress:
+  - to:
+      - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+        podSelector: {matchLabels: {k8s-app: kube-dns}}
+    ports: [{port: 53, protocol: UDP}, {port: 53, protocol: TCP}]
+```
+
+What it does not do:
+
+- Traffic from the node to its own pods is always allowed: kubelet probes,
+  and NodePort and LoadBalancer ports, which litek8s relays from a listener
+  on the node (so the pod sees the node as the client, and a policy cannot
+  tell clients of a NodePort apart).
+- hostNetwork pods are neither selected nor peers (as upstream leaves it
+  open).
+- Peer sets follow pods with a short delay: a new pod is admitted by others
+  once its address is known and pushed (fail closed); an address freed by a
+  deleted peer and given to a new pod keeps the old pod's permissions until
+  the next push (milliseconds to a second).
+- A pod with `NET_ADMIN` can send packets with another pod's source address
+  on its node's bridge (replies do not come back to it).
+- IPv4 only; the rules are iptables (legacy or nft backend), one rule per
+  (peer, port), fine for hundreds of pods per policy.
+
+The chains are removed with the pod's address (the agent rewrites them
+when pods go) and by `litek8s uninstall` with every other `LITEK8S-*`
+chain. Rule computation and rendering have unit tests
+(`src/kube/netpol.rs`, `src/kube/agent/netpol.rs`, the push order in
+`src/kube/agent/hub.rs`), and compat tier L3 has four policy cases
+(`compat/cases/L3-networkpolicy.sh`).
+
 ## Testing it
 
 `bench/nat-e2e.sh` boots three VMs: a server with a public address and two

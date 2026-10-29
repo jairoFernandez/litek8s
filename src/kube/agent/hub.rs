@@ -22,6 +22,7 @@ use tokio::io::{AsyncRead, AsyncWrite, BufReader, BufWriter};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::mpsc;
 
+use super::netpol::{self, PodRules};
 use super::overlay::{ANNOTATION_ENDPOINT, ANNOTATION_PUBLIC_KEY, NodePeer};
 use super::relay::{self, MeshNode, Route};
 use super::protocol::{Frame, Message, read_frame, write_frame};
@@ -227,9 +228,11 @@ impl AgentHub {
                 cluster_dns: api.cluster_dns.load(std::sync::atomic::Ordering::Relaxed),
                 obs: api.obs.get().filter(|_| features.iter().any(|f| f == "metrics")).map(|o| o.settings()),
                 overlay_status: features.iter().any(|f| f == super::OVERLAY_STATUS_FEATURE),
+                network_policy: features.iter().any(|f| f == netpol::FEATURE),
             }))
             .await;
-        let feed_task = tokio::spawn(feed_pods(api.clone(), node_name.clone(), tx.clone()));
+        let policies = features.iter().any(|f| f == netpol::FEATURE);
+        let feed_task = tokio::spawn(feed_pods(api.clone(), node_name.clone(), tx.clone(), policies));
 
         let status = node.get("status").cloned().unwrap_or_else(|| json!({}));
         // This connection's metric series ids → the store's.
@@ -466,8 +469,105 @@ fn pod_fingerprint(pod: &Value) -> Value {
     })
 }
 
+/// The NetworkPolicy rules of a node's pods as last sent to its agent, and
+/// what of every pod they were computed from.
+#[derive(Default)]
+struct PolicyFeed {
+    /// pod uid → rules (isolated pods of this node only).
+    sent: HashMap<String, PodRules>,
+    /// pod uid → `crate::kube::netpol::fingerprint`, for every pod.
+    seen: HashMap<String, Value>,
+    /// Something changed: recompute every pod's rules at this time.
+    due: Option<tokio::time::Instant>,
+}
+
+/// How long changes to policies, namespaces and pods are batched.
+const POLICY_BATCH: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// The cluster as policies see it; `None` when there are no policies.
+fn policy_snapshot(api: &ApiState) -> Option<(crate::kube::netpol::Snapshot, Vec<Value>)> {
+    let (policies, _) = api.store().list(crate::kube::netpol::GROUP, crate::kube::netpol::RESOURCE, None);
+    if policies.is_empty() {
+        return None;
+    }
+    let (pods, _) = api.store().list("", "pods", None);
+    let (namespaces, _) = api.store().list("", "namespaces", None);
+    let snapshot = crate::kube::netpol::Snapshot::new(policies, namespaces, &pods);
+    Some((snapshot, pods))
+}
+
+impl PolicyFeed {
+    /// Rules of every pod of `node` now, and the changes from what was sent.
+    fn recompute(&mut self, api: &ApiState, node: &str, full: bool) -> Option<Message> {
+        self.due = None;
+        let snapshot = policy_snapshot(api);
+        let mut now: HashMap<String, PodRules> = HashMap::new();
+        if let Some((snapshot, pods)) = &snapshot {
+            for pod in pods.iter().filter(|p| util::s(p, "/spec/nodeName") == node) {
+                if let Some(r) = snapshot.rules_for(pod) {
+                    now.insert(util::uid(pod), r);
+                }
+            }
+        }
+        if full {
+            let (pods, _) = api.store().list("", "pods", None);
+            self.seen = pods.iter().map(|p| (util::uid(p), crate::kube::netpol::fingerprint(p))).collect();
+        }
+        let mut changes = std::collections::BTreeMap::new();
+        for (uid, r) in &now {
+            if full || self.sent.get(uid) != Some(r) {
+                changes.insert(uid.clone(), Some(r.clone()));
+            }
+        }
+        if !full {
+            for uid in self.sent.keys().filter(|u| !now.contains_key(*u)) {
+                changes.insert(uid.clone(), None);
+            }
+        }
+        self.sent = now;
+        (full || !changes.is_empty()).then_some(Message::NetPolicy { pods: changes, full })
+    }
+
+    /// Before a pod of this node is sent: its own rules, if they changed
+    /// (so they are in place before it starts).
+    fn before_upsert(&mut self, api: &ApiState, pod: &Value) -> Option<Message> {
+        let uid = util::uid(pod);
+        let rules = policy_snapshot(api).and_then(|(s, _)| s.rules_for(pod));
+        if self.sent.get(&uid) == rules.as_ref() {
+            return None;
+        }
+        match &rules {
+            Some(r) => self.sent.insert(uid.clone(), r.clone()),
+            None => self.sent.remove(&uid),
+        };
+        Some(Message::NetPolicy { pods: std::collections::BTreeMap::from([(uid, rules)]), full: false })
+    }
+
+    /// Note an event that may change some pod's rules.
+    fn observe(&mut self, group: &str, resource: &str, event: EventType, object: &Value) {
+        let changed = match (group, resource) {
+            ("", "pods") => {
+                let uid = util::uid(object);
+                if event == EventType::Deleted {
+                    self.seen.remove(&uid).is_some()
+                } else {
+                    let fp = crate::kube::netpol::fingerprint(object);
+                    self.seen.insert(uid, fp.clone()) != Some(fp)
+                }
+            }
+            ("", "namespaces") => true,
+            (crate::kube::netpol::GROUP, crate::kube::netpol::RESOURCE) => true,
+            _ => false,
+        };
+        if changed && self.due.is_none() {
+            self.due = Some(tokio::time::Instant::now() + POLICY_BATCH);
+        }
+    }
+}
+
 /// Push the node's pods: a full sync, then every relevant change.
-async fn feed_pods(api: Arc<ApiState>, node: String, tx: mpsc::Sender<Frame>) {
+/// `policies`: the agent enforces NetworkPolicies, send their rules.
+async fn feed_pods(api: Arc<ApiState>, node: String, tx: mpsc::Sender<Frame>, policies: bool) {
     loop {
         let Ok(sub) = api.store().subscribe(None) else { return };
         let mut live = sub.live;
@@ -477,6 +577,12 @@ async fn feed_pods(api: Arc<ApiState>, node: String, tx: mpsc::Sender<Frame>) {
         let mut peers = overlay_peers(&api, &node);
         if tx.send(Frame::Control(Message::Peers { peers: peers.0.clone(), relay: peers.1 })).await.is_err() {
             return;
+        }
+        let mut policy = policies.then(PolicyFeed::default);
+        if let Some(msg) = policy.as_mut().and_then(|p| p.recompute(&api, &node, true)) {
+            if tx.send(Frame::Control(msg)).await.is_err() {
+                return;
+            }
         }
         let (pods, _) = api.store().list("", "pods", None);
         for pod in pods.iter().filter(|p| util::s(p, "/spec/nodeName") == node) {
@@ -497,11 +603,30 @@ async fn feed_pods(api: Arc<ApiState>, node: String, tx: mpsc::Sender<Frame>) {
             }
         }
         loop {
-            let event = match live.recv().await {
+            let due = policy.as_ref().and_then(|p| p.due);
+            let received = match due {
+                Some(at) => tokio::select! {
+                    e = live.recv() => Some(e),
+                    _ = tokio::time::sleep_until(at) => None,
+                },
+                None => Some(live.recv().await),
+            };
+            let Some(received) = received else {
+                if let Some(msg) = policy.as_mut().and_then(|p| p.recompute(&api, &node, false)) {
+                    if tx.send(Frame::Control(msg)).await.is_err() {
+                        return;
+                    }
+                }
+                continue;
+            };
+            let event = match received {
                 Ok(e) => e,
                 Err(RecvError::Lagged(_)) => break,
                 Err(RecvError::Closed) => return,
             };
+            if let Some(p) = policy.as_mut() {
+                p.observe(&event.key.group, &event.key.resource, event.event, &event.object);
+            }
             let msg = match (event.key.group.as_str(), event.key.resource.as_str()) {
                 ("", "pods") if util::s(&event.object, "/spec/nodeName") == node => {
                     let uid = util::uid(&event.object);
@@ -534,6 +659,11 @@ async fn feed_pods(api: Arc<ApiState>, node: String, tx: mpsc::Sender<Frame>) {
                         }
                         if sent.insert(uid, fp).is_none() {
                             *namespaces.entry(ns).or_default() += 1;
+                        }
+                        if let Some(rules) = policy.as_mut().and_then(|p| p.before_upsert(&api, &event.object)) {
+                            if tx.send(Frame::Control(rules)).await.is_err() {
+                                return;
+                            }
                         }
                         Message::PodUpsert { pod: event.object.clone() }
                     }
@@ -742,5 +872,127 @@ fn apply_pod_status(api: &ApiState, ns: &str, name: &str, uid: &str, mut status:
             }
             _ => return,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kube::store::ObjectKey;
+
+    fn pod(name: &str, node: &str, app: &str, ip: &str) -> Value {
+        json!({
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {"name": name, "namespace": "shop", "labels": {"app": app}},
+            "spec": {"nodeName": node, "containers": [{"name": "c", "image": "busybox"}]},
+            "status": {"phase": "Running", "podIP": ip},
+        })
+    }
+
+    /// Create a pod with its status (create drops it).
+    fn put_pod(api: &ApiState, p: Value) -> Value {
+        let created = api.create_object("", "pods", Some("shop"), p.clone()).unwrap();
+        util::write_status(api, "", "pods", &created, p["status"].clone()).unwrap();
+        api.get_object("", "pods", "shop", &util::name(&p)).unwrap()
+    }
+
+    fn set_ip(api: &ApiState, name: &str, ip: &str) {
+        let cur = api.get_object("", "pods", "shop", name).unwrap();
+        let mut status = cur["status"].clone();
+        status["podIP"] = json!(ip);
+        util::write_status(api, "", "pods", &cur, status).unwrap();
+    }
+
+    /// Control messages from the server until `stop` matches one, skipping
+    /// heartbeats and services.
+    async fn until<R: AsyncRead + Unpin>(r: &mut R, mut stop: impl FnMut(&Message) -> bool) -> Vec<Message> {
+        let mut out = Vec::new();
+        loop {
+            let frame = tokio::time::timeout(std::time::Duration::from_secs(5), read_frame(r)).await.expect("timed out").unwrap().unwrap();
+            let Frame::Control(msg) = frame else { continue };
+            if matches!(msg, Message::ServiceUpdate { .. } | Message::HeartbeatAck) {
+                continue;
+            }
+            let done = stop(&msg);
+            out.push(msg);
+            if done {
+                return out;
+            }
+        }
+    }
+
+    fn rules_of(msg: &Message) -> Option<(&std::collections::BTreeMap<String, Option<PodRules>>, bool)> {
+        match msg {
+            Message::NetPolicy { pods, full } => Some((pods, *full)),
+            _ => None,
+        }
+    }
+
+    #[tokio::test]
+    async fn policy_rules_are_pushed_before_pods_and_follow_peers() {
+        let api = Arc::new(ApiState::open(None, "127.0.0.1:0".into(), false).unwrap());
+        api.create_object("", "namespaces", None, json!({"metadata": {"name": "shop"}})).unwrap();
+        api.create_object(
+            "networking.k8s.io",
+            "networkpolicies",
+            Some("shop"),
+            json!({"metadata": {"name": "db"}, "spec": {"podSelector": {"matchLabels": {"app": "db"}}, "ingress": [{"from": [{"podSelector": {"matchLabels": {"app": "api"}}}], "ports": [{"port": 5432}]}]}}),
+        )
+        .unwrap();
+        let db = put_pod(&api, pod("db", "n1", "db", "10.42.0.5"));
+        let client = put_pod(&api, pod("api", "n2", "api", "10.42.1.7"));
+
+        let (agent_end, server_end) = tokio::io::duplex(1 << 20);
+        let server = tokio::spawn(AgentHub::serve_agent(api.clone(), server_end, "10.0.0.1".into(), 6443, None));
+        let (mut r, mut w) = tokio::io::split(agent_end);
+        let hello = Message::Hello { node: json!({"metadata": {"name": "n1"}, "status": {}}), features: vec![netpol::FEATURE.into()] };
+        write_frame(&mut w, &Frame::Control(hello)).await.unwrap();
+
+        // Welcome says so, and the full set comes before the node's pods.
+        let msgs = until(&mut r, |m| matches!(m, Message::SyncDone)).await;
+        assert!(matches!(msgs[0], Message::Welcome { network_policy: true, .. }));
+        let full = msgs.iter().position(|m| rules_of(m).is_some_and(|(_, f)| f)).expect("full set");
+        let upsert = msgs.iter().position(|m| matches!(m, Message::PodUpsert { .. })).unwrap();
+        assert!(full < upsert);
+        let (pods, _) = rules_of(&msgs[full]).unwrap();
+        let r_db = pods[&util::uid(&db)].clone().unwrap();
+        assert_eq!(r_db.ingress.as_ref().unwrap()[0].peers.as_deref().unwrap(), ["10.42.1.7/32"]);
+        assert!(!pods.contains_key(&util::uid(&client)));
+
+        // A new selected pod: its rules, then the pod.
+        let db2 = api.create_object("", "pods", Some("shop"), pod("db2", "n1", "db", "")).unwrap();
+        let msgs = until(&mut r, |m| matches!(m, Message::PodUpsert { .. })).await;
+        let (pods, full) = rules_of(&msgs[msgs.len() - 2]).expect("rules first");
+        assert!(!full && pods[&util::uid(&db2)].is_some());
+
+        // A peer's address changes: both pods' rules follow.
+        set_ip(&api, "api", "10.42.1.9");
+        let msgs = until(&mut r, |m| rules_of(m).is_some()).await;
+        let (pods, _) = rules_of(msgs.last().unwrap()).unwrap();
+        assert_eq!(pods.len(), 2);
+        for r in pods.values() {
+            assert_eq!(r.as_ref().unwrap().ingress.as_ref().unwrap()[0].peers.as_deref().unwrap(), ["10.42.1.9/32"]);
+        }
+
+        // The policy goes: nothing is isolated any more.
+        api.store().delete(&ObjectKey::new("networking.k8s.io", "networkpolicies", "shop", "db"), None).unwrap();
+        let msgs = until(&mut r, |m| rules_of(m).is_some()).await;
+        let (pods, _) = rules_of(msgs.last().unwrap()).unwrap();
+        assert_eq!(pods.len(), 2);
+        assert!(pods.values().all(Option::is_none));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn agents_without_the_feature_get_no_rules() {
+        let api = Arc::new(ApiState::open(None, "127.0.0.1:0".into(), false).unwrap());
+        let (agent_end, server_end) = tokio::io::duplex(1 << 20);
+        let server = tokio::spawn(AgentHub::serve_agent(api.clone(), server_end, "10.0.0.1".into(), 6443, None));
+        let (mut r, mut w) = tokio::io::split(agent_end);
+        write_frame(&mut w, &Frame::Control(Message::Hello { node: json!({"metadata": {"name": "n1"}, "status": {}}), features: vec![] })).await.unwrap();
+        let msgs = until(&mut r, |m| matches!(m, Message::SyncDone)).await;
+        assert!(matches!(msgs[0], Message::Welcome { network_policy: false, .. }));
+        assert!(!msgs.iter().any(|m| rules_of(m).is_some()));
+        server.abort();
     }
 }

@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- **NetworkPolicies are enforced** (crun nodes, i.e. Linux servers and
+  agents): until now they were stored and served but every pod reached
+  every pod. Ingress and egress, `podSelector`, `namespaceSelector` (alone
+  and combined), `ipBlock` with `except`, numbered, named and ranged
+  (`endPort`) ports over TCP, UDP and SCTP, `policyTypes` and their
+  defaults, and the implicit deny for selected pods; replies always pass.
+  The API server computes each pod's allowed peers (pod IPs per selector)
+  and pushes changes to the pod's node when pods, namespaces or policies
+  change, always before the pod itself, and the agent loads the pod's
+  chains before its first container starts, so a selected pod is never
+  open. Each node filters its own pods: ingress where the destination
+  runs, egress where the source runs, across nodes over the WireGuard
+  overlay; Service traffic is matched after its DNAT. The cluster DNS (the
+  API server, not a pod) counts as the pod `k8s-app: kube-dns` in
+  `kube-system`, so egress policies allow it only when they allow that.
+  Traffic from the node itself (probes, NodePort relays) is allowed. Needs
+  `br_netfilter` (loaded on demand) for pods on one node. The Docker
+  runtime (macOS) does not enforce policies. Details:
+  [docs/networking.md](docs/networking.md#networkpolicies).
+
 ## 0.2.11
 
 - **CRD columns with filters show their values**: `kubectl get` printed

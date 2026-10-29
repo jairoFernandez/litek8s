@@ -39,6 +39,14 @@ macOS, the rest pass on Linux; the compatibility corpus (kubectl, Helm with
   bindings to the node address (the 5 conformance specs it fails).
 - hostPorts are not exposed on the host's localhost in dev clusters
   (NodePorts and LoadBalancer ports are).
+- **NetworkPolicy**: enforced by the node agent on crun (Linux) nodes with
+  iptables, not on the Docker runtime (macOS). Traffic from the node itself
+  (probes, NodePort/LoadBalancer relays, which run on the node and not in
+  kube-proxy NAT) is always allowed; the cluster DNS is the API server, and
+  a policy peer selecting `kube-system` pods `k8s-app: kube-dns` allows it.
+  Same-node pod traffic needs `br_netfilter` (the agent loads it; without
+  it the agent logs that same-node traffic is not filtered). ipBlocks are
+  IPv4 only (the pod network is).
 - LoadBalancer Services: no external load balancer; every server and node
   listens on their ports (like k3s's servicelb), status points at a node;
   `--disable-loadbalancer-ports` keeps only the NodePorts.
