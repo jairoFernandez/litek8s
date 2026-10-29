@@ -21,7 +21,9 @@ and check it against `SHA256SUMS`.
 
 On Linux, dev clusters run rootless and need `crun`, `uidmap`, `passt`
 (or `slirp4netns`), `iproute2` and `iptables`: `litek8s dev setup` checks
-everything and says what is missing ([dev.md](dev.md#what-it-needs)).
+everything and says what is missing ([dev.md](dev.md#what-it-needs)), and
+`sudo "$(command -v litek8s)" dev setup` installs the missing packages (the
+full path because sudo's PATH leaves out `~/.local/bin`).
 macOS needs nothing else: no Docker Desktop, no Lima, no sudo.
 
 Running it as a service on Linux servers (`litek8s install server|agent`,

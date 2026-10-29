@@ -8,5 +8,5 @@
 | macOS Intel, Windows | no (WSL2 untested) | no | – |
 
 Tested on Ubuntu 24.04 (arm64 and x86_64) and recent macOS on Apple
-silicon. Ubuntu ≥ 23.10 needs `sudo litek8s dev setup` once (AppArmor and
-unprivileged user namespaces).
+silicon. Ubuntu ≥ 23.10 needs `sudo "$(command -v litek8s)" dev setup` once
+(AppArmor and unprivileged user namespaces).

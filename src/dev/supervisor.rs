@@ -65,7 +65,7 @@ fn map_ids(pid: u32) -> Result<()> {
         if !out.status.success() {
             let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
             if sandbox::apparmor_restricts_userns() {
-                bail!("{tool} failed ({err}): AppArmor restricts user namespaces; run `sudo litek8s dev setup` once");
+                bail!("{tool} failed ({err}): AppArmor restricts user namespaces; run `{}` once", super::sudo_setup_command());
             }
             bail!("{tool} failed: {err}");
         }

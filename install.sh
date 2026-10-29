@@ -175,5 +175,6 @@ esac
 say ""
 if [ "$os" = Linux ]; then
   say "Check the dev cluster's prerequisites (crun, uidmap, passt...):  litek8s dev setup"
+  say "Install what is missing (and allow it under AppArmor):  sudo \"$BIN_DIR/litek8s\" dev setup"
 fi
 say "Start a local cluster:  litek8s dev up && kubectl get nodes"

@@ -59,10 +59,12 @@ Everything it writes is under `~/.local/share/litek8s/dev`.
 | `ip`, `iptables-restore` | used inside the sandbox only | `iproute2`, `iptables` (nft or legacy backend) |
 | cgroup v2 + a systemd user session | a delegated cgroup for the cluster's resource limits | `dev up` starts the supervisor in a `systemd-run --user --scope -p Delegate=yes` scope |
 | Linux ≥ 5.11 | overlayfs in a user namespace (`userxattr`) | |
-| **Ubuntu ≥ 23.10 only:** `sudo litek8s dev setup`, once | AppArmor restricts unprivileged user namespaces; this installs `/etc/apparmor.d/litek8s` (an unconfined profile with `userns`, like Ubuntu's own profile for crun) for the litek8s binary's path | re-run if you move the binary |
+| **Ubuntu ≥ 23.10 only:** `sudo "$(command -v litek8s)" dev setup`, once | AppArmor restricts unprivileged user namespaces; this installs `/etc/apparmor.d/litek8s` (an unconfined profile with `userns`, like Ubuntu's own profile for crun) for the litek8s binary's path | re-run if you move the binary |
 
 `litek8s dev setup` (without sudo) checks all of this and says what is
-missing. That is the whole list: no daemon, no group membership, no
+missing. As root it also installs the missing packages with apt, dnf, yum,
+zypper, apk or pacman (and the AppArmor profile where needed); give sudo the
+binary's full path, since its PATH leaves out `~/.local/bin`. That is the whole list: no daemon, no group membership, no
 capabilities on the binary, no setuid litek8s. Run as root, `dev up` uses the
 same sandbox minus the user namespace (cgroup `/sys/fs/cgroup/litek8s-dev`).
 

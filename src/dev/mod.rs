@@ -115,7 +115,7 @@ pub enum DevCommand {
         #[arg(required = true, help = "Image names (exported from the local Docker or Podman) or paths to image archives (.tar)")]
         images: Vec<String>,
     },
-    /// Linux: check (and, as root, set up) what the rootless dev cluster needs
+    /// Linux: check what the rootless dev cluster needs; as root, install its packages and AppArmor profile
     Setup,
     #[command(hide = true)]
     Supervise {
@@ -1282,6 +1282,92 @@ async fn export_local_image(image: &str) -> Result<UploadBody> {
     Ok(BodyExt::boxed_unsync(http_body_util::StreamBody::new(stream)))
 }
 
+/// `sudo <this binary> dev setup`. sudo's secure_path leaves out
+/// ~/.local/bin, where install.sh puts litek8s, so a bare `sudo litek8s`
+/// is "command not found" there.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+pub(crate) fn sudo_setup_command() -> String {
+    sudo_setup_command_for(std::env::current_exe().ok().and_then(|e| e.canonicalize().ok()).as_deref())
+}
+
+fn sudo_setup_command_for(exe: Option<&Path>) -> String {
+    match exe.and_then(|e| e.to_str()) {
+        Some(exe) => format!("sudo {} dev setup", crate::remote::sh_quote(exe)),
+        None => "sudo \"$(command -v litek8s)\" dev setup".into(),
+    }
+}
+
+/// The package managers `dev setup` installs the sandbox's tools with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+enum PackageManager {
+    Apt,
+    Dnf,
+    Yum,
+    Zypper,
+    Apk,
+    Pacman,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl PackageManager {
+    fn detect() -> Option<Self> {
+        [
+            ("apt-get", Self::Apt),
+            ("dnf", Self::Dnf),
+            ("yum", Self::Yum),
+            ("zypper", Self::Zypper),
+            ("apk", Self::Apk),
+            ("pacman", Self::Pacman),
+        ]
+        .into_iter()
+        .find_map(|(bin, pm)| which(bin).map(|_| pm))
+    }
+
+    /// The commands that install `packages`, in order.
+    fn install_commands(self, packages: &[&str]) -> Vec<Vec<String>> {
+        let cmd = |head: &[&str]| head.iter().chain(packages).map(|s| s.to_string()).collect::<Vec<_>>();
+        match self {
+            Self::Apt => vec![vec!["apt-get".into(), "update".into()], cmd(&["apt-get", "install", "-y"])],
+            Self::Dnf => vec![cmd(&["dnf", "install", "-y"])],
+            Self::Yum => vec![cmd(&["yum", "install", "-y"])],
+            Self::Zypper => vec![cmd(&["zypper", "--non-interactive", "install"])],
+            Self::Apk => vec![cmd(&["apk", "add"])],
+            Self::Pacman => vec![cmd(&["pacman", "-S", "--noconfirm", "--needed"])],
+        }
+    }
+}
+
+/// The packages that provide the tools the rootless sandbox needs and
+/// `present` says are missing (preflight's list, minus what is not a
+/// package: subuid ranges, cgroup v2, AppArmor).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn missing_packages(pm: PackageManager, present: impl Fn(&str) -> bool) -> Vec<&'static str> {
+    use PackageManager::*;
+    let uidmap = match pm {
+        Apt => "uidmap",
+        Dnf | Yum => "shadow-utils",
+        Zypper | Pacman => "shadow",
+        Apk => "shadow-uidmap",
+    };
+    let iproute = if matches!(pm, Dnf | Yum) { "iproute" } else { "iproute2" };
+    let needs: [(&[&str], &str); 5] = [
+        (&["crun"], "crun"),
+        (&["newuidmap", "newgidmap"], uidmap),
+        (&["pasta", "slirp4netns"], "passt"),
+        (&["ip"], iproute),
+        (&["iptables-restore"], "iptables"),
+    ];
+    needs
+        .into_iter()
+        .filter(|(tools, _)| {
+            // uidmap needs both tools; for networking either one will do.
+            if tools.contains(&"pasta") { !tools.iter().any(|t| present(t)) } else { !tools.iter().all(|t| present(t)) }
+        })
+        .map(|(_, pkg)| pkg)
+        .collect()
+}
+
 #[cfg(target_os = "linux")]
 fn is_root() -> bool {
     // SAFETY: no preconditions.
@@ -1322,7 +1408,7 @@ pub fn preflight() -> Vec<String> {
         problems.push("cgroup v2 is not mounted at /sys/fs/cgroup".into());
     }
     if sandbox::apparmor_restricts_userns() && !apparmor_profile_installed() {
-        problems.push("AppArmor restricts unprivileged user namespaces here: run `sudo litek8s dev setup` once to allow litek8s".into());
+        problems.push(format!("AppArmor restricts unprivileged user namespaces here: run `{}` once to allow litek8s", sudo_setup_command()));
     }
     problems
 }
@@ -1336,6 +1422,7 @@ fn apparmor_profile_installed() -> bool {
 #[cfg(target_os = "linux")]
 fn setup() -> Result<()> {
     if is_root() {
+        install_packages()?;
         if sandbox::apparmor_restricts_userns() {
             let exe = std::env::current_exe()?.canonicalize()?;
             std::fs::write(hostinfo::APPARMOR_PROFILE_PATH, hostinfo::apparmor_profile(&exe))?;
@@ -1347,7 +1434,7 @@ fn setup() -> Result<()> {
         } else {
             println!("AppArmor does not restrict user namespaces here; nothing to install");
         }
-        println!("run `litek8s dev up` as your user (root runs the cluster without a user namespace)");
+        println!("run `litek8s dev setup` as your user to check the rest, then `litek8s dev up` (root runs the cluster without a user namespace)");
         return Ok(());
     }
     let problems = preflight();
@@ -1355,6 +1442,45 @@ fn setup() -> Result<()> {
         println!("ready for the rootless dev cluster: `litek8s dev up`");
     } else {
         println!("the rootless dev cluster needs:\n  - {}", problems.join("\n  - "));
+        if !missing_packages(PackageManager::Apt, sandbox_tool_present).is_empty() {
+            println!("`{}` installs the missing packages", sudo_setup_command());
+        }
+    }
+    Ok(())
+}
+
+/// Whether a tool the rootless sandbox runs is on this machine.
+#[cfg(target_os = "linux")]
+fn sandbox_tool_present(tool: &str) -> bool {
+    if tool == "crun" { crate::kube::agent::crun_binary().is_some() } else { which(tool).is_some() }
+}
+
+/// As root: install the packages that provide what the sandbox lacks.
+#[cfg(target_os = "linux")]
+fn install_packages() -> Result<()> {
+    let Some(pm) = PackageManager::detect() else {
+        let missing = missing_packages(PackageManager::Apt, sandbox_tool_present);
+        if !missing.is_empty() {
+            println!("no known package manager: install {} yourself", missing.join(" "));
+        }
+        return Ok(());
+    };
+    let missing = missing_packages(pm, sandbox_tool_present);
+    if missing.is_empty() {
+        println!("crun, uidmap, pasta, ip and iptables are installed");
+        return Ok(());
+    }
+    println!("installing {}", missing.join(" "));
+    for argv in pm.install_commands(&missing) {
+        let status = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .env("NEEDRESTART_SUSPEND", "1")
+            .status()
+            .with_context(|| format!("failed to run {}", argv[0]))?;
+        if !status.success() {
+            bail!("`{}` failed: install {} yourself", argv.join(" "), missing.join(" "));
+        }
     }
     Ok(())
 }
@@ -1514,6 +1640,36 @@ fn parse_share() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sudo_setup_names_the_binary_by_path() {
+        assert_eq!(sudo_setup_command_for(Some(Path::new("/home/u/.local/bin/litek8s"))), "sudo /home/u/.local/bin/litek8s dev setup");
+        assert_eq!(sudo_setup_command_for(Some(Path::new("/opt/my tools/litek8s"))), "sudo '/opt/my tools/litek8s' dev setup");
+        assert_eq!(sudo_setup_command_for(None), "sudo \"$(command -v litek8s)\" dev setup");
+    }
+
+    #[test]
+    fn missing_packages_per_distro() {
+        let none = |_: &str| false;
+        assert_eq!(missing_packages(PackageManager::Apt, none), ["crun", "uidmap", "passt", "iproute2", "iptables"]);
+        assert_eq!(missing_packages(PackageManager::Dnf, none), ["crun", "shadow-utils", "passt", "iproute", "iptables"]);
+        assert_eq!(missing_packages(PackageManager::Apk, none), ["crun", "shadow-uidmap", "passt", "iproute2", "iptables"]);
+        // A fresh Ubuntu: uidmap, ip and iptables are there.
+        let ubuntu = |t: &str| ["newuidmap", "newgidmap", "ip", "iptables-restore"].contains(&t);
+        assert_eq!(missing_packages(PackageManager::Apt, ubuntu), ["crun", "passt"]);
+        // slirp4netns does instead of pasta; newuidmap alone is not enough.
+        let slirp = |t: &str| ["crun", "newuidmap", "slirp4netns", "ip", "iptables-restore"].contains(&t);
+        assert_eq!(missing_packages(PackageManager::Apt, slirp), ["uidmap"]);
+    }
+
+    #[test]
+    fn install_commands_update_apt_first() {
+        assert_eq!(
+            PackageManager::Apt.install_commands(&["crun", "passt"]),
+            [vec!["apt-get", "update"], vec!["apt-get", "install", "-y", "crun", "passt"]]
+        );
+        assert_eq!(PackageManager::Pacman.install_commands(&["crun"]), [vec!["pacman", "-S", "--noconfirm", "--needed", "crun"]]);
+    }
 
     #[test]
     fn registries_travel_with_their_files() {
