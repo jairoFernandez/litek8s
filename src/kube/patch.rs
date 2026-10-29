@@ -40,7 +40,18 @@ pub fn json_patch(target: &mut Value, ops: &Value) -> Result<()> {
                 remove(&mut doc, path)?;
             }
             "replace" => {
-                remove(&mut doc, path)?;
+                // As Kubernetes' json-patch (evanphx v4): replacing a member missing from
+                // an existing object sets it (Vault patches its pod labels this way);
+                // a missing parent or array index is still an error.
+                let missing_member = !path.is_empty()
+                    && doc.pointer(path).is_none()
+                    && split_pointer(path)
+                        .ok()
+                        .and_then(|(parent, _)| doc.pointer(&parent).map(Value::is_object))
+                        .unwrap_or(false);
+                if !missing_member {
+                    remove(&mut doc, path)?;
+                }
                 add(&mut doc, path, value_of(op)?)?;
             }
             "move" | "copy" => {
@@ -297,6 +308,28 @@ mod tests {
         assert_eq!(doc, json!({"data": {"a": "9", "b": "9"}, "list": [2, 3]}));
         assert!(json_patch(&mut doc, &json!([{"op": "test", "path": "/data/a", "value": "x"}])).is_err());
         assert_eq!(doc["data"]["a"], "9");
+    }
+
+    #[test]
+    fn json_patch_replace_sets_a_missing_object_member() {
+        // Vault's Kubernetes service registration, on a pod without its labels yet.
+        let mut doc = json!({"metadata": {"name": "vault-0", "labels": {"app": "vault"}}, "list": [1]});
+        json_patch(
+            &mut doc,
+            &json!([
+                {"op": "replace", "path": "/metadata/labels/vault-active", "value": "false"},
+                {"op": "replace", "path": "/metadata/labels/vault-sealed", "value": "true"},
+                {"op": "replace", "path": "/metadata/labels/app", "value": "vault2"}
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            doc["metadata"]["labels"],
+            json!({"app": "vault2", "vault-active": "false", "vault-sealed": "true"})
+        );
+        // Still errors upstream too: a missing parent, an array index out of range.
+        assert!(json_patch(&mut doc, &json!([{"op": "replace", "path": "/metadata/annotations/a", "value": "x"}])).is_err());
+        assert!(json_patch(&mut doc, &json!([{"op": "replace", "path": "/list/5", "value": 2}])).is_err());
     }
 
     #[test]
