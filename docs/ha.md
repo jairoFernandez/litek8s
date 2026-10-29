@@ -212,5 +212,8 @@ shortened (`LITEK8S_RAFT_HEARTBEAT_MS=100`); bench/HA.md measures both.
   3 s so load balancers and agents move away.
 - Membership changes one server at a time; 3 or 5 voters. Learners (non-voting
   servers) are only used while a server joins.
-- No authentication for API clients yet (as on a single server): keep the
-  port on a trusted network.
+- API clients authenticate and RBAC applies as on a single server; a
+  request another server forwards to the leader carries the user it
+  authenticated (trusted with the cluster secret), so client certificates
+  work against any server. Every server derives the same client CA from the
+  shared service account key.

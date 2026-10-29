@@ -6,6 +6,7 @@
 mod admission;
 pub mod aggregator;
 pub mod agent;
+pub mod authn;
 pub mod cel;
 pub mod controllers;
 pub mod crd_schema;
@@ -27,6 +28,7 @@ mod proto_pointers;
 mod proxy;
 pub mod quota;
 pub mod quantity;
+pub mod rbac;
 pub mod registry;
 pub mod sa_token;
 pub mod selector;

@@ -4,7 +4,9 @@
 use anyhow::{Result, bail};
 use base64::Engine;
 use sha1::{Digest, Sha1};
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::sync::Mutex;
 
 const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -23,22 +25,51 @@ pub enum Incoming {
     Close,
 }
 
-pub struct Reader<R> {
+pub struct Reader<R, W> {
     inner: R,
+    /// The write half, shared with [`Writer`]: pings are answered from here.
+    out: Arc<Mutex<W>>,
 }
 
 pub struct Writer<W> {
-    inner: W,
+    inner: Arc<Mutex<W>>,
 }
 
-pub fn split<S: AsyncRead + AsyncWrite>(stream: S) -> (Reader<tokio::io::ReadHalf<S>>, Writer<tokio::io::WriteHalf<S>>) {
+/// The two halves of an upgraded connection.
+pub type Halves<S> = (Reader<tokio::io::ReadHalf<S>, tokio::io::WriteHalf<S>>, Writer<tokio::io::WriteHalf<S>>);
+
+pub fn split<S: AsyncRead + AsyncWrite>(stream: S) -> Halves<S> {
     let (r, w) = tokio::io::split(stream);
-    (Reader { inner: r }, Writer { inner: w })
+    let out = Arc::new(Mutex::new(w));
+    (Reader { inner: r, out: out.clone() }, Writer { inner: out })
 }
 
-impl<R: AsyncRead + Unpin> Reader<R> {
-    /// The next data message, reassembling fragments; control frames other
-    /// than close are skipped (pings are not answered, kubectl sends none).
+/// One frame, written whole under the lock so pongs never interleave with data.
+async fn write_frame<W: AsyncWrite + Unpin>(out: &Mutex<W>, opcode: u8, payload: &[u8]) -> Result<()> {
+    let mut head = Vec::with_capacity(10);
+    head.push(0x80 | opcode);
+    match payload.len() {
+        n if n < 126 => head.push(n as u8),
+        n if n <= u16::MAX as usize => {
+            head.push(126);
+            head.extend_from_slice(&(n as u16).to_be_bytes());
+        }
+        n => {
+            head.push(127);
+            head.extend_from_slice(&(n as u64).to_be_bytes());
+        }
+    }
+    let mut w = out.lock().await;
+    w.write_all(&head).await?;
+    w.write_all(payload).await?;
+    w.flush().await?;
+    Ok(())
+}
+
+impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> Reader<R, W> {
+    /// The next data message, reassembling fragments. Pings are answered with a
+    /// pong carrying the same payload: client-go (kubectl 1.30+) sends one every
+    /// few seconds and drops the stream when no pong comes back in time.
     pub async fn next(&mut self) -> Result<Incoming> {
         let mut message: Vec<u8> = Vec::new();
         let mut kind = 0u8;
@@ -74,7 +105,11 @@ impl<R: AsyncRead + Unpin> Reader<R> {
             }
             match opcode {
                 0x8 => return Ok(Incoming::Close),
-                0x9 | 0xA => continue,
+                0x9 => {
+                    write_frame(&self.out, 0xA, &payload).await?;
+                    continue;
+                }
+                0xA => continue,
                 0x0 => message.extend_from_slice(&payload),
                 op => {
                     kind = op;
@@ -90,23 +125,7 @@ impl<R: AsyncRead + Unpin> Reader<R> {
 
 impl<W: AsyncWrite + Unpin> Writer<W> {
     async fn frame(&mut self, opcode: u8, payload: &[u8]) -> Result<()> {
-        let mut head = Vec::with_capacity(10);
-        head.push(0x80 | opcode);
-        match payload.len() {
-            n if n < 126 => head.push(n as u8),
-            n if n <= u16::MAX as usize => {
-                head.push(126);
-                head.extend_from_slice(&(n as u16).to_be_bytes());
-            }
-            n => {
-                head.push(127);
-                head.extend_from_slice(&(n as u64).to_be_bytes());
-            }
-        }
-        self.inner.write_all(&head).await?;
-        self.inner.write_all(payload).await?;
-        self.inner.flush().await?;
-        Ok(())
+        write_frame(&self.inner, opcode, payload).await
     }
 
     pub async fn binary(&mut self, payload: &[u8]) -> Result<()> {
@@ -150,5 +169,32 @@ mod tests {
             Incoming::Binary(m) => assert_eq!(m, b"hello"),
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn answers_pings_with_pongs() {
+        let (client, server) = tokio::io::duplex(1024);
+        let (mut reader, _writer) = split(server);
+        let (mut cr, mut cw) = tokio::io::split(client);
+        let mask = [9u8, 8, 7, 6];
+        let masked = |data: &[u8]| -> Vec<u8> { data.iter().enumerate().map(|(i, b)| b ^ mask[i % 4]).collect() };
+        // "a" (binary, not final), a ping "hb" (as client-go's heartbeat), "b" (final)
+        let mut bytes = vec![0x02, 0x80 | 1];
+        bytes.extend_from_slice(&mask);
+        bytes.extend(masked(b"a"));
+        bytes.extend([0x89, 0x80 | 2]);
+        bytes.extend_from_slice(&mask);
+        bytes.extend(masked(b"hb"));
+        bytes.extend([0x80, 0x80 | 1]);
+        bytes.extend_from_slice(&mask);
+        bytes.extend(masked(b"b"));
+        cw.write_all(&bytes).await.unwrap();
+        match reader.next().await.unwrap() {
+            Incoming::Binary(m) => assert_eq!(m, b"ab"),
+            other => panic!("unexpected {other:?}"),
+        }
+        let mut pong = [0u8; 4];
+        cr.read_exact(&mut pong).await.unwrap();
+        assert_eq!(pong, [0x8A, 2, b'h', b'b']);
     }
 }

@@ -590,6 +590,21 @@ pub struct InstallResult {
     /// Server: the cluster CA (PEM), checked against the token.
     #[serde(default)]
     pub ca: Option<String>,
+    /// Server: the admin kubeconfig's client certificate and key (PEM),
+    /// from the kubeconfig the server wrote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_cert: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_key: Option<String>,
+}
+
+/// The client certificate and key (PEM) of a kubeconfig's first user.
+pub fn kubeconfig_client_cert(doc: &str) -> Option<(String, String)> {
+    use base64::Engine;
+    let v: serde_yaml::Value = serde_yaml::from_str(doc).ok()?;
+    let user = &v["users"][0]["user"];
+    let decode = |k: &str| user[k].as_str().and_then(|d| base64::engine::general_purpose::STANDARD.decode(d.trim()).ok()).and_then(|b| String::from_utf8(b).ok());
+    Some((decode("client-certificate-data")?, decode("client-key-data")?))
 }
 
 async fn print_result(role: Role, svc: &ServiceArgs, changed: bool) {
@@ -604,6 +619,10 @@ async fn print_result(role: Role, svc: &ServiceArgs, changed: bool) {
         }
         result.url = Some(join_url(svc));
         result.token = token;
+        if let Some((cert, key)) = svc.kubeconfig.as_ref().and_then(|k| std::fs::read_to_string(k).ok()).and_then(|d| kubeconfig_client_cert(&d)) {
+            result.client_cert = Some(cert);
+            result.client_key = Some(key);
+        }
     }
     println!("{RESULT_MARKER} {}", serde_json::to_string(&result).unwrap_or_default());
 }
@@ -615,7 +634,8 @@ fn print_server_summary(svc: &ServiceArgs) {
         println!("\nkubeconfig (root only): {}\n  sudo kubectl --kubeconfig {} get nodes", k.display(), k.display());
     }
     println!(
-        "\nThe API on port {} has no authentication: keep it on a trusted network (or firewall it).",
+        "\nThe API on port {} needs credentials (the kubeconfig's client certificate, service account tokens); \
+         `--authorization-mode RBAC-audit` only logs what RBAC would deny.",
         svc.listen.map_or(6443, |l| l.port())
     );
     let Some(token) = token else { return };

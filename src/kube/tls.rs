@@ -5,7 +5,11 @@
 //! account volume. The server makes its own CA and serving certificate on
 //! first start (kept in the data directory when there is one) and serves TLS
 //! on the same port as plain HTTP, telling them apart by the first byte.
-//! There is no client authentication yet: any bearer token is accepted.
+//! Clients may present a certificate signed by the cluster's client CA
+//! ([`ClientCa`], derived from the service account key so that every HA
+//! server has the same one); its CN is the user and its O entries the
+//! groups. Presenting none is fine at the TLS level (bearer tokens,
+//! anonymous requests); `authn` decides what the request may do.
 //!
 //! rustls sends its whole first flight (ServerHello, Certificate,
 //! ServerKeyExchange, ServerHelloDone) in a single TLS record. That is valid,
@@ -51,6 +55,8 @@ struct Stored {
 
 pub struct ServerTls {
     config: Arc<rustls::ServerConfig>,
+    /// Signs client certificates (the admin kubeconfig's).
+    client_ca: ClientCa,
     /// The same, with X25519 as the only key exchange group (see `accept`).
     x25519: Arc<rustls::ServerConfig>,
     /// For Raft connections between servers (ALPN [`RAFT_ALPN`]).
@@ -62,7 +68,9 @@ pub struct ServerTls {
 pub const RAFT_ALPN: &[u8] = b"litek8s-raft";
 
 impl ServerTls {
-    pub fn load_or_create(data_dir: Option<&Path>) -> Result<Self> {
+    /// The serving certificate from `<data_dir>/tls.json` (created if
+    /// missing) and the client CA derived from `client_ca_seed`.
+    pub fn load_or_create(data_dir: Option<&Path>, client_ca_seed: [u8; 32]) -> Result<Self> {
         if let Some(dir) = data_dir {
             std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
         }
@@ -91,10 +99,21 @@ impl ServerTls {
         let cert = CertificateDer::from(b64.decode(&stored.cert_der)?);
         let ca = CertificateDer::from(b64.decode(&stored.ca_der)?);
         let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(b64.decode(&stored.key_der)?));
+        let client_ca = ClientCa::derive(client_ca_seed)?;
+        if let Some(dir) = data_dir {
+            client_ca.write_files(dir)?;
+        }
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(CertificateDer::from(client_ca.cert_der.clone()))?;
+        let roots = Arc::new(roots);
         let build = |provider: rustls::crypto::CryptoProvider| -> Result<Arc<rustls::ServerConfig>> {
-            let mut config = rustls::ServerConfig::builder_with_provider(Arc::new(provider))
+            let provider = Arc::new(provider);
+            let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(roots.clone(), provider.clone())
+                .allow_unauthenticated()
+                .build()?;
+            let mut config = rustls::ServerConfig::builder_with_provider(provider)
                 .with_safe_default_protocol_versions()?
-                .with_no_client_auth()
+                .with_client_cert_verifier(verifier)
                 .with_single_cert(vec![cert.clone(), ca.clone()], key.clone_key())?;
             config.alpn_protocols = vec![b"http/1.1".to_vec()];
             Ok(Arc::new(config))
@@ -106,6 +125,7 @@ impl ServerTls {
         raft.alpn_protocols = vec![RAFT_ALPN.to_vec()];
         Ok(Self {
             config,
+            client_ca,
             x25519: build(x25519)?,
             raft: Arc::new(raft),
             ca_pem: stored.ca_pem,
@@ -142,6 +162,166 @@ impl ServerTls {
     pub fn ca_pem(&self) -> &str {
         &self.ca_pem
     }
+
+    pub fn client_ca(&self) -> &ClientCa {
+        &self.client_ca
+    }
+
+    /// A kubeconfig for `server` as `system:admin` (group `system:masters`)
+    /// with a client certificate. `tls_server_name` when `server`'s host is
+    /// not one the serving certificate names.
+    pub fn admin_kubeconfig(&self, server: &str, tls_server_name: Option<&str>) -> Result<String> {
+        let (cert, key) = self.client_ca.issue(ADMIN_USER, Some(crate::kube::rbac::MASTERS))?;
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let name_line = tls_server_name.map(|n| format!("    tls-server-name: {n}\n")).unwrap_or_default();
+        Ok(format!(
+            "apiVersion: v1\nkind: Config\nclusters:\n- name: litek8s\n  cluster:\n    server: {server}\n    certificate-authority-data: {}\n{name_line}\
+             contexts:\n- name: litek8s\n  context:\n    cluster: litek8s\n    user: litek8s\n\
+             current-context: litek8s\nusers:\n- name: litek8s\n  user:\n    client-certificate-data: {}\n    client-key-data: {}\n",
+            b64.encode(&self.ca_pem),
+            b64.encode(cert),
+            b64.encode(key),
+        ))
+    }
+}
+
+/// The user of the admin kubeconfig.
+pub const ADMIN_USER: &str = "system:admin";
+
+/// The CA that signs client certificates (kube-apiserver's
+/// `--client-ca-file`). Its Ed25519 key comes from a seed (a hash of the
+/// service account key, which HA servers share), so it is the same on
+/// every server without being stored; the certificate is deterministic
+/// too. Written to `<data dir>/client-ca.{crt,key}` for operators who sign
+/// their own users' certificates.
+pub struct ClientCa {
+    issuer: rcgen::Certificate,
+    key: KeyPair,
+    cert_der: Vec<u8>,
+}
+
+impl ClientCa {
+    pub fn derive(seed: [u8; 32]) -> Result<Self> {
+        // PKCS#8 v1 of an Ed25519 key is a fixed prefix and the seed.
+        let mut pkcs8 = hex_bytes("302e020100300506032b657004220420");
+        pkcs8.extend_from_slice(&seed);
+        let key = KeyPair::from_pkcs8_der_and_sign_algo(&PrivatePkcs8KeyDer::from(pkcs8), &rcgen::PKCS_ED25519)?;
+        let mut params = CertificateParams::new(Vec::<String>::new())?;
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        params.distinguished_name.push(DnType::CommonName, "litek8s-client-ca");
+        params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign, KeyUsagePurpose::DigitalSignature];
+        params.not_before = rcgen::date_time_ymd(2025, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2125, 1, 1);
+        params.serial_number = Some(rcgen::SerialNumber::from(1u64));
+        let issuer = params.self_signed(&key)?;
+        let cert_der = issuer.der().to_vec();
+        Ok(Self { issuer, key, cert_der })
+    }
+
+    pub fn cert_pem(&self) -> String {
+        self.issuer.pem()
+    }
+
+    /// A client certificate and its key (PEM) for `user` in `group`, valid
+    /// for ten years. (rcgen writes one entry per attribute type, so one
+    /// group; certificates made elsewhere may name several.)
+    pub fn issue(&self, user: &str, group: Option<&str>) -> Result<(String, String)> {
+        let key = KeyPair::generate()?;
+        let mut params = CertificateParams::new(Vec::<String>::new())?;
+        params.distinguished_name.push(DnType::CommonName, user);
+        if let Some(g) = group {
+            params.distinguished_name.push(DnType::OrganizationName, g);
+        }
+        params.use_authority_key_identifier_extension = true;
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
+        params.key_usages = vec![KeyUsagePurpose::DigitalSignature, KeyUsagePurpose::KeyEncipherment];
+        use chrono::Datelike;
+        let ymd = |d: chrono::DateTime<chrono::Utc>| rcgen::date_time_ymd(d.year(), d.month() as u8, d.day() as u8);
+        let now = chrono::Utc::now();
+        params.not_before = ymd(now - chrono::Duration::days(1));
+        params.not_after = ymd(now + chrono::Duration::days(3650));
+        let cert = params.signed_by(&key, &self.issuer, &self.key)?;
+        Ok((cert.pem(), key.serialize_pem()))
+    }
+
+    /// `client-ca.crt` and `client-ca.key` (0600) in `dir`.
+    fn write_files(&self, dir: &Path) -> Result<()> {
+        let crt = dir.join("client-ca.crt");
+        let key = dir.join("client-ca.key");
+        let pem = self.cert_pem();
+        if std::fs::read_to_string(&crt).ok().as_deref() != Some(pem.as_str()) {
+            std::fs::write(&crt, &pem).with_context(|| format!("failed to write {}", crt.display()))?;
+        }
+        let key_pem = self.key.serialize_pem();
+        if std::fs::read_to_string(&key).ok().as_deref() != Some(key_pem.as_str()) {
+            std::fs::write(&key, &key_pem).with_context(|| format!("failed to write {}", key.display()))?;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
+    }
+}
+
+fn hex_bytes(s: &str) -> Vec<u8> {
+    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap_or_default()).collect()
+}
+
+/// The user (CN) and groups (O) a client certificate names: DER walked by
+/// hand (TBSCertificate → subject Name), the chain was verified by rustls.
+pub fn certificate_subject(der: &[u8]) -> Option<(String, Vec<String>)> {
+    // (tag, content, rest)
+    fn tlv(b: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+        let tag = *b.first()?;
+        let first = *b.get(1)? as usize;
+        let (len, head) = if first < 0x80 {
+            (first, 2)
+        } else {
+            let n = first & 0x7f;
+            if n == 0 || n > 4 {
+                return None;
+            }
+            let mut len = 0usize;
+            for i in 0..n {
+                len = (len << 8) | *b.get(2 + i)? as usize;
+            }
+            (len, 2 + n)
+        };
+        let end = head.checked_add(len)?;
+        Some((tag, b.get(head..end)?, b.get(end..)?))
+    }
+    let (_, cert, _) = tlv(der)?;
+    let (_, mut tbs, _) = tlv(cert)?;
+    // [0] version (optional), serial, signature algorithm, issuer, validity, subject
+    if tbs.first() == Some(&0xa0) {
+        tbs = tlv(tbs)?.2;
+    }
+    for _ in 0..4 {
+        tbs = tlv(tbs)?.2;
+    }
+    let (_, mut name, _) = tlv(tbs)?;
+    const CN: &[u8] = &[0x55, 0x04, 0x03];
+    const O: &[u8] = &[0x55, 0x04, 0x0a];
+    let (mut user, mut groups) = (None, Vec::new());
+    while !name.is_empty() {
+        let (_, mut rdn, rest) = tlv(name)?;
+        name = rest;
+        while !rdn.is_empty() {
+            let (_, attr, rest) = tlv(rdn)?;
+            rdn = rest;
+            let (_, oid, value) = tlv(attr)?;
+            let (_, value, _) = tlv(value)?;
+            let value = String::from_utf8_lossy(value).to_string();
+            if oid == CN {
+                user = Some(value);
+            } else if oid == O {
+                groups.push(value);
+            }
+        }
+    }
+    Some((user?, groups))
 }
 
 fn generate() -> Result<Stored> {
@@ -330,6 +510,49 @@ mod tests {
         let mut m = vec![kind, 0, (len >> 8) as u8, len as u8];
         m.extend(std::iter::repeat_n(kind, len));
         m
+    }
+
+    #[test]
+    fn client_ca_is_deterministic_and_issues_certificates() {
+        let a = ClientCa::derive([7; 32]).unwrap();
+        let b = ClientCa::derive([7; 32]).unwrap();
+        assert_eq!(a.cert_der, b.cert_der);
+        assert_ne!(a.cert_der, ClientCa::derive([8; 32]).unwrap().cert_der);
+        let (cert, _key) = a.issue("jane", Some("system:masters")).unwrap();
+        use rustls::pki_types::pem::PemObject;
+        let der = CertificateDer::from_pem_slice(cert.as_bytes()).unwrap();
+        assert_eq!(certificate_subject(&der), Some(("jane".into(), vec!["system:masters".into()])));
+        // Accepted by the verifier the server uses.
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(CertificateDer::from(b.cert_der.clone())).unwrap();
+        let provider = Arc::new(rustls::crypto::ring::default_provider());
+        let verifier = rustls::server::WebPkiClientVerifier::builder_with_provider(Arc::new(roots), provider).build().unwrap();
+        verifier.verify_client_cert(&der, &[], rustls::pki_types::UnixTime::now()).unwrap();
+        let other = ClientCa::derive([9; 32]).unwrap().issue("eve", Some("system:masters")).unwrap().0;
+        let other = CertificateDer::from_pem_slice(other.as_bytes()).unwrap();
+        assert!(verifier.verify_client_cert(&other, &[], rustls::pki_types::UnixTime::now()).is_err());
+    }
+
+    #[test]
+    fn subject_with_several_organizations() {
+        fn tlv(tag: u8, parts: &[&[u8]]) -> Vec<u8> {
+            let body = parts.concat();
+            let mut out = vec![tag];
+            if body.len() < 128 {
+                out.push(body.len() as u8);
+            } else {
+                out.extend([0x81, body.len() as u8]);
+            }
+            out.extend(body);
+            out
+        }
+        let attr = |oid: &[u8], v: &str| tlv(0x31, &[&tlv(0x30, &[&tlv(0x06, &[oid]), &tlv(0x0c, &[v.as_bytes()])])]);
+        let subject = tlv(0x30, &[&attr(&[0x55, 4, 3], "jane"), &attr(&[0x55, 4, 10], "devs"), &attr(&[0x55, 4, 10], "ops")]);
+        let empty = tlv(0x30, &[]);
+        let tbs = tlv(0x30, &[&tlv(0xa0, &[&tlv(0x02, &[&[2]])]), &tlv(0x02, &[&[1]]), &empty, &empty, &empty, &subject]);
+        let cert = tlv(0x30, &[&tbs, &empty, &tlv(0x03, &[&[0]])]);
+        assert_eq!(certificate_subject(&cert), Some(("jane".into(), vec!["devs".into(), "ops".into()])));
+        assert_eq!(certificate_subject(&cert[..cert.len() - 4]), None);
     }
 
     #[test]

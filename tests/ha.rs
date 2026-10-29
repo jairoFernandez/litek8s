@@ -72,6 +72,7 @@ impl Server {
             join_server: join.map(|(u, _)| u.to_string()),
             raft_port: None,
             raft_listener: Some(raft_listener),
+            authorization_mode: litek8s::kube::rbac::Mode::AlwaysAllow,
         };
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let label = name.to_string();

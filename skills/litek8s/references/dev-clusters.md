@@ -72,6 +72,8 @@ at the same path, default `$HOME`), `port`, `publish` (`localhost` or
 
 ## Limits
 
-- No authentication on the API: it listens on 127.0.0.1 only.
+- No authentication on the API (AlwaysAllow, RBAC not enforced): it
+  listens on 127.0.0.1 only. Servers (`install`, `cluster apply`) enforce
+  RBAC.
 - All clusters share the VM's CPUs/memory (no per-cluster limits yet).
 - Rootless Linux cannot bind host ports below 1024.
