@@ -7,13 +7,20 @@
 // - JSON-LD: the page as a TechArticle, and its place in the docs as a
 //   BreadcrumbList (Home > Docs > group > page).
 // - The 404 page is kept out of the index.
+// - Translated docs pages (/es/docs/...) use their translation's seoTitle.
+// - Blog pages keep only the hreflang links they set themselves (`data-blog`):
+//   Starlight's own point every locale at the same path, which blog posts in
+//   another language (other slug) or without a translation do not have.
 import { defineRouteMiddleware } from '@astrojs/starlight/route-data';
 import { groups } from '../docs.manifest.mjs';
 
 type Head = { tag: string; attrs?: Record<string, string | boolean | undefined>; content?: string }[];
 
-const byId = new Map<string, { group: string; label: string; seoTitle?: string }>();
-for (const g of groups) for (const p of g.pages) byId.set(p.slug ? `docs/${p.slug}` : 'docs', { group: g.label, label: p.label, seoTitle: p.seoTitle });
+type Tr = { label: string; seoTitle?: string };
+const byId = new Map<string, { group: string; groupEs?: string; label: string; seoTitle?: string; translations?: Record<string, Tr> }>();
+for (const g of groups)
+  for (const p of g.pages)
+    byId.set(p.slug ? `docs/${p.slug}` : 'docs', { group: g.label, groupEs: g.translations?.es, label: p.label, seoTitle: p.seoTitle, translations: p.translations });
 
 export const onRequest = defineRouteMiddleware((context) => {
   const route = context.locals.starlightRoute;
@@ -26,7 +33,17 @@ export const onRequest = defineRouteMiddleware((context) => {
     return;
   }
 
-  const page = byId.get(route.id);
+  if (/^\/(es\/)?blog\//.test(context.url.pathname)) {
+    for (let i = head.length - 1; i >= 0; i--) {
+      const a = head[i].attrs;
+      if (head[i].tag === 'link' && a?.rel === 'alternate' && a.hreflang && !a['data-blog']) head.splice(i, 1);
+    }
+  }
+
+  const lang = route.lang;
+  const base = byId.get(route.id.replace(/^es\//, ''));
+  const tr = lang !== 'en' && route.id.startsWith(`${lang}/`) ? base?.translations?.[lang] : undefined;
+  const page = base && { ...base, label: tr?.label ?? base.label, seoTitle: tr ? tr.seoTitle : base.seoTitle, group: (lang === 'es' && base.groupEs) || base.group };
   const pageTitle = route.entry.data.title;
   if (page?.seoTitle) {
     const title = head.find((h) => h.tag === 'title');
@@ -50,7 +67,7 @@ export const onRequest = defineRouteMiddleware((context) => {
 
   const url = new URL(context.url.pathname, site).href;
   const home = new URL('/', site).href;
-  const docs = new URL('/docs/', site).href;
+  const docs = new URL(lang === 'en' ? '/docs/' : `/${lang}/docs/`, site).href;
   const crumbs = [{ name: siteTitle, item: home }, { name: 'Docs', item: docs }];
   if (page && route.id !== 'docs') crumbs.push({ name: page.label, item: url });
   const ld = {

@@ -1,0 +1,81 @@
+---
+// One blog post: Starlight's look, the post's own Open Graph and Twitter
+// tags (title, description, type article, dates), hreflang links to its
+// translation, and BlogPosting JSON-LD.
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import { render } from 'astro:content';
+import { postUrl, docsLinks, dateFmt, blogRoot, translationOf, strings, type Post } from '../../lib/blog';
+
+const { post } = Astro.props as { post: Post };
+const { Content, headings } = await render(post);
+const site = Astro.site ?? new URL('http://localhost:4321');
+const url = new URL(postUrl(post), site).href;
+const image = new URL('/og.png', site).href;
+const { title, description, date, updated, tags, lang } = post.data;
+const t = strings[lang];
+const docs = docsLinks(post);
+const other = await translationOf(post);
+const blog = new URL(blogRoot(lang), site).href;
+
+const ld = JSON.stringify({
+  '@context': 'https://schema.org',
+  '@graph': [
+    {
+      '@type': 'BlogPosting',
+      headline: title,
+      description,
+      url,
+      image,
+      datePublished: date.toISOString(),
+      dateModified: (updated ?? date).toISOString(),
+      keywords: tags.join(', '),
+      inLanguage: lang,
+      author: { '@type': 'Person', name: 'Jairo Fernandez', url: 'https://github.com/jairoFernandez' },
+      publisher: { '@type': 'Organization', name: 'litek8s', url: new URL('/', site).href, logo: new URL('/brand/litek8s-mark-512.png', site).href },
+      mainEntityOfPage: url,
+      about: { '@type': 'SoftwareApplication', name: 'litek8s', url: new URL('/', site).href },
+    },
+    {
+      '@type': 'BreadcrumbList',
+      itemListElement: [
+        { '@type': 'ListItem', position: 1, name: 'litek8s', item: new URL('/', site).href },
+        { '@type': 'ListItem', position: 2, name: t.title, item: blog },
+        { '@type': 'ListItem', position: 3, name: title, item: url },
+      ],
+    },
+  ],
+}).replace(/</g, '\\u003c');
+
+const alternates = other
+  ? [
+      { tag: 'link', attrs: { rel: 'alternate', hreflang: lang, href: url, 'data-blog': true } },
+      { tag: 'link', attrs: { rel: 'alternate', hreflang: other.data.lang, href: new URL(postUrl(other), site).href, 'data-blog': true } },
+    ]
+  : [];
+
+const head = [
+  { tag: 'meta', attrs: { property: 'article:published_time', content: date.toISOString() } },
+  ...(updated ? [{ tag: 'meta', attrs: { property: 'article:modified_time', content: updated.toISOString() } }] : []),
+  ...tags.map((tag) => ({ tag: 'meta', attrs: { property: 'article:tag', content: tag } })),
+  ...alternates,
+  { tag: 'script', attrs: { type: 'application/ld+json' }, content: ld },
+] as const;
+---
+<StarlightPage frontmatter={{ title, description, head: [...head] }} headings={headings}>
+  <p class="post-meta">
+    <time datetime={date.toISOString()}>{dateFmt(date, lang)}</time>{tags.length > 0 && <> · {tags.join(' · ')}</>}
+    {other && <> · <a href={postUrl(other)} hreflang={other.data.lang} lang={other.data.lang}>{t.translated}</a></>}
+  </p>
+  <Content />
+  {docs.length > 0 && (
+    <>
+      <h2 id="read-the-docs">{t.readDocs}</h2>
+      <ul>{docs.map((d) => <li><a href={d.href}>{d.label}</a></li>)}</ul>
+    </>
+  )}
+  <p><a href={blogRoot(lang)}>{t.allPosts}</a></p>
+</StarlightPage>
+
+<style>
+  .post-meta { color: var(--sl-color-gray-3); font-size: var(--sl-text-sm); }
+</style>

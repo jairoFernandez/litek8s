@@ -4,4 +4,5 @@ dist/
 .vercel/
 # Generated from the repository's markdown by scripts/sync-docs.mjs
 src/content/docs/docs/
+src/content/docs/es/
 public/docs-assets/

@@ -2,7 +2,7 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import vercel from '@astrojs/vercel';
-import { REPO, groups } from './docs.manifest.mjs';
+import { REPO, groups, LOCALES } from './docs.manifest.mjs';
 
 // The public URL, for canonical links and the sitemap: SITE_URL if set, else
 // litek8s.dev on Vercel (previews too, so they point search engines at the
@@ -22,17 +22,19 @@ export default defineConfig({
       logo: { src: './src/assets/logo.svg', replacesTitle: false },
       favicon: '/favicon.svg',
       social: [{ icon: 'github', label: 'GitHub', href: REPO }],
-      // English only for now. Spanish: add `es: { label: 'Español', lang: 'es' }`,
-      // put translated pages in src/content/docs/es/ and strings in src/i18n/.
-      locales: { root: { label: 'English', lang: 'en' } },
+      // English at the root, Spanish under /es/ (docs.manifest.mjs `translations`;
+      // untranslated pages fall back to English with a notice).
+      locales: { root: { label: 'English', lang: 'en' }, ...LOCALES },
       customCss: ['./src/styles/docs.css'],
       lastUpdated: false,
       pagination: true,
       sidebar: [
         ...groups.map((g) => ({
           label: g.label,
+          ...(g.translations ? { translations: g.translations } : {}),
           items: g.pages.map((p) => ({
             label: p.label,
+            ...(p.translations ? { translations: Object.fromEntries(Object.entries(p.translations).map(([l, tr]) => [l, tr.label])) } : {}),
             slug: p.slug ? `docs/${p.slug}` : 'docs',
             ...(p.badge ? { badge: { text: p.badge, variant: 'caution' } } : {}),
           })),

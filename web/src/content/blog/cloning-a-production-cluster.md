@@ -5,6 +5,7 @@ date: 2026-10-29
 tags: [migration, rbac, networkpolicy, gitops]
 docs: [auth, networking, clusters, agents]
 draft: true
+translation: es/clonar-un-cluster-de-produccion
 ---
 
 The question was simple: could a real production cluster (k3s on a cloud
