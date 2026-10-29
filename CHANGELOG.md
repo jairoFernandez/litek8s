@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- **`kubectl exec` and port-forward over WebSocket no longer drop after a
+  minute**: client-go (kubectl 1.30+) pings the stream every few seconds and
+  gives up when no pong comes back, so long exec sessions (a `mongorestore`
+  fed through stdin, a quiet shell) died with `next reader: i/o timeout`.
+  The API server now answers every ping with a pong.
+- **LoadBalancer Services take a node's ExternalIP when it has one**
+  (`--node-external-ip`), as k3s's servicelb does, instead of its InternalIP:
+  external-dns no longer publishes a cloud VM's private address.
+  `LITEK8S_LOADBALANCER_IP` still overrides both.
+- **JSON patch `replace` of a missing member of an object sets it**, as
+  Kubernetes' json-patch does: Vault's Kubernetes service registration
+  patches its pod's `vault-active`/`vault-sealed` labels this way and got
+  422, so the `vault-active` Service had no endpoints. A missing parent or an
+  array index out of range is still an error.
+
 ## 0.2.11
 
 - **CRD columns with filters show their values**: `kubectl get` printed
