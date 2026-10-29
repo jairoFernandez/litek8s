@@ -11,7 +11,9 @@ export const en = {
   meta: {
     title: 'litek8s · a lightweight Kubernetes in one binary',
     description:
-      'The real Kubernetes API, local dev clusters in about a second, a Docker-compatible API, a terminal UI, built-in metrics, logs and alerts, HA and multi-node: one Rust binary whose whole control plane idles at 23 MiB, 24× less than k3s.',
+      'The real Kubernetes API in one Rust binary: local dev clusters in a second, a Docker-compatible API, built-in metrics and logs, HA. Idles at 23 MiB.',
+    // Alt text of the social card (public/og.png).
+    imageAlt: 'litek8s: a lightweight Kubernetes in one binary',
   },
   links: {
     github: GH,

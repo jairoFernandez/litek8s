@@ -16,6 +16,28 @@ const { t } = Astro.props;
 const site = Astro.site ?? new URL('http://localhost:4321');
 const canonical = new URL(Astro.url.pathname, site);
 const og = new URL('/og.png', site);
+// Structured data for search engines: the site, and litek8s as a free
+// application (`<` escaped so the JSON cannot close the script element).
+const home = new URL('/', site).href;
+const ld = JSON.stringify({
+  '@context': 'https://schema.org',
+  '@graph': [
+    { '@type': 'WebSite', name: 'litek8s', url: home, description: t.meta.description, inLanguage: t.lang },
+    {
+      '@type': 'SoftwareApplication',
+      name: 'litek8s',
+      url: home,
+      description: t.meta.description,
+      image: og.href,
+      applicationCategory: 'DeveloperApplication',
+      operatingSystem: 'macOS, Linux',
+      license: 'https://www.apache.org/licenses/LICENSE-2.0',
+      offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
+      sameAs: [t.links.github, t.links.crates],
+      downloadUrl: t.links.releases,
+    },
+  ],
+}).replace(/</g, '\\u003c');
 const md = (s: string) => s.replace(/`([^`]+)`/g, '<code>$1</code>');
 // Words of the tagline; the components it replaces (etcd … containerd)
 // light up in the accent color.
@@ -44,7 +66,15 @@ const hl = (i: number) => i >= from && i <= to && !['the', 'and'].includes(words
     <meta property="og:image" content={og} />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content={t.meta.imageAlt} />
+    <meta property="og:site_name" content="litek8s" />
+    <meta property="og:locale" content={t.lang} />
     <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={t.meta.title} />
+    <meta name="twitter:description" content={t.meta.description} />
+    <meta name="twitter:image" content={og} />
+    <link rel="sitemap" href="/sitemap-index.xml" />
+    <script type="application/ld+json" set:html={ld} />
     <link rel="preload" href={displayFont} as="font" type="font/woff2" crossorigin />
     <script is:inline>
       // Before first paint: the theme (shared with the docs, which use
@@ -105,7 +135,7 @@ const hl = (i: number) => i >= from && i <= to && !['the', 'and'].includes(words
             </div>
             <h1>
               {t.hero.lines.map((l, i) => (
-                <span class="line"><span class:list={{ accent: i === t.hero.lines.length - 1 }} style={`--i:${i}`}>{l}</span></span>
+                <span class="line"><span class:list={{ accent: i === t.hero.lines.length - 1 }} style={`--i:${i}`}>{l}</span>{' '}</span>
               ))}
             </h1>
           </div>

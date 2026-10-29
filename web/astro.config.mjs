@@ -37,6 +37,8 @@ export default defineConfig({
         })),
       })),
       components: { SiteTitle: './src/components/docs/SiteTitle.astro' },
+      // Per-page SEO: seoTitle, social card image, JSON-LD (src/routeData.ts).
+      routeMiddleware: './src/routeData.ts',
     }),
   ],
 });

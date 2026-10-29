@@ -47,18 +47,18 @@ Before and after, on the Mac with the same cluster (`--cpus 4 --memory
 4096`, a 3-replica deployment, a CPU-burning one, a crash-looping pod, a
 pending one, a finished job, a compose project), in a dark terminal:
 
-![Home before](ui/before-home.svg)
+![litek8s ui home view before the restyle, dark terminal](ui/before-home.svg)
 
-![Home after](ui/home-dark.svg)
+![litek8s ui home view after the restyle: clusters, nodes, CPU and memory meters, dark terminal](ui/home-dark.svg)
 
 The same in a light terminal, and the Kubernetes view (dark, with the
 zebra rows the terminal's reported background allows):
 
-![Home, light terminal](ui/home-light.svg)
+![litek8s ui home view in a light terminal](ui/home-light.svg)
 
-![Kubernetes, before](ui/before-kube.svg)
+![litek8s ui Kubernetes view before the restyle: a list of pods](ui/before-kube.svg)
 
-![Kubernetes, after](ui/kube-dark.svg)
+![litek8s ui Kubernetes view after the restyle: a k9s-style list of pods with zebra rows](ui/kube-dark.svg)
 
 As text, 80x24 before:
 
