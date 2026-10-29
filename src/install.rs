@@ -1078,6 +1078,29 @@ mod tests {
     }
 
     #[test]
+    fn iptables_cleanup_removes_network_policy_chains() {
+        let rules = "\
+*filter
+:INPUT ACCEPT [0:0]
+:FORWARD ACCEPT [0:0]
+:LITEK8S-FORWARD - [0:0]
+:LITEK8S-NETPOL - [0:0]
+:LITEK8S-NPI-0a2a0005 - [0:0]
+-A INPUT -i litek8s0 -j LITEK8S-NETPOL
+-A FORWARD -j LITEK8S-FORWARD
+-A LITEK8S-FORWARD -j LITEK8S-NETPOL
+-A LITEK8S-NETPOL -d 10.42.0.5/32 -j LITEK8S-NPI-0a2a0005
+-A LITEK8S-NPI-0a2a0005 -j DROP
+COMMIT";
+        let cmds = iptables_cleanup("filter", rules);
+        assert_eq!(&cmds[..2], ["iptables -t filter -D INPUT -i litek8s0 -j LITEK8S-NETPOL", "iptables -t filter -D FORWARD -j LITEK8S-FORWARD"]);
+        // Every chain is flushed before any is deleted (they refer to each other).
+        let first_x = cmds.iter().position(|c| c.contains(" -X ")).unwrap();
+        assert!(cmds[2..first_x].iter().all(|c| c.contains(" -F ")) && cmds[first_x..].len() == 3);
+        assert!(cmds.contains(&"iptables -t filter -X LITEK8S-NPI-0a2a0005".to_string()));
+    }
+
+    #[test]
     fn iptables_cleanup_deletes_jumps_then_chains() {
         let rules = "\
 *nat

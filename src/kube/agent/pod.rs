@@ -328,6 +328,11 @@ impl<R: PodRuntime> Worker<R> {
             return;
         };
         let ip = self.agent.runtime().sandbox_ip(&sandbox.id).await.ok().flatten();
+        if let (Some(np), Some(ip)) = (self.agent.netpol(), ip.as_deref()) {
+            if let Err(e) = np.register(&self.uid, ip).await {
+                eprintln!("node-agent: network policy of pod {}/{}: {e:#}", self.ns, self.name);
+            }
+        }
         self.sandbox = Some(SandboxInfo { id: sandbox.id.clone(), ip });
         let all_inits_done = !mine.is_empty();
         for c in &mine {
@@ -729,6 +734,13 @@ impl<R: PodRuntime> Worker<R> {
                 .collect(),
         };
         let sandbox = self.agent.runtime().run_sandbox(&spec).await?;
+        // The pod's NetworkPolicy chains exist before any container runs.
+        if let (Some(np), Some(ip)) = (self.agent.netpol(), sandbox.ip.as_deref()) {
+            if let Err(e) = np.register(&self.uid, ip).await {
+                let _ = self.agent.runtime().remove(&sandbox.id).await;
+                return Err(e.context("network policy"));
+            }
+        }
         self.agent.track_container(&sandbox.id, &self.uid);
         if !self.agent.runtime().writes_pod_files() && !spec.host_network {
             let gateway = self.agent.resolve_host("host-gateway").await.unwrap_or_default();
@@ -1614,6 +1626,10 @@ impl<R: PodRuntime> Worker<R> {
         }
         for id in &ids {
             self.agent.untrack_container(id);
+        }
+        if let Some(np) = self.agent.netpol() {
+            // Before the address is released and given to another pod.
+            np.unregister(&self.uid);
         }
         if let Some(sb) = self.sandbox.take() {
             let _ = rt.remove(&sb.id).await;

@@ -90,6 +90,9 @@ pub enum Message {
         /// Send `OverlayStatus` reports (the agent announced `overlay-status`).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         overlay_status: bool,
+        /// `NetPolicy` messages follow (the agent announced `network-policy`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        network_policy: bool,
     },
     HeartbeatAck,
     /// The other nodes of the pod overlay (all of them, each time), with
@@ -103,6 +106,16 @@ pub enum Message {
     /// The server lost track of this node for a while (its pods were marked
     /// not ready): report every pod's status again.
     Resync,
+    /// NetworkPolicy rules of this node's pods (pod uid → rules; `None`:
+    /// no longer isolated), always sent before the `PodUpsert` they matter
+    /// for. `full`: the whole set, replacing the agent's. Only to agents
+    /// that announce `network-policy`.
+    NetPolicy {
+        #[serde(default)]
+        pods: std::collections::BTreeMap<String, Option<super::netpol::PodRules>>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        full: bool,
+    },
     /// A pod bound to this node was created or changed.
     PodUpsert { pod: Value },
     PodDelete { uid: String },

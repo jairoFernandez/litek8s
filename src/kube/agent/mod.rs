@@ -21,6 +21,7 @@
 pub(crate) mod crun;
 pub mod hub;
 mod kubelet;
+pub mod netpol;
 mod obs;
 pub mod overlay;
 mod pod;
@@ -167,6 +168,8 @@ pub struct Agent<R: PodRuntime> {
     /// The address `host-gateway` stands for in pods (found once).
     gateway_ip: tokio::sync::OnceCell<Option<String>>,
     proxy: Arc<proxy::Proxy>,
+    /// NetworkPolicy enforcement, when the runtime can (crun).
+    netpol: Option<Arc<netpol::NetPol>>,
     overlay: Option<Arc<overlay::Overlay>>,
     /// The server takes `OverlayStatus` reports on this connection.
     overlay_reports: std::sync::atomic::AtomicBool,
@@ -189,6 +192,7 @@ impl<R: PodRuntime> Agent<R> {
 
     pub fn with_overlay(rt: R, config: AgentConfig, overlay: Option<overlay::Overlay>) -> Arc<Self> {
         let (link, _) = watch::channel(None);
+        let netpol = rt.enforces_network_policy().then(|| Arc::new(netpol::NetPol::default()));
         let agent = Arc::new(Self {
             rt: Arc::new(rt),
             config,
@@ -201,6 +205,7 @@ impl<R: PodRuntime> Agent<R> {
             images: Mutex::new(HashMap::new()),
             gateway_ip: tokio::sync::OnceCell::new(),
             proxy: Arc::new(proxy::Proxy::default()),
+            netpol,
             overlay: overlay.map(Arc::new),
             overlay_reports: Default::default(),
             claims: Mutex::default(),
@@ -224,6 +229,9 @@ impl<R: PodRuntime> Agent<R> {
             tokio::spawn(overlay_loop(agent.clone()));
         }
         tokio::spawn(proxy::run(agent.proxy.clone(), agent.rt.clone()));
+        if let Some(np) = agent.netpol.clone() {
+            tokio::spawn(np.run());
+        }
         let exits = agent.clone();
         tokio::spawn(async move {
             let mut stream = exits.rt.exits();
@@ -267,6 +275,10 @@ impl<R: PodRuntime> Agent<R> {
             return Some(host.to_string());
         }
         tokio::net::lookup_host((host, 53)).await.ok()?.find(|a| a.is_ipv4()).map(|a| a.ip().to_string())
+    }
+
+    pub(crate) fn netpol(&self) -> Option<&Arc<netpol::NetPol>> {
+        self.netpol.as_ref()
     }
 
     pub(crate) fn service_proxy(&self) -> &proxy::Proxy {
@@ -427,6 +439,9 @@ impl<R: PodRuntime> Agent<R> {
             features.push(OVERLAY_STATUS_FEATURE.into());
         }
         features.push(protocol::MACHINE_FEATURE.into());
+        if self.netpol.is_some() {
+            features.push(netpol::FEATURE.into());
+        }
         tx.send(Frame::Control(Message::Hello { node: self.config.node.clone(), features }))
             .await
             .ok()
@@ -493,7 +508,19 @@ impl<R: PodRuntime> Agent<R> {
 
     async fn handle(self: &Arc<Self>, link: &Arc<Link>, msg: Message) {
         match msg {
-            Message::Welcome { api_host, api_port, cluster_dns, obs, overlay_status, .. } => {
+            Message::Welcome { api_host, api_port, cluster_dns, obs, overlay_status, network_policy, .. } => {
+                if let Some(np) = self.netpol.clone() {
+                    if !network_policy {
+                        np.unsupported();
+                    }
+                    // Pods ask the cluster DNS at the API server's address.
+                    let agent = self.clone();
+                    let host = api_host.clone();
+                    tokio::spawn(async move {
+                        let dns = agent.resolve_host(&host).await.and_then(|ip| ip.parse().ok());
+                        np.set_dns(dns.into_iter().collect());
+                    });
+                }
                 *self.api.lock().unwrap() = Some(ApiEndpoint { host: api_host, port: api_port, cluster_dns });
                 self.overlay_reports.store(overlay_status, Ordering::Relaxed);
                 self.link.send_replace(Some(link.clone()));
@@ -510,6 +537,11 @@ impl<R: PodRuntime> Agent<R> {
                             eprintln!("node-agent: WireGuard peers not applied: {e:#}");
                         }
                     });
+                }
+            }
+            Message::NetPolicy { pods, full } => {
+                if let Some(np) = &self.netpol {
+                    np.update(pods, full);
                 }
             }
             Message::PodUpsert { pod } => self.upsert(pod),

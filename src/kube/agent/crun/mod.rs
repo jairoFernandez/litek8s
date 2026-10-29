@@ -213,6 +213,7 @@ impl CrunPods {
         let cluster = net::Subnet::parse(cluster_cidr)?;
         run_quiet("sh", &["-c", &net::bridge_commands(&subnet)], None).await.context("failed to set up the pod bridge")?;
         let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1");
+        run_quiet("sh", &["-c", crate::kube::agent::netpol::CREATE_CHAIN], None).await?;
         run_quiet("iptables-restore", &["--noflush"], Some(&net::base_rules(&subnet, &cluster))).await?;
         run_quiet("sh", &["-c", net::HOOKS], None).await?;
         let (exits_tx, exits_rx) = mpsc::unbounded_channel();
@@ -693,6 +694,10 @@ impl PodRuntime for CrunPods {
     }
 
     fn writes_pod_files(&self) -> bool {
+        true
+    }
+
+    fn enforces_network_policy(&self) -> bool {
         true
     }
 
