@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.12
 
 - **The API server authenticates clients and enforces RBAC** (breaking for
   servers; dev clusters are unchanged). Until now every client that reached
