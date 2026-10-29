@@ -17,12 +17,16 @@ pub const SKILL: &[Doc] = &[
     Doc { path: "references/observability.md", description: "Built-in metrics, log search and alerts, with ready PromQL recipes", text: include_str!("../../skills/litek8s/references/observability.md") },
     Doc { path: "references/docker.md", description: "The Docker Engine API of a dev cluster: docker, compose, builds, what is missing", text: include_str!("../../skills/litek8s/references/docker.md") },
     Doc { path: "references/ha-and-join.md", description: "HA control plane (3/5 servers over Raft), joining nodes, the load balancer", text: include_str!("../../skills/litek8s/references/ha-and-join.md") },
+    Doc { path: "references/auth-and-rbac.md", description: "Authentication and RBAC on servers: 401/403 after upgrading, RBAC-audit, fixes", text: include_str!("../../skills/litek8s/references/auth-and-rbac.md") },
     Doc { path: "references/differences.md", description: "How litek8s differs from upstream Kubernetes (conformance gaps, missing pieces)", text: include_str!("../../skills/litek8s/references/differences.md") },
     Doc { path: "references/troubleshooting.md", description: "Diagnosing pods, nodes, dev clusters and the API server", text: include_str!("../../skills/litek8s/references/troubleshooting.md") },
 ];
 
 pub const DOCS: &[Doc] = &[
     Doc { path: "agents.md", description: "Using litek8s from LLM agents: the MCP server, the skill, -o json", text: include_str!("../../docs/agents.md") },
+    Doc { path: "auth.md", description: "Authentication and RBAC: modes, identities, upgrading a cluster made with an earlier litek8s, your own users", text: include_str!("../../docs/auth.md") },
+    Doc { path: "clusters.md", description: "Servers and nodes over SSH, cluster files (litek8s cluster apply)", text: include_str!("../../docs/clusters.md") },
+    Doc { path: "limitations.md", description: "What litek8s does not do yet", text: include_str!("../../docs/limitations.md") },
     Doc { path: "dev.md", description: "litek8s dev: local clusters (design, commands, internals)", text: include_str!("../../docs/dev.md") },
     Doc { path: "docker.md", description: "The Docker Engine API on litek8s", text: include_str!("../../docs/docker.md") },
     Doc { path: "observability.md", description: "Built-in metrics, PromQL subset, log search, alerts", text: include_str!("../../docs/observability.md") },

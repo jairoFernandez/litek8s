@@ -466,9 +466,11 @@ asks for it back.
 
 ## Limits
 
-- No authentication on the API (it listens on 127.0.0.1 only; inside the
-  VM or sandbox, on the cluster's cell, and for multi-node clusters also on
-  its cell address, which only the other cells reach).
+- No authentication on the API (`--authorization-mode AlwaysAllow`: it
+  listens on 127.0.0.1 only; inside the VM or sandbox, on the cluster's
+  cell, and for multi-node clusters also on its cell address, which only
+  the other cells reach). RBAC objects are stored, not enforced; servers
+  installed with `litek8s install` or `cluster apply` enforce them.
 - hostPorts are not exposed on the host's localhost (NodePorts are); rootless
   cannot bind host ports below 1024.
 - macOS: the first boot formats the data disk (~5 s); DHCP from the

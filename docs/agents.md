@@ -14,6 +14,13 @@ that:
 3. **`-o json`** on the litek8s-specific commands: `dev status`, `dev list`,
    `query`, `alerts` (and its subcommands), `logs`.
 
+
+The website serves [`/llms.txt`](https://litek8s.dev/llms.txt) (every
+docs page with its description and a link to its markdown) and
+[`/llms-full.txt`](https://litek8s.dev/llms-full.txt) (all of them in one
+file), for agents that look for docs on the web instead of running the MCP
+server.
+
 ## Claude Code
 
 ```bash

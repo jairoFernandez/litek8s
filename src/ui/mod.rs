@@ -20,6 +20,8 @@ mod obs;
 /// The API server a kubeconfig context (or the local dev cluster) names,
 /// for the CLI (`litek8s logs`, `alerts`, `query`).
 pub(crate) use kube::resolve as resolve_kube;
+#[cfg(test)]
+pub(crate) use kube::endpoint_for as kube_endpoint_for;
 // What `litek8s mcp` reuses of the Kubernetes view.
 pub(crate) use kube::{auth as kube_auth, gitops as kube_gitops, ops as kube_ops, resources as kube_resources, state as kube_state, yaml as kube_yaml};
 pub mod theme;

@@ -18,9 +18,25 @@ macOS, the rest pass on Linux; the compatibility corpus (kubectl, Helm with
 
 ## Missing or partial
 
-- **No authentication/authorization for clients**: every client is admin;
-  RBAC objects are stored and served but not enforced. Dev clusters listen
-  on 127.0.0.1 only.
+- **Authentication and RBAC**: servers (`litek8s apiserver`, `install
+  server`, `cluster apply`) default to `--authorization-mode RBAC`: service
+  account tokens, client certificates from the cluster's client CA (CN
+  user, O groups; the written kubeconfig is `system:admin` in
+  `system:masters`) and the join token (admin) authenticate; anonymous
+  requests reach only `/healthz`, `/livez`, `/readyz`, `/version` and the
+  OIDC documents (401 elsewhere). Role/ClusterRole/bindings are enforced
+  (verbs, groups, resources, subresources such as `pods/exec`,
+  resourceNames, nonResourceURLs, `*`), with default ClusterRoles
+  (cluster-admin, admin, edit, view aggregated, system:discovery,
+  system:basic-user, system:public-info-viewer, system:auth-delegator),
+  aggregationRule, escalation checks (`escalate`, `bind`), impersonation and
+  real SubjectAccessReview/SelfSubjectAccessReview/SelfSubjectRulesReview/
+  SelfSubjectReview answers. `RBAC-audit` logs denials (`RBAC-audit: DENY`)
+  and allows anyway; `AlwaysAllow` is the old no-auth mode. **Dev clusters
+  stay AlwaysAllow** (127.0.0.1 only). Charts that relied on every pod being
+  admin need their RBAC: check the server log in RBAC-audit first. Not
+  there: OIDC/static/webhook authenticators, the Node authorizer, client
+  certificate revocation, front-proxy identity for aggregated APIs.
 - **ValidatingAdmissionPolicy** rules and webhook `matchConditions` are
   accepted but not enforced. Writes made by the in-process controllers do
   not go through admission webhooks.

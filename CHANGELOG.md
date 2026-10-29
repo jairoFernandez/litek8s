@@ -2,6 +2,64 @@
 
 ## Unreleased
 
+- **The API server authenticates clients and enforces RBAC** (breaking for
+  servers; dev clusters are unchanged). Until now every client that reached
+  the port was cluster admin, with or without a token: any pod could read
+  every Secret or start privileged pods. `litek8s apiserver` now takes
+  `--authorization-mode RBAC|RBAC-audit|AlwaysAllow` (default `RBAC`):
+  - Authentication: service account tokens (signature, account, bound pod
+    and audience checked, as TokenReview does), client certificates signed
+    by the cluster's client CA (CN user, O groups; derived from the service
+    account key, so every HA server has the same one; also written to
+    `<data-dir>/client-ca.{crt,key}` for your own users), the join token
+    (`system:masters`), and `Impersonate-*` headers (checked with the
+    `impersonate` verb). Anonymous requests reach only `/healthz`,
+    `/livez`, `/readyz`, `/version`, `/cacerts` and the OIDC discovery
+    documents; anything else is 401. HA servers forward the authenticated
+    user with writes they send to the leader.
+  - Authorization: Role, ClusterRole, RoleBinding and ClusterRoleBinding
+    are enforced (verbs, API groups, resources and subresources such as
+    `pods/exec`, resourceNames, nonResourceURLs, wildcards); websocket
+    exec/attach/port-forward need `create`, as in 1.33. `system:masters`
+    may do anything; in-process controllers and node agents are not
+    subject to it. New clusters get the default ClusterRoles (cluster-admin,
+    admin/edit/view with aggregation, system:discovery, system:basic-user,
+    system:public-info-viewer, system:auth-delegator, system:monitoring,
+    system:service-account-issuer-discovery), their bindings and the
+    `extension-apiserver-authentication-reader` Role; an aggregationRule
+    controller keeps aggregated ClusterRoles' rules. Writing a role or
+    binding that grants more than the author holds is refused unless they
+    may `escalate` or `bind` it. SubjectAccessReview, LocalSubjectAccessReview,
+    SelfSubjectAccessReview, SelfSubjectRulesReview and SelfSubjectReview
+    answer for real (`kubectl auth can-i`, `kubectl auth whoami`).
+  - `RBAC-audit` evaluates everything and allows anyway, logging each
+    denial (`apiserver: RBAC-audit: DENY user=... get secrets namespace=...`)
+    and each user's first use of a verb and resource (`ALLOW`), so a
+    cluster can run its workloads for a while and get the RBAC its charts
+    lack before switching to `RBAC`. `AlwaysAllow` is the old behavior.
+  - The kubeconfig `apiserver --kubeconfig` writes (and so
+    `/etc/litek8s/kubeconfig.yaml` of `litek8s install server`) is now
+    `https://` with the cluster CA and a `system:admin` client certificate
+    (group `system:masters`), mode 0600; `install server --ssh` and
+    `cluster apply` put that certificate in the context they add, instead
+    of the placeholder token. Re-run them after upgrading a server, or
+    start it with `--authorization-mode AlwaysAllow` (or `RBAC-audit`)
+    until you do.
+  - Upgrading a server whose pods relied on being admin: their charts may
+    need a Role or ClusterRole they never shipped. Start with
+    `--authorization-mode RBAC-audit` and read the `DENY` lines.
+  - Dev clusters (`litek8s dev`) stay `AlwaysAllow` on 127.0.0.1: nothing
+    to do.
+  - **Upgrading a cluster made with an earlier release**: docs/auth.md
+    ("Upgrading a cluster made with an earlier litek8s") has the steps for a
+    401 (`kubectl auth whoami` says `system:anonymous`) and for workloads
+    that get 403. An older `litek8s` CLI running `cluster apply` (lkcloud
+    calls the one on PATH) writes the placeholder token back: upgrade the
+    CLI first. The MCP server serves the guide as `litek8s://docs/auth.md`
+    and `litek8s://skill/references/auth-and-rbac.md`.
+- **llms.txt**: litek8s.dev serves `/llms.txt` (every docs page with its
+  description and markdown source) and `/llms-full.txt` (all of them in one
+  file), built from the docs manifest, for agents looking for the docs.
 - **`kubectl exec` and port-forward over WebSocket no longer drop after a
   minute**: client-go (kubectl 1.30+) pings the stream every few seconds and
   gives up when no pong comes back, so long exec sessions (a `mongorestore`

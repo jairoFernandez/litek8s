@@ -17,6 +17,8 @@ pub const DEFAULT_AUDIENCES: [&str; 2] = [ISSUER, "k3s"];
 pub struct TokenSigner {
     key: EcdsaKeyPair,
     kid: String,
+    /// A hash of the key, from which other keys are derived (`seed`).
+    secret_hash: [u8; 32],
 }
 
 fn b64(bytes: &[u8]) -> String {
@@ -44,7 +46,19 @@ impl TokenSigner {
             .map_err(|_| anyhow::anyhow!("invalid service account key"))?;
         use sha2::Digest;
         let kid = b64(&sha2::Sha256::digest(key.public_key().as_ref())[..16]);
-        Ok(Self { key, kid })
+        let secret_hash = sha2::Sha256::digest(&pkcs8).into();
+        Ok(Self { key, kid, secret_hash })
+    }
+
+    /// 32 bytes derived from the signing key for `purpose`: the same on
+    /// every server that shares the key (HA), unguessable without it.
+    pub fn seed(&self, purpose: &str) -> [u8; 32] {
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        h.update(b"litek8s/");
+        h.update(purpose.as_bytes());
+        h.update(self.secret_hash);
+        h.finalize().into()
     }
 
     pub fn sign(&self, claims: &Value) -> String {

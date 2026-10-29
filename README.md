@@ -137,9 +137,10 @@ in [Numbers](https://litek8s.dev/docs/numbers/).
 
 litek8s is an early preview (v0.x), built and tested by one person.
 
-- **No client authentication or RBAC yet:** every API client is admin. Dev
-  clusters listen on `127.0.0.1` only; keep a server's API on a trusted
-  network.
+- **Authentication and RBAC are simpler than upstream's** (no OIDC, no
+  Node authorizer, no certificate revocation). Servers enforce RBAC
+  (`--authorization-mode RBAC-audit` only logs); dev clusters listen on
+  `127.0.0.1` only and every client there is admin.
 - APIs, flags and on-disk formats may change between 0.x releases.
 - Some kubelet behaviors are missing.
 

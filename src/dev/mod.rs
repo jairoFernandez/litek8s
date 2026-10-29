@@ -1587,6 +1587,9 @@ async fn inner_apiserver(o: InnerOptions) -> Result<()> {
         // than a server's: a dev cluster should stay nearly free.
         obs: Some(crate::obs::server::ObsConfig { memory_budget: 8 << 20, ..Default::default() }),
         prometheus_listen: None,
+        // A dev cluster is the user's own: its kubeconfig has no
+        // credentials, and every client is an administrator.
+        authorization_mode: crate::kube::rbac::Mode::AlwaysAllow,
     })
     .await
 }

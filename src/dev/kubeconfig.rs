@@ -58,6 +58,8 @@ pub struct ClusterEntry {
     pub tls_server_name: Option<String>,
     /// The user's bearer token.
     pub token: Option<String>,
+    /// The user's client certificate and key (PEM).
+    pub client_cert: Option<(String, String)>,
 }
 
 /// [`merge`] with a whole cluster entry.
@@ -88,6 +90,10 @@ pub fn merge_cluster(doc: &str, context: &str, entry: &ClusterEntry, make_curren
     let mut user = Mapping::new();
     if let Some(t) = &entry.token {
         user.insert("token".into(), t.as_str().into());
+    }
+    if let Some((cert, key)) = &entry.client_cert {
+        user.insert("client-certificate-data".into(), base64::engine::general_purpose::STANDARD.encode(cert).into());
+        user.insert("client-key-data".into(), base64::engine::general_purpose::STANDARD.encode(key).into());
     }
     upsert(seq(&mut root, "users"), name, "user", Value::Mapping(user));
     let mut context = Mapping::new();
@@ -269,7 +275,7 @@ mod tests {
 
     #[test]
     fn a_remote_cluster_with_its_ca_and_server_name() {
-        let entry = ClusterEntry { server: "https://192.168.1.10:6443".into(), ca: Some("-----BEGIN CERTIFICATE-----\nX\n".into()), tls_server_name: Some("kubernetes.default.svc".into()), token: Some("t".into()) };
+        let entry = ClusterEntry { server: "https://192.168.1.10:6443".into(), ca: Some("-----BEGIN CERTIFICATE-----\nX\n".into()), tls_server_name: Some("kubernetes.default.svc".into()), token: Some("t".into()), client_cert: None };
         let doc = merge_cluster(KIND, "home", &entry, true).unwrap();
         let v: Value = serde_yaml::from_str(&doc).unwrap();
         let c = v["clusters"].as_sequence().unwrap().iter().find(|c| c["name"] == "home").unwrap();

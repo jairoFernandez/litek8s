@@ -50,6 +50,9 @@ litek8s lb --listen 127.0.0.1:6443 --server http://192.168.1.10:6443   # one add
 
 ## Security
 
-No authentication or authorization for API clients yet: every client is
-admin. Keep the API port on a trusted network (dev clusters listen on
-127.0.0.1 only). The join path (agents) is authenticated.
+Servers authenticate API clients (service account tokens, client
+certificates from the cluster's client CA, the join token as admin) and
+enforce RBAC (`--authorization-mode RBAC`, the default; `RBAC-audit` logs
+and allows; `AlwaysAllow` is the old no-auth mode, which dev clusters
+use on 127.0.0.1). The join path (agents) is authenticated with the join
+token and the node password.

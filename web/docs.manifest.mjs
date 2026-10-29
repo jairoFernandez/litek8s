@@ -40,7 +40,7 @@ export const groups = [
       { slug: 'multi-node', label: 'Multi-node and HA', seoTitle: 'Multi-node Kubernetes and HA with litek8s', source: 'docs/multi-node.md' },
       {
         slug: 'limitations', label: 'Limitations', seoTitle: 'Limitations of litek8s', source: 'docs/limitations.md',
-        description: 'What litek8s does not do yet: no client authentication or RBAC enforcement, young on-disk formats, kubelet behaviors and admission features still missing.',
+        description: 'What litek8s does not do yet: simpler authentication and RBAC than upstream, young on-disk formats, kubelet behaviors and admission features still missing.',
       },
     ],
   },
@@ -53,6 +53,10 @@ export const groups = [
       { slug: 'ui', label: 'Terminal UI', source: 'docs/ui.md' },
       { slug: 'observability', label: 'Metrics, logs, alerts', source: 'docs/observability.md' },
       { slug: 'clusters', label: 'Clusters over SSH', source: 'docs/clusters.md' },
+      {
+        slug: 'auth', label: 'Authentication and RBAC', seoTitle: 'Authentication and RBAC on litek8s servers', source: 'docs/auth.md',
+        description: 'How litek8s servers authenticate clients and enforce RBAC, the RBAC-audit mode, and how to fix a cluster made with an earlier release (401, 403).',
+      },
       { slug: 'registries', label: 'Private registries and mirrors', source: 'docs/registries.md' },
       { slug: 'networking', label: 'Networking across NATs', source: 'docs/networking.md' },
       { slug: 'ha', label: 'HA control plane', source: 'docs/ha.md' },
