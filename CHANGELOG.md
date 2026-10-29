@@ -50,6 +50,16 @@
     `--authorization-mode RBAC-audit` and read the `DENY` lines.
   - Dev clusters (`litek8s dev`) stay `AlwaysAllow` on 127.0.0.1: nothing
     to do.
+  - **Upgrading a cluster made with an earlier release**: docs/auth.md
+    ("Upgrading a cluster made with an earlier litek8s") has the steps for a
+    401 (`kubectl auth whoami` says `system:anonymous`) and for workloads
+    that get 403. An older `litek8s` CLI running `cluster apply` (lkcloud
+    calls the one on PATH) writes the placeholder token back: upgrade the
+    CLI first. The MCP server serves the guide as `litek8s://docs/auth.md`
+    and `litek8s://skill/references/auth-and-rbac.md`.
+- **llms.txt**: litek8s.dev serves `/llms.txt` (every docs page with its
+  description and markdown source) and `/llms-full.txt` (all of them in one
+  file), built from the docs manifest, for agents looking for the docs.
 
 ## 0.2.11
 

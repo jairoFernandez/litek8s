@@ -91,6 +91,7 @@ references/observability.md, e.g. top memory pods:
 - references/observability.md: metric names, PromQL recipes, log search, alerts and silences
 - references/docker.md: the Docker API: compose, builds, what is unsupported
 - references/ha-and-join.md: 3/5-server control plane, `litek8s agent --join`, `litek8s lb`
+- references/auth-and-rbac.md: servers' authentication and RBAC: 401/403 after upgrading, audit mode, fixes
 - references/differences.md: where litek8s differs from upstream Kubernetes
 - references/troubleshooting.md: symptoms → causes for pods, nodes, dev clusters, the API
 
