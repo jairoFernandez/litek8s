@@ -14,7 +14,9 @@ const MANAGED_BY: &str = "endpoints.kubernetes.io/managed-by";
 const ENDPOINTS_MANAGER: &str = "endpoint-controller";
 
 /// The address of the first ready node, which LoadBalancer Services get as
-/// their ingress (like k3s's servicelb).
+/// their ingress (like k3s's servicelb): its ExternalIP when it has one
+/// (`--node-external-ip`, a cloud VM behind 1:1 NAT), else its InternalIP, so
+/// external-dns never publishes a private address it could avoid.
 fn node_address(api: &ApiState) -> Option<String> {
     // The dev cluster exposes LoadBalancers on the developer's localhost.
     if let Ok(ip) = std::env::var("LITEK8S_LOADBALANCER_IP") {
@@ -28,10 +30,10 @@ fn node_address(api: &ApiState) -> Option<String> {
         .filter(|n| util::condition_true(n, "Ready"))
         .chain(nodes.iter())
         .find_map(|n| {
-            n.pointer("/status/addresses")?
-                .as_array()?
+            let addresses = n.pointer("/status/addresses")?.as_array()?;
+            ["ExternalIP", "InternalIP"]
                 .iter()
-                .find(|a| s(a, "/type") == "InternalIP")
+                .find_map(|kind| addresses.iter().find(|a| s(a, "/type") == *kind))
                 .map(|a| s(a, "/address").to_string())
         })
 }
@@ -744,6 +746,19 @@ mod tests {
         let rv = s(&lb, "/metadata/resourceVersion").to_string();
         reconcile_service(&api, "default", "lb").unwrap();
         assert_eq!(s(&api.get_object("", "services", "default", "lb").unwrap(), "/metadata/resourceVersion"), rv);
+    }
+
+    #[test]
+    fn load_balancers_prefer_a_nodes_external_ip() {
+        let api = api();
+        let created = api.create_object("", "nodes", None, json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "cloud"}})).unwrap();
+        let status = json!({"addresses": [{"type": "InternalIP", "address": "10.70.1.4"}, {"type": "ExternalIP", "address": "203.0.113.7"}],
+            "conditions": [{"type": "Ready", "status": "True"}]});
+        util::write_status(&api, "", "nodes", &created, status).unwrap();
+        service(&api, "lb", json!({"type": "LoadBalancer", "selector": {"app": "web"}, "ports": [{"port": 80}]}));
+        reconcile_service(&api, "default", "lb").unwrap();
+        let lb = api.get_object("", "services", "default", "lb").unwrap();
+        assert_eq!(lb.pointer("/status/loadBalancer/ingress/0/ip"), Some(&json!("203.0.113.7")));
     }
 
     #[test]
