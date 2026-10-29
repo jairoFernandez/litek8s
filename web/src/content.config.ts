@@ -6,14 +6,16 @@ import { docsSchema, i18nSchema } from '@astrojs/starlight/schema';
 // src/content/docs/docs/ is generated from the repository's markdown by
 // scripts/sync-docs.mjs (npm run sync); do not edit it by hand.
 // src/content/i18n/<lang>.json overrides Starlight's UI strings per language.
-// src/content/blog/*.md are the blog posts (/blog/<file name>/); `docs` lists
-// the docs pages a post builds on (slugs from docs.manifest.mjs, '' for the
-// introduction), linked at its end.
+// src/content/blog/*.md are the blog posts (/blog/<file name>/), and
+// src/content/blog/es/*.md the Spanish ones (/es/blog/<file name>/, `lang: es`);
+// `translation` names the same post in the other language (its id: `es/<file>`
+// or `<file>`). `docs` lists the docs pages a post builds on (slugs from
+// docs.manifest.mjs, '' for the introduction), linked at its end.
 export const collections = {
   docs: defineCollection({ loader: docsLoader(), schema: docsSchema() }),
   i18n: defineCollection({ loader: i18nLoader(), schema: i18nSchema() }),
   blog: defineCollection({
-    loader: glob({ pattern: '*.md', base: './src/content/blog' }),
+    loader: glob({ pattern: '**/*.md', base: './src/content/blog' }),
     schema: z.object({
       title: z.string(),
       description: z.string().max(160),
@@ -22,6 +24,8 @@ export const collections = {
       tags: z.array(z.string()).default([]),
       docs: z.array(z.string()).default([]),
       draft: z.boolean().default(false),
+      lang: z.enum(['en', 'es']).default('en'),
+      translation: z.string().optional(),
     }),
   }),
 };

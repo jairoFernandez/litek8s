@@ -7,6 +7,11 @@
 // its sections with `source: 'README.md', sections: ['## heading', ...]`
 // ("" is the text before the first heading).
 //
+// Translations: a page can set `translations: { es: { source, label, title?,
+// seoTitle?, description? } }` with a translated source under docs/es/; it is
+// served at /es/docs/<slug>/. Pages without one fall back to English there
+// (Starlight shows a notice). Groups can set `translations: { es: 'label' }`.
+//
 // For search results and link previews, a page can set `seoTitle` (the
 // <title> and og:title, in place of the page's short title) and
 // `description` (in place of its first paragraph). Keep titles under ~60
@@ -17,7 +22,7 @@ export const BRANCH = 'main';
 
 export const groups = [
   {
-    label: 'Start here',
+    label: 'Start here', translations: { es: 'Empieza aquí' },
     pages: [
       { slug: '', label: 'Introduction', title: 'Introduction', seoTitle: 'litek8s: a lightweight Kubernetes in one binary', source: 'docs/overview.md' },
       { slug: 'alongside', label: 'Next to your clusters', source: 'docs/alongside.md' },
@@ -45,7 +50,7 @@ export const groups = [
     ],
   },
   {
-    label: 'Guides',
+    label: 'Guides', translations: { es: 'Guías' },
     pages: [
       { slug: 'dev', label: 'Dev clusters', source: 'docs/dev.md' },
       { slug: 'docker', label: 'Docker API', source: 'docs/docker.md' },
@@ -56,6 +61,12 @@ export const groups = [
       {
         slug: 'auth', label: 'Authentication and RBAC', seoTitle: 'Authentication and RBAC on litek8s servers', source: 'docs/auth.md',
         description: 'How litek8s servers authenticate clients and enforce RBAC, the RBAC-audit mode, and how to fix a cluster made with an earlier release (401, 403).',
+        translations: {
+          es: {
+            source: 'docs/es/auth.md', label: 'Autenticación y RBAC', seoTitle: 'Autenticación y RBAC en servidores litek8s',
+            description: 'Cómo los servidores litek8s autentican clientes y aplican RBAC, el modo RBAC-audit y cómo arreglar un cluster creado con una versión anterior (401, 403).',
+          },
+        },
       },
       { slug: 'registries', label: 'Private registries and mirrors', source: 'docs/registries.md' },
       { slug: 'networking', label: 'Networking across NATs', source: 'docs/networking.md' },
@@ -66,7 +77,7 @@ export const groups = [
     ],
   },
   {
-    label: 'Contributing',
+    label: 'Contributing', translations: { es: 'Contribuir' },
     pages: [
       { slug: 'contributing', label: 'Building and testing', source: 'CONTRIBUTING.md' },
       { slug: 'develop-without-docker', label: 'Developing without Docker', source: 'docs/develop-without-docker.md' },
@@ -78,3 +89,9 @@ export const pages = groups.flatMap((g) => g.pages);
 
 /** The site path of a docs page. */
 export const route = (slug) => (slug ? `/docs/${slug}/` : '/docs/');
+
+/** Languages other than English, with their URL prefix. */
+export const LOCALES = { es: { label: 'Español', lang: 'es' } };
+
+/** The site path of a docs page in a language ('en' or a LOCALES key). */
+export const localRoute = (slug, lang = 'en') => (lang === 'en' ? route(slug) : `/${lang}${route(slug)}`);

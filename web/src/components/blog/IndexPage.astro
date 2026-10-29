@@ -1,0 +1,51 @@
+---
+// The blog's index for one language: its posts, newest first.
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import { posts, postUrl, dateFmt, blogRoot, strings, type Lang } from '../../lib/blog';
+import { localRoute } from '../../../docs.manifest.mjs';
+
+const { lang } = Astro.props as { lang: Lang };
+const t = strings[lang];
+const list = await posts(lang);
+const site = Astro.site ?? new URL('http://localhost:4321');
+const root = blogRoot(lang);
+const ld = JSON.stringify({
+  '@context': 'https://schema.org',
+  '@type': 'Blog',
+  name: t.name,
+  inLanguage: lang,
+  url: new URL(root, site).href,
+  blogPost: list.map((p) => ({
+    '@type': 'BlogPosting',
+    headline: p.data.title,
+    url: new URL(postUrl(p), site).href,
+    datePublished: p.data.date.toISOString(),
+  })),
+}).replace(/</g, '\\u003c');
+const alternates = (['en', 'es'] as const).map((l) => ({ tag: 'link', attrs: { rel: 'alternate', hreflang: l, href: new URL(blogRoot(l), site).href, 'data-blog': true } }));
+---
+<StarlightPage
+  frontmatter={{
+    title: t.title,
+    description: t.description,
+    head: [...alternates, { tag: 'script', attrs: { type: 'application/ld+json' }, content: ld }],
+  }}
+>
+  <p set:html={t.intro(localRoute('', lang), `${root}rss.xml`)} />
+  <p><a href={blogRoot(t.other.lang)} hreflang={t.other.lang} lang={t.other.lang}>{t.other.label}</a></p>
+  <ul class="posts">
+    {list.map((p) => (
+      <li>
+        <a href={postUrl(p)}><strong>{p.data.title}</strong></a>
+        <br /><small><time datetime={p.data.date.toISOString()}>{dateFmt(p.data.date, lang)}</time></small>
+        <p>{p.data.description}</p>
+      </li>
+    ))}
+  </ul>
+</StarlightPage>
+
+<style>
+  .posts { list-style: none; padding: 0; }
+  .posts li + li { margin-top: 1.5rem; }
+  .posts p { margin-top: 0.25rem; }
+</style>
