@@ -51,6 +51,10 @@ otherwise get from `kubectl describe pod`, `kubectl logs --previous`,
   context. Use `contexts_list probe=true` to find litek8s ones; use
   kubectl for other clusters.
 - "cannot reach ..." → cluster stopped, or wrong context.
+- 401 `Unauthorized` / `whoami` says `system:anonymous` on a server → a
+  context from an earlier litek8s (placeholder token): upgrade the CLI and
+  re-run `litek8s cluster apply` / `install --ssh`; 403 `Forbidden` from a
+  pod → its service account lacks a Role. references/auth-and-rbac.md.
 - `logs_search` / `query` say there is no API → the server runs with
   `--no-observability`.
 - Empty PromQL result → the metric needs a sample (every 10 s) or the

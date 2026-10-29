@@ -26,7 +26,8 @@ Honest list; more in [skills/litek8s/references/differences.md](../skills/litek8
   rules together may be refused). Sign your own users' certificates with
   `<data-dir>/client-ca.{crt,key}` (an Ed25519 CA; `extendedKeyUsage =
   clientAuth`). Keep the API port (and the Raft port, 6444) off untrusted
-  networks anyway.
+  networks anyway. Upgrading a cluster made with an earlier release, and
+  fixing 401/403: [auth.md](auth.md).
 - One person's project, weeks old: APIs, flags and on-disk formats may
   change between 0.x releases without migration.
 - Not every kubelet behavior: no `Unhealthy`/`BackOff` events, a memory
