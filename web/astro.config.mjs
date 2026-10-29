@@ -28,14 +28,19 @@ export default defineConfig({
       customCss: ['./src/styles/docs.css'],
       lastUpdated: false,
       pagination: true,
-      sidebar: groups.map((g) => ({
-        label: g.label,
-        items: g.pages.map((p) => ({
-          label: p.label,
-          slug: p.slug ? `docs/${p.slug}` : 'docs',
-          ...(p.badge ? { badge: { text: p.badge, variant: 'caution' } } : {}),
+      sidebar: [
+        ...groups.map((g) => ({
+          label: g.label,
+          items: g.pages.map((p) => ({
+            label: p.label,
+            slug: p.slug ? `docs/${p.slug}` : 'docs',
+            ...(p.badge ? { badge: { text: p.badge, variant: 'caution' } } : {}),
+          })),
         })),
-      })),
+        { label: 'Blog', link: '/blog/' },
+      ],
+      // The blog's RSS feed, announced on every page.
+      head: [{ tag: 'link', attrs: { rel: 'alternate', type: 'application/rss+xml', title: 'litek8s blog', href: '/blog/rss.xml' } }],
       components: { SiteTitle: './src/components/docs/SiteTitle.astro' },
       // Per-page SEO: seoTitle, social card image, JSON-LD (src/routeData.ts).
       routeMiddleware: './src/routeData.ts',

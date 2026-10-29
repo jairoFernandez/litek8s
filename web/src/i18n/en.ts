@@ -31,6 +31,7 @@ export const en = {
       { label: 'How it works', href: '#how' },
       { label: 'Install', href: '#install' },
       { label: 'Docs', href: '/docs/' },
+      { label: 'Blog', href: '/blog/' },
     ],
     github: 'GitHub',
     theme: 'Switch between dark and light',
@@ -429,6 +430,7 @@ export const en = {
           { label: 'Releases', href: `${GH}/releases` },
           { label: 'crates.io', href: 'https://crates.io/crates/litek8s' },
           { label: 'Issues', href: `${GH}/issues` },
+          { label: 'Blog', href: '/blog/' },
         ],
       },
       {

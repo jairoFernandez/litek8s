@@ -45,6 +45,9 @@ export const onRequest = defineRouteMiddleware((context) => {
     { tag: 'meta', attrs: { name: 'twitter:image', content: image } },
   );
 
+  // Blog pages (src/pages/blog/) bring their own JSON-LD.
+  if (!page) return;
+
   const url = new URL(context.url.pathname, site).href;
   const home = new URL('/', site).href;
   const docs = new URL('/docs/', site).href;

@@ -1,0 +1,44 @@
+---
+// The blog's index: every post, newest first.
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import { posts, postUrl, dateFmt } from '../../lib/blog';
+
+const list = await posts();
+const site = Astro.site ?? new URL('http://localhost:4321');
+const ld = JSON.stringify({
+  '@context': 'https://schema.org',
+  '@type': 'Blog',
+  name: 'litek8s blog',
+  url: new URL('/blog/', site).href,
+  blogPost: list.map((p) => ({
+    '@type': 'BlogPosting',
+    headline: p.data.title,
+    url: new URL(postUrl(p), site).href,
+    datePublished: p.data.date.toISOString(),
+  })),
+}).replace(/</g, '\\u003c');
+---
+<StarlightPage
+  frontmatter={{
+    title: 'Blog',
+    description: 'Guides and notes about litek8s, a lightweight Kubernetes in one binary: home labs, dev clusters, CI, observability and more.',
+    head: [{ tag: 'script', attrs: { type: 'application/ld+json' }, content: ld }],
+  }}
+>
+  <p>Longer walk-throughs of what the <a href="/docs/">docs</a> describe. <a href="/blog/rss.xml">RSS feed</a>.</p>
+  <ul class="posts">
+    {list.map((p) => (
+      <li>
+        <a href={postUrl(p)}><strong>{p.data.title}</strong></a>
+        <br /><small><time datetime={p.data.date.toISOString()}>{dateFmt(p.data.date)}</time></small>
+        <p>{p.data.description}</p>
+      </li>
+    ))}
+  </ul>
+</StarlightPage>
+
+<style>
+  .posts { list-style: none; padding: 0; }
+  .posts li + li { margin-top: 1.5rem; }
+  .posts p { margin-top: 0.25rem; }
+</style>
