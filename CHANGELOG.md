@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.13
 
 - **`litek8s ui --context <remote litek8s>` shows that cluster while a dev
   cluster runs here**: Home took the local dev cluster's state (its VM's
