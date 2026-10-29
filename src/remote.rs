@@ -856,7 +856,8 @@ pub fn api_url(api_address: Option<&str>, server_args: &[String], ssh_host: &str
     }
 }
 
-/// The kubeconfig user's token (the server takes any).
+/// The kubeconfig user's token for a server too old to hand out an admin
+/// certificate (it took any token).
 pub const NO_AUTH_TOKEN: &str = "litek8s-no-client-auth";
 
 /// Add the server's context to this machine's kubeconfig.
@@ -868,9 +869,11 @@ pub fn write_context(context: &str, server_url: &str, result: &InstallResult) ->
         // The serving certificate names the in-cluster service, not the
         // addresses the server is reached at.
         tls_server_name: result.ca.as_ref().map(|_| crate::kube::join::SERVER_NAME.to_string()),
-        // The API does not authenticate clients, but kubectl asks for a
-        // username and password on an https server without credentials.
-        token: Some(NO_AUTH_TOKEN.to_string()),
+        client_cert: result.client_cert.clone().zip(result.client_key.clone()),
+        // A server from before client authentication took any token
+        // (kubectl asks for a username and password on an https server
+        // without credentials).
+        token: result.client_cert.is_none().then(|| NO_AUTH_TOKEN.to_string()),
     };
     crate::dev::kubeconfig::install_cluster(&path, context, &entry, true)?;
     Ok(path)
