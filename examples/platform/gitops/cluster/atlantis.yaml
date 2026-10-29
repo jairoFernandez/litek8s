@@ -41,7 +41,7 @@ spec:
         ingress:
           enabled: true
           annotations:
-            cert-manager.io/cluster-issuer: platform-ca
+            cert-manager.io/cluster-issuer: <CLUSTER_ISSUER>
           host: atlantis.<DOMAIN_NAME>
           path: /
           pathType: Prefix

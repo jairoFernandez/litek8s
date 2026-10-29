@@ -21,6 +21,14 @@
 # DOMAIN           web UIs at https://<app>.$DOMAIN (default localhost:
 #                  browsers and curl resolve *.localhost to this machine)
 # HTTP_PORT/HTTPS_PORT  the ingress's LoadBalancer ports (default 80/443)
+# ISSUER           who signs the UIs' certificates: platform-ca (default), the
+#                  platform's own CA (trust it on your machine); letsencrypt:
+#                  Let's Encrypt over HTTP-01, for a DOMAIN that resolves
+#                  publicly to the cluster with port 80 open (e.g.
+#                  <public IP>.sslip.io), trusted by every browser
+# ACME_EMAIL       with ISSUER=letsencrypt: the account's email (optional)
+# ACME_SERVER      with ISSUER=letsencrypt: the ACME directory (default Let's
+#                  Encrypt's production; its staging for tests)
 set -euo pipefail
 dir="$(cd "$(dirname "$0")" && pwd)"
 . "$dir/lib.sh"
@@ -33,6 +41,9 @@ cluster="${CLUSTER_NAME:-mgmt}"
 domain="${DOMAIN:-localhost}"
 http_port="${HTTP_PORT:-80}"
 https_port="${HTTPS_PORT:-443}"
+issuer="${ISSUER:-platform-ca}"
+acme_email="${ACME_EMAIL:-}"
+acme_server="${ACME_SERVER:-https://acme-v02.api.letsencrypt.org/directory}"
 
 case "$platform_mode" in
   lk) ;;
@@ -43,6 +54,17 @@ case "$git_provider" in
   gitea) ;;
   github) command -v gh >/dev/null || { echo "GIT_PROVIDER=github needs the gh CLI, logged in" >&2; exit 1; } ;;
   *) echo "GIT_PROVIDER: gitea or github, not $git_provider" >&2; exit 1 ;;
+esac
+case "$issuer" in
+  platform-ca) ;;
+  letsencrypt)
+    # HTTP-01: Let's Encrypt fetches http://<host>/.well-known/... on port 80.
+    case "$domain" in
+      localhost | *.localhost | *.local | *.lan | *.test | *.internal)
+        echo "ISSUER=letsencrypt needs a DOMAIN that resolves publicly to the cluster, not $domain" >&2; exit 1 ;;
+    esac
+    [[ $http_port == 80 ]] || { echo "ISSUER=letsencrypt needs the ingress on port 80 (HTTP_PORT=$http_port)" >&2; exit 1; } ;;
+  *) echo "ISSUER: platform-ca or letsencrypt, not $issuer" >&2; exit 1 ;;
 esac
 
 work="$(mktemp -d)"
@@ -61,7 +83,7 @@ if [[ $git_provider == gitea ]]; then
 ingress:
   enabled: true
   annotations:
-    cert-manager.io/cluster-issuer: platform-ca
+    cert-manager.io/cluster-issuer: $issuer
   hosts:
     - host: gitea.$domain
       paths: [{path: /}]
@@ -103,11 +125,19 @@ else
   rm -f "$c/atlantis.yaml" "$render/atlantis.yaml"
   tofu_state_ns=github-iac
 fi
+if [[ $issuer == letsencrypt ]]; then
+  [[ -n $acme_email ]] || perl -ni -e 'print unless /^\s*email: <ACME_EMAIL>$/' "$c/components/cert-issuers/letsencrypt.yaml"
+else
+  rm -f "$c/components/cert-issuers/letsencrypt.yaml"
+fi
 https_suffix=""; [[ $https_port == 443 ]] || https_suffix=":$https_port"
-find "$render" \( -name '*.yaml' -o -name '*.tf' \) -exec perl -pi -e "s#<CLUSTER_NAME>#$cluster#g; s#<GITOPS_REPO_URL>#$repo_url#g;
+# The issuer's values through the environment: an email's @ would be a Perl array.
+find "$render" \( -name '*.yaml' -o -name '*.tf' \) -exec env LK_ISSUER="$issuer" LK_ACME_SERVER="$acme_server" \
+  LK_ACME_EMAIL="$acme_email" perl -pi -e "s#<CLUSTER_NAME>#$cluster#g; s#<GITOPS_REPO_URL>#$repo_url#g;
   s#<DOMAIN_NAME>#$domain#g; s#<INGRESS_HTTP_PORT>#$http_port#g; s#<INGRESS_HTTPS_PORT>#$https_port#g;
   s#<INGRESS_HTTPS_SUFFIX>#$https_suffix#g; s#<APP_REPOSITORY>#$owner/$app_repo#g;
-  s#<GITOPS_REPOSITORY>#$owner/$gitops_repo#g; s#<TOFU_STATE_NAMESPACE>#$tofu_state_ns#g" {} +
+  s#<GITOPS_REPOSITORY>#$owner/$gitops_repo#g; s#<TOFU_STATE_NAMESPACE>#$tofu_state_ns#g;
+  s#<CLUSTER_ISSUER>#\$ENV{LK_ISSUER}#g; s#<ACME_SERVER>#\$ENV{LK_ACME_SERVER}#g; s#<ACME_EMAIL>#\$ENV{LK_ACME_EMAIL}#g" {} +
 
 scm_ensure_repo "$gitops_repo"
 empty=false; scm_repo_empty "$gitops_repo" && empty=true
@@ -169,7 +199,7 @@ echo "argocd: ready"
 
 kubectl -n argocd create configmap platform --from-literal=provider="$git_provider" --from-literal=owner="$owner" \
   --from-literal=gitops_repo="$gitops_repo" --from-literal=app_repo="$app_repo" --from-literal=domain="$domain" \
-  --from-literal=https_port="$https_port" --from-literal=mode="$platform_mode" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  --from-literal=https_port="$https_port" --from-literal=mode="$platform_mode" --from-literal=issuer="$issuer" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 # Read access to the gitops repository: a Gitea token of its own, or the
 # GitHub token.
@@ -307,7 +337,12 @@ Argo Workflows: https://argo.$domain$port  token:
 App:     https://metaphor-development.$domain$port  (push to $owner/$app_repo to deploy)
 OpenBao: https://openbao.$domain$port root token:
            kubectl -n openbao get secret openbao-init -o jsonpath='{.data.root-token}' | base64 -d
-CA:      kubectl -n cert-manager get secret platform-ca -o jsonpath='{.data.ca\.crt}' | base64 -d > platform-ca.crt
-         (trust it in your browser or keychain to drop the certificate warning)
+$(if [[ $issuer == letsencrypt ]]; then
+  echo "TLS:     Let's Encrypt (ClusterIssuer letsencrypt): browsers trust it, nothing to install;"
+  echo "         kubectl get certificates -A  shows each one Ready once its HTTP-01 challenge passed"
+else
+  echo "CA:      kubectl -n cert-manager get secret platform-ca -o jsonpath='{.data.ca\\.crt}' | base64 -d > platform-ca.crt"
+  echo "         (trust it in your browser or keychain to drop the certificate warning)"
+fi)
 Check:   $dir/smoke.sh $( [[ $git_provider == gitea ]] && echo "$runners")
 EOF

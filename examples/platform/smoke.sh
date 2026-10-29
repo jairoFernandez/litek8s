@@ -96,20 +96,27 @@ done
 echo "gitops: all Applications Synced and Healthy"
 sed 's/^/  /' <<<"$out"
 
-# ---- HTTPS through the ingress, verified with the platform's CA ----------------
+# ---- HTTPS through the ingress, verified with the issuer's CA ------------------
 
 port="$(kubectl -n traefik get svc traefik -o jsonpath='{.spec.ports[?(@.name=="websecure")].port}')"
-secret_value cert-manager platform-ca 'ca\.crt' >"$ca"
+issuer="$(platform_get issuer)"; issuer="${issuer:-platform-ca}"
+if [[ $issuer == letsencrypt ]]; then
+  # Publicly trusted: the system CAs verify it.
+  ca_args=()
+else
+  secret_value cert-manager platform-ca 'ca\.crt' >"$ca"
+  ca_args=(--cacert "$ca")
+fi
 deadline=$((SECONDS + timeout))
 urls=("https://argocd.$domain:$port/healthz")
 [[ $git_provider == gitea ]] && urls+=("https://gitea.$domain:$port/api/healthz")
 kubectl -n openbao get ingress openbao >/dev/null 2>&1 && urls+=("https://openbao.$domain:$port/v1/sys/health")
 for url in "${urls[@]}"; do
-  until code="$(curl -s -o /dev/null -w '%{http_code}' --cacert "$ca" "$url")" && [[ $code == 200 ]]; do
+  until code="$(curl -s -o /dev/null -w '%{http_code}' ${ca_args[@]+"${ca_args[@]}"} "$url")" && [[ $code == 200 ]]; do
     if [[ $SECONDS -ge $deadline ]]; then echo "https: $url -> $code (timeout)"; exit 1; fi
     sleep 5
   done
-  echo "https: $url 200 (certificate from platform-ca)"
+  echo "https: $url 200 (certificate from $issuer)"
 done
 
 # ---- Secrets: OpenBao -> external-secrets -> a Kubernetes Secret ---------------
@@ -197,7 +204,7 @@ if kubectl -n argocd get application development >/dev/null 2>&1; then
   echo "app: pushed $commit to $owner/$app_repo ($msg)"
   url="https://metaphor-development.$domain:$port/"
   deadline=$((SECONDS + timeout))
-  until page="$(curl -s --cacert "$ca" "$url")" && grep -q "$msg" <<<"$page" && grep -q "version: $commit" <<<"$page"; do
+  until page="$(curl -s ${ca_args[@]+"${ca_args[@]}"} "$url")" && grep -q "$msg" <<<"$page" && grep -q "version: $commit" <<<"$page"; do
     if [[ $SECONDS -ge $deadline ]]; then echo "app: $url does not show $commit (timeout)"; printf '%s\n' "$page" | tail -3; exit 1; fi
     # GitHub cannot tell Argo CD about the CI's push: ask it to look.
     [[ $git_provider == github ]] && kubectl -n argocd annotate application development argocd.argoproj.io/refresh=normal --overwrite >/dev/null

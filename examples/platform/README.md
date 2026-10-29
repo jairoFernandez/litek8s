@@ -41,7 +41,7 @@ What is in it so far:
 Argo CD, Gitea, OpenBao, Argo Workflows and Atlantis are at
 `https://{argocd,gitea,openbao,argo,atlantis}.<DOMAIN>`, the sample app at
 `https://metaphor-development.<DOMAIN>`, with certificates the platform's CA
-signs.
+signs (or Let's Encrypt, [below](#certificates-platform-ca-or-lets-encrypt)).
 kubefirst's ingress-nginx is retired upstream (no releases since March
 2026); Traefik takes its place.
 
@@ -160,6 +160,35 @@ merges it, waits for the apply and finds the policy in OpenBao, then removes
 it on `main` and waits for that apply too. The runner keeps `tofu` and the
 providers in `/cache` between jobs: the first job downloads them (3 min on a
 slow home link, ~40 KB/s from GitHub's releases), the next ones take ~20 s.
+
+## Certificates: platform CA or Let's Encrypt
+
+`ISSUER` picks the ClusterIssuer every Ingress of the platform names
+(`cert-manager.io/cluster-issuer`):
+
+- `platform-ca` (default): the platform's own CA (`cert-issuers`), for
+  `localhost`, a LAN or anything not reachable from the internet. Browsers
+  warn until you trust it: `kubectl -n cert-manager get secret platform-ca -o
+  jsonpath='{.data.ca\.crt}' | base64 -d > platform-ca.crt`.
+- `letsencrypt`: the ClusterIssuer `letsencrypt` (`cert-issuers/letsencrypt.yaml`,
+  ACME HTTP-01 through Traefik), trusted by every browser with nothing to
+  install, which is what a demo on a server wants. It needs a `DOMAIN` that
+  resolves publicly to the cluster (`<public IP>.sslip.io` does with no DNS)
+  and the ingress on port 80 from the internet; `up.sh` refuses `localhost`,
+  `.lan`, `.local`, `.test` and `.internal`, and an `HTTP_PORT` other than 80.
+  `ACME_EMAIL` (optional) gets Let's Encrypt's expiry mail; `ACME_SERVER`
+  defaults to production (`https://acme-staging-v02.api.letsencrypt.org/directory`
+  for tests, whose certificates browsers do not trust).
+
+```bash
+ISSUER=letsencrypt DOMAIN=203.0.113.7.sslip.io ACME_EMAIL=ops@example.com examples/platform/up.sh
+kubectl get certificates -A      # READY True once each challenge passed
+```
+
+On a platform already running, `SEED=update` with the new `ISSUER` commits it
+to the gitops repository. The sample app's Ingress lives in
+`registry/environments`, which `SEED=update` keeps: change its annotation there.
+cert-manager issues a new certificate when the annotation changes.
 
 ## Platform modes
 

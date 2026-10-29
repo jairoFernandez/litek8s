@@ -3,7 +3,7 @@ kind: Ingress
 metadata:
   name: metaphor
   annotations:
-    cert-manager.io/cluster-issuer: platform-ca
+    cert-manager.io/cluster-issuer: <CLUSTER_ISSUER>
 spec:
   rules:
     - host: metaphor-development.<DOMAIN_NAME>
