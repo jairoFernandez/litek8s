@@ -432,6 +432,8 @@ pub fn quantity(s: &str) -> Option<f64> {
     let n: f64 = num.parse().ok()?;
     let m = match unit {
         "" => 1.0,
+        "n" => 1e-9,
+        "u" => 1e-6,
         "m" => 1e-3,
         "k" | "K" => 1e3,
         "M" => 1e6,
@@ -441,6 +443,10 @@ pub fn quantity(s: &str) -> Option<f64> {
         "Mi" => 1024.0 * 1024.0,
         "Gi" => 1024.0 * 1024.0 * 1024.0,
         "Ti" => 1024f64.powi(4),
+        "P" => 1e15,
+        "E" => 1e18,
+        "Pi" => 1024f64.powi(5),
+        "Ei" => 1024f64.powi(6),
         _ => return None,
     };
     Some(n * m)
@@ -486,6 +492,17 @@ fn trim_zeros(s: &[u8]) -> &[u8] {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn quantities_in_every_suffix() {
+        // metrics.k8s.io answers CPU in nanocores.
+        assert_eq!(quantity("258000000n"), Some(0.258));
+        assert_eq!(quantity("1500u"), Some(0.0015));
+        assert_eq!(quantity("250m"), Some(0.25));
+        assert_eq!(quantity("1277212Ki"), Some(1277212.0 * 1024.0));
+        assert_eq!(quantity("2Pi"), Some(2.0 * 1024f64.powi(5)));
+        assert_eq!(quantity("3x"), None);
+    }
 
     fn pod_table() -> Value {
         json!({"kind": "Table", "columnDefinitions": [
