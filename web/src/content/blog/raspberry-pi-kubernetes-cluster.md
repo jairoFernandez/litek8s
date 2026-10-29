@@ -2,6 +2,8 @@
 title: "Kubernetes on a Raspberry Pi and an old laptop with litek8s"
 description: "Turn a Raspberry Pi, an old laptop and a cheap cloud VM into one Kubernetes cluster with litek8s: one binary per machine, installed over SSH from your laptop."
 date: 2026-10-28
+updated: 2026-10-29
+translation: es/kubernetes-en-raspberry-pi
 tags: [home lab, raspberry pi, multi-node]
 docs: [clusters, multi-node, networking, platforms]
 ---
@@ -92,10 +94,13 @@ Give a cloud VM its public address with `--node-external-ip`; the
 
 ## What to keep in mind
 
-litek8s is young, and it says so. The Kubernetes API has **no client
-authentication or RBAC enforcement** yet: every client is admin, so keep
-port 6443 on a trusted network or behind a VPN. The full list is in
-[Limitations](/docs/limitations/).
+litek8s is young, and it says so. Since 0.2.12 a server authenticates
+clients and enforces RBAC (the context `install --ssh` and `cluster apply`
+add carries an admin client certificate), but there is no OIDC login or
+certificate revocation yet, so keep port 6443 on a trusted network or
+behind a VPN. If your cluster was made with an earlier release, read
+[Authentication and RBAC](/docs/auth/) before upgrading. The full list is
+in [Limitations](/docs/limitations/).
 
 The SSH install and cluster file are tested end to end on three Ubuntu
 24.04 VMs (`bench/cluster-e2e.sh`): apply, a re-apply that restarts

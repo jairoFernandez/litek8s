@@ -44,7 +44,8 @@ const md = (s: string) => s.replace(/`([^`]+)`/g, '<code>$1</code>');
 const words = t.tagline.text.split(' ');
 const from = words.indexOf('etcd,');
 const to = words.indexOf('containerd,');
-const hl = (i: number) => i >= from && i <= to && !['the', 'and'].includes(words[i]);
+const hl = (i: number) => i >= from && i <= to && !['the', 'and', 'el', 'la', 'los', 'las', 'y'].includes(words[i]);
+const other = t.nav.lang;
 ---
 <!doctype html>
 <html lang={t.lang} class="no-js">
@@ -73,8 +74,11 @@ const hl = (i: number) => i >= from && i <= to && !['the', 'and'].includes(words
     <meta name="twitter:title" content={t.meta.title} />
     <meta name="twitter:description" content={t.meta.description} />
     <meta name="twitter:image" content={og} />
+    <link rel="alternate" hreflang={t.lang} href={canonical.href} />
+    <link rel="alternate" hreflang={other.lang} href={new URL(other.href, site).href} />
+    <link rel="alternate" hreflang="x-default" href={home} />
     <link rel="sitemap" href="/sitemap-index.xml" />
-    <link rel="alternate" type="application/rss+xml" title="litek8s blog" href="/blog/rss.xml" />
+    <link rel="alternate" type="application/rss+xml" title="litek8s blog" href={t.links.rss} />
     <script type="application/ld+json" set:html={ld} />
     <link rel="preload" href={displayFont} as="font" type="font/woff2" crossorigin />
     <script is:inline>
@@ -103,11 +107,12 @@ const hl = (i: number) => i >= from && i <= to && !['the', 'and'].includes(words
 
     <header class="nav" data-nav>
       <div class="wrap nav-inner">
-        <a class="brand" href="/" aria-label="litek8s home"><Logo id="nav-logo" />litek8s</a>
+        <a class="brand" href={t.nav.home} aria-label="litek8s home"><Logo id="nav-logo" />litek8s</a>
         <ul class="nav-links" id="nav-links">
           {t.nav.items.map((it) => <li><a href={it.href}>{it.label}</a></li>)}
         </ul>
         <div class="nav-actions">
+          <a class="icon-btn nav-lang" href={other.href} hreflang={other.lang} lang={other.lang} aria-label={other.label} title={other.label}>{other.short}</a>
           <a class="icon-btn nav-gh" href={t.links.github} aria-label={t.nav.github}><Icon name="github" /></a>
           <button type="button" class="icon-btn theme-toggle" data-theme-toggle aria-label={t.nav.theme} title={t.nav.theme}>
             <Icon name="moon" class="moon" /><Icon name="sun" class="sun" />
@@ -173,7 +178,7 @@ const hl = (i: number) => i >= from && i <= to && !['the', 'and'].includes(words
 
       <Numbers t={t.numbers} />
       <Features t={t.features} />
-      <How t={t.how} />
+      <How t={t.how} docsBase={t.links.docs} />
 
       <section id="install" class="section">
         <div class="wrap">
@@ -206,7 +211,7 @@ const hl = (i: number) => i >= from && i <= to && !['the', 'and'].includes(words
           </div>
           <div class="server-row" data-reveal>
             <p><strong>{t.install.servers}.</strong> {t.install.serversText}</p>
-            <a class="btn" href="/docs/multi-node/">{t.install.serversLink}<Icon name="arrow" class="arrow" /></a>
+            <a class="btn" href={`${t.links.docs}multi-node/`}>{t.install.serversLink}<Icon name="arrow" class="arrow" /></a>
           </div>
         </div>
       </section>
@@ -278,7 +283,7 @@ const hl = (i: number) => i >= from && i <= to && !['the', 'and'].includes(words
       <div class="wrap">
         <div class="footer-grid">
           <div class="footer-brand">
-            <a class="brand" href="/"><Logo id="foot-logo" />litek8s</a>
+            <a class="brand" href={t.nav.home}><Logo id="foot-logo" />litek8s</a>
             <p>{t.footer.tagline}</p>
           </div>
           {t.footer.cols.map((c) => (

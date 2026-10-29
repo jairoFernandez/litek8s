@@ -1,6 +1,7 @@
 // Landing page copy and data, English. Another language: copy this file
-// (e.g. es.ts), translate the strings, and add src/pages/es/index.astro that
-// renders <Landing t={es} />. Commands, numbers and URLs stay as they are.
+// (e.g. es.ts), translate the strings, point its internal links at that
+// language's pages, and add src/pages/<lang>/index.astro that renders
+// <Landing t={dict} />. Commands, numbers and URLs stay as they are.
 // Every number here comes from README.md and the bench/compat files it links.
 
 const GH = 'https://github.com/jairoFernandez/litek8s';
@@ -20,6 +21,7 @@ export const en = {
     releases: `${GH}/releases`,
     crates: 'https://crates.io/crates/litek8s',
     docs: '/docs/',
+    rss: '/blog/rss.xml',
     issues: `${GH}/issues`,
     license: blob('LICENSE'),
   },
@@ -34,6 +36,9 @@ export const en = {
       { label: 'Blog', href: '/blog/' },
     ],
     github: 'GitHub',
+    // The other language's landing page (the nav's language link, hreflang).
+    lang: { label: 'Español', short: 'ES', lang: 'es', href: '/es/' },
+    home: '/',
     theme: 'Switch between dark and light',
     menu: 'Menu',
   },
@@ -404,7 +409,7 @@ export const en = {
     title: 'The honest list',
     lead: 'Early preview, built and tested by one person: expect rough edges.',
     items: [
-      { title: 'No client authentication or RBAC enforcement.', text: 'Every API client is admin. Dev clusters listen on 127.0.0.1 only; on a server, keep port 6443 (and the Raft port, 6444) behind a firewall or VPN. Node join and HA peers are authenticated by the join token.', strong: true },
+      { title: 'Authentication and RBAC are simpler than upstream.', text: 'Servers authenticate clients and enforce RBAC since 0.2.12, but there is no OIDC or webhook login and no certificate revocation. Dev clusters stay open on 127.0.0.1; on a server, keep port 6443 (and the Raft port, 6444) off untrusted networks anyway.', strong: true },
       { title: 'Weeks old.', text: 'APIs, flags and on-disk formats may change between 0.x releases without migration.' },
       { title: 'Not every kubelet behavior.', text: 'No Unhealthy/BackOff events; a memory emptyDir is one tmpfs per container mount; ValidatingAdmissionPolicy and webhook matchConditions are accepted but not enforced.' },
       { title: 'Metrics stop at the platform.', text: 'Containers, nodes and cluster state are covered; application /metrics endpoints are not scraped.' },
