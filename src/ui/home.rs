@@ -39,7 +39,10 @@ pub fn spawn(
             // macOS: the clusters' data is in the VM's disk, in the dev data
             // directory; Linux: each cluster's own directory.
             let home = if cfg!(target_os = "macos") { dev_home.clone() } else { cluster.data_dir(&dev_home) };
-            let state = crate::dev::cluster_state(&name);
+            // A remote litek8s (`--context`): its nodes are the numbers; a dev
+            // cluster that happens to run on this machine must not stand in
+            // for it (its VM's CPU, memory, uptime and Docker socket).
+            let state = if remote.is_some() { None } else { crate::dev::cluster_state(&name) };
             let env = crate::dev::env_state();
             let mut s = HomeSample { data_dir: home.display().to_string(), ..Default::default() };
             match &state {
