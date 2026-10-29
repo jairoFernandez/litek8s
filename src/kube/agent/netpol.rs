@@ -284,6 +284,14 @@ impl NetPol {
         if !sysctl.exists() {
             let _ = std::process::Command::new("modprobe").arg("br_netfilter").stderr(std::process::Stdio::null()).status();
         }
+        // Pods started by an agent that did not set hairpin mode on their
+        // bridge port (see `crun::sys::bridge_attach`).
+        for port in std::fs::read_dir("/sys/class/net/litek8s0/brif").into_iter().flatten().flatten() {
+            let mode = port.path().join("hairpin_mode");
+            if std::fs::read_to_string(&mode).is_ok_and(|v| v.trim() != "1") {
+                let _ = std::fs::write(&mode, "1");
+            }
+        }
         let ok = std::fs::read_to_string(sysctl).is_ok_and(|v| v.trim() == "1") || std::fs::write(sysctl, "1").is_ok();
         let mut st = self.state.lock().unwrap();
         if !ok && !st.warned_bridge {

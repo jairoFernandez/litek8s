@@ -18,7 +18,9 @@
   API server, not a pod) counts as the pod `k8s-app: kube-dns` in
   `kube-system`, so egress policies allow it only when they allow that.
   Traffic from the node itself (probes, NodePort relays) is allowed. Needs
-  `br_netfilter` (loaded on demand) for pods on one node. The Docker
+  `br_netfilter` (loaded on demand) for pods on one node; pod bridge ports
+  are now in hairpin mode, as the kubelet sets them, so a pod still reaches
+  itself through its Service with it on. The Docker
   runtime (macOS) does not enforce policies. Details:
   [docs/networking.md](docs/networking.md#networkpolicies).
 

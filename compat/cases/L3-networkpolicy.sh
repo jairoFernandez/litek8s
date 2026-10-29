@@ -94,8 +94,9 @@ case_def netpol_namespaces L3 300 "default deny, then namespaceSelector alone an
 t_netpol_namespaces() {
     use_ns
     local peer="$NS-peer"
-    k create namespace "$peer" >/dev/null
-    trap 'kubectl delete namespace "$peer" --wait=false >/dev/null 2>&1' EXIT
+    k create namespace "$peer" >/dev/null 2>&1 || k get namespace "$peer" >/dev/null
+    # Expanded now: $peer is local and gone when the subshell exits.
+    trap "kubectl delete namespace '$peer' --wait=false >/dev/null 2>&1" EXIT
     np_web "$NS"
     np_client "$NS" local role=client
     np_client "$peer" client role=client

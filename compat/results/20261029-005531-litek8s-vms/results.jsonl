@@ -1,0 +1,16 @@
+{"id": "svc_clusterip", "tier": "L3", "status": "pass", "seconds": 12, "detail": ""}
+{"id": "svc_dns", "tier": "L3", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "svc_endpoints", "tier": "L3", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "svc_headless", "tier": "L3", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "svc_nodeport", "tier": "L3", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "pod_to_pod", "tier": "L3", "status": "pass", "seconds": 0, "detail": ""}
+{"id": "api_from_pod", "tier": "L3", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "netpol_ingress_pods", "tier": "L3", "status": "pass", "seconds": 23, "detail": ""}
+{"id": "netpol_namespaces", "tier": "L3", "status": "fail", "seconds": 46, "detail": "compat/run.sh: line 51: peer: unbound variable"}
+{"id": "netpol_egress_dns", "tier": "L3", "status": "pass", "seconds": 16, "detail": ""}
+{"id": "netpol_ipblock", "tier": "L3", "status": "pass", "seconds": 11, "detail": ""}
+{"id": "multi_pod_to_pod", "tier": "M1", "status": "pass", "seconds": 1, "detail": ""}
+{"id": "multi_daemonset_every_node", "tier": "M1", "status": "pass", "seconds": 7, "detail": ""}
+{"id": "multi_service_spreads", "tier": "M1", "status": "fail", "seconds": 71, "detail": "timed out after 60s waiting for: bash -c kubectl -n compat-multi-service-spreads exec pa -- sh -c 'for i in $(seq 1 20); do wget -qO- -T 3 http://who/; done' | sort -u | tr '\\n' ' ' | grep -q 'pa pb'"}
+{"id": "multi_node_kill_deployment", "tier": "M1", "status": "fail", "seconds": 0, "detail": "set COMPAT_NODE_KILL and COMPAT_NODE_START to power nodes off and on"}
+{"id": "multi_node_short_outage", "tier": "M1", "status": "fail", "seconds": 1, "detail": "set COMPAT_NODE_KILL and COMPAT_NODE_START to power nodes off and on"}

@@ -205,7 +205,9 @@ On each node, one chain per isolated pod address, behind `LITEK8S-NETPOL`:
 - `LITEK8S-FORWARD` jumps to it first, which sees traffic between pods of
   the node (bridged; iptables sees it through `br_netfilter` with
   `net.bridge.bridge-nf-call-iptables=1`, which the agent sets up when the
-  first isolated pod appears), traffic arriving from and leaving to other
+  first isolated pod appears; pod ports on the bridge are in hairpin mode,
+  as the kubelet sets them, so a pod still reaches itself through its own
+  Service), traffic arriving from and leaving to other
   nodes over the overlay, and traffic to anything outside. Service traffic
   is filtered after the ClusterIP's DNAT and before the masquerade, so the
   real backend and the real client are matched.
@@ -257,6 +259,13 @@ chain. Rule computation and rendering have unit tests
 (`src/kube/netpol.rs`, `src/kube/agent/netpol.rs`, the push order in
 `src/kube/agent/hub.rs`), and compat tier L3 has four policy cases
 (`compat/cases/L3-networkpolicy.sh`).
+
+Last run (2026-10-29, `bench/cluster.sh up 2`: two Ubuntu 24.04 arm64 VMs
+under qemu/HVF, crun): L3 11/11 and M1's non-outage cases with
+br_netfilter on; a pinned check with the database on one node and allowed
+and denied clients on both; no connection from a denied pod got through
+while `litek8s-apiserver` (server and local agent) restarted; every chain
+gone after the pods were deleted.
 
 ## Testing it
 
