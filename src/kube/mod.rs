@@ -18,6 +18,7 @@ pub mod ha;
 pub mod join;
 pub mod managed;
 pub mod metrics;
+pub mod netpol;
 pub mod openapi;
 mod openapi_pb;
 pub mod patch;

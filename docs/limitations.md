@@ -33,6 +33,12 @@ Honest list; more in [skills/litek8s/references/differences.md](../skills/litek8
 - Not every kubelet behavior: no `Unhealthy`/`BackOff` events, a memory
   `emptyDir` is one tmpfs per container mount; ValidatingAdmissionPolicy
   and webhook `matchConditions` are accepted but not enforced.
+- NetworkPolicies are enforced on crun nodes (Linux) only; the Docker
+  runtime (macOS servers) stores them without effect. Traffic from a node to
+  its own pods (probes, NodePort and LoadBalancer relays, which run on the
+  node) is always allowed, and pods with `NET_ADMIN` can forge source
+  addresses on their node's bridge
+  ([networking.md](networking.md#networkpolicies)).
 - Pods' `imagePullSecrets` are not used: nodes pull with the credentials of
   their registry configuration ([registries.md](registries.md)), and the
   Docker API cannot `docker push` yet.

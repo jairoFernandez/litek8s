@@ -131,6 +131,8 @@ impl Ipam {
 /// --noflush` (declaring a chain flushes it, so reloading is idempotent).
 /// Traffic to other pods of the cluster (over the overlay) keeps its pod
 /// source address; everything else leaving the node is masqueraded.
+/// Forwarded pod traffic goes through the NetworkPolicy chain first
+/// (`crate::kube::agent::netpol`; it must exist, see `CREATE_CHAIN` there).
 pub(crate) fn base_rules(subnet: &Subnet, cluster: &Subnet) -> String {
     let cidr = subnet.cidr();
     let cluster = cluster.cidr();
@@ -142,9 +144,11 @@ pub(crate) fn base_rules(subnet: &Subnet, cluster: &Subnet) -> String {
 COMMIT\n\
 *filter\n\
 :LITEK8S-FORWARD - [0:0]\n\
+-A LITEK8S-FORWARD -j {netpol}\n\
 -A LITEK8S-FORWARD -i {BRIDGE} -j ACCEPT\n\
 -A LITEK8S-FORWARD -o {BRIDGE} -j ACCEPT\n\
-COMMIT\n"
+COMMIT\n",
+        netpol = crate::kube::agent::netpol::CHAIN
     )
 }
 
@@ -255,6 +259,9 @@ mod tests {
         let s = Subnet::parse("10.42.0.0/24").unwrap();
         let cluster = Subnet::parse("10.42.0.0/16").unwrap();
         assert!(base_rules(&s, &cluster).contains("-A LITEK8S-POSTROUTING -s 10.42.0.0/24 ! -d 10.42.0.0/16 ! -o litek8s0 -j MASQUERADE\n"));
+        // Policies first, and their chain is not declared (that would flush it).
+        assert!(base_rules(&s, &cluster).contains(":LITEK8S-FORWARD - [0:0]\n-A LITEK8S-FORWARD -j LITEK8S-NETPOL\n-A LITEK8S-FORWARD -i litek8s0 -j ACCEPT\n"));
+        assert!(!base_rules(&s, &cluster).contains(":LITEK8S-NETPOL"));
         let r = hostport_rules(&[(8080, "TCP".into(), "10.42.0.5".into(), 80, String::new()), (53, "UDP".into(), "10.42.0.6".into(), 53, "192.168.1.7".into())]);
         assert!(r.contains("-A LITEK8S-HOSTPORTS -p tcp -m tcp --dport 8080 -j DNAT --to-destination 10.42.0.5:80\n"));
         assert!(r.contains("-A LITEK8S-HOSTPORTS -d 192.168.1.7/32 -p udp -m udp --dport 53 -j DNAT --to-destination 10.42.0.6:53\n"));

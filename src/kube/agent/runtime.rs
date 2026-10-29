@@ -248,6 +248,11 @@ pub trait PodRuntime: Send + Sync + 'static {
     fn reaches_pods_directly(&self) -> bool {
         false
     }
+    /// Whether pod traffic goes through the node's iptables, so
+    /// NetworkPolicies are enforced (`netpol.rs`): crun.
+    fn enforces_network_policy(&self) -> bool {
+        false
+    }
     /// Whether the runtime writes each pod's `/etc/hosts` and
     /// `/etc/resolv.conf` itself; otherwise the agent writes kubelet-style
     /// ones and bind-mounts them into the containers.
@@ -1160,6 +1165,9 @@ impl PodRuntime for NodeRuntime {
     }
     fn reaches_pods_directly(&self) -> bool {
         each!(self, rt => rt.reaches_pods_directly())
+    }
+    fn enforces_network_policy(&self) -> bool {
+        each!(self, rt => rt.enforces_network_policy())
     }
     fn writes_pod_files(&self) -> bool {
         each!(self, rt => rt.writes_pod_files())

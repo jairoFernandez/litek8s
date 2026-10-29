@@ -219,6 +219,10 @@ mod linux {
         req.ifr_ifru.ifru_ifindex = index as libc::c_int;
         // SAFETY: SIOCBRADDIF reads ifr_name and ifr_ifindex.
         check(unsafe { libc::ioctl(sock.as_raw_fd(), SIOCBRADDIF as _, &mut req) }, || format!("failed to add {port} to {bridge}"))?;
+        // Hairpin, as the kubelet's hairpin-veth: with br_netfilter (on for
+        // NetworkPolicies) a pod reaching itself through a Service has its
+        // DNAT'd frame bridged back out the port it came in on.
+        let _ = std::fs::write(format!("/sys/class/net/{bridge}/brif/{port}/hairpin_mode"), "1");
         let mut req = ifreq(port)?;
         // SAFETY: SIOCGIFFLAGS/SIOCSIFFLAGS read and write ifr_flags.
         check(unsafe { libc::ioctl(sock.as_raw_fd(), libc::SIOCGIFFLAGS as _, &mut req) }, || format!("failed to read {port} flags"))?;
