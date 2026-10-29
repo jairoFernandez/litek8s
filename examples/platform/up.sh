@@ -18,9 +18,6 @@
 #                  cluster's image store, no registry. (dind: not yet, it
 #                  needs nodes that pull from a registry with a private CA.)
 # RUNNERS          Gitea's act_runner modes: lkdocker (default), dind, host
-# DOMAIN           web UIs at https://<app>.$DOMAIN (default localhost:
-#                  browsers and curl resolve *.localhost to this machine)
-# HTTP_PORT/HTTPS_PORT  the ingress's LoadBalancer ports (default 80/443)
 # ISSUER           who signs the UIs' certificates: platform-ca (default), the
 #                  platform's own CA (trust it on your machine); letsencrypt:
 #                  Let's Encrypt over HTTP-01, for a DOMAIN that resolves
@@ -29,6 +26,9 @@
 # ACME_EMAIL       with ISSUER=letsencrypt: the account's email (optional)
 # ACME_SERVER      with ISSUER=letsencrypt: the ACME directory (default Let's
 #                  Encrypt's production; its staging for tests)
+# DOMAIN           web UIs at https://<app>.$DOMAIN (default localhost:
+#                  browsers and curl resolve *.localhost to this machine)
+# HTTP_PORT/HTTPS_PORT  the ingress's LoadBalancer ports (default 80/443)
 set -euo pipefail
 dir="$(cd "$(dirname "$0")" && pwd)"
 . "$dir/lib.sh"
@@ -38,12 +38,12 @@ gitops_repo="${GITOPS_REPO:-gitops}"
 app_repo="${APP_REPO:-metaphor}"
 runners="${RUNNERS:-lkdocker}"
 cluster="${CLUSTER_NAME:-mgmt}"
-domain="${DOMAIN:-localhost}"
-http_port="${HTTP_PORT:-80}"
-https_port="${HTTPS_PORT:-443}"
 issuer="${ISSUER:-platform-ca}"
 acme_email="${ACME_EMAIL:-}"
 acme_server="${ACME_SERVER:-https://acme-v02.api.letsencrypt.org/directory}"
+domain="${DOMAIN:-localhost}"
+http_port="${HTTP_PORT:-80}"
+https_port="${HTTPS_PORT:-443}"
 
 case "$platform_mode" in
   lk) ;;
@@ -199,7 +199,7 @@ echo "argocd: ready"
 
 kubectl -n argocd create configmap platform --from-literal=provider="$git_provider" --from-literal=owner="$owner" \
   --from-literal=gitops_repo="$gitops_repo" --from-literal=app_repo="$app_repo" --from-literal=domain="$domain" \
-  --from-literal=https_port="$https_port" --from-literal=mode="$platform_mode" --from-literal=issuer="$issuer" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+  --from-literal=https_port="$https_port" --from-literal=mode="$platform_mode" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
 
 # Read access to the gitops repository: a Gitea token of its own, or the
 # GitHub token.
