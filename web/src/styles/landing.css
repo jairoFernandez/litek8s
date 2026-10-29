@@ -206,6 +206,7 @@ section { position: relative; scroll-margin-top: 64px; }
 }
 .icon-btn:hover { color: var(--fg); background: var(--surface-2); border-color: var(--line-2); }
 .icon-btn svg { width: 18px; height: 18px; }
+.nav-lang { font: 600 12px/1 var(--font-mono, ui-monospace, monospace); letter-spacing: 0.04em; text-decoration: none; }
 .theme-toggle .sun { display: none; }
 :root[data-theme='light'] .theme-toggle .sun { display: block; }
 :root[data-theme='light'] .theme-toggle .moon { display: none; }

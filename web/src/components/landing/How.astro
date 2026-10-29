@@ -7,10 +7,10 @@ import multinode from '../../diagrams/multinode.svg?raw';
 import ha from '../../diagrams/ha.svg?raw';
 import type { Dict } from '../../i18n/en';
 
-interface Props { t: Dict['how'] }
-const { t } = Astro.props;
+interface Props { t: Dict['how']; docsBase?: string }
+const { t, docsBase = '/docs/' } = Astro.props;
 const svgs: Record<string, string> = { architecture, local, multinode, ha };
-const docs: Record<string, string> = { architecture: '/docs/', local: '/docs/dev/', multinode: '/docs/multi-node/', ha: '/docs/ha/' };
+const docs: Record<string, string> = { architecture: docsBase, local: `${docsBase}dev/`, multinode: `${docsBase}multi-node/`, ha: `${docsBase}ha/` };
 ---
 <section id="how" class="section">
   <div class="wrap">
