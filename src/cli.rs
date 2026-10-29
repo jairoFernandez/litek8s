@@ -353,7 +353,7 @@ enum Command {
         after_help = APISERVER_AFTER_HELP
     )]
     Apiserver {
-        #[arg(long, default_value = "127.0.0.1:6443", help = "Address to listen on (plain HTTP, no auth)")]
+        #[arg(long, default_value = "127.0.0.1:6443", help = "Address to listen on (HTTPS, and plain HTTP on the same port)")]
         listen: std::net::SocketAddr,
         #[arg(long, help = "Directory for the object log; omit to keep objects in memory only")]
         data_dir: Option<PathBuf>,
@@ -409,6 +409,8 @@ enum Command {
         server: Option<String>,
         #[arg(long, help = "HA: port of the Raft listener between servers (default: the --listen port + 1)")]
         raft_port: Option<u16>,
+        #[arg(long, value_enum, default_value = "RBAC", help = "RBAC: clients authenticate (service account tokens, client certificates; anonymous only on /healthz, /version and the like) and RBAC decides; RBAC-audit: the same, but denials are only logged; AlwaysAllow: no authentication, every client is an administrator")]
+        authorization_mode: crate::kube::rbac::Mode,
         #[command(flatten)]
         obs: ObsArgs,
     },
@@ -770,6 +772,7 @@ pub async fn run() -> Result<()> {
             cluster_init,
             server,
             raft_port,
+            authorization_mode,
             obs,
         } => {
             crate::registries::init(registry_config.as_deref())?;
@@ -824,6 +827,7 @@ pub async fn run() -> Result<()> {
                 raft_listener: None,
                 prometheus_listen: obs.prometheus_listen,
                 obs: obs.config()?,
+                authorization_mode,
             })
             .await
         }

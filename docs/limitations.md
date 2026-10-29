@@ -2,11 +2,31 @@
 
 Honest list; more in [skills/litek8s/references/differences.md](../skills/litek8s/references/differences.md).
 
-- **No client authentication or RBAC enforcement.** Every API client is
-  admin. Dev clusters listen on `127.0.0.1` only; on a server, put the API
-  behind a firewall or VPN and do not expose port 6443 (or the Raft port,
-  6444) to untrusted networks. Node join and HA peers are authenticated by
-  the join token.
+- **Authentication and RBAC are simpler than upstream's.** `litek8s
+  apiserver` (and so `install server`, `cluster apply`) authenticates
+  clients and enforces RBAC by default (`--authorization-mode RBAC`): service
+  account tokens, client certificates signed by the cluster's client CA (CN
+  user, O groups; the kubeconfig it writes is `system:admin` in
+  `system:masters`), and the join token (an administrator's credential).
+  Anonymous requests reach only `/healthz`, `/livez`, `/readyz`, `/version`
+  and the OIDC discovery documents; everything else gets 401.
+  `--authorization-mode RBAC-audit` decides, logs (`RBAC-audit: DENY ...`,
+  and each user's first use of a verb and resource as `ALLOW`) and allows,
+  to find the RBAC a cluster's charts lack before enforcing;
+  `AlwaysAllow` is the old behavior. Dev clusters (`litek8s dev`) stay
+  AlwaysAllow on `127.0.0.1`. Missing next to upstream: OIDC, static token
+  and webhook authenticators; the Node and ABAC authorizers (the nodes'
+  agents talk to the server over their own authenticated connection);
+  client certificate revocation (certificates are valid for ten years; to
+  cut one off, rotate the client CA by replacing `<data-dir>/sa.key`, which
+  also invalidates every service account token); aggregated API servers
+  (metrics-server) get no front-proxy identity, so their delegated
+  authorization sees anonymous requests; the escalation check compares rules
+  one by one (a role whose verbs are covered by several of the author's
+  rules together may be refused). Sign your own users' certificates with
+  `<data-dir>/client-ca.{crt,key}` (an Ed25519 CA; `extendedKeyUsage =
+  clientAuth`). Keep the API port (and the Raft port, 6444) off untrusted
+  networks anyway.
 - One person's project, weeks old: APIs, flags and on-disk formats may
   change between 0.x releases without migration.
 - Not every kubelet behavior: no `Unhealthy`/`BackOff` events, a memory
