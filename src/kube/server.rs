@@ -130,6 +130,9 @@ pub struct ApiServerConfig {
     pub obs: Option<crate::obs::server::ObsConfig>,
     /// Also serve the Prometheus HTTP API at the root of this address.
     pub prometheus_listen: Option<SocketAddr>,
+    /// AlwaysAllow (no credentials needed), RBAC, or RBAC-audit (decide,
+    /// log, allow).
+    pub authorization_mode: super::rbac::Mode,
 }
 
 /// Loads an image archive into the local node (`litek8s dev load`).
@@ -190,6 +193,10 @@ pub struct ApiState {
     crd_cache: std::sync::Mutex<HashMap<String, CachedCrd>>,
     /// Metrics, log search and alerts, when on (crate::obs).
     pub(crate) obs: std::sync::OnceLock<Arc<crate::obs::server::Obs>>,
+    /// `--authorization-mode` and the audit log's bookkeeping.
+    pub(crate) authz: super::authn::Authz,
+    /// The RBAC objects, compiled.
+    pub(crate) rbac: super::rbac::Cache,
 }
 
 struct CachedCrd {
@@ -209,7 +216,11 @@ impl ApiState {
     /// Open the state around `store` without writing the objects every
     /// cluster has (an HA server's leader does that, once Raft runs).
     pub fn open_with(store: Arc<Store>, data_dir: Option<&Path>, server_address: String, log_requests: bool) -> Result<Self> {
-        let tls = match tls::ServerTls::load_or_create(data_dir) {
+        if let Some(dir) = data_dir {
+            std::fs::create_dir_all(dir).with_context(|| format!("failed to create {}", dir.display()))?;
+        }
+        let signer = super::sa_token::TokenSigner::load_or_create(data_dir)?;
+        let tls = match tls::ServerTls::load_or_create(data_dir, signer.seed("client-ca")) {
             Ok(tls) => Some(tls),
             Err(error) => {
                 eprintln!("apiserver: TLS disabled: {error:#}");
@@ -235,14 +246,21 @@ impl ApiState {
             lifecycle: super::controllers::NodeLifecycle::default(),
             metrics: Metrics::default(),
             overlay_endpoint: std::sync::OnceLock::new(),
-            signer: super::sa_token::TokenSigner::load_or_create(data_dir)?,
+            signer,
             pod_port: std::sync::atomic::AtomicU16::new(0),
             image_loader: std::sync::OnceLock::new(),
             request_metrics: Default::default(),
             crd_cache: Default::default(),
             obs: std::sync::OnceLock::new(),
+            authz: Default::default(),
+            rbac: Default::default(),
         };
         Ok(state)
+    }
+
+    /// `--authorization-mode` (before serving).
+    pub fn set_authorization_mode(&mut self, mode: super::rbac::Mode) {
+        self.authz = super::authn::Authz::new(mode);
     }
 
     /// Register the stored CRDs' resource types.
@@ -312,6 +330,13 @@ impl ApiState {
         for (name, value) in [("system-cluster-critical", 2_000_000_000), ("system-node-critical", 2_000_001_000)] {
             self.ensure(&pc, None, json!({"metadata": {"name": name}, "value": value}))?;
         }
+        for (plural, obj) in super::rbac::bootstrap_objects() {
+            self.ensure(&self.builtin(super::rbac::GROUP, plural), None, obj)?;
+        }
+        for (plural, ns, obj) in super::rbac::bootstrap_namespaced() {
+            self.ensure(&self.builtin(super::rbac::GROUP, plural), Some(ns), obj)?;
+        }
+        super::rbac::reconcile_aggregation(self);
         Ok(())
     }
 
@@ -443,6 +468,7 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
     state.node_port_offset = config.node_port_offset;
     state.disk_root = config.disk_root.clone().or_else(|| config.data_dir.clone());
     state.lifecycle = config.lifecycle.clone();
+    state.authz = super::authn::Authz::new(config.authorization_mode);
     state.agents_welcome.send_replace(false);
     let state = Arc::new(state);
     let token = state.join_token();
@@ -453,10 +479,16 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
     }
     let node_ip = config.node_ip.map(|ip| ip.to_string()).unwrap_or_else(super::agent::local_ip);
     if let Some(path) = &config.kubeconfig_out {
-        write_kubeconfig(path, &format!("http://{client_addr}"))?;
+        match state.tls() {
+            Some(tls) => write_admin_kubeconfig(path, tls, client_addr)?,
+            None => write_kubeconfig(path, &format!("http://{client_addr}"))?,
+        }
         eprintln!("apiserver: wrote kubeconfig to {}", path.display());
     }
-    eprintln!("apiserver: listening on http://{addr} (and https for in-cluster clients; no authentication)");
+    match config.authorization_mode {
+        super::rbac::Mode::AlwaysAllow => eprintln!("apiserver: listening on http://{addr} and https (authorization mode AlwaysAllow: no authentication, every client is an administrator)"),
+        mode => eprintln!("apiserver: listening on https://{addr} (authorization mode {}: service account tokens and client certificates)", mode.as_str()),
+    }
     let node_name = config.node_name.clone().unwrap_or_else(super::agent::default_node_name);
     let mut main_listener = Some(listener);
     let mut serving = None;
@@ -513,6 +545,7 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
     } else {
         tokio::spawn(super::controllers::run(state.clone()));
         tokio::spawn(expire_events(state.clone()));
+        tokio::spawn(super::rbac::run_aggregation(state.clone()));
     }
     if let Some(extra) = config.extra_listen {
         let l = TcpListener::bind(extra).await.with_context(|| format!("failed to bind apiserver on {extra}"))?;
@@ -668,7 +701,12 @@ async fn leader_tasks(state: Arc<ApiState>) {
     if let Err(e) = state.bootstrap() {
         eprintln!("apiserver: bootstrap objects: {e:#}");
     }
-    tokio::join!(super::controllers::run(state.clone()), expire_events(state.clone()), publish_server_endpoints(state.clone()));
+    tokio::join!(
+        super::controllers::run(state.clone()),
+        expire_events(state.clone()),
+        publish_server_endpoints(state.clone()),
+        super::rbac::run_aggregation(state.clone()),
+    );
 }
 
 /// Each server's Lease in kube-system: where pods reach it (HA).
@@ -819,11 +857,15 @@ async fn serve_listener_filtered(state: Arc<ApiState>, listener: TcpListener, lo
             // with 0x16, an HTTP request with a method name.
             let mut first = [0u8; 1];
             let is_tls = matches!(stream.peek(&mut first).await, Ok(1)) && first[0] == 0x16;
-            let service_state = state.clone();
-            let service = service_fn(move |req| {
-                let state = service_state.clone();
-                async move { Ok::<_, Infallible>(handle(state, req).await) }
-            });
+            let serve_with = |conn: super::authn::Conn| {
+                let conn = Arc::new(conn);
+                let service_state = state.clone();
+                service_fn(move |req| {
+                    let state = service_state.clone();
+                    let conn = conn.clone();
+                    async move { Ok::<_, Infallible>(handle(state, req, &conn).await) }
+                })
+            };
             match state.tls().filter(|_| is_tls) {
                 Some(tls) => {
                     let tls_stream = match tls.accept(crate::kube::tls::OneMessagePerRecord::new(stream)).await {
@@ -835,12 +877,14 @@ async fn serve_listener_filtered(state: Arc<ApiState>, listener: TcpListener, lo
                             return;
                         }
                     };
+                    let service = serve_with(super::authn::Conn::from_certificates(tls_stream.get_ref().1.peer_certificates()));
                     let _ = http1::Builder::new()
                         .serve_connection(TokioIo::new(tls_stream), service)
                         .with_upgrades()
                         .await;
                 }
                 None => {
+                    let service = serve_with(super::authn::Conn::default());
                     let _ = http1::Builder::new()
                         .serve_connection(TokioIo::new(stream), service)
                         .with_upgrades()
@@ -870,6 +914,30 @@ async fn serve_raft_listener(state: Arc<ApiState>, listener: std::net::TcpListen
     }
 }
 
+/// A kubeconfig for `system:admin` (client certificate, group
+/// `system:masters`) at `https://<addr>`, readable by its owner only.
+pub(crate) fn write_admin_kubeconfig(path: &Path, tls: &tls::ServerTls, addr: SocketAddr) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // The serving certificate names loopback; other addresses are checked
+    // against the in-cluster name.
+    let name = (!addr.ip().is_loopback()).then_some(join::SERVER_NAME);
+    let host = match addr.ip() {
+        std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+        ip => ip.to_string(),
+    };
+    let config = tls.admin_kubeconfig(&format!("https://{host}:{}", addr.port()), name)?;
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, config).with_context(|| format!("failed to write {}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(&tmp, path).with_context(|| format!("failed to write {}", path.display()))
+}
+
 pub fn write_kubeconfig(path: &Path, server: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -895,6 +963,8 @@ pub(crate) struct Req {
     body: Bytes,
     headers: hyper::HeaderMap,
     upgrade: std::sync::Mutex<Option<hyper::upgrade::OnUpgrade>>,
+    /// Who sent it (`None`: no credentials, authorization mode AlwaysAllow).
+    pub(crate) user: Option<super::rbac::UserInfo>,
 }
 
 impl Req {
@@ -947,6 +1017,7 @@ impl Req {
             body: self.body.clone(),
             headers: self.headers.clone(),
             upgrade: std::sync::Mutex::new(None),
+            user: self.user.clone(),
         }
     }
 
@@ -991,6 +1062,11 @@ impl ApiError {
             details: None,
             list_meta: None,
         }
+    }
+
+    pub(crate) fn with_details(mut self, details: Value) -> Self {
+        self.details = Some(details);
+        self
     }
 
     pub(crate) fn bad_request(message: impl Into<String>) -> Self {
@@ -1183,15 +1259,25 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-async fn handle(state: Arc<ApiState>, mut req: Request<Incoming>) -> Response<Body> {
+async fn handle(state: Arc<ApiState>, mut req: Request<Incoming>, conn: &super::authn::Conn) -> Response<Body> {
     let started = Instant::now();
+    if req.uri().path().starts_with(super::ha::net::PREFIX) {
+        return super::ha::serve(&state, req).await;
+    }
+    let query = parse_query(req.uri().query());
+    let user = match super::authn::check(&state, req.method(), req.uri().path(), &query, req.headers(), conn) {
+        Ok(user) => user,
+        Err(e) => {
+            if state.log_requests {
+                eprintln!("apiserver: {} {} -> {}", req.method(), req.uri().path(), e.code.as_u16());
+            }
+            return e.into_response();
+        }
+    };
     let upgrade = req
         .headers()
         .contains_key(hyper::header::UPGRADE)
         .then(|| hyper::upgrade::on(&mut req));
-    if req.uri().path().starts_with(super::ha::net::PREFIX) {
-        return super::ha::serve(&state, req).await;
-    }
     let (parts, body) = req.into_parts();
     let path = parts.uri.path().to_string();
     if path == IMAGES_PATH && parts.method == Method::POST {
@@ -1231,13 +1317,14 @@ async fn handle(state: Arc<ApiState>, mut req: Request<Incoming>) -> Response<Bo
     let req = Req {
         method: parts.method.clone(),
         path: path.clone(),
-        query: parse_query(parts.uri.query()),
+        query,
         raw_query: parts.uri.query().unwrap_or_default().to_string(),
         accept: header(ACCEPT),
         content_type: header(CONTENT_TYPE),
         body,
         headers: parts.headers.clone(),
         upgrade: std::sync::Mutex::new(upgrade),
+        user,
     };
     if let Some(resp) = crate::obs::api::route(&state, &req.method, &path, &req.raw_query, &req.body, &req.content_type).await {
         return resp;
@@ -1681,7 +1768,7 @@ async fn resource_request(
             query.insert("fieldSelector".into(), format!("metadata.name={name}"));
             state.watch(rt, ns, &req.clone_with_query(query))
         }
-        (&Method::POST, None, None) if is_review(rt) => state.review(rt, req),
+        (&Method::POST, None, None) if is_review(rt) => state.review(rt, ns, req),
         (&Method::GET, Some(name), Some("log")) if is_pods(rt) => {
             super::pod_streams::log(state, ns.unwrap_or_default(), name, req).await
         }
@@ -2070,7 +2157,7 @@ impl ApiState {
         ))
     }
 
-    fn review(&self, rt: &ResourceType, req: &Req) -> Result<Response<Body>, ApiError> {
+    fn review(self: &Arc<Self>, rt: &ResourceType, ns: Option<&str>, req: &Req) -> Result<Response<Body>, ApiError> {
         // Reviews have no object metadata to show as a table.
         if (req.wants_table() || req.wants_partial()) && !req.accept.contains("application/json,") && !req.accept.ends_with("application/json") {
             return Err(ApiError::new(
@@ -2086,17 +2173,55 @@ impl ApiState {
             obj["metadata"] = json!({});
         }
         obj["metadata"]["creationTimestamp"] = Value::Null;
+        // Without credentials under AlwaysAllow: the administrator, as
+        // before authentication existed.
+        let me = req.user.clone().unwrap_or_else(|| super::rbac::UserInfo {
+            username: tls::ADMIN_USER.into(),
+            groups: vec![super::rbac::MASTERS.into(), super::rbac::AUTHENTICATED.into()],
+            ..Default::default()
+        });
+        let mode = self.authz.mode;
+        let spec = obj.get("spec").cloned().unwrap_or_else(|| json!({}));
         obj["status"] = match rt.kind.as_str() {
             "TokenReview" => self.review_token(&obj),
-            "SelfSubjectRulesReview" => json!({
-                "resourceRules": [{"verbs": ["*"], "apiGroups": ["*"], "resources": ["*"]}],
-                "nonResourceRules": [{"verbs": ["*"], "nonResourceURLs": ["*"]}],
-                "incomplete": false,
-            }),
-            "SelfSubjectReview" => json!({"userInfo": {"username": "system:admin", "groups": ["system:masters", "system:authenticated"]}}),
-            _ => json!({"allowed": true, "reason": "litek8s has no authorization yet"}),
+            "SelfSubjectRulesReview" => {
+                let ns = spec.get("namespace").and_then(Value::as_str).unwrap_or_default();
+                super::rbac::review_rules(self, mode, &me, ns)
+            }
+            "SelfSubjectReview" => json!({"userInfo": me.to_json()}),
+            "SelfSubjectAccessReview" => super::rbac::review_access(self, mode, &me, &spec, None),
+            "LocalSubjectAccessReview" => {
+                let ns = ns.unwrap_or_default();
+                let named = spec.pointer("/resourceAttributes/namespace").and_then(Value::as_str).unwrap_or_default();
+                if spec.get("resourceAttributes").is_none() || named != ns {
+                    return Err(ApiError::new(
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "Invalid",
+                        format!("spec.resourceAttributes.namespace must match the request's namespace {ns:?}"),
+                    ));
+                }
+                super::rbac::review_access(self, mode, &super::rbac::spec_user(&spec), &spec, Some(ns))
+            }
+            _ => super::rbac::review_access(self, mode, &super::rbac::spec_user(&spec), &spec, None),
         };
         Ok(json_response(StatusCode::CREATED, &obj))
+    }
+
+    /// RBAC's escalation check on a write of a role or binding.
+    fn check_rbac_escalation(self: &Arc<Self>, rt: &ResourceType, ns: Option<&str>, obj: &Value, req: &Req) -> Result<(), ApiError> {
+        let mode = self.authz.mode;
+        if rt.group != super::rbac::GROUP || mode == super::rbac::Mode::AlwaysAllow {
+            return Ok(());
+        }
+        let Some(user) = &req.user else { return Ok(()) };
+        match super::rbac::check_escalation(self, user, &rt.plural, ns.unwrap_or_default(), obj) {
+            Ok(()) => Ok(()),
+            Err(message) if mode == super::rbac::Mode::RbacAudit => {
+                eprintln!("apiserver: RBAC-audit: DENY escalation: {} {:?}: {message}", qualified(rt), name_of(obj));
+                Ok(())
+            }
+            Err(message) => Err(ApiError::new(StatusCode::FORBIDDEN, "Forbidden", format!("{} {:?} is forbidden: {message}", qualified(rt), name_of(obj)))),
+        }
     }
 
     /// `pods/binding`: what an external scheduler posts.
@@ -2200,6 +2325,7 @@ impl ApiState {
             dry_run: req.dry_run(),
         };
         let mut obj = admission::admit(self, &attrs, obj).await?;
+        self.check_rbac_escalation(rt, ns, &obj, req)?;
         if is_pods(rt) {
             // Mutating webhooks may add containers: default them too.
             for field in ["initContainers", "containers"] {
@@ -2266,6 +2392,7 @@ impl ApiState {
             dry_run: req.dry_run(),
         };
         let mut new = admission::admit(self, &attrs, new).await?;
+        self.check_rbac_escalation(rt, ns, &new, req)?;
         self.track_fields(rt, Some(&old), &mut new, incoming, req, sub);
         if req.dry_run() {
             return Ok(json_response(StatusCode::OK, &new));
@@ -2321,6 +2448,7 @@ impl ApiState {
                         dry_run: req.dry_run(),
                     };
                     let mut obj = admission::admit(self, &attrs, obj).await?;
+                    self.check_rbac_escalation(rt, ns, &obj, req)?;
                     set_managed_fields(&mut obj, entries);
                     if req.dry_run() {
                         return Ok(json_response(StatusCode::CREATED, &obj));
@@ -2379,6 +2507,7 @@ impl ApiState {
                 dry_run: req.dry_run(),
             };
             let mut new = admission::admit(self, &attrs, new).await?;
+            self.check_rbac_escalation(rt, ns, &new, req)?;
             match applied {
                 Some(entries) => set_managed_fields(&mut new, entries),
                 None => self.track_fields(rt, Some(&old), &mut new, incoming, req, sub),
@@ -2988,7 +3117,26 @@ impl ApiState {
     /// account and bound objects still exist).
     fn review_token(&self, review: &Value) -> Value {
         let token = review.pointer("/spec/token").and_then(Value::as_str).unwrap_or_default();
-        let fail = |e: &str| json!({"authenticated": false, "user": {}, "error": e});
+        let wanted: Vec<String> = review.pointer("/spec/audiences").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
+        match self.verify_token(token, &wanted) {
+            Ok((user, audiences)) => json!({"authenticated": true, "user": user, "audiences": audiences}),
+            Err(e) => json!({"authenticated": false, "user": {}, "error": e}),
+        }
+    }
+
+    /// A service account token presented to this API server: signed here,
+    /// its account and bound pod still there, meant for this API (its
+    /// audiences include the issuer or `k3s`, the defaults).
+    pub(crate) fn authenticate_service_account(&self, token: &str) -> Result<super::rbac::UserInfo, String> {
+        let api: Vec<String> = super::sa_token::DEFAULT_AUDIENCES.iter().map(|a| a.to_string()).collect();
+        let (user, _) = self.verify_token(token, &api)?;
+        Ok(super::rbac::UserInfo::from_json(&user))
+    }
+
+    /// The user a service account token names and the audiences of
+    /// `wanted` it is valid for (its own when `wanted` is empty).
+    fn verify_token(&self, token: &str, wanted: &[String]) -> Result<(Value, Vec<String>), String> {
+        let fail = |e: &str| Err(e.to_string());
         let Some(claims) = self.signer.verify(token) else { return fail("invalid bearer token") };
         let s = |p: &str| claims.pointer(p).and_then(Value::as_str).unwrap_or_default();
         let ns = s("/kubernetes.io/namespace");
@@ -3003,12 +3151,11 @@ impl ApiState {
             }
         }
         let token_aud: Vec<String> = claims.get("aud").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
-        let wanted: Vec<String> = review.pointer("/spec/audiences").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(str::to_string).collect();
-        let audiences: Vec<String> = if wanted.is_empty() { token_aud.clone() } else { wanted.into_iter().filter(|a| token_aud.contains(a)).collect() };
+        let audiences: Vec<String> = if wanted.is_empty() { token_aud.clone() } else { wanted.iter().filter(|a| token_aud.contains(a)).cloned().collect() };
         if audiences.is_empty() {
             return fail("token audiences is invalid for the target audiences");
         }
-        json!({"authenticated": true, "user": super::sa_token::user_of(&claims), "audiences": audiences})
+        Ok((super::sa_token::user_of(&claims), audiences))
     }
 
     pub(crate) fn openid_jwks(&self) -> Value {
@@ -3693,6 +3840,9 @@ impl ApiState {
     }
 
     fn after_write(&self, rt: &ResourceType, stored: &Value) {
+        if rt.group == super::rbac::GROUP {
+            self.rbac.invalidate();
+        }
         match (rt.group.as_str(), rt.plural.as_str()) {
             ("apiextensions.k8s.io", "customresourcedefinitions") => {
                 if let Err(error) = self.registry.register_crd(stored) {
@@ -3734,6 +3884,9 @@ impl ApiState {
     }
 
     fn after_delete(&self, rt: &ResourceType, gone: &Value) {
+        if rt.group == super::rbac::GROUP {
+            self.rbac.invalidate();
+        }
         if rt.plural == "events" && (rt.group.is_empty() || rt.group == "events.k8s.io") {
             let other = if rt.group.is_empty() { "events.k8s.io" } else { "" };
             let ns = meta(gone).get("namespace").and_then(Value::as_str).unwrap_or_default();
@@ -4145,10 +4298,18 @@ impl ApiState {
             let mut builder = Request::builder().method(req.method.clone()).uri(&uri);
             for (k, v) in req.headers.iter() {
                 let hop = matches!(k.as_str(), "host" | "content-length" | "transfer-encoding" | "keep-alive" | "te" | "trailer" | "proxy-connection")
-                    || (k.as_str() == "connection" && !upgrading);
+                    || (k.as_str() == "connection" && !upgrading)
+                    || k.as_str() == super::authn::FORWARDED_USER_HEADER
+                    || k.as_str() == super::authn::FORWARDED_AUTH_HEADER;
                 if !hop {
                     builder = builder.header(k, v);
                 }
+            }
+            // Who the client is, as authenticated here (a client
+            // certificate does not travel with the request).
+            if let Some(user) = &req.user {
+                let encoded = base64::engine::general_purpose::STANDARD.encode(serde_json::to_vec(user)?);
+                builder = builder.header(super::authn::FORWARDED_USER_HEADER, encoded).header(super::authn::FORWARDED_AUTH_HEADER, cluster.peers.secret());
             }
             Ok(builder.header(hyper::header::HOST, addr).header(FORWARDED_HEADER, &cluster.name).body(super::ha::net::body(req.body.clone()))?)
         };
@@ -4448,6 +4609,41 @@ mod tests {
         assert_eq!(agent_api_endpoint(&plain, "192.168.1.10:6443"), ("192.168.1.10".to_string(), 6443));
         plain.pod_port.store(6444, std::sync::atomic::Ordering::Relaxed);
         assert_eq!(agent_api_endpoint(&plain, "127.0.0.1:6443"), ("host-gateway".to_string(), 6444));
+    }
+
+    #[tokio::test]
+    async fn client_certificates_authenticate_over_tls() {
+        let dir = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut state = ApiState::open(None, addr.to_string(), false).unwrap();
+        state.set_authorization_mode(super::super::rbac::Mode::Rbac);
+        let state = Arc::new(state);
+        tokio::spawn(serve_listener(state.clone(), listener));
+        let path = dir.path().join("kubeconfig");
+        write_admin_kubeconfig(&path, state.tls().unwrap(), addr).unwrap();
+        let doc: serde_yaml::Value = serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let admin = crate::ui::kube_endpoint_for(&doc, "litek8s", dir.path()).unwrap();
+        let secrets = admin.json(Method::GET, "/api/v1/namespaces/kube-system/secrets", None).await.unwrap();
+        assert_eq!(secrets["kind"], "SecretList");
+        let me = admin.json(Method::POST, "/apis/authentication.k8s.io/v1/selfsubjectreviews", Some(&json!({}))).await.unwrap();
+        assert_eq!(me["status"]["userInfo"]["username"], "system:admin");
+        assert!(me["status"]["userInfo"]["groups"].as_array().unwrap().contains(&json!("system:masters")));
+        // The same server over TLS without the certificate: 401.
+        let mut anonymous = doc.clone();
+        anonymous["users"][0]["user"] = serde_yaml::Value::Mapping(Default::default());
+        let anonymous = crate::ui::kube_endpoint_for(&anonymous, "litek8s", dir.path()).unwrap();
+        let err = anonymous.json(Method::GET, "/api/v1/namespaces/kube-system/secrets", None).await.unwrap_err();
+        assert!(format!("{err:#}").contains("401") || format!("{err:#}").contains("Unauthorized"), "{err:#}");
+        assert_eq!(anonymous.json(Method::GET, "/version", None).await.unwrap()["major"], "1");
+        // A certificate from another CA fails the handshake.
+        let other = tls::ClientCa::derive([3; 32]).unwrap().issue("eve", Some("system:masters")).unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD;
+        let mut forged = doc.clone();
+        forged["users"][0]["user"]["client-certificate-data"] = b64.encode(other.0).into();
+        forged["users"][0]["user"]["client-key-data"] = b64.encode(other.1).into();
+        let forged = crate::ui::kube_endpoint_for(&forged, "litek8s", dir.path()).unwrap();
+        assert!(forged.json(Method::GET, "/api/v1/namespaces/kube-system/secrets", None).await.is_err());
     }
 
     #[test]

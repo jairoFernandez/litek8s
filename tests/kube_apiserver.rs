@@ -609,3 +609,193 @@ async fn metrics_api_serves_node_and_pod_metrics_from_the_store() -> Result<()> 
     assert_eq!((code, v["kind"].as_str()), (200, Some("NodeMetrics")), "{v}");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Authentication and RBAC
+
+/// A server in `mode`; the join token is an administrator's credential.
+async fn start_authorized(mode: litek8s::kube::rbac::Mode) -> Result<(String, String, Arc<ApiState>)> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?.to_string();
+    let mut state = ApiState::open(None, addr.clone(), false)?;
+    state.set_authorization_mode(mode);
+    let state = Arc::new(state);
+    let token = state.join_token();
+    tokio::spawn(serve_listener(state.clone(), listener));
+    Ok((addr, token, state))
+}
+
+/// One request with extra headers; (status, JSON body).
+async fn call_as(addr: &str, method: &str, path: &str, headers: &[(&str, &str)], body: Option<Value>) -> Result<(u16, Value)> {
+    let mut stream = TcpStream::connect(addr).await?;
+    let body = body.map(|b| b.to_string()).unwrap_or_default();
+    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nAccept: application/json\r\nContent-Type: application/json\r\nContent-Length: {}\r\n", body.len());
+    for (k, v) in headers {
+        request.push_str(&format!("{k}: {v}\r\n"));
+    }
+    request.push_str("\r\n");
+    request.push_str(&body);
+    stream.write_all(request.as_bytes()).await?;
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await?;
+    let text = String::from_utf8_lossy(&raw);
+    let (head, body) = text.split_once("\r\n\r\n").context("malformed response")?;
+    let status: u16 = head.split(' ').nth(1).context("no status")?.parse()?;
+    let body = if head.to_ascii_lowercase().contains("transfer-encoding: chunked") { dechunk(body) } else { body.to_string() };
+    Ok((status, serde_json::from_str(&body).unwrap_or(Value::String(body))))
+}
+
+fn bearer(token: &str) -> String {
+    format!("Bearer {token}")
+}
+
+async fn sa_token(addr: &str, admin: &str, ns: &str, sa: &str, audiences: &[&str]) -> Result<String> {
+    let auth = bearer(admin);
+    let h = [("Authorization", auth.as_str())];
+    let (code, _) = call_as(addr, "POST", &format!("/api/v1/namespaces/{ns}/serviceaccounts"), &h, Some(json!({"metadata": {"name": sa}}))).await?;
+    assert!(code == 201 || code == 409, "{code}");
+    let spec = if audiences.is_empty() { json!({}) } else { json!({"audiences": audiences}) };
+    let (code, tr) = call_as(addr, "POST", &format!("/api/v1/namespaces/{ns}/serviceaccounts/{sa}/token"), &h, Some(json!({"spec": spec}))).await?;
+    assert_eq!(code, 201, "{tr}");
+    Ok(tr["status"]["token"].as_str().context("no token")?.to_string())
+}
+
+#[tokio::test]
+async fn rbac_authenticates_and_authorizes_requests() -> Result<()> {
+    let (addr, admin, _state) = start_authorized(litek8s::kube::rbac::Mode::Rbac).await?;
+    let admin_h = bearer(&admin);
+    let admin_h = [("Authorization", admin_h.as_str())];
+    // Anonymous: the public paths only.
+    for path in ["/version", "/healthz", "/readyz", "/openid/v1/jwks", "/.well-known/openid-configuration"] {
+        assert_eq!(get(&addr, path).await?.0, 200, "{path}");
+    }
+    for path in ["/api/v1/namespaces/default/secrets", "/api", "/metrics", "/litek8s/v1/memory"] {
+        assert_eq!(get(&addr, path).await?.0, 401, "{path}");
+    }
+    assert_eq!(call_as(&addr, "GET", "/api/v1/secrets", &[("Authorization", "Bearer litek8s-no-client-auth")], None).await?.0, 401);
+    assert_eq!(call_as(&addr, "GET", "/api/v1/secrets", &admin_h, None).await?.0, 200);
+    // The identity HA servers forward is only trusted with the cluster secret.
+    let forged = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, br#"{"username":"x","groups":["system:masters"]}"#);
+    let spoof = [("x-litek8s-forwarded-user", forged.as_str()), ("x-litek8s-forwarded-auth", "guess")];
+    assert_eq!(call_as(&addr, "GET", "/api/v1/secrets", &spoof, None).await?.0, 401);
+
+    // A service account: discovery and self reviews, nothing else.
+    let token = sa_token(&addr, &admin, "default", "ci", &[]).await?;
+    let ci = bearer(&token);
+    let ci = [("Authorization", ci.as_str())];
+    assert_eq!(call_as(&addr, "GET", "/api", &ci, None).await?.0, 200);
+    assert_eq!(call_as(&addr, "GET", "/apis/apps/v1", &ci, None).await?.0, 200);
+    let (code, denied) = call_as(&addr, "GET", "/api/v1/namespaces/default/pods", &ci, None).await?;
+    assert_eq!(code, 403);
+    assert_eq!(
+        denied["message"],
+        "pods is forbidden: User \"system:serviceaccount:default:ci\" cannot list resource \"pods\" in API group \"\" in the namespace \"default\""
+    );
+    assert_eq!(denied["details"]["kind"], "pods");
+    let (code, me) = call_as(&addr, "POST", "/apis/authentication.k8s.io/v1/selfsubjectreviews", &ci, Some(json!({}))).await?;
+    assert_eq!(code, 201, "{me}");
+    assert_eq!(me["status"]["userInfo"]["username"], "system:serviceaccount:default:ci");
+    assert!(me["status"]["userInfo"]["groups"].as_array().unwrap().contains(&json!("system:serviceaccounts:default")));
+
+    // Granted through a Role and RoleBinding.
+    let role = json!({"metadata": {"name": "pods"}, "rules": [
+        {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list", "watch"]},
+        {"apiGroups": [""], "resources": ["pods/exec"], "verbs": ["create"]},
+        {"apiGroups": ["rbac.authorization.k8s.io"], "resources": ["roles", "rolebindings"], "verbs": ["create"]},
+    ]});
+    assert_eq!(call_as(&addr, "POST", "/apis/rbac.authorization.k8s.io/v1/namespaces/default/roles", &admin_h, Some(role)).await?.0, 201);
+    let binding = json!({"metadata": {"name": "ci-pods"}, "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "pods"}, "subjects": [{"kind": "ServiceAccount", "name": "ci", "namespace": "default"}]});
+    assert_eq!(call_as(&addr, "POST", "/apis/rbac.authorization.k8s.io/v1/namespaces/default/rolebindings", &admin_h, Some(binding)).await?.0, 201);
+    assert_eq!(call_as(&addr, "GET", "/api/v1/namespaces/default/pods", &ci, None).await?.0, 200);
+    assert_eq!(call_as(&addr, "GET", "/api/v1/namespaces/default/pods?watch=true&timeoutSeconds=1", &ci, None).await?.0, 200);
+    assert_eq!(call_as(&addr, "GET", "/api/v1/namespaces/kube-system/pods", &ci, None).await?.0, 403);
+    assert_eq!(call_as(&addr, "GET", "/api/v1/namespaces/default/secrets", &ci, None).await?.0, 403);
+    assert_eq!(call_as(&addr, "DELETE", "/api/v1/namespaces/default/pods/x", &ci, None).await?.0, 403);
+
+    // kubectl auth can-i
+    let can = |verb: &str, resource: &str, sub: &str| json!({"spec": {"resourceAttributes": {"namespace": "default", "verb": verb, "resource": resource, "subresource": sub}}});
+    let (_, r) = call_as(&addr, "POST", "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", &ci, Some(can("create", "pods", "exec"))).await?;
+    assert_eq!(r["status"]["allowed"], true, "{r}");
+    let (_, r) = call_as(&addr, "POST", "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", &ci, Some(can("get", "secrets", ""))).await?;
+    assert_eq!(r["status"]["allowed"], false, "{r}");
+    let (_, r) = call_as(&addr, "POST", "/apis/authorization.k8s.io/v1/selfsubjectrulesreviews", &ci, Some(json!({"spec": {"namespace": "default"}}))).await?;
+    assert!(r["status"]["resourceRules"].as_array().unwrap().iter().any(|rule| rule["resources"] == json!(["pods/exec"])), "{r}");
+    // SubjectAccessReview needs system:auth-delegator (the admin has it).
+    let sar = json!({"spec": {"user": "system:serviceaccount:default:ci", "groups": ["system:serviceaccounts"], "resourceAttributes": {"namespace": "default", "verb": "list", "resource": "pods"}}});
+    assert_eq!(call_as(&addr, "POST", "/apis/authorization.k8s.io/v1/subjectaccessreviews", &ci, Some(sar.clone())).await?.0, 403);
+    let (_, r) = call_as(&addr, "POST", "/apis/authorization.k8s.io/v1/subjectaccessreviews", &admin_h, Some(sar)).await?;
+    assert_eq!(r["status"]["allowed"], true, "{r}");
+
+    // Escalation: a role or binding may only grant what its author holds.
+    let wider = json!({"metadata": {"name": "secrets"}, "rules": [{"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]}]});
+    let (code, e) = call_as(&addr, "POST", "/apis/rbac.authorization.k8s.io/v1/namespaces/default/roles", &ci, Some(wider)).await?;
+    assert_eq!(code, 403, "{e}");
+    assert!(e["message"].as_str().unwrap().contains("not currently held"), "{e}");
+    let narrower = json!({"metadata": {"name": "read-pods"}, "rules": [{"apiGroups": [""], "resources": ["pods"], "verbs": ["get"]}]});
+    assert_eq!(call_as(&addr, "POST", "/apis/rbac.authorization.k8s.io/v1/namespaces/default/roles", &ci, Some(narrower)).await?.0, 201);
+    let to_admin = json!({"metadata": {"name": "root"}, "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "cluster-admin"}, "subjects": [{"kind": "ServiceAccount", "name": "ci"}]});
+    assert_eq!(call_as(&addr, "POST", "/apis/rbac.authorization.k8s.io/v1/namespaces/default/rolebindings", &ci, Some(to_admin)).await?.0, 403);
+
+    // Impersonation needs the impersonate verb.
+    let imp = [("Authorization", admin_h[0].1), ("Impersonate-User", "system:serviceaccount:default:ci")];
+    assert_eq!(call_as(&addr, "GET", "/api/v1/namespaces/default/secrets", &imp, None).await?.0, 403);
+    assert_eq!(call_as(&addr, "GET", "/api/v1/namespaces/default/pods", &imp, None).await?.0, 200);
+    let imp = [("Authorization", ci[0].1), ("Impersonate-User", "admin"), ("Impersonate-Group", "system:masters")];
+    assert_eq!(call_as(&addr, "GET", "/api/v1/namespaces/default/secrets", &imp, None).await?.0, 403);
+
+    // Tokens for other audiences, or of a deleted account, are rejected.
+    let vault = sa_token(&addr, &admin, "default", "ci", &["vault"]).await?;
+    assert_eq!(call_as(&addr, "GET", "/api", &[("Authorization", bearer(&vault).as_str())], None).await?.0, 401);
+    assert_eq!(call_as(&addr, "DELETE", "/api/v1/namespaces/default/serviceaccounts/ci", &admin_h, None).await?.0, 200);
+    assert_eq!(call_as(&addr, "GET", "/api", &ci, None).await?.0, 401);
+    Ok(())
+}
+
+#[tokio::test]
+async fn rbac_audit_logs_but_allows() -> Result<()> {
+    let (addr, admin, _state) = start_authorized(litek8s::kube::rbac::Mode::RbacAudit).await?;
+    assert_eq!(get(&addr, "/api/v1/namespaces/default/secrets").await?.0, 200);
+    let token = sa_token(&addr, &admin, "default", "app", &[]).await?;
+    assert_eq!(call_as(&addr, "GET", "/api/v1/secrets", &[("Authorization", bearer(&token).as_str())], None).await?.0, 200);
+    // Reviews still answer what RBAC decides.
+    let ssar = json!({"spec": {"resourceAttributes": {"namespace": "default", "verb": "get", "resource": "secrets"}}});
+    let (_, r) = call_as(&addr, "POST", "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", &[("Authorization", bearer(&token).as_str())], Some(ssar)).await?;
+    assert_eq!(r["status"]["allowed"], false, "{r}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn default_cluster_roles_and_aggregation() -> Result<()> {
+    let (addr, admin, state) = start_authorized(litek8s::kube::rbac::Mode::Rbac).await?;
+    tokio::spawn(litek8s::kube::rbac::run_aggregation(state));
+    let h = bearer(&admin);
+    let h = [("Authorization", h.as_str())];
+    for name in ["cluster-admin", "admin", "edit", "view", "system:auth-delegator", "system:basic-user", "system:discovery", "system:public-info-viewer"] {
+        assert_eq!(call_as(&addr, "GET", &format!("/apis/rbac.authorization.k8s.io/v1/clusterroles/{name}"), &h, None).await?.0, 200, "{name}");
+    }
+    let (_, view) = call_as(&addr, "GET", "/apis/rbac.authorization.k8s.io/v1/clusterroles/view", &h, None).await?;
+    assert!(view["rules"].as_array().unwrap().iter().any(|r| r["resources"].as_array().unwrap().contains(&json!("pods"))), "{view}");
+    let extra = json!({"metadata": {"name": "widgets-view", "labels": {"rbac.authorization.k8s.io/aggregate-to-view": "true"}}, "rules": [{"apiGroups": ["example.com"], "resources": ["widgets"], "verbs": ["get"]}]});
+    assert_eq!(call_as(&addr, "POST", "/apis/rbac.authorization.k8s.io/v1/clusterroles", &h, Some(extra)).await?.0, 201);
+    // view, then edit (aggregates view), then admin (aggregates edit).
+    for role in ["view", "edit", "admin"] {
+        let mut found = false;
+        for _ in 0..100 {
+            let (_, r) = call_as(&addr, "GET", &format!("/apis/rbac.authorization.k8s.io/v1/clusterroles/{role}"), &h, None).await?;
+            if r["rules"].as_array().unwrap().iter().any(|r| r["resources"] == json!(["widgets"])) {
+                found = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(found, "{role} did not aggregate widgets-view");
+    }
+    // A user bound to `view` in a namespace reads pods there.
+    let token = sa_token(&addr, &admin, "default", "viewer", &[]).await?;
+    let binding = json!({"metadata": {"name": "viewer"}, "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": "view"}, "subjects": [{"kind": "ServiceAccount", "name": "viewer"}]});
+    assert_eq!(call_as(&addr, "POST", "/apis/rbac.authorization.k8s.io/v1/namespaces/default/rolebindings", &h, Some(binding)).await?.0, 201);
+    let v = bearer(&token);
+    assert_eq!(call_as(&addr, "GET", "/api/v1/namespaces/default/pods", &[("Authorization", v.as_str())], None).await?.0, 200);
+    assert_eq!(call_as(&addr, "GET", "/api/v1/namespaces/default/secrets", &[("Authorization", v.as_str())], None).await?.0, 403);
+    Ok(())
+}

@@ -5,9 +5,11 @@
 //! in discovery; requests under `/apis/<group>/<version>/` are proxied to the
 //! Service over TLS.
 //!
-//! Requests reach the extension server without user identity (no
-//! front-proxy client certificate), so it sees them as anonymous; with no
-//! authorization here, its delegated SubjectAccessReviews are allowed.
+//! The request is authorized here first, as any other. It reaches the
+//! extension server without user identity (no front-proxy client
+//! certificate), so the extension server sees it as anonymous: under RBAC
+//! its delegated SubjectAccessReviews for `system:anonymous` are denied
+//! unless a binding allows that user.
 
 use std::collections::HashSet;
 use std::sync::Arc;
