@@ -261,6 +261,30 @@ pub struct PodUsage {
     pub name: String,
     pub cpu: Vec<Option<f64>>,
     pub mem: Vec<Option<f64>>,
+    /// From the pod's spec: CPU in cores, memory in bytes.
+    pub cpu_bounds: Bounds,
+    pub mem_bounds: Bounds,
+}
+
+/// A pod's limit and request for one resource, summed over the containers
+/// that run side by side. `limit` is `None` when any of them has no limit
+/// (the pod is not capped); `request` is `None` when none asks for any.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Bounds {
+    pub limit: Option<f64>,
+    pub request: Option<f64>,
+}
+
+impl Bounds {
+    /// What `used` is measured against: the limit, else the request
+    /// (`true`: it is the request).
+    pub fn of(&self) -> Option<(f64, bool)> {
+        match (self.limit, self.request) {
+            (Some(l), _) if l > 0.0 => Some((l, false)),
+            (_, Some(r)) if r > 0.0 => Some((r, true)),
+            _ => None,
+        }
+    }
 }
 
 impl PodUsage {

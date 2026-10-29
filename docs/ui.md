@@ -667,10 +667,11 @@ View 9, on the cluster's built-in metrics, logs and alerts
 │ ◐ firing  KubePodCrashLooping      6m     default/crasher-778d767f48-4zrkx (…│
 │ ◐ firing  KubePodRestartLoop       5m     default/crasher-778d767f48-4zrkx (…│
 ╰──────────────────────────────────────────────────────────────────────────────╯
-╭─ Pods by CPU ────────────────────────────────────────────────── last 30 min ─╮
-│ NAMESPACE    POD          CPU                      MEMORY                    │
-│▌shop         db-0           800m ▅▅▅ ▅▆▆▆▆▆▇▇▇▇███  60.0 MB ▂▂▂ ▃▃▃▃▃▃▃▃▃▃▃▄▄│
-│ default      web-7d9-abc    100m ▁▁▁ ▂▂▂▂▂▂▂▂▂▂▂▂▂   160 MB ▅▅▅ ▅▆▆▆▆▆▇▇▇▇███│
+╭─ Pods by CPU ─────────────────────────── % of limit, r: of request · 30 min ─╮
+│ NAMESPACE  POD                CPU/LIMIT     %     MEM/LIMIT     % CPU        │
+│▌shop       api-0              475m/500m   95%   243Mi/256Mi   95% ███████████│
+│ shop       worker-1           300m/100m r300%   100Mi/200Mi r 50% ▅▅▅▅▅▅▅▅▅▅▅│
+│ shop       cache-2                20m/—     —        50Mi/—     — ▁▁▁▁▁▁▁▁▁▁▁│
 │                                                                              │
 ╰──────────────────────────────────────────────────────────────────────────────╯
   l  logs   L  search logs   s  sort   a/A  ack   n  namespace          ?  help
@@ -680,8 +681,14 @@ View 9, on the cluster's built-in metrics, logs and alerts
   acknowledged (dim); `a` acknowledges the selected pod's alerts, `A` all of them (each
   silenced until it resolves; asks first).
 - **Pods** by CPU (cores, `m` = millicores) or memory (working set; `s`
-  switches), top consumers first, with a sparkline per pod over the last 30
-  minutes (one cell per ~2 minutes; a gap where there was no sample).
+  switches), top consumers first. Each figure is shown against the pod's
+  limit (`used/limit` and the share, colored green to red), summed over its
+  containers and sidecars; a pod with a container without a limit has none.
+  Without a limit the request stands in (`r` before the share; above 100 %
+  is fine there, the pod is just using more than it reserved); with
+  neither, `/—`. Then a sparkline over the last 30 minutes (one cell per
+  ~2 minutes; a gap where there was no sample): the sorted resource's on
+  80 columns, both on wide terminals.
   `n` cycles namespaces, `/` filters.
 - **Logs**: `l` opens every log of the selected pod over the last hour,
   following, including containers that restarted or are gone; `L` asks

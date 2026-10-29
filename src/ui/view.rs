@@ -10,7 +10,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Cell, Clear, HighlightSpacing, Padding, Paragraph, Row, Table, TableState, Wrap};
 
-use super::app::{App, CRow, DevStatus, Field, InputKind, NewCluster, Overlay, RECLAIMS, SETTINGS, Setting, TABS, Tab};
+use super::app::{App, Bounds, CRow, DevStatus, Field, InputKind, NewCluster, Overlay, RECLAIMS, SETTINGS, Setting, TABS, Tab};
 use super::model::{age, bytes, ibytes};
 use super::theme::{Health, Theme};
 
@@ -1530,7 +1530,19 @@ fn observe(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     f.render_widget(Paragraph::new(lines).block(t.block_with("Alerts", right)), top);
 
     let idx = app.visible_obs_pods();
-    let spark_w = 17usize;
+    // Each figure against what caps it: `used/limit` and the share of it
+    // (`r` and the request's share when there is no limit, `—` when there
+    // is neither). The sparklines get what the pod column leaves: both on
+    // wide terminals, the sorted resource's alone on narrow ones.
+    const NS: u16 = 10;
+    const CPU: u16 = 9;
+    const MEM: u16 = 13;
+    const PCT: u16 = 5;
+    let inner = rest.width.saturating_sub(3);
+    let fixed = NS + CPU + PCT + MEM + PCT + 6;
+    let both = inner >= fixed + 1 + 2 * 17 + 24;
+    let spark_w = if both { 17 } else { inner.saturating_sub(fixed + 18).min(17) as usize };
+    let spark_w = if spark_w < 6 { 0 } else { spark_w };
     let cpu_max = idx.iter().flat_map(|i| o.pods[*i].cpu.iter().flatten()).fold(0.0f64, |a, b| a.max(*b));
     let mem_max = idx.iter().flat_map(|i| o.pods[*i].mem.iter().flatten()).fold(0.0f64, |a, b| a.max(*b));
     let rows: Vec<Row> = idx
@@ -1539,33 +1551,62 @@ fn observe(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
             let p = &o.pods[*i];
             // A pod gone during the window: dim, no current figures.
             let live = p.live();
-            let (cpu, mem) = if live { (cpu_text(p.cpu_now()), bytes(p.mem_now() as u64)) } else { ("gone".into(), "-".into()) };
             let figure = |on: bool| if !live { t.dim } else if on { t.bold } else { Style::new() };
             let spark = |v: &[Option<f64>], max: f64| if live { Line::from(t.sparkline_gaps(v, max, spark_w)) } else { Line::styled(t.sparkline_gaps(v, max, spark_w).iter().map(|s| s.content.to_string()).collect::<String>(), t.dim) };
-            Row::new(vec![
-                Cell::from(Span::styled(p.namespace.clone(), t.dim)),
-                Cell::from(Span::styled(p.name.clone(), if live { Style::new() } else { t.dim })),
-                Cell::from(Span::styled(format!("{cpu:>6}"), figure(!app.obs_by_mem))),
-                Cell::from(spark(&p.cpu, cpu_max)),
-                Cell::from(Span::styled(format!("{mem:>8}"), figure(app.obs_by_mem))),
-                Cell::from(spark(&p.mem, mem_max)),
-            ])
+            // `used/limit` (or `/request`, or `/—`) and the share.
+            let against = |used: f64, b: &Bounds, text: &dyn Fn(f64) -> String, w: u16, on: bool| -> (Cell<'static>, Cell<'static>) {
+                if !live {
+                    return (Cell::from(Span::styled(format!("{:>w$}", if on { "gone" } else { "-" }, w = w as usize), t.dim)), Cell::from(""));
+                }
+                let cap = b.of();
+                let of = cap.map(|(c, _)| text(c)).unwrap_or_else(|| "—".into());
+                let head = text(used);
+                let pad = (w as usize).saturating_sub(head.chars().count() + 1 + of.chars().count());
+                let cap_style = if cap.is_some_and(|(_, req)| !req) { Style::new() } else { t.dim };
+                let fig = Cell::from(Line::from(vec![Span::raw(" ".repeat(pad)), Span::styled(head, figure(on)), Span::styled("/", t.dim), Span::styled(of, cap_style)]));
+                let pct = match cap {
+                    Some((c, req)) => {
+                        let r = used / c;
+                        let n = format!("{}%", (r * 100.0).round().min(999.0) as u64);
+                        if req { Span::styled(format!("r{n:>4}"), t.dim) } else { Span::styled(format!("{n:>5}"), if r >= 0.9 { t.level(r).add_modifier(Modifier::BOLD) } else { t.level(r) }) }
+                    }
+                    None => Span::styled(format!("{:>5}", "—"), t.dim),
+                };
+                (fig, Cell::from(pct))
+            };
+            let (cpu, cpu_pct) = against(p.cpu_now(), &p.cpu_bounds, &cpu_text, CPU, !app.obs_by_mem);
+            let (mem, mem_pct) = against(p.mem_now(), &p.mem_bounds, &|b| ibytes(b as u64), MEM, app.obs_by_mem);
+            let mut cells = vec![Cell::from(Span::styled(p.namespace.clone(), t.dim)), Cell::from(Span::styled(p.name.clone(), if live { Style::new() } else { t.dim })), cpu, cpu_pct];
+            if both {
+                cells.push(Cell::from(spark(&p.cpu, cpu_max)));
+            }
+            cells.extend([mem, mem_pct]);
+            if both {
+                cells.push(Cell::from(spark(&p.mem, mem_max)));
+            } else if spark_w > 0 {
+                cells.push(Cell::from(if app.obs_by_mem { spark(&p.mem, mem_max) } else { spark(&p.cpu, cpu_max) }));
+            }
+            Row::new(cells)
         })
         .collect();
     let ns = app.obs_namespace.as_deref().map(|n| format!(" · {n}")).unwrap_or_default();
     let by = if app.obs_by_mem { "memory" } else { "CPU" };
-    render_table(
-        f,
-        app,
-        t,
-        rest,
-        &format!("Pods by {by}"),
-        format!("last 30 min{ns}"),
-        vec!["NAMESPACE", "POD", "CPU", "", "MEMORY", ""],
-        rows,
-        vec![Constraint::Length(12), Constraint::Fill(1), Constraint::Length(6), Constraint::Length(spark_w as u16), Constraint::Length(8), Constraint::Length(spark_w as u16)],
-        "No pod metrics yet (the first samples arrive within 10 s).",
-    );
+    let mut header = vec!["NAMESPACE", "POD", "CPU/LIMIT", "    %"];
+    let mut widths = vec![Constraint::Length(NS), Constraint::Fill(1), Constraint::Length(CPU), Constraint::Length(PCT)];
+    if both {
+        header.push("");
+        widths.push(Constraint::Length(17));
+    }
+    header.extend(["    MEM/LIMIT", "    %"]);
+    widths.extend([Constraint::Length(MEM), Constraint::Length(PCT)]);
+    if both {
+        header.push("");
+        widths.push(Constraint::Length(17));
+    } else if spark_w > 0 {
+        header.push(if app.obs_by_mem { "MEMORY" } else { "CPU" });
+        widths.push(Constraint::Length(spark_w as u16));
+    }
+    render_table(f, app, t, rest, &format!("Pods by {by}"), format!("% of limit, r: of request · 30 min{ns}"), header, rows, widths, "No pod metrics yet (the first samples arrive within 10 s).");
 }
 
 fn settings(f: &mut Frame, app: &App, t: &Theme, area: Rect) {

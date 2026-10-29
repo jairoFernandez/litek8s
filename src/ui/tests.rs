@@ -926,8 +926,8 @@ fn observe_shows_alerts_top_pods_and_searches_logs() {
     let series = |base: f64| (0..17).map(|i| if i == 3 { None } else { Some(base * (1.0 + i as f64 / 16.0)) }).collect::<Vec<_>>();
     app.apply(Msg::Obs(Box::new(ObsSample {
         pods: vec![
-            PodUsage { namespace: "default".into(), name: "web-7d9-abc".into(), cpu: series(0.05), mem: series(80e6) },
-            PodUsage { namespace: "shop".into(), name: "db-0".into(), cpu: series(0.4), mem: series(30e6) },
+            PodUsage { namespace: "default".into(), name: "web-7d9-abc".into(), cpu: series(0.05), mem: series(80e6), ..Default::default() },
+            PodUsage { namespace: "shop".into(), name: "db-0".into(), cpu: series(0.4), mem: series(30e6), ..Default::default() },
         ],
         alerts: vec![AlertRow {
             state: "firing".into(),
@@ -948,11 +948,11 @@ fn observe_shows_alerts_top_pods_and_searches_logs() {
     let s = render(&app, 80, 24);
     assert!(s.contains("9 Obs") && s.contains("8 Set"), "{s}");
     assert!(s.contains("1 firing") && s.contains("KubePodCrashLooping") && s.contains("web-7d9-abc (nginx)"), "{s}");
-    assert!(s.contains("Pods by CPU") && s.contains("db-0") && s.contains("800m") && s.contains("▁"), "{s}");
+    assert!(s.contains("Pods by CPU") && s.contains("db-0") && s.contains("800m/—") && s.contains("▆"), "{s}");
     // Top consumer first; s sorts by memory.
     assert_eq!(app.selected_obs_pod().unwrap().name, "db-0");
     // A pod deleted 20 minutes ago ranks last, marked gone.
-    let mut gone = PodUsage { namespace: "default".into(), name: "old-job".into(), cpu: series(5.0), mem: series(1e9) };
+    let mut gone = PodUsage { namespace: "default".into(), name: "old-job".into(), cpu: series(5.0), mem: series(1e9), ..Default::default() };
     let n = gone.cpu.len();
     for i in n - 10..n {
         gone.cpu[i] = None;
@@ -986,6 +986,42 @@ fn observe_shows_alerts_top_pods_and_searches_logs() {
     app.key(code(KeyCode::Esc));
     app.apply(Msg::Obs(Box::new(ObsSample { error: Some("observability is off on this server".into()), ..Default::default() })));
     assert!(render(&app, 80, 24).contains("observability is off"));
+}
+
+#[test]
+fn observe_shows_use_against_limits_and_requests() {
+    let mut app = sample_app();
+    let flat = |v: f64| vec![Some(v); 17];
+    let mi = (1u64 << 20) as f64;
+    let pod = |name: &str, cpu: f64, mem: f64, cpu_bounds: Bounds, mem_bounds: Bounds| PodUsage { namespace: "shop".into(), name: name.into(), cpu: flat(cpu), mem: flat(mem), cpu_bounds, mem_bounds };
+    let limit = |l: f64| Bounds { limit: Some(l), request: Some(l / 2.0) };
+    app.apply(Msg::Obs(Box::new(ObsSample {
+        pods: vec![
+            // Near both ceilings.
+            pod("api-0", 0.475, 243.0 * mi, limit(0.5), limit(256.0 * mi)),
+            // Requests only: measured against them.
+            pod("worker-1", 0.3, 100.0 * mi, Bounds { limit: None, request: Some(0.1) }, Bounds { limit: None, request: Some(200.0 * mi) }),
+            // Neither: said so, not blank.
+            pod("cache-2", 0.02, 50.0 * mi, Bounds::default(), Bounds::default()),
+        ],
+        at: app.now,
+        ..Default::default()
+    })));
+    app.key(key('9'));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("CPU/LIMIT") && s.contains("MEM/LIMIT") && s.contains("% of limit, r: of request"), "{s}");
+    let line = |name: &str| s.lines().find(|l| l.contains(name)).unwrap_or_else(|| panic!("{name} missing:\n{s}")).to_string();
+    let api = line("api-0");
+    assert!(api.contains("475m/500m") && api.contains("95%") && api.contains("243Mi/256Mi"), "{api}");
+    let worker = line("worker-1");
+    assert!(worker.contains("300m/100m") && worker.contains("r300%") && worker.contains("100Mi/200Mi") && worker.contains("r 50%"), "{worker}");
+    let cache = line("cache-2");
+    assert!(cache.contains("20m/—") && cache.contains("50Mi/—"), "{cache}");
+    // The sorted resource's sparkline still fits at 80 columns.
+    assert!(api.contains('▁') || api.contains('█'), "{api}");
+    // Wide: both sparklines.
+    let wide = render(&app, 140, 24);
+    assert_eq!(wide.lines().find(|l| l.contains("api-0")).unwrap().matches('█').count(), 34, "{wide}");
 }
 
 #[test]

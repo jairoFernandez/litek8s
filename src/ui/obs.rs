@@ -15,7 +15,7 @@ use serde_json::{Value, json};
 use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedSender;
 
-use super::app::{AlertRow, Msg, ObsSample, PodUsage};
+use super::app::{AlertRow, Bounds, Msg, ObsSample, PodUsage};
 use super::client::{Endpoint, Lines, enc};
 
 /// How often the view refreshes while shown.
@@ -118,6 +118,16 @@ pub async fn sample(ep: &Endpoint) -> Result<ObsSample> {
             }
         }
     }
+    // Limits and requests from the pods' specs; without them (RBAC, a
+    // failed list) the view still shows the use.
+    if let Ok(list) = ep.json(Method::GET, "/api/v1/pods", None).await {
+        for pod in list["items"].as_array().into_iter().flatten() {
+            let s = |k: &str| pod["metadata"][k].as_str().unwrap_or_default().to_string();
+            if let Some(p) = pods.get_mut(&(s("namespace"), s("name"))) {
+                (p.cpu_bounds, p.mem_bounds) = (bounds(pod, "cpu"), bounds(pod, "memory"));
+            }
+        }
+    }
     let a = ep.json(Method::GET, "/litek8s/v1/alerts", None).await?;
     let mut alerts: Vec<AlertRow> = a["alerts"]
         .as_array()
@@ -143,6 +153,32 @@ pub async fn sample(ep: &Endpoint) -> Result<ObsSample> {
         .collect();
     alerts.sort_by_key(|a| (a.state != "firing", a.silenced, a.severity != "critical", a.since));
     Ok(ObsSample { pods: pods.into_values().collect(), alerts, error: None, at: now })
+}
+
+/// A pod's limit and request for `resource` (`cpu` in cores, `memory` in
+/// bytes), over the containers that run together: the app containers and
+/// sidecars (init containers with `restartPolicy: Always`). One container
+/// without a limit leaves the pod without one; a request left out defaults
+/// to the limit, as the API server does.
+pub fn bounds(pod: &Value, resource: &str) -> Bounds {
+    let spec = &pod["spec"];
+    let sidecars = spec["initContainers"].as_array().into_iter().flatten().filter(|c| c["restartPolicy"] == "Always");
+    let mut limit = Some(0i128);
+    let mut request = None;
+    for c in spec["containers"].as_array().into_iter().flatten().chain(sidecars) {
+        let q = |kind: &str| crate::kube::quantity::milli_of(&c["resources"][kind][resource]);
+        let (l, r) = (q("limits"), q("requests"));
+        limit = limit.zip(l).map(|(a, b)| a + b);
+        if let Some(r) = r.or(l) {
+            request = Some(request.unwrap_or(0) + r);
+        }
+    }
+    // No containers at all: nothing is known.
+    if spec["containers"].as_array().is_none_or(|c| c.is_empty()) {
+        limit = None;
+    }
+    let units = |m: i128| m as f64 / 1000.0;
+    Bounds { limit: limit.map(units), request: request.map(units) }
 }
 
 /// A cluster-wide log search into the log view (following).
@@ -235,5 +271,28 @@ mod tests {
         assert_eq!(s.len(), POINTS as usize + 1);
         assert_eq!((s[0], s[POINTS as usize - 1], s[POINTS as usize]), (Some(1.0), Some(2.0), Some(3.0)));
         assert_eq!(s[1], None);
+    }
+
+    #[test]
+    fn bounds_sum_the_containers_that_run_together() {
+        let pod = json!({"spec": {
+            "initContainers": [
+                {"name": "migrate", "resources": {"limits": {"cpu": "4", "memory": "4Gi"}}},
+                {"name": "proxy", "restartPolicy": "Always", "resources": {"limits": {"cpu": "100m", "memory": "64Mi"}}},
+            ],
+            "containers": [
+                {"name": "app", "resources": {"requests": {"cpu": "250m", "memory": "128Mi"}, "limits": {"cpu": "500m", "memory": "256Mi"}}},
+                {"name": "log", "resources": {"requests": {"cpu": "50m"}, "limits": {"memory": "32Mi"}}},
+            ],
+        }});
+        // The one-off init container does not count; the sidecar does.
+        // log has no CPU limit: the pod has none.
+        assert_eq!(bounds(&pod, "cpu"), Bounds { limit: None, request: Some(0.4) });
+        let mi = 1024.0 * 1024.0;
+        assert_eq!(bounds(&pod, "memory"), Bounds { limit: Some(352.0 * mi), request: Some((128.0 + 32.0 + 64.0) * mi) });
+        // Nothing set: no limit, no request.
+        let bare = json!({"spec": {"containers": [{"name": "app"}]}});
+        assert_eq!(bounds(&bare, "memory"), Bounds::default());
+        assert_eq!(bounds(&json!({}), "cpu"), Bounds::default());
     }
 }

@@ -351,7 +351,7 @@ kubectl get alertrules -A; kubectl get alertreceivers,silences
 ## In `litek8s ui`
 
 The Observe view (9) shows the active alerts and the pods by CPU or memory
-(`s`) with sparklines of the last 30 minutes; `l` opens every log of the
+(`s`), each against the pod's limit (or request), with sparklines of the last 30 minutes; `l` opens every log of the
 selected pod (gone containers included), `L` searches every pod's logs of
 the last hour by regex, `a` acknowledges the selected pod's alerts, `A`
 all of them. It samples every 10 s while it is on screen and not at all
