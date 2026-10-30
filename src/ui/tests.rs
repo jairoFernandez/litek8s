@@ -96,8 +96,9 @@ fn render(app: &App, w: u16, h: u16) -> String {
 #[test]
 fn every_view_fits_80x24() {
     let mut app = sample_app();
-    for (i, tab) in TABS.iter().enumerate() {
-        app.key(key(char::from(b'1' + i as u8)));
+    with_argo(&mut app);
+    for tab in TABS.iter() {
+        app.key(key(tab.key()));
         assert_eq!(app.tab, *tab);
         let screen = render(&app, 80, 24);
         assert_eq!(screen.lines().count(), 24);
@@ -639,9 +640,10 @@ fn theme(preset: super::theme::Preset, depth: super::theme::Depth, ascii: bool, 
 #[test]
 fn every_view_renders_at_many_sizes() {
     let mut app = sample_app();
+    with_argo(&mut app);
     for (w, h) in [(60, 18), (80, 24), (100, 30), (120, 40), (200, 60)] {
-        for (i, _) in TABS.iter().enumerate() {
-            app.key(key(char::from(b'1' + i as u8)));
+        for tab in TABS.iter() {
+            app.key(key(tab.key()));
             for overlay in [false, true] {
                 if overlay {
                     app.key(key('?'));
@@ -649,7 +651,7 @@ fn every_view_renders_at_many_sizes() {
                 let s = render(&app, w, h);
                 assert!(s.lines().all(|l| l.chars().count() == w as usize), "{w}x{h}:\n{s}");
                 let tabs = if h >= 30 { 1 } else { 0 };
-                assert!(s.lines().nth(tabs).unwrap().contains(&format!("{} ", i + 1)), "{w}x{h}:\n{s}");
+                assert!(s.lines().nth(tabs).unwrap().contains(&format!("{} ", tab.key())), "{w}x{h}:\n{s}");
                 assert!(s.lines().last().unwrap().contains("help"), "{w}x{h}:\n{s}");
                 if overlay {
                     app.key(key('x'));
@@ -746,8 +748,9 @@ fn ascii_mode_draws_only_ascii() {
     let mut app = sample_app();
     let plain = render(&app, 120, 40);
     app.kube.theme = theme(super::theme::Preset::Default, super::theme::Depth::X256, true, None);
-    for (i, _) in TABS.iter().enumerate() {
-        app.key(key(char::from(b'1' + i as u8)));
+    with_argo(&mut app);
+    for tab in TABS.iter() {
+        app.key(key(tab.key()));
         for size in [(80, 24), (120, 40)] {
             let s = render(&app, size.0, size.1);
             assert!(s.is_ascii(), "{}", s.chars().filter(|c| !c.is_ascii()).collect::<String>());
@@ -911,10 +914,11 @@ fn memory_and_disk_bars_name_their_scale() {
 #[ignore]
 fn print_screens() {
     let mut app = sample_app();
+    with_argo(&mut app);
     for (w, h) in [(80, 24), (120, 40)] {
-        for (i, _) in TABS.iter().enumerate() {
-            app.key(key(char::from(b'1' + i as u8)));
-            println!("{w}x{h} tab {}\n{}", i + 1, render(&app, w, h));
+        for tab in TABS.iter() {
+            app.key(key(tab.key()));
+            println!("{w}x{h} tab {}\n{}", tab.key(), render(&app, w, h));
         }
     }
 }
@@ -1354,3 +1358,226 @@ fn home_and_nodes_show_what_the_pods_reserve() {
     assert_eq!(ext.get(&("Node".into(), "CPU LIM".into())).and_then(|m| m.get("lab2-b")).map(String::as_str), Some("1000m 25%"));
 }
 
+
+// ---- the Apps view (Argo CD Applications) ----
+
+fn argo_resources() -> Vec<crate::ui::kube_resources::Resource> {
+    use crate::ui::kube_resources::Resource;
+    vec![
+        Resource { group: "argoproj.io".into(), version: "v1alpha1".into(), plural: "applications".into(), singular: "application".into(), kind: "Application".into(), namespaced: true, verbs: vec!["get".into(), "list".into(), "patch".into()], short: vec!["app".into(), "apps".into()] },
+        Resource { group: "apps".into(), version: "v1".into(), plural: "deployments".into(), singular: "deployment".into(), kind: "Deployment".into(), namespaced: true, verbs: vec!["get".into(), "list".into()], short: vec!["deploy".into()] },
+    ]
+}
+
+fn argo_apps() -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let rev = "0123456789abcdef0123456789abcdef01234567";
+    vec![
+        json!({"metadata": {"namespace": "argocd", "name": "payments", "uid": "p"}, "spec": {"project": "default", "source": {"repoURL": "https://github.com/acme/deploy.git", "path": "apps/payments", "targetRevision": "main"}, "destination": {"server": "https://kubernetes.default.svc", "namespace": "payments"}},
+            "status": {"sync": {"status": "Synced", "revision": rev}, "health": {"status": "Healthy"}, "reconciledAt": "2026-01-01T00:59:40Z",
+                       "operationState": {"phase": "Running", "message": "waiting for healthy state of apps/Deployment/payments", "startedAt": "2026-01-01T00:58:00Z", "operation": {"initiatedBy": {"automated": true}}}}}),
+        json!({"metadata": {"namespace": "argocd", "name": "shop", "uid": "s"}, "spec": {"source": {"repoURL": "https://github.com/acme/deploy.git", "path": "apps/shop", "targetRevision": "main"}, "destination": {"server": "https://kubernetes.default.svc", "namespace": "shop"}, "syncPolicy": {"automated": {"prune": true}}},
+            "status": {"sync": {"status": "Synced", "revision": rev}, "health": {"status": "Healthy"}, "history": [{"id": 4, "revision": rev, "deployedAt": "2026-01-01T00:30:00Z", "initiatedBy": {"automated": true}}]}}),
+        json!({"metadata": {"namespace": "argocd", "name": "web", "uid": "w", "ownerReferences": [{"kind": "ApplicationSet", "name": "envs", "uid": "e1"}]},
+            "spec": {"source": {"repoURL": "https://github.com/acme/deploy.git", "path": "apps/web", "targetRevision": "main"}, "destination": {"server": "https://kubernetes.default.svc", "namespace": "web"}, "syncPolicy": {"automated": {"prune": true, "selfHeal": true}}},
+            "status": {"sync": {"status": "OutOfSync", "revision": rev}, "health": {"status": "Degraded", "message": "Deployment web exceeded its progress deadline"},
+                       "conditions": [{"type": "SyncError", "message": "one or more objects failed to apply", "lastTransitionTime": "2026-01-01T00:55:00Z"}],
+                       "operationState": {"phase": "Failed", "message": "one or more objects failed to apply", "startedAt": "2026-01-01T00:50:00Z", "finishedAt": "2026-01-01T00:51:00Z",
+                                          "operation": {"initiatedBy": {"username": "admin"}},
+                                          "syncResult": {"resources": [{"kind": "Deployment", "namespace": "web", "name": "web", "status": "SyncFailed", "message": "admission webhook denied the request"}]}},
+                       "history": [{"id": 1, "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "deployedAt": "2025-12-31T00:00:00Z", "initiatedBy": {"automated": true}},
+                                   {"id": 2, "revision": rev, "deployedAt": "2026-01-01T00:20:00Z", "initiatedBy": {"username": "admin"}}],
+                       "resources": [{"group": "apps", "kind": "Deployment", "namespace": "web", "name": "web", "status": "OutOfSync", "health": {"status": "Degraded", "message": "exceeded its progress deadline"}},
+                                     {"kind": "Service", "namespace": "web", "name": "web", "status": "Synced", "health": {"status": "Healthy"}},
+                                     {"kind": "ConfigMap", "namespace": "web", "name": "old", "status": "OutOfSync", "requiresPruning": true}]}}),
+    ]
+}
+
+/// The cluster serves Argo CD's Applications (litecd runs them), it is a
+/// litek8s cluster (writable), and the Apps view has a sample.
+fn with_argo(app: &mut App) {
+    use crate::ui::kube::{KMsg, argo_sample};
+    app.kube.reset(None, "litek8s-dev".into());
+    app.apply(Msg::Kube(KMsg::Identified { context: "litek8s-dev".into(), litek8s: true }));
+    app.apply(Msg::Kube(KMsg::Discovery(Ok(argo_resources()))));
+    let set = serde_json::json!({"metadata": {"namespace": "argocd", "name": "envs", "uid": "e1"}, "spec": {"generators": [{"list": {}}]}, "status": {"conditions": [{"type": "ResourcesUpToDate", "status": "True", "message": "All applications have been generated successfully"}]}});
+    app.apply(Msg::Argo(Box::new(argo_sample(argo_apps(), Some(vec![set]), app.now))));
+}
+
+#[test]
+fn apps_view_only_where_the_cluster_serves_applications() {
+    let mut app = sample_app();
+    assert!(!app.visible_tabs().contains(&Tab::Apps));
+    app.key(key('0'));
+    assert_eq!(app.tab, Tab::Home);
+    let s = render(&app, 80, 24);
+    assert!(!s.lines().next().unwrap().contains("0 Apps"), "{s}");
+    with_argo(&mut app);
+    assert!(app.visible_tabs().contains(&Tab::Apps));
+    app.key(key('0'));
+    assert_eq!(app.tab, Tab::Apps);
+    // Another cluster, without them: the view goes away.
+    app.kube.reset(None, "other".into());
+    app.apply(Msg::Kube(crate::ui::kube::KMsg::Discovery(Ok(Vec::new()))));
+    assert_eq!(app.tab, Tab::Home);
+    assert!(!app.visible_tabs().contains(&Tab::Apps));
+}
+
+#[test]
+fn apps_lists_sync_health_revision_and_what_goes_wrong() {
+    let mut app = sample_app();
+    with_argo(&mut app);
+    app.key(key('0'));
+    let s = render(&app, 80, 24);
+    assert!(s.lines().next().unwrap().contains("0 Apps"), "{s}");
+    assert!(s.contains("Applications · litecd latest · argocd") && s.contains("3 apps · 1 degraded · 1 OutOfSync"), "{s}");
+    let web = s.lines().find(|l| l.contains(" web ")).unwrap_or_else(|| panic!("{s}"));
+    assert!(web.contains("✕") && web.contains("OutOfSync") && web.contains("Degraded") && web.contains("0123456") && web.contains("9m") && web.contains("sync failed"), "{web}");
+    let pay = s.lines().find(|l| l.contains("payments")).unwrap();
+    assert!(pay.contains("◐") && pay.contains("sync running"), "{pay}");
+    // The selected app's source, destination and policy under the list.
+    assert!(s.contains("acme/deploy apps/payments@main") || s.contains("github.com/acme/deploy apps/payments@main"), "{s}");
+    assert!(s.contains("in-cluster/payments · manual"), "{s}");
+    // Wide: project and source columns.
+    let w = render(&app, 140, 40);
+    assert!(w.contains("PROJECT") && w.contains("acme/deploy apps/web@main"), "{w}");
+    // `/` filters.
+    app.key(key('/'));
+    for c in "shop".chars() {
+        app.key(key(c));
+    }
+    app.key(code(KeyCode::Enter));
+    assert_eq!(app.list_len(), 1);
+    app.key(code(KeyCode::Esc));
+    assert_eq!(app.list_len(), 3);
+    // A: the ApplicationSets, with the apps they own.
+    app.key(key('A'));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("ApplicationSets") && s.contains("argocd/envs") && s.contains("list") && s.contains("All applications"), "{s}");
+    app.key(key('A'));
+    assert!(render(&app, 80, 24).contains("Applications · litecd"));
+}
+
+#[test]
+fn apps_detail_shows_resources_history_and_the_last_sync() {
+    let mut app = sample_app();
+    with_argo(&mut app);
+    app.key(key('0'));
+    app.key(key('j'));
+    app.key(key('j'));
+    assert_eq!(app.key(code(KeyCode::Enter)), vec![Effect::ArgoFocus(Some(("argocd".into(), "web".into())))]);
+    let s = render(&app, 80, 24);
+    assert!(s.contains("app argocd/web") && s.contains("OutOfSync · Degraded"), "{s}");
+    assert!(s.contains("auto (prune, self-heal)") && s.contains("✕ Failed (admin)") && s.contains("SyncError"), "{s}");
+    assert!(s.contains("Deployment") && s.contains("web/web") && s.contains("exceeded its progress") && s.contains("requires pruning") && s.contains("1/3 synced"), "{s}");
+    // h: the history, newest first; then the last sync's result.
+    app.key(key('h'));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("sync history") && s.contains("2 deploys"), "{s}");
+    let first = s.lines().position(|l| l.contains("2  0123456")).unwrap_or_else(|| panic!("{s}"));
+    assert!(s.lines().nth(first).unwrap().contains("admin") && s.lines().position(|l| l.contains("1  aaaaaaa")).unwrap() > first, "{s}");
+    app.key(key('h'));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("last sync result") && s.contains("SyncFailed") && s.contains("admission webhook"), "{s}");
+    app.key(key('h'));
+    // enter on a resource: describe it in the Kubernetes view.
+    let effects = app.key(code(KeyCode::Enter));
+    assert_eq!(app.tab, Tab::Kube);
+    assert!(matches!(&effects[..], [Effect::Kube(crate::ui::kube::KEffect::Describe { obj, .. })] if obj.res.kind == "Deployment" && obj.name == "web" && obj.ns == "web"), "{effects:?}");
+    // Closing it comes back to the app; esc again to the list, where it was.
+    app.key(code(KeyCode::Esc));
+    assert_eq!(app.tab, Tab::Apps);
+    assert!(app.argo.detail.is_some());
+    assert_eq!(app.key(code(KeyCode::Esc)), vec![Effect::ArgoFocus(None)]);
+    assert_eq!(app.argo.detail, None);
+    assert_eq!(super::argo::name(app.argo_selected().unwrap()), "web");
+    // An app that is gone says so.
+    app.key(code(KeyCode::Enter));
+    app.apply(Msg::Argo(Box::new(crate::ui::kube::argo_sample(Vec::new(), None, app.now))));
+    assert!(render(&app, 80, 24).contains("argocd/web is gone"));
+}
+
+#[test]
+fn apps_sync_asks_with_prune_and_force_refresh_and_terminate() {
+    use crate::ui::kube::KEffect;
+    let mut app = sample_app();
+    with_argo(&mut app);
+    // Argo CD runs them here: force and terminate exist (litecd has neither).
+    app.argo.sample.controller = Some(crate::ui::argo::Controller { name: "Argo CD".into(), version: "v3.1.0".into(), namespace: "argocd".into() });
+    app.key(key('0'));
+    app.key(key('G'));
+    // s: the sync dialog; p and f turn prune and force on.
+    assert!(app.key(key('s')).is_empty());
+    assert!(matches!(&app.overlay, Overlay::Sync { prune: false, force: false, objs } if objs[0].name == "web"));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("Sync app/argocd/web?") && s.contains("[ ] p prune") && s.contains("[ ] f force"), "{s}");
+    app.key(key('p'));
+    app.key(key('f'));
+    assert!(render(&app, 80, 24).contains("[x] p prune"));
+    let effects = app.key(key('y'));
+    assert!(matches!(&effects[..], [Effect::Kube(KEffect::AppSync { prune: true, force: true, objs })] if objs.len() == 1 && objs[0].ns == "argocd"), "{effects:?}");
+    // n cancels.
+    app.key(key('s'));
+    assert!(app.key(key('n')).is_empty());
+    assert_eq!(app.overlay, Overlay::None);
+    // r / R: refresh, hard refresh (no question: they only compare again).
+    assert!(matches!(&app.key(key('r'))[..], [Effect::Kube(KEffect::AppRefresh { hard: false, .. })]));
+    assert!(matches!(&app.key(key('R'))[..], [Effect::Kube(KEffect::AppRefresh { hard: true, .. })]));
+    // T: only a running sync, after asking.
+    assert!(app.key(key('T')).is_empty());
+    assert_eq!(app.overlay, Overlay::None);
+    assert!(app.status.as_ref().is_some_and(|(m, _)| m.contains("no sync running")));
+    app.key(key('g'));
+    app.key(key('T'));
+    let Overlay::Confirm { title, lines, effect } = app.overlay.clone() else { panic!("{:?}", app.overlay) };
+    assert!(title == "Terminate the sync of app/argocd/payments?" && lines.iter().any(|l| l.contains("waiting for healthy state")), "{lines:?}");
+    assert!(matches!(effect, Effect::Kube(KEffect::AppTerminate(o)) if o.name == "payments"));
+    app.key(key('n'));
+    // D: the diff with git, in the Kubernetes view's pager.
+    let effects = app.key(key('D'));
+    assert_eq!(app.tab, Tab::Kube);
+    assert!(matches!(&effects[..], [Effect::Kube(KEffect::AppDiff { obj, .. })] if obj.name == "payments"), "{effects:?}");
+}
+
+#[test]
+fn apps_on_litecd_have_no_force_or_terminate() {
+    use crate::ui::kube::KEffect;
+    let mut app = sample_app();
+    with_argo(&mut app);
+    app.key(key('0'));
+    app.key(key('G'));
+    app.key(key('s'));
+    app.key(key('f'));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("not available: litecd") && !s.contains("[x] f force"), "{s}");
+    assert!(matches!(&app.key(key('y'))[..], [Effect::Kube(KEffect::AppSync { force: false, .. })]));
+    app.key(key('g'));
+    assert!(app.key(key('T')).is_empty());
+    assert_eq!(app.overlay, Overlay::None);
+    assert!(app.status.as_ref().is_some_and(|(m, _)| m.contains("litecd cannot terminate")), "{:?}", app.status);
+}
+
+#[test]
+fn apps_changes_are_refused_on_read_only_clusters() {
+    let mut app = sample_app();
+    with_argo(&mut app);
+    app.apply(Msg::Kube(crate::ui::kube::KMsg::Identified { context: "litek8s-dev".into(), litek8s: false }));
+    app.key(key('0'));
+    for k in ['s', 'r', 'R'] {
+        assert!(app.key(key(k)).is_empty(), "{k}");
+        assert_eq!(app.overlay, Overlay::None);
+        assert!(app.status.as_ref().is_some_and(|(m, e)| *e && m.contains("read-only")), "{:?}", app.status);
+    }
+    // Reads still work: the detail, the diff.
+    assert!(matches!(&app.key(code(KeyCode::Enter))[..], [Effect::ArgoFocus(Some(_))]));
+}
+
+#[test]
+fn apps_say_why_when_they_cannot_be_read() {
+    let mut app = sample_app();
+    with_argo(&mut app);
+    app.key(key('0'));
+    app.apply(Msg::Argo(Box::new(super::argo::ArgoSample { error: Some("applications.argoproj.io is forbidden: User \"dev\" cannot list".into()), ..Default::default() })));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("is forbidden") && s.contains("Argo CD's or litecd's"), "{s}");
+}

@@ -928,7 +928,7 @@ impl Server {
         let res = gitops::resources(&app);
         let out_of_sync: Vec<String> = res.iter().filter(|x| x["sync"] == "OutOfSync" && x.get("requiresPruning").is_none()).map(res_label).collect();
         let to_prune: Vec<String> = res.iter().filter(|x| x.get("requiresPruning").is_some()).map(res_label).collect();
-        let mut would = json!({"would_sync": r.label(), "context": k.context, "operation": gitops::sync_operation(&app, "litek8s-mcp", prune, revision), "out_of_sync": out_of_sync});
+        let mut would = json!({"would_sync": r.label(), "context": k.context, "operation": gitops::sync_operation(&app, "litek8s-mcp", prune, false, revision), "out_of_sync": out_of_sync});
         if prune {
             would["would_prune"] = json!(to_prune);
         } else if !to_prune.is_empty() {
@@ -937,7 +937,7 @@ impl Server {
         if let Err(preview) = guard::confirmed(a, would) {
             return Ok(preview);
         }
-        let msg = gitops::sync(&k.ep, &r, "litek8s-mcp", prune, revision).await?;
+        let msg = gitops::sync(&k.ep, &r, "litek8s-mcp", prune, false, revision).await?;
         let wait = a.get("wait_seconds").and_then(Value::as_u64).unwrap_or(0);
         if wait == 0 {
             return Ok(json!({"started": true, "message": msg, "hint": "application_status shows its progress"}));

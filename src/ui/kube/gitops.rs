@@ -80,9 +80,11 @@ pub fn app_health(app: &Value) -> Health {
 }
 
 /// The `operation` a manual sync writes, as the argocd CLI does: the app's
-/// sync options, the hook strategy; `prune` deletes what git no longer has.
-pub fn sync_operation(app: &Value, user: &str, prune: bool, revision: Option<&str>) -> Value {
-    let mut sync = json!({"syncStrategy": {"hook": {}}});
+/// sync options, the hook strategy; `prune` deletes what git no longer has,
+/// `force` replaces what cannot be patched (deletes and recreates it, as
+/// `argocd app sync --force`).
+pub fn sync_operation(app: &Value, user: &str, prune: bool, force: bool, revision: Option<&str>) -> Value {
+    let mut sync = if force { json!({"syncStrategy": {"hook": {"force": true}}}) } else { json!({"syncStrategy": {"hook": {}}}) };
     if let Some(o) = app.pointer("/spec/syncPolicy/syncOptions").and_then(Value::as_array).filter(|o| !o.is_empty()) {
         sync["syncOptions"] = json!(o);
     }
@@ -96,15 +98,16 @@ pub fn sync_operation(app: &Value, user: &str, prune: bool, revision: Option<&st
 }
 
 /// Start a sync; refused while another operation runs.
-pub async fn sync(ep: &Endpoint, obj: &ObjRef, user: &str, prune: bool, revision: Option<&str>) -> Result<String> {
+pub async fn sync(ep: &Endpoint, obj: &ObjRef, user: &str, prune: bool, force: bool, revision: Option<&str>) -> Result<String> {
     let path = obj.res.object_path(&obj.ns, &obj.name);
     let app = ep.json(Method::GET, &path, None).await?;
     if app["operation"].is_object() {
         bail!("{} already has an operation running", obj.label());
     }
-    let patch = json!({"operation": sync_operation(&app, user, prune, revision)});
+    let patch = json!({"operation": sync_operation(&app, user, prune, force, revision)});
     ep.json_typed(Method::PATCH, &path, "application/merge-patch+json", Some(&patch)).await?;
-    Ok(format!("{} syncing{}", obj.label(), if prune { " (prune)" } else { "" }))
+    let opts: Vec<&str> = [(prune, "prune"), (force, "force")].into_iter().filter(|(on, _)| *on).map(|(_, w)| w).collect();
+    Ok(format!("{} syncing{}", obj.label(), if opts.is_empty() { String::new() } else { format!(" ({})", opts.join(", ")) }))
 }
 
 /// Ask for a refresh: `normal` compares with git again, `hard` also renders
@@ -416,8 +419,9 @@ mod tests {
     #[test]
     fn a_manual_sync_carries_the_apps_options() {
         let app = json!({"spec": {"syncPolicy": {"syncOptions": ["CreateNamespace=true"]}}});
-        assert_eq!(sync_operation(&app, "litek8s", true, Some("main")), json!({"initiatedBy": {"username": "litek8s"}, "sync": {"syncStrategy": {"hook": {}}, "syncOptions": ["CreateNamespace=true"], "prune": true, "revision": "main"}}));
-        assert_eq!(sync_operation(&json!({}), "u", false, None), json!({"initiatedBy": {"username": "u"}, "sync": {"syncStrategy": {"hook": {}}}}));
+        assert_eq!(sync_operation(&app, "litek8s", true, false, Some("main")), json!({"initiatedBy": {"username": "litek8s"}, "sync": {"syncStrategy": {"hook": {}}, "syncOptions": ["CreateNamespace=true"], "prune": true, "revision": "main"}}));
+        assert_eq!(sync_operation(&json!({}), "u", false, false, None), json!({"initiatedBy": {"username": "u"}, "sync": {"syncStrategy": {"hook": {}}}}));
+        assert_eq!(sync_operation(&json!({}), "u", false, true, None), json!({"initiatedBy": {"username": "u"}, "sync": {"syncStrategy": {"hook": {"force": true}}}}));
     }
 
     #[test]

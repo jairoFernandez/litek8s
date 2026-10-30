@@ -22,6 +22,12 @@ pub mod yaml;
 
 pub use state::{KEffect, KMsg, KubeUi};
 
+/// An Apps view sample of these apps, run by litecd (tests).
+#[cfg(test)]
+pub fn argo_sample(apps: Vec<serde_json::Value>, appsets: Option<Vec<serde_json::Value>>, at: i64) -> crate::ui::argo::ArgoSample {
+    crate::ui::argo::ArgoSample { apps, appsets, controller: Some(crate::ui::argo::Controller { name: "litecd".into(), version: "latest".into(), namespace: "argocd".into() }), error: None, at }
+}
+
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;

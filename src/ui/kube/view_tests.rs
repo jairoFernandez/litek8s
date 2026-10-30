@@ -951,7 +951,7 @@ fn argo_applications_sync_refresh_terminate_and_resources() {
     app.key(key('s'));
     assert!(matches!(&app.kube.overlay, Overlay::Confirm(c) if c.title == "Sync app/argocd/web?"), "{:?}", app.kube.overlay);
     let effects = kube_effects(app.key(key('y')));
-    assert!(matches!(&effects[..], [KEffect::AppSync { objs, prune: false }] if objs.len() == 1 && objs[0].name == "web"), "{effects:?}");
+    assert!(matches!(&effects[..], [KEffect::AppSync { objs, prune: false, .. }] if objs.len() == 1 && objs[0].name == "web"), "{effects:?}");
     app.key(key('p'));
     let effects = kube_effects(app.key(key('y')));
     assert!(matches!(&effects[..], [KEffect::AppSync { prune: true, .. }]), "{effects:?}");

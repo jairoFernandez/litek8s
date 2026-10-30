@@ -22,9 +22,11 @@ pub enum Tab {
     Kube,
     Settings,
     Observe,
+    /// Argo CD's Applications (shown when the cluster serves them).
+    Apps,
 }
 
-pub const TABS: [Tab; 9] = [Tab::Home, Tab::Clusters, Tab::Containers, Tab::Images, Tab::Volumes, Tab::Space, Tab::Kube, Tab::Settings, Tab::Observe];
+pub const TABS: [Tab; 10] = [Tab::Home, Tab::Clusters, Tab::Containers, Tab::Images, Tab::Volumes, Tab::Space, Tab::Kube, Tab::Settings, Tab::Observe, Tab::Apps];
 
 impl Tab {
     pub fn title(self) -> &'static str {
@@ -38,7 +40,15 @@ impl Tab {
             Tab::Kube => "Kubernetes",
             Tab::Settings => "Settings",
             Tab::Observe => "Observe",
+            Tab::Apps => "Apps",
         }
+    }
+
+    /// The key that shows it (and the number the tab bar gives it):
+    /// `1`-`9`, then `0`.
+    pub fn key(self) -> char {
+        let i = self.index();
+        if i == 9 { '0' } else { char::from(b'1' + i as u8) }
     }
 
     /// This machine's Docker (the dev clusters' engine): not part of a
@@ -47,7 +57,7 @@ impl Tab {
         matches!(self, Tab::Containers | Tab::Images | Tab::Volumes | Tab::Space)
     }
 
-    fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         TABS.iter().position(|t| *t == self).unwrap_or(0)
     }
 }
@@ -145,6 +155,9 @@ pub enum Effect {
     Kube(KEffect),
     /// Silence these alerts until they resolve.
     AckAlerts(Vec<AlertRow>),
+    /// The Apps view drills into this app (namespace, name), or back out:
+    /// its resources' health is read from the live objects while it does.
+    ArgoFocus(Option<(String, String)>),
     SaveConfig(DevConfig),
     EditConfig,
     DockerContext(bool),
@@ -186,6 +199,7 @@ pub enum Msg {
     Config(Result<DevConfig, String>),
     Clusters(Box<ClustersSample>),
     Obs(Box<ObsSample>),
+    Argo(Box<super::argo::ArgoSample>),
 }
 
 /// A local cluster in the Clusters view.
@@ -428,6 +442,45 @@ pub enum Overlay {
     Confirm { title: String, lines: Vec<String>, effect: Effect },
     Input { prompt: String, value: String, kind: InputKind, error: Option<String> },
     NewCluster(NewCluster),
+    /// Sync Argo CD apps: `p` and `f` turn prune and force on and off.
+    Sync { objs: Vec<super::kube::state::ObjRef>, prune: bool, force: bool },
+}
+
+/// What the Apps view's detail lists under the app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ArgoPane {
+    #[default]
+    Resources,
+    History,
+    /// The last operation's result per resource.
+    Result,
+}
+
+impl ArgoPane {
+    pub fn title(self) -> &'static str {
+        match self {
+            ArgoPane::Resources => "resources",
+            ArgoPane::History => "sync history",
+            ArgoPane::Result => "last sync result",
+        }
+    }
+}
+
+/// The Apps view: Argo CD's Applications (or ApplicationSets), and one
+/// app's resources, history and last sync.
+#[derive(Debug, Clone, Default)]
+pub struct ArgoView {
+    pub sample: super::argo::ArgoSample,
+    /// The app drilled into (namespace, name).
+    pub detail: Option<(String, String)>,
+    pub pane: ArgoPane,
+    /// ApplicationSets instead of Applications.
+    pub sets: bool,
+    /// The list's selection while the detail shows.
+    list_sel: usize,
+    /// A describe or diff opened in the Kubernetes view from here: closing
+    /// it (back to this many views) comes back.
+    back_to: Option<usize>,
 }
 
 pub struct LogView {
@@ -543,6 +596,8 @@ pub struct App {
     pub obs_by_mem: bool,
     /// The Observe view's namespace (`None`: all).
     pub obs_namespace: Option<String>,
+    /// The Apps view (Argo CD Applications).
+    pub argo: ArgoView,
     pub space_checked: BTreeSet<Reclaim>,
     pub mouse: bool,
     /// What the header shows next to the name when this is not the plain
@@ -632,6 +687,7 @@ impl App {
             obs: ObsSample::default(),
             obs_by_mem: false,
             obs_namespace: None,
+            argo: ArgoView::default(),
             space_checked: [Reclaim::StoppedContainers, Reclaim::DanglingImages, Reclaim::BuildCache].into_iter().collect(),
             mouse: false,
             build: String::new(),
@@ -664,7 +720,7 @@ impl App {
     /// Docker tabs (they come back with a dev cluster, in 2 Clusters).
     /// Each keeps its number either way.
     pub fn visible_tabs(&self) -> Vec<Tab> {
-        TABS.iter().copied().filter(|t| !(t.docker() && self.home.status == DevStatus::Remote)).collect()
+        TABS.iter().copied().filter(|t| !(t.docker() && self.home.status == DevStatus::Remote) && (*t != Tab::Apps || self.argo_res().is_some())).collect()
     }
 
     fn go_tab(&mut self, tab: Tab) {
@@ -672,7 +728,17 @@ impl App {
             self.flash(format!("{} is this machine's Docker, not {}'s: pick a dev cluster in 2 Clusters to use it", tab.title(), self.kube_context), false);
             return;
         }
+        if tab == Tab::Apps && self.argo_res().is_none() {
+            let why = if self.kube.discovered { format!("{} serves no Argo CD Applications (applications.argoproj.io): no Argo CD or litecd there", self.kube_context) } else { "Apps shows once the cluster's API is known (it serves applications.argoproj.io)".to_string() };
+            self.flash(why, false);
+            return;
+        }
         self.tab = tab;
+    }
+
+    /// Argo CD's Application type, when the cluster serves it.
+    pub fn argo_res(&self) -> Option<super::kube::resources::Resource> {
+        self.kube.catalog.list.iter().find(|r| super::kube::gitops::is_app(r)).cloned()
     }
 
     fn step_tab(&mut self, step: isize) {
@@ -789,6 +855,7 @@ impl App {
             Tab::Kube => 0,
             Tab::Settings => SETTINGS.len(),
             Tab::Observe => self.visible_obs_pods().len(),
+            Tab::Apps => self.argo_len(),
         }
     }
 
@@ -1014,6 +1081,8 @@ impl App {
             Msg::KubeDown(e) => {
                 self.kube_error = Some(e);
                 self.pods.clear();
+                // Another cluster (or none): the Apps view starts over.
+                self.argo = ArgoView::default();
                 self.relink();
             }
             Msg::Kube(m) => {
@@ -1024,6 +1093,10 @@ impl App {
                 self.kube.apply(m);
                 if let Some((text, error)) = self.kube.flash.take() {
                     self.flash(text, error);
+                }
+                // A cluster without Argo CD's Applications has no Apps view.
+                if self.tab == Tab::Apps && self.kube.discovered && self.argo_res().is_none() {
+                    self.tab = Tab::Home;
                 }
             }
             Msg::Home(sample) => {
@@ -1082,6 +1155,15 @@ impl App {
             Msg::Obs(sample) => {
                 self.obs = *sample;
                 if self.tab == Tab::Observe {
+                    self.clamp();
+                }
+            }
+            Msg::Argo(sample) => {
+                self.argo.sample = *sample;
+                if self.argo.sets && self.argo.sample.appsets.as_ref().is_none_or(Vec::is_empty) {
+                    self.argo.sets = false;
+                }
+                if self.tab == Tab::Apps {
                     self.clamp();
                 }
             }
@@ -1392,6 +1474,25 @@ impl App {
                 };
             }
             o @ Overlay::NewCluster(_) => self.overlay = o,
+            Overlay::Sync { objs, prune, force } => {
+                return match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => vec![Effect::Kube(KEffect::AppSync { objs, prune, force })],
+                    KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Char('q') => Vec::new(),
+                    KeyCode::Char('p') => {
+                        self.overlay = Overlay::Sync { objs, prune: !prune, force };
+                        Vec::new()
+                    }
+                    KeyCode::Char('f') => {
+                        let force = !force && !self.argo.sample.litecd();
+                        self.overlay = Overlay::Sync { objs, prune, force };
+                        Vec::new()
+                    }
+                    _ => {
+                        self.overlay = Overlay::Sync { objs, prune, force };
+                        Vec::new()
+                    }
+                };
+            }
             Overlay::Input { prompt, mut value, kind, error } => {
                 match key.code {
                     KeyCode::Esc => {
@@ -1422,11 +1523,19 @@ impl App {
         if self.logs.is_some() {
             return self.log_key(key);
         }
+        if self.tab != Tab::Kube {
+            self.argo.back_to = None;
+        }
         if self.tab == Tab::Kube {
             self.kube.now = self.now;
             let handled = self.kube.key(key);
             if let Some((text, error)) = self.kube.flash.take() {
                 self.flash(text, error);
+            }
+            // Closing what the Apps view opened goes back to it.
+            if self.argo.back_to.is_some_and(|d| self.kube.views.len() <= d) {
+                self.argo.back_to = None;
+                self.tab = Tab::Apps;
             }
             if let Some(effects) = handled {
                 return effects;
@@ -1436,6 +1545,7 @@ impl App {
             KeyCode::Char('q') => return vec![Effect::Quit],
             KeyCode::Char('?') | KeyCode::F(1) => self.overlay = Overlay::Help,
             KeyCode::Char(c @ '1'..='9') => self.go_tab(TABS[c as usize - '1' as usize]),
+            KeyCode::Char('0') => self.go_tab(Tab::Apps),
             KeyCode::Tab => self.step_tab(1),
             KeyCode::BackTab => self.step_tab(-1),
             KeyCode::Down | KeyCode::Char('j') => self.move_sel(1),
@@ -1588,6 +1698,7 @@ impl App {
             Tab::Kube => {}
             Tab::Settings => return self.settings_key(code),
             Tab::Observe => return self.obs_key(code),
+            Tab::Apps => return self.argo_key(code),
         }
         Vec::new()
     }
@@ -1639,6 +1750,166 @@ impl App {
                 } else {
                     let lines = mine.iter().map(|a| format!("{} {}", a.name, a.target)).collect();
                     self.confirm("Acknowledge (silence until resolved)?", lines, Effect::AckAlerts(mine));
+                }
+            }
+            _ => {}
+        }
+        Vec::new()
+    }
+
+    // ---- the Apps view ----
+
+    /// The Applications the list shows (indices into the sample), filtered
+    /// by name, namespace, project, sync or health (`/OutOfSync`).
+    pub fn visible_argo_apps(&self) -> Vec<usize> {
+        let apps = &self.argo.sample.apps;
+        (0..apps.len())
+            .filter(|&i| {
+                let a = &apps[i];
+                let project = a.pointer("/spec/project").and_then(serde_json::Value::as_str).unwrap_or_default();
+                self.matches(&[super::argo::name(a), super::argo::namespace(a), project, super::argo::sync_status(a), super::argo::health_status(a)])
+            })
+            .collect()
+    }
+
+    /// The ApplicationSets the list shows, filtered.
+    pub fn visible_argo_sets(&self) -> Vec<usize> {
+        let sets = self.argo.sample.appsets.as_deref().unwrap_or_default();
+        (0..sets.len()).filter(|&i| self.matches(&[super::argo::name(&sets[i]), super::argo::namespace(&sets[i])])).collect()
+    }
+
+    /// The app the detail shows.
+    pub fn argo_detail_app(&self) -> Option<&serde_json::Value> {
+        let (ns, name) = self.argo.detail.as_ref()?;
+        self.argo.sample.apps.iter().find(|a| super::argo::namespace(a) == ns && super::argo::name(a) == name)
+    }
+
+    /// The app the keys act on: the detail's, else the list's selection.
+    pub fn argo_selected(&self) -> Option<&serde_json::Value> {
+        if self.argo.detail.is_some() {
+            return self.argo_detail_app();
+        }
+        if self.argo.sets {
+            return None;
+        }
+        let i = *self.visible_argo_apps().get(self.selected[Tab::Apps.index()])?;
+        self.argo.sample.apps.get(i)
+    }
+
+    fn argo_len(&self) -> usize {
+        if self.argo.detail.is_some() {
+            let Some(app) = self.argo_detail_app() else { return 0 };
+            return match self.argo.pane {
+                ArgoPane::Resources => super::argo::resources(app).len(),
+                ArgoPane::History => super::argo::history(app).len(),
+                ArgoPane::Result => super::argo::sync_result(app).len(),
+            };
+        }
+        if self.argo.sets { self.visible_argo_sets().len() } else { self.visible_argo_apps().len() }
+    }
+
+    fn argo_obj(&self, app: &serde_json::Value) -> Option<super::kube::state::ObjRef> {
+        Some(super::kube::state::ObjRef { res: self.argo_res()?, ns: super::argo::namespace(app).into(), name: super::argo::name(app).into() })
+    }
+
+    /// Whether changes may go to this cluster (as the Kubernetes view
+    /// judges it); says why not.
+    fn argo_writable(&mut self) -> bool {
+        let a = self.kube.access();
+        if a.writable() {
+            return true;
+        }
+        let why = self.kube.refusal(a);
+        self.flash(why, true);
+        false
+    }
+
+    /// Back from the detail to the list (where it was).
+    fn argo_back(&mut self) -> Vec<Effect> {
+        self.argo.detail = None;
+        self.argo.pane = ArgoPane::Resources;
+        self.selected[Tab::Apps.index()] = self.argo.list_sel;
+        self.clamp();
+        vec![Effect::ArgoFocus(None)]
+    }
+
+    fn argo_key(&mut self, code: KeyCode) -> Vec<Effect> {
+        let detail = self.argo.detail.is_some();
+        match code {
+            KeyCode::Esc | KeyCode::Backspace | KeyCode::Left if detail => return self.argo_back(),
+            KeyCode::Char('A') if !detail => {
+                if self.argo.sample.appsets.as_ref().is_none_or(Vec::is_empty) {
+                    self.flash("no ApplicationSets on this cluster", false);
+                } else {
+                    self.argo.sets = !self.argo.sets;
+                    self.selected[Tab::Apps.index()] = 0;
+                }
+                return Vec::new();
+            }
+            KeyCode::Char('h') if detail => {
+                self.argo.pane = match self.argo.pane {
+                    ArgoPane::Resources => ArgoPane::History,
+                    ArgoPane::History => ArgoPane::Result,
+                    ArgoPane::Result => ArgoPane::Resources,
+                };
+                self.selected[Tab::Apps.index()] = 0;
+                return Vec::new();
+            }
+            _ => {}
+        }
+        let Some(app) = self.argo_selected().cloned() else { return Vec::new() };
+        let Some(obj) = self.argo_obj(&app) else { return Vec::new() };
+        match code {
+            KeyCode::Enter | KeyCode::Right if !detail => {
+                self.argo.list_sel = self.sel();
+                self.argo.detail = Some((obj.ns.clone(), obj.name.clone()));
+                self.argo.pane = ArgoPane::Resources;
+                self.selected[Tab::Apps.index()] = 0;
+                return vec![Effect::ArgoFocus(Some((obj.ns, obj.name)))];
+            }
+            // A resource of the app: describe it in the Kubernetes view.
+            KeyCode::Enter if self.argo.pane == ArgoPane::Resources => {
+                let Some(r) = super::argo::resources(&app).into_iter().nth(self.sel()) else { return Vec::new() };
+                let Some(res) = self.kube.catalog.list.iter().find(|x| x.group == r.group && x.kind == r.kind).cloned() else {
+                    self.flash(format!("{} is not a type this cluster serves", r.kind), true);
+                    return Vec::new();
+                };
+                self.argo.back_to = Some(self.kube.views.len());
+                self.tab = Tab::Kube;
+                return self.kube.describe(super::kube::state::ObjRef { res, ns: r.namespace, name: r.name });
+            }
+            KeyCode::Char('d') => {
+                self.argo.back_to = Some(self.kube.views.len());
+                self.tab = Tab::Kube;
+                return self.kube.describe(obj);
+            }
+            KeyCode::Char('D') => {
+                self.argo.back_to = Some(self.kube.views.len());
+                self.tab = Tab::Kube;
+                return self.kube.app_diff(obj);
+            }
+            KeyCode::Char('s') => {
+                if self.argo_writable() {
+                    self.overlay = Overlay::Sync { objs: vec![obj], prune: false, force: false };
+                }
+            }
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                if self.argo_writable() {
+                    return vec![Effect::Kube(KEffect::AppRefresh { objs: vec![obj], hard: code == KeyCode::Char('R') })];
+                }
+            }
+            KeyCode::Char('T') => {
+                if !super::argo::running(&app) {
+                    self.flash(format!("{} has no sync running", obj.label()), false);
+                } else if self.argo.sample.litecd() {
+                    self.flash("litecd cannot terminate a running sync (Argo CD only): it ends on its own or at its retry limit".to_string(), false);
+                } else if self.argo_writable() {
+                    let msg = super::argo::operation(&app).map(|(_, m)| m).unwrap_or_default();
+                    let mut lines = vec!["Stops its running operation (as argocd app terminate-op): what it applied stays.".to_string()];
+                    if !msg.is_empty() {
+                        lines.push(format!("Now: {msg}"));
+                    }
+                    self.confirm(format!("Terminate the sync of {}?", obj.label()), lines, Effect::Kube(KEffect::AppTerminate(obj)));
                 }
             }
             _ => {}

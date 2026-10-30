@@ -154,7 +154,7 @@ pub enum KEffect {
     Drain { nodes: Vec<String> },
     Trigger(ObjRef),
     /// Argo CD Applications: start a sync, ask for a refresh, stop a sync.
-    AppSync { objs: Vec<ObjRef>, prune: bool },
+    AppSync { objs: Vec<ObjRef>, prune: bool, force: bool },
     AppRefresh { objs: Vec<ObjRef>, hard: bool },
     AppTerminate(ObjRef),
     /// An app's published diff into pager `id`.
@@ -2439,7 +2439,7 @@ impl KubeUi {
                 let what = if prune { "Sync and prune" } else { "Sync" };
                 let mut lines = labels(&targets);
                 lines.push(if prune { "Applies what git has and deletes what it no longer has (an operation, as argocd app sync --prune).".into() } else { "Applies what git has (an operation on the app, as argocd app sync).".into() });
-                self.overlay = Overlay::Confirm(Confirm { title: format!("{what} {}?", if targets.len() == 1 { obj.label() } else { format!("{} apps", targets.len()) }), lines, action: ConfirmAction::Run(vec![KEffect::AppSync { objs: targets, prune }]) });
+                self.overlay = Overlay::Confirm(Confirm { title: format!("{what} {}?", if targets.len() == 1 { obj.label() } else { format!("{} apps", targets.len()) }), lines, action: ConfirmAction::Run(vec![KEffect::AppSync { objs: targets, prune, force: false }]) });
                 Vec::new()
             }
             KeyCode::Char('r') | KeyCode::Char('R') => {
@@ -2491,7 +2491,16 @@ impl KubeUi {
         self.overlay = Overlay::Confirm(Confirm { title, lines, action: ConfirmAction::Delete { objs, propagation: Propagation::Background, force } });
     }
 
-    fn describe(&mut self, obj: ObjRef) -> Vec<Effect> {
+    /// An Argo CD app's diff with git in a pager (the Apps view's `D`).
+    pub fn app_diff(&mut self, obj: ObjRef) -> Vec<Effect> {
+        let id = self.id();
+        let mut p = Pager::new(id, format!("diff {} (- live, + git)", obj.label()), PagerKind::Diff);
+        p.obj = Some(obj.clone());
+        self.push(View::Pager(p));
+        vec![k(KEffect::AppDiff { id, obj })]
+    }
+
+    pub fn describe(&mut self, obj: ObjRef) -> Vec<Effect> {
         let id = self.id();
         let mut p = Pager::new(id, format!("describe {}", obj.label()), PagerKind::Describe);
         p.obj = Some(obj.clone());

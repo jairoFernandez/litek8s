@@ -8,6 +8,7 @@
 //! same way. See docs/ui.md.
 
 pub mod app;
+mod argo;
 pub(crate) mod client;
 mod clusters;
 mod ctx;
@@ -142,12 +143,17 @@ pub async fn run(args: UiArgs) -> Result<()> {
     let obs_visible = Arc::new(AtomicBool::new(false));
     let wake_obs = Arc::new(Notify::new());
     let obs_ep: obs::Shared = Arc::new(Mutex::new(fixed.as_ref().map(|(ep, _)| ep.clone())));
+    let argo_visible = Arc::new(AtomicBool::new(false));
+    let wake_argo = Arc::new(Notify::new());
+    let argo_focus: argo::SharedFocus = Arc::new(Mutex::new(argo::Focus::default()));
     let budgets = docker::Budgets::default();
     let docker_task = docker::spawn(docker_ep.clone(), tx.clone(), refresh.clone(), budgets.clone());
     let tasks = vec![
         home::spawn(tx.clone(), local, pace.clone(), wake_home.clone(), active.clone(), fixed.as_ref().filter(|_| !local).map(|(ep, _)| ep.clone())),
         clusters::spawn(tx.clone(), clusters_visible.clone(), wake_clusters.clone()),
         obs::spawn(tx.clone(), obs_visible.clone(), wake_obs.clone(), obs_ep.clone()),
+        // The same API server as Observe's (it follows context switches).
+        argo::spawn(tx.clone(), argo_visible.clone(), wake_argo.clone(), obs_ep.clone(), argo_focus.clone()),
     ];
     let kube_watches = if fixed.is_some() { kube::spawn_watches(kube_ep.clone(), tx.clone()) } else { Vec::new() };
     if fixed.is_none() {
@@ -186,6 +192,9 @@ pub async fn run(args: UiArgs) -> Result<()> {
         obs_visible,
         wake_obs,
         obs_ep,
+        argo_visible,
+        wake_argo,
+        argo_focus,
         kube: kube_ep,
         follow_dev: fixed.is_none(),
         kube_port: None,
@@ -419,6 +428,11 @@ struct Runtime {
     obs_visible: Arc<AtomicBool>,
     wake_obs: Arc<Notify>,
     obs_ep: obs::Shared,
+    /// The Apps view samples only while shown, and reads the health of
+    /// the app it drills into.
+    argo_visible: Arc<AtomicBool>,
+    wake_argo: Arc<Notify>,
+    argo_focus: argo::SharedFocus,
     kube: Endpoint,
     /// The Kubernetes API is the local dev cluster's, wherever it runs.
     follow_dev: bool,
@@ -553,6 +567,10 @@ impl Runtime {
             if self.obs_visible.swap(on_obs, Ordering::Relaxed) != on_obs && on_obs {
                 self.wake_obs.notify_one();
             }
+            let on_argo = app.tab == Tab::Apps && app.logs.is_none();
+            if self.argo_visible.swap(on_argo, Ordering::Relaxed) != on_argo && on_argo {
+                self.wake_argo.notify_one();
+            }
             for e in effects {
                 if self.effect(e, terminal, app).await? {
                     return Ok(());
@@ -577,6 +595,7 @@ impl Runtime {
             Msg::Home(_) => matches!(app.tab, Tab::Home | Tab::Space | Tab::Settings) && app.logs.is_none(),
             Msg::Clusters(_) => app.tab == Tab::Clusters && app.logs.is_none(),
             Msg::Obs(_) => app.tab == Tab::Observe && app.logs.is_none(),
+            Msg::Argo(_) => app.tab == Tab::Apps && app.logs.is_none(),
             Msg::Projects { .. } => app.tab == Tab::Containers && app.logs.is_none(),
             Msg::LogLines(..) | Msg::LogEnd(..) => app.logs.is_some(),
             Msg::Kube(kube::KMsg::Data(..) | kube::KMsg::LogLines { .. } | kube::KMsg::Ext { .. } | kube::KMsg::Forwards(_)) => app.tab == Tab::Kube && app.logs.is_none(),
@@ -596,6 +615,7 @@ impl Runtime {
             Effect::Quit => return Ok(true),
             Effect::Refresh => {
                 self.wake_obs.notify_one();
+                self.wake_argo.notify_one();
                 self.refresh.notify_one();
                 self.wake_home.notify_one();
                 self.wake_clusters.notify_one();
@@ -777,7 +797,21 @@ impl Runtime {
                     wake.notify_one();
                 });
             }
-            Effect::Kube(e) => kube::rt::effect(self, e, terminal, app).await?,
+            Effect::ArgoFocus(focus) => {
+                let mut f = self.argo_focus.lock().unwrap();
+                f.kinds = if focus.is_some() { app.kube.catalog.list.clone() } else { Vec::new() };
+                f.app = focus;
+                drop(f);
+                self.wake_argo.notify_one();
+            }
+            Effect::Kube(e) => {
+                // An app synced, refreshed or stopped: show what follows soon.
+                let argo = matches!(e, kube::KEffect::AppSync { .. } | kube::KEffect::AppRefresh { .. } | kube::KEffect::AppTerminate(_));
+                kube::rt::effect(self, e, terminal, app).await?;
+                if argo {
+                    self.wake_argo.notify_one();
+                }
+            }
         }
         Ok(false)
     }
