@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.16
 
 - **`litek8s ui` has an Apps view (`0`) for Argo CD and litecd**: on
   clusters that serve `applications.argoproj.io` a tenth tab lists every
