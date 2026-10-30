@@ -189,29 +189,35 @@ pub fn fs_usage(path: &Path) -> Option<(u64, u64)> {
 /// big tree.
 pub const REFRESH: Duration = Duration::from_secs(60);
 
+/// The last walk of each directory, and the ones being walked.
 struct Cache {
-    last: Option<(Instant, NodeDisk)>,
-    running: bool,
+    last: Vec<(String, Instant, NodeDisk)>,
+    running: Vec<String>,
 }
 
-static CACHE: Mutex<Cache> = Mutex::new(Cache { last: None, running: false });
+static CACHE: Mutex<Cache> = Mutex::new(Cache { last: Vec::new(), running: Vec::new() });
 
-/// The node's disk, from the last walk; a walk starts in the background
-/// when that one is older than [`REFRESH`] (the first request waits for it).
+/// The node's disk under `dir`, from the last walk; a walk starts in the
+/// background when that one is older than [`REFRESH`] (the first request
+/// waits for it). Each directory has its own walk.
 pub async fn cached(dir: PathBuf, node: String) -> NodeDisk {
+    let key = dir.display().to_string();
     let (have, stale) = {
         let c = CACHE.lock().unwrap();
-        let have = c.last.as_ref().filter(|(_, d)| d.data_dir == dir.display().to_string()).map(|(_, d)| d.clone());
-        let stale = c.last.as_ref().is_none_or(|(at, d)| at.elapsed() > REFRESH || d.data_dir != dir.display().to_string());
-        (have, stale && !c.running)
+        let entry = c.last.iter().find(|(k, _, _)| *k == key);
+        let have = entry.map(|(_, _, d)| d.clone());
+        let stale = entry.is_none_or(|(_, at, _)| at.elapsed() > REFRESH);
+        (have, stale && !c.running.contains(&key))
     };
     if stale {
-        CACHE.lock().unwrap().running = true;
+        CACHE.lock().unwrap().running.push(key.clone());
+        let k = key.clone();
         let job = tokio::task::spawn_blocking(move || {
             let d = walk(&dir, &node);
             let mut c = CACHE.lock().unwrap();
-            c.last = Some((Instant::now(), d.clone()));
-            c.running = false;
+            c.last.retain(|(x, _, _)| *x != k);
+            c.last.push((k.clone(), Instant::now(), d.clone()));
+            c.running.retain(|x| *x != k);
             d
         });
         if have.is_none() {
@@ -221,16 +227,40 @@ pub async fn cached(dir: PathBuf, node: String) -> NodeDisk {
     match have {
         Some(d) => d,
         None => {
-            // Another request is walking: wait for it.
+            // Another request is walking it: wait for that walk.
             for _ in 0..600 {
                 tokio::time::sleep(Duration::from_millis(100)).await;
-                if let Some((_, d)) = CACHE.lock().unwrap().last.clone() {
-                    return d;
+                if let Some((_, _, d)) = CACHE.lock().unwrap().last.iter().find(|(k, _, _)| *k == key) {
+                    return d.clone();
                 }
             }
             NodeDisk::default()
         }
     }
+}
+
+/// One node's disk from walks of several of its directories (a server's
+/// data directory and, beside it, its node agent's): the categories add
+/// up; a filesystem two of them share counts once.
+pub fn merge(parts: &[NodeDisk], node: &str) -> NodeDisk {
+    let mut d = sum(parts, node);
+    let mut seen: Vec<(u64, u64)> = Vec::new();
+    d.fs_used = 0;
+    d.fs_size = 0;
+    for p in parts {
+        // Same size: the same filesystem, measured twice (used may move a bit
+        // between the two statvfs calls: the larger one).
+        match seen.iter_mut().find(|(_, size)| *size == p.fs_size) {
+            Some((used, _)) => *used = (*used).max(p.fs_used),
+            None => seen.push((p.fs_used, p.fs_size)),
+        }
+    }
+    for (used, size) in seen {
+        d.fs_used += used;
+        d.fs_size += size;
+    }
+    d.data_dir = parts.iter().map(|p| p.data_dir.as_str()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join(", ");
+    d
 }
 
 /// litek8s's own files on this machine: the binary and, on macOS, the
@@ -372,6 +402,16 @@ pub fn node_breakdown(n: &NodeDisk, r: &Reclaimable, what: &str) -> Breakdown {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_adds_directories_and_counts_a_shared_filesystem_once() {
+        let api = NodeDisk { node: "s".into(), objects: 50, other: 1, data_dir: "/var/lib/litek8s/apiserver".into(), fs_used: 1000, fs_size: 8000, ..Default::default() };
+        let agent = NodeDisk { node: "s".into(), images: 17_000, volumes: 300, data_dir: "/var/lib/litek8s/node-agent".into(), fs_used: 1002, fs_size: 8000, ..Default::default() };
+        let d = merge(&[api, agent], "s");
+        assert_eq!((d.images, d.volumes, d.objects, d.total()), (17_000, 300, 50, 17_351));
+        assert_eq!((d.fs_used, d.fs_size), (1002, 8000), "one filesystem, measured twice");
+        assert_eq!(d.data_dir, "/var/lib/litek8s/apiserver, /var/lib/litek8s/node-agent");
+    }
 
     #[test]
     fn categories_by_place() {

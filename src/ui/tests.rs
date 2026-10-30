@@ -610,8 +610,9 @@ fn home_explains_cpu_and_disk_with_b() {
     // `b`: CPU first, then disk.
     app.key(key('b'));
     let s = render(&app, 80, 24);
-    assert!(s.contains("CPU · 30.0% of one CPU = 8% of 4 CPUs") && s.contains("bar: 1 CPU"), "{s}");
-    assert!(s.contains("pod default/web-7d9") && s.contains("20.0%") && s.contains("VM overhead"), "{s}");
+    // Rows and bars in shares of the VM's 4 CPUs, as the meter above.
+    assert!(s.contains("CPU · 7.5% of 4 CPUs = 30% of one") && s.contains("bar: 4 CPUs"), "{s}");
+    assert!(s.contains("pod default/web-7d9") && s.contains("5.0%") && s.contains("VM overhead"), "{s}");
     app.key(key('b'));
     let s = render(&app, 80, 24);
     assert!(s.contains("Disk · 990 MB (litek8s and its VM disk)"), "{s}");
@@ -848,34 +849,32 @@ fn row<'a>(s: &'a str, label: &str) -> (String, String) {
     (number, bar)
 }
 
-/// The bars say what the numbers say: a full bar is one CPU (the unit the
-/// rows are in, named in the box's title), not the largest row; a value
-/// that rounds to nothing prints `<0.1%` with at most a hairline, and zero
-/// draws no bar.
+/// The bars say what the numbers say: a full bar is every CPU of what Home
+/// shows (16 here), the unit the rows are in and the meter's; a value that
+/// rounds to nothing prints `<0.1%` with at most a hairline, and zero draws
+/// no bar. (Rows come in % of one CPU: 1600% is all 16.)
 #[test]
 fn cpu_bars_agree_with_their_numbers() {
-    // Tiny values (the reported screen: an idle sandbox on 16 CPUs).
-    let s = cpu_screen(&[("litek8s (dev)", 0.1), ("pods & containers", 0.0), ("sandbox", 0.03)]);
-    assert!(s.contains("bar: 1 CPU"), "the scale is named:\n{s}");
+    // Tiny values (an idle sandbox on 16 CPUs).
+    let s = cpu_screen(&[("litek8s (dev)", 1.6), ("pods & containers", 0.0), ("sandbox", 0.03)]);
+    assert!(s.contains("bar: 16 CPUs"), "the scale is named:\n{s}");
     assert_eq!(row(&s, "litek8s (dev)"), ("0.1%".into(), "▏".into()), "{s}");
     assert_eq!(row(&s, "pods & containers"), ("0.0%".into(), "".into()), "{s}");
     assert_eq!(row(&s, "sandbox"), ("<0.1%".into(), "▏".into()), "{s}");
-    assert!(s.contains("CPU · 0.1% of one CPU = <1% of 16 CPUs"), "{s}");
+    assert!(s.contains("CPU · 0.1% of 16 CPUs = 2% of one"), "{s}");
     // All zero: no bars at all.
     let s = cpu_screen(&[("litek8s (dev)", 0.0), ("pods & containers", 0.0), ("sandbox", 0.0)]);
     for l in ["litek8s (dev)", "pods & containers", "sandbox"] {
         assert_eq!(row(&s, l), ("0.0%".into(), "".into()), "{s}");
     }
-    // One dominant row: its bar is its share of a CPU, the others stay
-    // slivers (not scaled up to the largest), past one CPU it is full.
-    let s = cpu_screen(&[("litek8s (dev)", 0.5), ("pods & containers", 50.0), ("sandbox", 1.2)]);
+    // One dominant row: its bar is its share of the 16 CPUs, the others
+    // stay slivers (not scaled up to the largest); all 16 is a full bar.
+    let s = cpu_screen(&[("litek8s (dev)", 8.0), ("pods & containers", 800.0), ("sandbox", 19.2)]);
     let (n, bar) = row(&s, "pods & containers");
     assert_eq!(n, "50.0%");
-    let width = row(&cpu_screen(&[("litek8s (dev)", 0.0), ("pods & containers", 100.0), ("sandbox", 0.0)]), "pods & containers").1.chars().count();
+    let width = row(&cpu_screen(&[("litek8s (dev)", 0.0), ("pods & containers", 1600.0), ("sandbox", 0.0)]), "pods & containers").1.chars().count();
     assert_eq!(bar.chars().filter(|c| *c == '█').count(), width / 2, "half of a full bar ({width}): {s}");
     assert_eq!(row(&s, "litek8s (dev)").1, "▏", "{s}");
-    let s = cpu_screen(&[("litek8s (dev)", 0.5), ("pods & containers", 250.0), ("sandbox", 1.2)]);
-    assert_eq!(row(&s, "pods & containers"), ("250.0%".into(), "█".repeat(width)), "{s}");
     assert_eq!(row(&s, "sandbox").1.chars().count(), 1, "{s}");
 }
 
@@ -1320,7 +1319,8 @@ fn home_and_nodes_show_what_the_pods_reserve() {
     use super::model::{Alloc, NodeAlloc};
     let mut app = remote_app();
     let gib = 1073741824.0;
-    let node = |n: &str| crate::dev::memory::NodeMemory { node: n.into(), usage: crate::dev::memory::Usage { litek8s: 8 << 20, pods: 1 << 30, docker: 0, cache: 0 }, meminfo: None };
+    let meminfo = crate::dev::memory::MemInfo { total: 8 << 30, free: 6 << 30, available: 7 << 30, ..Default::default() };
+    let node = |n: &str| crate::dev::memory::NodeMemory { node: n.into(), usage: crate::dev::memory::Usage { litek8s: 8 << 20, pods: 1 << 30, docker: 0, cache: 0 }, meminfo: Some(meminfo.clone()) };
     let mut r = super::app::NodeReports::default();
     r.memory = vec![node("lab2-a"), node("lab2-b")];
     app.apply(Msg::Home(Box::new(HomeSample { status: DevStatus::Remote, nodes: Some(r), ..Default::default() })));
@@ -1337,7 +1337,10 @@ fn home_and_nodes_show_what_the_pods_reserve() {
     // The cluster: 4 GiB of 16 reserved, 5 GiB limited, one pod unlimited.
     let s = render(&app, 140, 40);
     assert!(s.contains("reserved 4.0 GiB 25%") && s.contains("limits 5.0 GiB 31%"), "{s}");
-    assert!(s.contains("reserved 1.50 CPUs 19%") && s.contains("1 pod without a limit"), "{s}");
+    assert!(s.contains("reserved 1.50 CPUs 19%") && s.contains("1 pod without a lim"), "{s}");
+    // The meters carry the marks: requests │ and limits ┃ on the bar.
+    let mem_line = s.lines().find(|l| l.contains("GiB in use")).unwrap_or_else(|| panic!("{s}"));
+    assert!(mem_line.contains("█│┃"), "marks on the bar: {mem_line}");
     // One node (n): only its pods, against its own allocatable.
     app.key(key('n'));
     let s = render(&app, 140, 40);

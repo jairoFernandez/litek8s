@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **`litek8s ui`: the CPU breakdown is scaled to the CPUs of what it shows**:
+  for the whole cluster or a node, the box reads "7.5% of 16 CPUs = 1.2 CPUs
+  of one" and its bars are drawn against all of them (`bar: 16 CPUs`), not
+  against a single CPU.
+- **Reserved and limit marks on the CPU and memory meters**: `│` where the
+  pods' requests reach and `┃` where their limits do (yellow at 85%, red past
+  100%), so a meter shows use against what the scheduler promised.
+- **Fix: a server that also runs a node counted only its API data in the disk
+  report**: the node agent's directory (images, pod volumes) is now added,
+  with a shared filesystem counted once.
+
 ## 0.2.14
 
 - **`litek8s ui` shows what the pods reserve, for the cluster and for each
