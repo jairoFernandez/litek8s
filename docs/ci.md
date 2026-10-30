@@ -19,8 +19,6 @@ unchanged.
 
 ## When it pays off
 
-| the job needs | instead of | what changes | measured |
-|---|---|---|---|
 | the job needs | instead of | what changes | verdict |
 |---|---|---|---|
 | **a Kubernetes cluster** (kubectl, Helm, operators, e2e) on GitHub's runners | kind, k3d (Docker containers as nodes) | ready in ~2.5 s instead of ~45 s; **3–5× faster jobs, 26–37× less memory** | **switch** |

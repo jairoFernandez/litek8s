@@ -90,7 +90,7 @@ export const es: Dict = {
     footnote:
       'En macOS un cluster de desarrollo corre en una pequeña VM Linux, y el Monitor de Actividad muestra la VM entera: unos 240 MiB recién iniciada, ~380 MiB después de descargar y correr 5 pods de nginx, porque macOS conserva cada página que el guest tocó hasta que la VM se detiene. Los 6 fallos de conformance: 5 son solo de macOS (DNS por TCP en el puerto 53, un binding de hostPort) y pasan en Linux; 1 era un watch, ya corregido. Un plano de control HA de 3 servidores sigue siendo linealizable ante caídas del líder y particiones, y un cluster de 3 nodos corrió 21 h bajo carga sin fugas.',
     footLinks: [
-      { label: 'Memoria en macOS', href: `${docs('dev')}#memory-on-macos` },
+      { label: 'Memoria en macOS', href: `${docs('dev')}#memoria-en-macos` },
       { label: 'bench/HA.md', href: blob('bench/HA.md') },
       { label: 'bench/SOAK.md', href: blob('bench/SOAK.md') },
     ],
