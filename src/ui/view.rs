@@ -478,14 +478,14 @@ fn disk_figure(h: &super::app::HomeSample) -> (Option<f64>, String) {
 /// `cpu    ▁▂▃▅  ███▍░░░░░  3% of 4 CPUs`: a label, an optional sparkline,
 /// a meter `mw` wide and the figure.
 #[allow(clippy::too_many_arguments)]
-fn meter_line(t: &Theme, label: &str, spark: Option<&[f64]>, spark_max: f64, ratio: Option<f64>, text: &str, stack: Option<&Stack>, mw: usize) -> Line<'static> {
+fn meter_line(t: &Theme, label: &str, spark: Option<&[f64]>, spark_max: f64, ratio: Option<f64>, text: &str, stack: Option<&Stack>, mw: usize, marks: Option<(f64, f64)>) -> Line<'static> {
     let mut spans = vec![Span::styled(format!(" {label:<7}"), t.dim)];
     if let Some(values) = spark {
         spans.extend(t.sparkline(values, spark_max, 14));
         spans.push(Span::raw(" "));
     }
     match ratio {
-        Some(r) => spans.extend(meter_spans(t, r, text, stack, mw)),
+        Some(r) => spans.extend(meter_spans_marked(t, r, text, stack, mw, marks)),
         None => spans.push(Span::styled(text.to_string(), t.dim)),
     }
     Line::from(spans)
@@ -508,6 +508,49 @@ fn meter_spans(t: &Theme, r: f64, text: &str, stack: Option<&Stack>, mw: usize) 
         None => spans.push(Span::raw(text.to_string())),
     }
     spans
+}
+
+/// A meter with marks on its bar: where the pods' requests (`│`) and
+/// limits (`┃`) reach, as shares of the same whole as the bar. A mark past
+/// the end sits on the last cell, in red.
+fn meter_spans_marked(t: &Theme, r: f64, text: &str, stack: Option<&Stack>, mw: usize, marks: Option<(f64, f64)>) -> Vec<Span<'static>> {
+    let mut spans = meter_spans(t, r, text, stack, mw);
+    let Some((req, lim)) = marks else { return spans };
+    if mw < 4 {
+        return spans;
+    }
+    // The bar is the first `mw` cells: split it into cells, mark, regroup.
+    let mut cells: Vec<(char, Style)> = Vec::new();
+    let mut rest: Vec<Span<'static>> = Vec::new();
+    for s in spans.drain(..) {
+        if cells.len() >= mw {
+            rest.push(s);
+            continue;
+        }
+        let chars: Vec<char> = s.content.chars().collect();
+        let take = (mw - cells.len()).min(chars.len());
+        cells.extend(chars[..take].iter().map(|c| (*c, s.style)));
+        if take < chars.len() {
+            rest.push(Span::styled(chars[take..].iter().collect::<String>(), s.style));
+        }
+    }
+    let at = |v: f64| ((v * mw as f64).round() as usize).clamp(1, mw) - 1;
+    let mark = t.bold;
+    if req > 0.0 {
+        cells[at(req)] = ('│', mark);
+    }
+    if lim > 0.0 {
+        cells[at(lim)] = ('┃', if lim > 1.0 { t.bad.add_modifier(Modifier::BOLD) } else if lim >= 0.85 { t.warn.add_modifier(Modifier::BOLD) } else { mark });
+    }
+    let mut out: Vec<Span<'static>> = Vec::new();
+    for (c, st) in cells {
+        match out.last_mut() {
+            Some(s) if s.style == st => s.content.to_mut().push(c),
+            _ => out.push(Span::styled(c.to_string(), st)),
+        }
+    }
+    out.extend(rest);
+    out
 }
 
 /// Chips after a label, wrapped under it when they do not fit in `width`.
@@ -626,7 +669,7 @@ fn home(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     // One meter width for the three, from the longest figure.
     let tw = [&fig.cpu.1, &fig.mem.1, &fig.disk.1].iter().map(|s| s.chars().count()).max().unwrap_or(0);
     let mw = w.saturating_sub(8 + if history.is_some() { 15 } else { 0 } + 7 + tw).clamp(4, 36);
-    let mut lines = vec![meter_line(t, "cpu", history.map(|_| cpu_hist.as_slice()), cpu_max, fig.cpu.0, &fig.cpu.1, None, mw)];
+    let mut lines = vec![meter_line(t, "cpu", history.map(|_| cpu_hist.as_slice()), cpu_max, fig.cpu.0, &fig.cpu.1, None, mw, alloc.as_ref().map(|a| marks_of(a, false)))];
     // Under each meter, what the pods reserve of it (indented to the bars).
     let indent = |l: Line<'static>| {
         let mut spans = vec![Span::raw("       ")];
@@ -636,11 +679,11 @@ fn home(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     if let Some(a) = &alloc {
         lines.push(indent(reserved_line(t, a, false)));
     }
-    lines.push(meter_line(t, "memory", history.map(|_| mem_hist.as_slice()), 1.0, fig.mem.0, &fig.mem.1, fig.stack.as_ref(), mw));
+    lines.push(meter_line(t, "memory", history.map(|_| mem_hist.as_slice()), 1.0, fig.mem.0, &fig.mem.1, fig.stack.as_ref(), mw, alloc.as_ref().map(|a| marks_of(a, true))));
     if let Some(a) = &alloc {
         lines.push(indent(reserved_line(t, a, true)));
     }
-    lines.push(meter_line(t, "disk", history.map(|_| &[][..]), 1.0, fig.disk.0, &fig.disk.1, None, mw));
+    lines.push(meter_line(t, "disk", history.map(|_| &[][..]), 1.0, fig.disk.0, &fig.disk.1, None, mw, None));
     let flat = |chips: Vec<Vec<Span<'static>>>| chips.into_iter().flatten().collect::<Vec<_>>();
     let mut pods = vec![Span::styled(" pods   ", t.dim)];
     if kube_down {
@@ -826,9 +869,9 @@ fn home_wide(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     let mem_hist: Vec<f64> = app.history.iter().map(|(_, m)| *m as f64).collect();
     let cpu_max = cpu_hist.iter().cloned().fold(0.1, f64::max);
     let alloc = app.allocated();
-    resource_box(f, t, cpu_r, "cpu", cpu_b, Some((&cpu_hist, cpu_max)), graph_h, fig.cpu.0, fig.cpu.1.clone(), None, alloc.as_ref().map(|a| reserved_line(t, a, false)));
-    resource_box(f, t, mem_r, "memory", mem_b, Some((&mem_hist, 1.0)), graph_h, fig.mem.0, fig.mem.1.clone(), fig.stack.as_ref(), alloc.as_ref().map(|a| reserved_line(t, a, true)));
-    resource_box(f, t, disk_r, "disk", disk_b, None, 0, fig.disk.0, fig.disk.1.clone(), None, None);
+    resource_box(f, t, cpu_r, "cpu", cpu_b, Some((&cpu_hist, cpu_max)), graph_h, fig.cpu.0, fig.cpu.1.clone(), None, alloc.as_ref().map(|a| reserved_line(t, a, false)), alloc.as_ref().map(|a| marks_of(a, false)));
+    resource_box(f, t, mem_r, "memory", mem_b, Some((&mem_hist, 1.0)), graph_h, fig.mem.0, fig.mem.1.clone(), fig.stack.as_ref(), alloc.as_ref().map(|a| reserved_line(t, a, true)), alloc.as_ref().map(|a| marks_of(a, true)));
+    resource_box(f, t, disk_r, "disk", disk_b, None, 0, fig.disk.0, fig.disk.1.clone(), None, None, None);
 
     let mut lines = Vec::new();
     let ww = work_r.width.saturating_sub(2) as usize;
@@ -881,12 +924,18 @@ fn reserved_line(t: &Theme, a: &super::model::Allocated, memory: bool) -> Line<'
         let style = if p > 100.0 { t.bad } else if p >= 85.0 { t.warn } else { Style::new() };
         Span::styled(format!("{p:.0}%"), style)
     };
-    let mut spans = vec![Span::styled(" reserved ", t.dim), Span::raw(format!("{} ", amount(req))), share(req), Span::styled(" · limits ", t.dim), Span::raw(format!("{} ", amount(lim))), share(lim)];
+    let mut spans = vec![Span::styled(" │", t.bold), Span::styled(" reserved ", t.dim), Span::raw(format!("{} ", amount(req))), share(req), Span::styled(" · ", t.dim), Span::styled("┃", t.bold), Span::styled(" limits ", t.dim), Span::raw(format!("{} ", amount(lim))), share(lim)];
     if unlimited > 0 {
         spans.push(Span::styled(" · ", t.dim));
         spans.push(Span::styled(format!("{unlimited} {} without a limit", if unlimited == 1 { "pod" } else { "pods" }), t.warn));
     }
     Line::from(spans)
+}
+
+/// Where the requests and limits reach on a meter of all the CPUs or memory.
+fn marks_of(a: &super::model::Allocated, memory: bool) -> (f64, f64) {
+    let (req, lim, of) = if memory { (a.mem_req, a.mem_lim, a.memory) } else { (a.cpu_req, a.cpu_lim, a.cpu) };
+    if of <= 0.0 { (0.0, 0.0) } else { (req / of, lim / of) }
 }
 
 /// A remote litek8s's nodes: the whole cluster, then each node, with its
@@ -935,7 +984,7 @@ fn node_lines(app: &App, t: &Theme, width: usize) -> Vec<Line<'static>> {
 /// A resource in a box: its history, a meter, then its breakdown as
 /// inline bars, as many lines as fit (`+N` says how many did not).
 #[allow(clippy::too_many_arguments)]
-fn resource_box(f: &mut Frame, t: &Theme, area: Rect, name: &str, b: Option<&Explain>, hist: Option<(&[f64], f64)>, graph_h: u16, ratio: Option<f64>, text: String, stack: Option<&Stack>, under: Option<Line<'static>>) {
+fn resource_box(f: &mut Frame, t: &Theme, area: Rect, name: &str, b: Option<&Explain>, hist: Option<(&[f64], f64)>, graph_h: u16, ratio: Option<f64>, text: String, stack: Option<&Stack>, under: Option<Line<'static>>, marks: Option<(f64, f64)>) {
     if area.height < 3 {
         return;
     }
@@ -967,7 +1016,7 @@ fn resource_box(f: &mut Frame, t: &Theme, area: Rect, name: &str, b: Option<&Exp
     match ratio {
         Some(r) => {
             let mut spans = vec![Span::raw(" ")];
-            spans.extend(meter_spans(t, r, &text, stack, w.saturating_sub(tw + 8).clamp(4, 40)));
+            spans.extend(meter_spans_marked(t, r, &text, stack, w.saturating_sub(tw + 8).clamp(4, 40), marks));
             lines.push(Line::from(spans));
         }
         None => lines.push(Line::styled(format!(" {text}"), t.dim)),
@@ -1051,15 +1100,21 @@ fn explain_boxes(app: &App) -> Vec<Explain> {
         });
     }
     if let Some(c) = &app.cpu {
-        // Rows are in % of one CPU, and so are the bars: a full bar is a
-        // whole CPU (a row using more fills it; its number says how much).
-        let share = if c.cpus > 0.0 { format!(" = {} of {:.0} CPUs", pct(c.total_pct / c.cpus, 0), c.cpus) } else { String::new() };
+        // Rows in % of every CPU of what Home shows (the cluster's, a
+        // node's, the VM's), the meter's unit, and so are the bars: a full
+        // bar is all of them. Unknown CPUs: % of one CPU, a bar per CPU.
+        let of = if c.cpus > 0.0 { c.cpus } else { 1.0 };
+        let (scale, title) = if c.cpus > 0.0 {
+            (format!("bar: {:.0} CPUs", c.cpus), format!("CPU · {} of {:.0} CPUs = {} of one ({})", pct(c.total_pct / of, 1), c.cpus, pct(c.total_pct, 0), c.what))
+        } else {
+            ("bar: 1 CPU".into(), format!("CPU · {} of one CPU ({})", pct(c.total_pct, 1), c.what))
+        };
         out.push(Explain {
             kind: 1,
-            title: format!("CPU · {} of one CPU{share} ({})", pct(c.total_pct, 1), c.what),
+            title,
             what: c.what.to_string(),
-            scale: "bar: 1 CPU".into(),
-            lines: c.lines.iter().map(|l| ExplainLine { label: l.label.clone(), value: pct(l.pct, 1), note: l.note.clone(), indent: l.indent, share: l.pct / 100.0 }).collect(),
+            scale,
+            lines: c.lines.iter().map(|l| ExplainLine { label: l.label.clone(), value: pct(l.pct / of, 1), note: l.note.clone(), indent: l.indent, share: l.pct / 100.0 / of }).collect(),
         });
     }
     if let Some(d) = &app.disk_breakdown() {

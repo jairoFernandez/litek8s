@@ -174,6 +174,9 @@ pub struct ApiState {
     pub(crate) node_port_offset: u16,
     /// What `GET /litek8s/v1/disk` walks.
     pub(crate) disk_root: Option<PathBuf>,
+    /// The local node agent's directory when it is not inside `disk_root`
+    /// (a server installed with `install server`): walked too.
+    pub(crate) node_disk_root: Option<PathBuf>,
     pub(crate) lifecycle: super::controllers::NodeLifecycle,
     pub(crate) metrics: Metrics,
     /// Where pods on other nodes reach this server over the pod overlay
@@ -243,6 +246,7 @@ impl ApiState {
             network: join::ClusterNetwork::default(),
             node_port_offset: 0,
             disk_root: None,
+            node_disk_root: None,
             lifecycle: super::controllers::NodeLifecycle::default(),
             metrics: Metrics::default(),
             overlay_endpoint: std::sync::OnceLock::new(),
@@ -467,6 +471,12 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
     state.network = config.network.clone();
     state.node_port_offset = config.node_port_offset;
     state.disk_root = config.disk_root.clone().or_else(|| config.data_dir.clone());
+    // The node agent's directory, when it lies outside the one walked above.
+    state.node_disk_root = config
+        .run_node
+        .then(|| config.node_dir.clone().or_else(|| config.data_dir.as_ref().map(|d| d.join("node-agent"))))
+        .flatten()
+        .filter(|n| state.disk_root.as_ref().is_none_or(|root| !n.starts_with(root)));
     state.lifecycle = config.lifecycle.clone();
     state.authz = super::authn::Authz::new(config.authorization_mode);
     state.agents_welcome.send_replace(false);
@@ -1402,7 +1412,16 @@ pub const DISK_PATH: &str = "/litek8s/v1/disk";
 async fn local_machine_report(state: &Arc<ApiState>, what: &str) -> Option<Value> {
     let name = super::agent::default_node_name();
     let v = match what {
-        "disk" => serde_json::to_value(crate::dev::disk::cached(state.disk_root.clone()?, name).await),
+        "disk" => {
+            // A server that runs pods keeps them in its node agent's
+            // directory, which `install` puts beside the data directory
+            // (/var/lib/litek8s/{apiserver,node-agent}): both are its disk.
+            let mut parts = vec![crate::dev::disk::cached(state.disk_root.clone()?, name.clone()).await];
+            if let Some(dir) = state.node_disk_root.clone() {
+                parts.push(crate::dev::disk::cached(dir, name.clone()).await);
+            }
+            serde_json::to_value(crate::dev::disk::merge(&parts, &name))
+        }
         "cpu" => serde_json::to_value(tokio::task::spawn_blocking(move || crate::dev::cpu::this_node(&name)).await.ok()?),
         _ => serde_json::to_value(tokio::task::spawn_blocking(move || crate::dev::memory::this_node(&name)).await.ok()?),
     };
