@@ -15,11 +15,12 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+use super::podcert;
 use super::probe::{self, ProbeKind, ProbeResult, ProbeTarget};
 use super::protocol::Message;
 use super::runtime::{
     ContainerSpec, LABEL_ATTEMPT, LABEL_CONTAINER, LABEL_HASH, LABEL_NODE, LABEL_POD_NAME, LABEL_POD_NAMESPACE, LABEL_POD_UID, LABEL_ROLE,
-    MountSource, MountSpec, PodRuntime, SandboxInfo, SandboxSpec,
+    MountSource, MountSpec, PodRuntime, Propagation, SandboxInfo, SandboxSpec,
 };
 use super::volumes::{self, Prepared};
 use super::{Agent, PodView};
@@ -147,6 +148,8 @@ struct Worker<R: PodRuntime> {
     condition_times: HashMap<String, (String, String)>,
     last_sent: Option<Value>,
     wake_at: Option<Instant>,
+    /// An answer to a pending PodCertificateRequest arrived.
+    certs_due_now: bool,
     node: Value,
 }
 
@@ -197,6 +200,7 @@ pub(crate) async fn run<R: PodRuntime>(
         condition_times: HashMap::new(),
         last_sent: None,
         wake_at: None,
+        certs_due_now: false,
         pod,
     };
     if w.start_time.is_empty() {
@@ -230,6 +234,7 @@ pub(crate) async fn run<R: PodRuntime>(
             break;
         }
         w.step().await;
+        w.refresh_certificates().await;
         w.publish_view();
         w.report().await;
         let wake = w.wake_at.take();
@@ -241,7 +246,19 @@ pub(crate) async fn run<R: PodRuntime>(
                 Some(PodMsg::Probe(result)) => w.on_probe(result).await,
                 Some(PodMsg::Wake) => {}
                 Some(PodMsg::ObjectChanged { resource, namespace, name }) => {
-                    if namespace == w.ns && w.volumes.is_some() && volumes::uses_object(&w.pod, &resource, &name) {
+                    let relevant = match resource.as_str() {
+                        "clustertrustbundles" => volumes::uses_trust_bundles(&w.pod),
+                        // An answer to this pod's request: `step` (no volumes
+                        // yet) or the refresh picks it up now.
+                        "podcertificaterequests" => {
+                            if namespace == w.ns && podcert::waits_for(&w.dir, &name) {
+                                w.certs_due_now = true;
+                            }
+                            false
+                        }
+                        _ => namespace == w.ns && volumes::uses_object(&w.pod, &resource, &name),
+                    };
+                    if relevant && w.volumes.is_some() {
                         if let Ok(v) = w.agent.prepare_volumes(&w.pod, &w.dir, &w.node).await {
                             w.volumes = Some(v);
                         }
@@ -701,7 +718,7 @@ impl<R: PodRuntime> Worker<R> {
         for (name, prepared) in self.volumes.iter().flatten() {
             if let Prepared::Named { volume, fresh: is_fresh, empty_dir } = prepared {
                 let target = format!("/.litek8s/volumes/{name}");
-                mounts.push(MountSpec { source: MountSource::Volume { name: volume.clone(), subpath: None }, target: target.clone(), read_only: false });
+                mounts.push(MountSpec { source: MountSource::Volume { name: volume.clone(), subpath: None }, target: target.clone(), read_only: false, propagation: Propagation::Private });
                 if *is_fresh || *empty_dir {
                     fresh.push(target);
                 }
@@ -1265,7 +1282,8 @@ impl<R: PodRuntime> Worker<R> {
                 }
             };
             let read_only = read_only || (matches!(prepared, Prepared::Dir(_)) && target == SA_MOUNT);
-            mounts.push(MountSpec { source, target, read_only });
+            let propagation = Propagation::parse(s(m, "/mountPropagation"));
+            mounts.push(MountSpec { source, target, read_only, propagation });
         }
         // The termination message file, read back when the container exits.
         if let Some(path) = self.termination_file(c) {
@@ -1274,13 +1292,13 @@ impl<R: PodRuntime> Worker<R> {
                 t => t.to_string(),
             };
             if !mounts.iter().any(|m: &MountSpec| m.target == target) {
-                mounts.push(MountSpec { source: MountSource::Bind(path.to_string_lossy().to_string()), target, read_only: false });
+                mounts.push(MountSpec { source: MountSource::Bind(path.to_string_lossy().to_string()), target, read_only: false, propagation: Propagation::Private });
             }
         }
         for (file, target) in [("etc-hosts", "/etc/hosts"), ("resolv.conf", "/etc/resolv.conf")] {
             let path = self.dir.join(file);
             if path.exists() && !mounts.iter().any(|m: &MountSpec| m.target == target) {
-                mounts.push(MountSpec { source: MountSource::Bind(path.to_string_lossy().to_string()), target: target.into(), read_only: false });
+                mounts.push(MountSpec { source: MountSource::Bind(path.to_string_lossy().to_string()), target: target.into(), read_only: false, propagation: Propagation::Private });
             }
         }
         let security = spec.get("securityContext").cloned().unwrap_or(Value::Null);
@@ -1577,6 +1595,25 @@ impl<R: PodRuntime> Worker<R> {
     }
 
     /// Stop and remove everything the pod had on this node.
+    /// Pod certificates: renew the ones due (`podcert::ensure` asks for a
+    /// new one from `beginRefreshAt` on and looks at pending requests),
+    /// rewriting the volumes, and wake up for the next one.
+    async fn refresh_certificates(&mut self) {
+        if self.volumes.is_none() {
+            return;
+        }
+        let now = chrono::Utc::now().timestamp();
+        let Some(due) = podcert::next_due(&self.dir) else { return };
+        if now >= due || std::mem::take(&mut self.certs_due_now) {
+            if let Ok(v) = self.agent.prepare_volumes(&self.pod, &self.dir, &self.node).await {
+                self.volumes = Some(v);
+            }
+        }
+        if let Some(due) = podcert::next_due(&self.dir) {
+            self.wake_in(Duration::from_secs((due - now).clamp(1, 3600) as u64));
+        }
+    }
+
     async fn teardown(&mut self) {
         let grace = self
             .pod

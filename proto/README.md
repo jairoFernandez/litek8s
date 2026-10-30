@@ -4,7 +4,14 @@
 [kubernetes/apimachinery](https://github.com/kubernetes/apimachinery),
 [kubernetes/apiextensions-apiserver](https://github.com/kubernetes/apiextensions-apiserver) and
 [kubernetes/kube-aggregator](https://github.com/kubernetes/kube-aggregator) (APIService), tag
-`v0.33.0` (Kubernetes 1.33), unmodified, Apache-2.0 (see `LICENSE`).
+`v0.33.0` (Kubernetes 1.33), Apache-2.0 (see `LICENSE`), unmodified except:
+
+- `api/certificates/v1` and `api/certificates/v1beta1` are from `v0.37.2`
+  (ClusterTrustBundle, PodCertificateRequest; docs/specs/09-pod-certificates.md);
+- `api/core/v1` has `PodCertificateProjection` and `VolumeProjection.podCertificate`
+  (field 6) copied from `v0.37.2`.
+
+Updating everything to a newer tag keeps all of these.
 
 `build.rs` compiles them with protox into a descriptor set embedded in the
 binary. `src/kube/protobuf.rs` uses it to decode the protobuf request bodies
@@ -14,7 +21,7 @@ To update, re-download the same paths at a new tag:
 
 ```bash
 v=v0.34.0
-for gv in admissionregistration/v1 apps/v1 autoscaling/v1 autoscaling/v2 batch/v1 certificates/v1 \
+for gv in admissionregistration/v1 apps/v1 autoscaling/v1 autoscaling/v2 batch/v1 certificates/v1 certificates/v1beta1 \
           coordination/v1 core/v1 discovery/v1 events/v1 flowcontrol/v1 networking/v1 node/v1 \
           policy/v1 rbac/v1 scheduling/v1 storage/v1; do
   curl -fsSL https://raw.githubusercontent.com/kubernetes/api/$v/$gv/generated.proto \

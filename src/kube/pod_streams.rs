@@ -156,13 +156,16 @@ pub(crate) async fn log(state: &Arc<ApiState>, ns: &str, name: &str, req: &Req) 
     Ok(resp)
 }
 
-/// `exec` and `attach` over WebSocket. kubectl tries this first and falls
-/// back to SPDY, which is not served.
+/// `exec` and `attach` over WebSocket (kubectl 1.30+) or SPDY/3.1
+/// (client-go's `NewSPDYExecutor`, older kubectl).
 pub(crate) async fn exec(state: &Arc<ApiState>, ns: &str, name: &str, req: &Req, attach: bool) -> Result<Response<Body>, ApiError> {
     let (pod, node, container) = target(state, ns, name, req)?;
     let upgrade = req.header(UPGRADE.as_str()).to_ascii_lowercase();
+    if upgrade.starts_with("spdy/3.1") {
+        return exec_spdy(state, pod, node, container, req, attach).await;
+    }
     if upgrade != "websocket" {
-        return Err(ApiError::bad_request("streaming requires a WebSocket upgrade (SPDY is not supported)"));
+        return Err(ApiError::bad_request("streaming requires a WebSocket or SPDY/3.1 upgrade"));
     }
     let offered: Vec<String> = req
         .header("sec-websocket-protocol")
@@ -205,6 +208,45 @@ pub(crate) async fn exec(state: &Arc<ApiState>, ns: &str, name: &str, req: &Req,
     h.insert(CONNECTION, HeaderValue::from_static("Upgrade"));
     h.insert("sec-websocket-accept", HeaderValue::from_str(&ws::accept_key(key)).unwrap());
     h.insert("sec-websocket-protocol", HeaderValue::from_static(protocol));
+    Ok(resp)
+}
+
+/// exec/attach over a `SPDY/3.1` upgrade (`spdy::serve_exec`).
+async fn exec_spdy(state: &Arc<ApiState>, pod: Value, node: String, container: String, req: &Req, attach: bool) -> Result<Response<Body>, ApiError> {
+    let offered = req.header_all("x-stream-protocol-version");
+    let protocol = ["v4.channel.k8s.io", "v3.channel.k8s.io", "v2.channel.k8s.io", "channel.k8s.io"]
+        .into_iter()
+        .find(|p| offered.iter().any(|o| o == p) || (*p == "v4.channel.k8s.io" && offered.iter().any(|o| o == "v5.channel.k8s.io")))
+        .ok_or_else(|| ApiError::bad_request("no supported streaming protocol offered (want v4.channel.k8s.io)"))?;
+    let truthy = |k: &str| matches!(req.q(k), Some("true" | "1"));
+    let command: Vec<String> = req.query_all("command");
+    if !attach && command.is_empty() {
+        return Err(ApiError::bad_request("you must specify at least 1 command"));
+    }
+    let want = super::spdy::ExecStreams { stdin: truthy("stdin"), stdout: truthy("stdout"), stderr: truthy("stderr"), tty: truthy("tty") };
+    if !want.stdin && !want.stdout && !want.stderr {
+        return Err(ApiError::bad_request("you must specify at least one of stdin, stdout, stderr"));
+    }
+    let on_upgrade = req.take_upgrade().ok_or_else(|| ApiError::bad_request("connection cannot be upgraded"))?;
+    let uid = util::uid(&pod);
+    let command = if attach { Vec::new() } else { command };
+    let (stdin, tty) = (want.stdin, want.tty);
+    let handle = state
+        .hub
+        .open_stream(&node, |stream| Message::Exec { stream, pod_uid: uid, container, command, stdin, tty })
+        .await
+        .map_err(open_error)?;
+    let json_status = protocol == "v4.channel.k8s.io";
+    tokio::spawn(async move {
+        let Ok(upgraded) = on_upgrade.await else { return };
+        let _ = super::spdy::serve_exec(TokioIo::new(upgraded), handle, want, json_status).await;
+    });
+    let mut resp = Response::new(super::server::full(Bytes::new()));
+    *resp.status_mut() = StatusCode::SWITCHING_PROTOCOLS;
+    let h = resp.headers_mut();
+    h.insert(UPGRADE, HeaderValue::from_static("SPDY/3.1"));
+    h.insert(CONNECTION, HeaderValue::from_static("Upgrade"));
+    h.insert("x-stream-protocol-version", HeaderValue::from_static(protocol));
     Ok(resp)
 }
 

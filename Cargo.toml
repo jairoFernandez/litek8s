@@ -87,6 +87,8 @@ objc2-foundation = "0.3"
 objc2-virtualization = "0.3"
 
 [dev-dependencies]
+# Certificate validity in tests (rcgen's own `time`).
+time = "0.3"
 prost = "0.14"
 protox = "0.10.0"
 tempfile = "3.18.0"

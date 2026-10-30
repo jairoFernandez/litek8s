@@ -62,6 +62,7 @@ pub(crate) struct ResolvedMount {
     pub target: String,
     pub kind: MountKind,
     pub read_only: bool,
+    pub propagation: crate::kube::agent::runtime::Propagation,
 }
 
 /// The PID namespace a container runs in.
@@ -518,7 +519,13 @@ fn mounts(p: &BundleParams) -> Vec<Value> {
         let target = clean_target(&m.target);
         let mount = match m.kind {
             MountKind::Bind => {
-                let mut options = vec!["rbind", "rprivate"];
+                use crate::kube::agent::runtime::Propagation;
+                let propagation = match m.propagation {
+                    Propagation::Private => "rprivate",
+                    Propagation::HostToContainer => "rslave",
+                    Propagation::Bidirectional => "rshared",
+                };
+                let mut options = vec!["rbind", propagation];
                 if m.read_only {
                     options.push("ro");
                 }
@@ -727,17 +734,21 @@ mod tests {
         let spec = ContainerSpec::default();
         let mut p = params(&spec, &image);
         p.mounts = vec![
-            ResolvedMount { source: "/v/b".into(), target: "/data/sub/".into(), kind: MountKind::Bind, read_only: true },
-            ResolvedMount { source: "/v/a".into(), target: "/data".into(), kind: MountKind::Bind, read_only: false },
-            ResolvedMount { source: "".into(), target: "/dev/shm".into(), kind: MountKind::Tmpfs, read_only: false },
+            ResolvedMount { source: "/v/b".into(), target: "/data/sub/".into(), kind: MountKind::Bind, read_only: true, propagation: Default::default() },
+            ResolvedMount { source: "/v/a".into(), target: "/data".into(), kind: MountKind::Bind, read_only: false, propagation: Default::default() },
+            ResolvedMount { source: "/var/lib/ate".into(), target: "/var/lib/ate".into(), kind: MountKind::Bind, read_only: false, propagation: crate::kube::agent::runtime::Propagation::HostToContainer },
+            ResolvedMount { source: "".into(), target: "/dev/shm".into(), kind: MountKind::Tmpfs, read_only: false, propagation: Default::default() },
         ];
         let c = config(&p).unwrap();
         let mounts = c["mounts"].as_array().unwrap();
         let targets: Vec<&str> = mounts.iter().filter_map(|m| m["destination"].as_str()).collect();
-        assert_eq!(&targets[targets.len() - 3..], ["/data", "/data/sub", "/dev/shm"]);
+        assert_eq!(&targets[targets.len() - 4..], ["/data", "/data/sub", "/dev/shm", "/var/lib/ate"]);
         assert_eq!(targets.iter().filter(|t| **t == "/dev/shm").count(), 1);
         let sub = mounts.iter().find(|m| m["destination"] == "/data/sub").unwrap();
         assert_eq!(sub["options"], json!(["rbind", "rprivate", "ro"]));
+        // mountPropagation: HostToContainer is a slave mount.
+        let ate = mounts.iter().find(|m| m["destination"] == "/var/lib/ate").unwrap();
+        assert_eq!(ate["options"], json!(["rbind", "rslave"]));
     }
 
     #[test]

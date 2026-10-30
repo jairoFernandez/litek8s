@@ -19,6 +19,7 @@
 | `docs/specs/06-scheduler-cost-aware.md` | P1 | Draft | Definir `requests`, capacidad por nodo y scoring policy inicial |
 | `docs/specs/07-vpc-lite.md` | P2 | Draft | Delimitar el alcance mínimo viable de red privada de servicios |
 | `docs/specs/08-ai-inference-mesh.md` | P3 | Deferred | Reabrir después de multi-VM liviano, scheduler por capacidad y conectividad privada |
+| `docs/specs/09-pod-certificates.md` | P1 | Implementado | `hostPath` type y `mountPropagation` en crun, luego instalar Substrate (`docs/substrate.md`) |
 
 ## Sesión actual recomendada
 

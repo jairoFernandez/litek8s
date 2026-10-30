@@ -534,7 +534,7 @@ impl CrunPods {
                 }
                 MountSource::Tmpfs => (String::new(), spec::MountKind::Tmpfs),
             };
-            out.push(spec::ResolvedMount { source, target: m.target.clone(), kind, read_only: m.read_only });
+            out.push(spec::ResolvedMount { source, target: m.target.clone(), kind, read_only: m.read_only, propagation: m.propagation });
         }
         Ok(out)
     }
@@ -816,7 +816,8 @@ impl PodRuntime for CrunPods {
             let ip = if spec.host_network { None } else { Some(self.inner.ipam.lock().unwrap().allocate(&id)?) };
             let host_if = format!("lk{short}");
             let batch = ip.map(|ip| net::pod_link_commands(&host_if, ip, &self.inner.subnet, self.inner.mtu));
-            sys::create_namespaces(meta.netns.as_ref().map(PathBuf::from), PathBuf::from(&meta.ipc), batch, spec.sysctls.clone())?;
+            let defaults = if spec.host_network { Vec::new() } else { net::default_pod_sysctls(&spec.sysctls) };
+            sys::create_namespaces(meta.netns.as_ref().map(PathBuf::from), PathBuf::from(&meta.ipc), batch, spec.sysctls.clone(), defaults)?;
             if ip.is_some() {
                 sys::bridge_attach(net::BRIDGE, &host_if)?;
             }

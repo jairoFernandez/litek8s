@@ -5,8 +5,9 @@
 //!   Linux host and on a VM-backed Docker); `medium: Memory` is a
 //!   tmpfs-backed one (with Docker), shared by the pod's containers.
 //! - `configMap`, `secret`, `downwardAPI` and `projected` (which carries the
-//!   service account token) are files written under the agent's directory
-//!   and bind-mounted read-only.
+//!   service account token, pod certificates and trust bundles, see
+//!   `podcert.rs`) are files written under the agent's directory and
+//!   bind-mounted read-only.
 //! - `hostPath` is a bind mount.
 
 use std::collections::{BTreeMap, HashMap};
@@ -221,6 +222,11 @@ impl<R: PodRuntime> Agent<R> {
                     }
                 }
             } else if let Some(path) = volume.pointer("/hostPath/path").and_then(Value::as_str) {
+                // Where containers see this host's files (crun): the
+                // kubelet's type checks, and DirectoryOrCreate/FileOrCreate.
+                if self.runtime().scheme() == "crun" {
+                    host_path_type(Path::new(path), s(volume, "/hostPath/type"))?;
+                }
                 Prepared::HostPath(path.to_string())
             } else if let Some(src) = volume.get("configMap") {
                 let stage = begin_write(&dir)?;
@@ -252,42 +258,10 @@ impl<R: PodRuntime> Agent<R> {
             } else if let Some(src) = volume.get("projected") {
                 let stage = begin_write(&dir)?;
                 let mode = default_mode(src);
-                for source in src.get("sources").and_then(Value::as_array).into_iter().flatten() {
-                    if let Some(cm) = source.get("configMap") {
-                        let cm_name = s(cm, "/name");
-                        let optional = cm.get("optional").and_then(Value::as_bool) == Some(true);
-                        match self.lookup("configmaps", ns, cm_name).await? {
-                            Some(obj) => project(&stage, &object_data(&obj, false), cm.get("items"), mode, optional, &format!("configmap {cm_name}"))?,
-                            None if optional => {}
-                            None => return Err(format!("configmap \"{cm_name}\" not found")),
-                        }
-                    } else if let Some(sec) = source.get("secret") {
-                        let sec_name = s(sec, "/name");
-                        let optional = sec.get("optional").and_then(Value::as_bool) == Some(true);
-                        match self.lookup("secrets", ns, sec_name).await? {
-                            Some(obj) => project(&stage, &object_data(&obj, true), sec.get("items"), mode, optional, &format!("secret {sec_name}"))?,
-                            None if optional => {}
-                            None => return Err(format!("secret \"{sec_name}\" not found")),
-                        }
-                    } else if let Some(da) = source.get("downwardAPI") {
-                        self.write_downward(&stage, pod, da.get("items"), mode, node)?;
-                    } else if let Some(tok) = source.get("serviceAccountToken") {
-                        let sa = s(pod, "/spec/serviceAccountName");
-                        let request = serde_json::json!({
-                            "sa": if sa.is_empty() { "default" } else { sa },
-                            "pod": s(pod, "/metadata/name"),
-                            "audience": s(tok, "/audience"),
-                            "expirationSeconds": tok.get("expirationSeconds").and_then(Value::as_i64),
-                        })
-                        .to_string();
-                        let token = self
-                            .lookup("token", ns, &request)
-                            .await?
-                            .and_then(|t| t.get("token").and_then(Value::as_str).map(str::to_string))
-                            .ok_or("failed to get a service account token")?;
-                        let path = tok.get("path").and_then(Value::as_str).unwrap_or("token");
-                        write_file(&stage, path, token.as_bytes(), mode)?;
-                    }
+                if let Err(e) = self.write_projected(&stage, pod, pod_dir, &name, src, mode, node).await {
+                    // Not published: drop the half-written version.
+                    let _ = std::fs::remove_dir_all(&stage);
+                    return Err(e);
                 }
                 publish(&dir, &stage, fs_group)?;
                 Prepared::Dir(dir)
@@ -304,6 +278,80 @@ impl<R: PodRuntime> Agent<R> {
             out.insert(name, prepared);
         }
         Ok(out)
+    }
+
+    /// The files of a `projected` volume, written to `stage`.
+    #[allow(clippy::too_many_arguments)]
+    async fn write_projected(&self, stage: &Path, pod: &Value, pod_dir: &Path, volume: &str, src: &Value, mode: u32, node: &Value) -> Result<(), String> {
+        let ns = s(pod, "/metadata/namespace");
+        let stage = stage.to_path_buf();
+        for (i, source) in src.get("sources").and_then(Value::as_array).into_iter().flatten().enumerate() {
+            if let Some(cm) = source.get("configMap") {
+                let cm_name = s(cm, "/name");
+                let optional = cm.get("optional").and_then(Value::as_bool) == Some(true);
+                match self.lookup("configmaps", ns, cm_name).await? {
+                    Some(obj) => project(&stage, &object_data(&obj, false), cm.get("items"), mode, optional, &format!("configmap {cm_name}"))?,
+                    None if optional => {}
+                    None => return Err(format!("configmap \"{cm_name}\" not found")),
+                }
+            } else if let Some(sec) = source.get("secret") {
+                let sec_name = s(sec, "/name");
+                let optional = sec.get("optional").and_then(Value::as_bool) == Some(true);
+                match self.lookup("secrets", ns, sec_name).await? {
+                    Some(obj) => project(&stage, &object_data(&obj, true), sec.get("items"), mode, optional, &format!("secret {sec_name}"))?,
+                    None if optional => {}
+                    None => return Err(format!("secret \"{sec_name}\" not found")),
+                }
+            } else if let Some(da) = source.get("downwardAPI") {
+                self.write_downward(&stage, pod, da.get("items"), mode, node)?;
+            } else if let Some(tok) = source.get("serviceAccountToken") {
+                let sa = s(pod, "/spec/serviceAccountName");
+                let request = serde_json::json!({
+                    "sa": if sa.is_empty() { "default" } else { sa },
+                    "pod": s(pod, "/metadata/name"),
+                    "audience": s(tok, "/audience"),
+                    "expirationSeconds": tok.get("expirationSeconds").and_then(Value::as_i64),
+                })
+                .to_string();
+                let token = self
+                    .lookup("token", ns, &request)
+                    .await?
+                    .and_then(|t| t.get("token").and_then(Value::as_str).map(str::to_string))
+                    .ok_or("failed to get a service account token")?;
+                let path = tok.get("path").and_then(Value::as_str).unwrap_or("token");
+                write_file(&stage, path, token.as_bytes(), mode)?;
+            } else if let Some(pc) = source.get("podCertificate") {
+                let now = chrono::Utc::now().timestamp();
+                let issued = super::podcert::ensure(&LinkPcrApi(self), pod_dir, pod, &format!("{volume}-{i}"), pc, now).await?;
+                let path = |field: &str| pc.get(field).and_then(Value::as_str).filter(|p| !p.is_empty());
+                if let Some(p) = path("credentialBundlePath") {
+                    write_file(&stage, p, format!("{}{}", issued.key_pem, issued.chain_pem).as_bytes(), mode)?;
+                }
+                if let Some(p) = path("keyPath") {
+                    write_file(&stage, p, issued.key_pem.as_bytes(), mode)?;
+                }
+                if let Some(p) = path("certificateChainPath") {
+                    write_file(&stage, p, issued.chain_pem.as_bytes(), mode)?;
+                }
+            } else if let Some(ctb) = source.get("clusterTrustBundle") {
+                let optional = ctb.get("optional").and_then(Value::as_bool) == Some(true);
+                let reply = self
+                    .lookup("clustertrustbundles", "", &ctb.to_string())
+                    .await?
+                    .ok_or("the API server does not serve ClusterTrustBundles to this node (upgrade litek8s)")?;
+                let bundles = reply.get("bundles").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str);
+                let pem = super::podcert::merge_bundles(bundles);
+                if !pem.is_empty() {
+                    write_file(&stage, s(ctb, "/path"), pem.as_bytes(), mode)?;
+                } else if !optional {
+                    return Err(match ctb.get("name").and_then(Value::as_str) {
+                        Some(n) => format!("clustertrustbundle \"{n}\" not found"),
+                        None => format!("no ClusterTrustBundle for signer \"{}\" matches the label selector", s(ctb, "/signerName")),
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 
     fn write_downward(&self, dir: &Path, pod: &Value, items: Option<&Value>, mode: u32, node: &Value) -> Result<(), String> {
@@ -381,24 +429,31 @@ fn publish(dir: &Path, stage: &Path, fs_group: Option<u32>) -> Result<(), String
     Ok(())
 }
 
-/// Give the pod's `fsGroup` access the way the kubelet does (group
-/// ownership). Where the agent may not change ownership (not root), the
-/// group's permissions are granted to owner and others as well.
+/// Give the pod's `fsGroup` access the way the kubelet does for these
+/// read-only volumes (`SetVolumeOwnership`): group ownership, plus read for
+/// owner and group (`0440`; directories `2550`), so a `defaultMode: 0600`
+/// file is readable by the pod's group. Where the agent may not change
+/// ownership (not root), the group's permissions are granted to owner and
+/// others as well.
 fn apply_fs_group(dir: &Path, gid: u32) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
-        if std::os::unix::fs::chown(&path, None, Some(gid)).is_err() {
-            if let Ok(meta) = std::fs::metadata(&path) {
-                let mode = meta.permissions().mode() & 0o777;
-                // Owner too: VM-backed Docker shows bind-mounted files as
-                // owned by whoever reads them (so there, owner bits suffice).
-                let group = (mode >> 3) & 0o7;
-                let widened = if cfg!(target_os = "linux") { mode | (group << 6) | group } else { mode | (group << 6) };
-                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(widened));
-            }
+        let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+        if meta.file_type().is_symlink() {
+            continue;
         }
-        if path.is_dir() {
+        let mask = if meta.is_dir() { 0o2550 } else { 0o440 };
+        let mode = (meta.permissions().mode() & 0o7777) | mask;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode));
+        if std::os::unix::fs::chown(&path, None, Some(gid)).is_err() {
+            // Owner too: VM-backed Docker shows bind-mounted files as
+            // owned by whoever reads them (so there, owner bits suffice).
+            let group = (mode >> 3) & 0o7;
+            let widened = if cfg!(target_os = "linux") { mode | (group << 6) | group } else { mode | (group << 6) };
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(widened));
+        }
+        if meta.is_dir() {
             apply_fs_group(&path, gid);
         }
     }
@@ -407,6 +462,42 @@ fn apply_fs_group(dir: &Path, gid: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fs_group_can_read_private_files() {
+        // The kubelet's SetVolumeOwnership: a 0600 file becomes 0640.
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("credential-bundle.pem");
+        std::fs::write(&f, "x").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // Our own group: chown succeeds without root.
+        let gid = unsafe { libc::getegid() };
+        apply_fs_group(dir.path(), gid);
+        let meta = std::fs::metadata(&f).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o640);
+        assert_eq!(std::os::unix::fs::MetadataExt::gid(&meta), gid);
+    }
+
+    #[test]
+    fn host_path_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().join("var/lib/ate");
+        host_path_type(&d, "DirectoryOrCreate").unwrap();
+        assert!(d.is_dir());
+        assert_eq!(std::fs::metadata(&d).unwrap().permissions().mode() & 0o777, 0o755);
+        let f = dir.path().join("etc/srv/auth.yaml");
+        host_path_type(&f, "FileOrCreate").unwrap();
+        assert!(f.is_file());
+        host_path_type(&f, "FileOrCreate").unwrap();
+        host_path_type(&d, "Directory").unwrap();
+        host_path_type(&f, "File").unwrap();
+        assert!(host_path_type(&f, "Directory").unwrap_err().contains("is not a directory"));
+        assert!(host_path_type(&d, "FileOrCreate").unwrap_err().contains("is not a file"));
+        assert!(host_path_type(&dir.path().join("missing"), "Directory").is_err());
+        assert!(host_path_type(&f, "Socket").is_err());
+        host_path_type(&dir.path().join("untouched"), "").unwrap();
+        assert!(!dir.path().join("untouched").exists());
+    }
     use serde_json::json;
 
     #[test]
@@ -447,6 +538,92 @@ mod tests {
         assert_eq!(resource_ref(&pod, "c", "limits.memory", Some(&json!("1Mi")), &node), "64");
         assert_eq!(resource_ref(&pod, "c", "requests.cpu", Some(&json!("1m")), &node), "4000");
     }
+}
+
+/// A `hostPath` volume's `type`, as the kubelet applies it: create the
+/// directory (0755) or empty file (0644) for the `...OrCreate` types, check
+/// what is there for the others.
+fn host_path_type(path: &Path, ty: &str) -> Result<(), String> {
+    use std::os::unix::fs::FileTypeExt;
+    let meta = std::fs::metadata(path);
+    let fail = |what: &str| Err(format!("hostPath type check failed: {} is not {what}", path.display()));
+    match ty {
+        "" => Ok(()),
+        "DirectoryOrCreate" => match meta {
+            Ok(m) if m.is_dir() => Ok(()),
+            Ok(_) => fail("a directory"),
+            Err(_) => {
+                std::fs::create_dir_all(path).map_err(|e| format!("failed to create hostPath {}: {e}", path.display()))?;
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
+                Ok(())
+            }
+        },
+        "FileOrCreate" => match meta {
+            Ok(m) if m.is_file() => Ok(()),
+            Ok(_) => fail("a file"),
+            Err(_) => {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .map_err(|e| format!("failed to create hostPath {}: {e}", path.display()))?;
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644));
+                Ok(())
+            }
+        },
+        "Directory" => match meta {
+            Ok(m) if m.is_dir() => Ok(()),
+            _ => fail("a directory"),
+        },
+        "File" => match meta {
+            Ok(m) if m.is_file() => Ok(()),
+            _ => fail("a file"),
+        },
+        "Socket" => match meta {
+            Ok(m) if m.file_type().is_socket() => Ok(()),
+            _ => fail("a socket file"),
+        },
+        "CharDevice" => match meta {
+            Ok(m) if m.file_type().is_char_device() => Ok(()),
+            _ => fail("a character device"),
+        },
+        "BlockDevice" => match meta {
+            Ok(m) if m.file_type().is_block_device() => Ok(()),
+            _ => fail("a block device"),
+        },
+        other => Err(format!("hostPath type {other:?} is not supported")),
+    }
+}
+
+/// The agent's connection as the API for pod certificates.
+struct LinkPcrApi<'a, R: PodRuntime>(&'a Agent<R>);
+
+impl<R: PodRuntime> super::podcert::PcrApi for LinkPcrApi<'_, R> {
+    async fn create(&self, ns: &str, request: Value) -> Result<Value, String> {
+        let reply = self
+            .0
+            .lookup("podcertificaterequests/create", ns, &request.to_string())
+            .await?
+            .ok_or("the API server does not take PodCertificateRequests from this node (upgrade litek8s)")?;
+        match reply.get("error").and_then(Value::as_str) {
+            Some(e) => Err(e.to_string()),
+            None => Ok(reply),
+        }
+    }
+
+    async fn get(&self, ns: &str, name: &str) -> Result<Option<Value>, String> {
+        self.0.lookup("podcertificaterequests", ns, name).await
+    }
+}
+
+/// Whether `pod` projects ClusterTrustBundles (any of them may have changed).
+pub(crate) fn uses_trust_bundles(pod: &Value) -> bool {
+    pod.pointer("/spec/volumes").and_then(Value::as_array).into_iter().flatten().any(|v| {
+        v.pointer("/projected/sources").and_then(Value::as_array).is_some_and(|s| s.iter().any(|src| src.get("clusterTrustBundle").is_some()))
+    })
 }
 
 /// Whether `pod` mounts a ConfigMap or Secret named `name` as files.

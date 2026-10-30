@@ -26,6 +26,7 @@ use super::netpol::{self, PodRules};
 use super::overlay::{ANNOTATION_ENDPOINT, ANNOTATION_PUBLIC_KEY, NodePeer};
 use super::relay::{self, MeshNode, Route};
 use super::protocol::{Frame, Message, read_frame, write_frame};
+use crate::kube::certificates;
 use crate::kube::controllers::util;
 use crate::kube::server::ApiState;
 use crate::kube::store::EventType;
@@ -258,7 +259,7 @@ impl AgentHub {
                         }
                     }
                     Frame::Control(Message::OverlayStatus { peers }) => overlay_report(&api, &node_name, &peers),
-                    Frame::Control(msg) => handle_message(&api, &tx, &streams, msg).await,
+                    Frame::Control(msg) => handle_message(&api, &node_name, &tx, &streams, msg).await,
                     Frame::Data { stream, channel, bytes } => {
                         let sender = streams.lock().unwrap().get(&stream).cloned();
                         if let Some(sender) = sender {
@@ -684,6 +685,17 @@ async fn feed_pods(api: Arc<ApiState>, node: String, tx: mpsc::Sender<Frame>, po
                     }
                     Message::ObjectChanged { resource: resource.to_string(), namespace: ns.clone(), name: event.key.name.clone() }
                 }
+                (certificates::GROUP, "clustertrustbundles") => {
+                    Message::ObjectChanged { resource: "clustertrustbundles".into(), namespace: String::new(), name: event.key.name.clone() }
+                }
+                // A request of this node's pods was answered.
+                (certificates::GROUP, "podcertificaterequests")
+                    if event.event != EventType::Deleted
+                        && util::s(&event.object, "/spec/nodeName") == node
+                        && certificates::pcr_outcome(&event.object) != Ok(None) =>
+                {
+                    Message::ObjectChanged { resource: "podcertificaterequests".into(), namespace: event.key.namespace.clone(), name: event.key.name.clone() }
+                }
                 ("", "persistentvolumes") if event.event == EventType::Deleted => {
                     let on_node = event
                         .object
@@ -753,6 +765,7 @@ fn service_update(api: &ApiState, ns: &str, name: &str) -> Message {
 
 async fn handle_message(
     api: &Arc<ApiState>,
+    node: &str,
     tx: &mpsc::Sender<Frame>,
     streams: &Arc<Mutex<HashMap<u32, mpsc::Sender<StreamEvent>>>>,
     msg: Message,
@@ -763,7 +776,7 @@ async fn handle_message(
         }
         Message::PodTerminated { namespace, name, uid } => api.finish_pod_deletion(&namespace, &name, &uid),
         Message::Get { id, resource, namespace, name } => {
-            let object = lookup(api, &resource, &namespace, &name);
+            let object = lookup(api, node, &resource, &namespace, &name);
             let _ = tx.send(Frame::Control(Message::GetResult { id, object })).await;
         }
         Message::StreamDone { stream, exit_code, error } => {
@@ -778,8 +791,20 @@ async fn handle_message(
 }
 
 /// Objects an agent may read: only what pods need.
-fn lookup(api: &ApiState, resource: &str, namespace: &str, name: &str) -> Option<Value> {
+fn lookup(api: &ApiState, node: &str, resource: &str, namespace: &str, name: &str) -> Option<Value> {
     match resource {
+        // `name`: a `clusterTrustBundle` projection (JSON).
+        "clustertrustbundles" => Some(trust_bundles(api, &serde_json::from_str(name).ok()?)),
+        "podcertificaterequests" => {
+            let pcr = api.get_object(certificates::GROUP, resource, namespace, name)?;
+            (util::s(&pcr, "/spec/nodeName") == node).then_some(pcr)
+        }
+        // `name`: JSON {podName, source, signerName, maxExpirationSeconds,
+        // stubPKCS10Request, unverifiedUserAnnotations}.
+        "podcertificaterequests/create" => Some(match create_pcr(api, node, namespace, name) {
+            Ok(pcr) => pcr,
+            Err(e) => json!({"error": e}),
+        }),
         "configmaps" | "secrets" | "persistentvolumeclaims" | "serviceaccounts" => {
             api.get_object("", resource, namespace, name)
         }
@@ -807,6 +832,83 @@ fn lookup(api: &ApiState, resource: &str, namespace: &str, name: &str) -> Option
         }
         _ => None,
     }
+}
+
+/// The trust bundles a `clusterTrustBundle` projection selects:
+/// `{"bundles": [trustBundle, ...]}`.
+fn trust_bundles(api: &ApiState, projection: &Value) -> Value {
+    let bundles: Vec<Value> = if let Some(name) = projection.get("name").and_then(Value::as_str) {
+        api.get_object(certificates::GROUP, "clustertrustbundles", "", name).into_iter().collect()
+    } else {
+        let signer = util::s(projection, "/signerName");
+        // No selector selects nothing; an empty one everything.
+        let Some(selector) = crate::kube::selector::LabelSelector::from_object(projection.get("labelSelector")) else {
+            return json!({"bundles": []});
+        };
+        let (all, _) = api.store().list(certificates::GROUP, "clustertrustbundles", None);
+        all.into_iter().filter(|b| util::s(b, "/spec/signerName") == signer && selector.matches(b)).collect()
+    };
+    json!({"bundles": bundles.iter().map(|b| util::s(b, "/spec/trustBundle")).collect::<Vec<_>>()})
+}
+
+/// Label on the PodCertificateRequests the node agent makes: which
+/// projection (`<volume>-<source index>`) of the pod it is for.
+pub const PCR_SOURCE_LABEL: &str = "litek8s.dev/pod-certificate-source";
+
+/// Create the PodCertificateRequest for a pod of `node`, filling in the
+/// pod, service account and node identities from the store (an agent can
+/// only ask for its own pods), owned by the pod. Earlier finished requests
+/// of the same projection are removed.
+fn create_pcr(api: &ApiState, node: &str, ns: &str, request: &str) -> Result<Value, String> {
+    let req: Value = serde_json::from_str(request).map_err(|e| format!("bad request: {e}"))?;
+    let pod_name = util::s(&req, "/podName");
+    let pod = api.get_object("", "pods", ns, pod_name).ok_or_else(|| format!("pod {ns}/{pod_name} not found"))?;
+    if util::s(&pod, "/spec/nodeName") != node {
+        return Err(format!("pod {ns}/{pod_name} is not on node {node}"));
+    }
+    let sa_name = match util::s(&pod, "/spec/serviceAccountName") {
+        "" => "default",
+        sa => sa,
+    };
+    let sa = api.get_object("", "serviceaccounts", ns, sa_name).ok_or_else(|| format!("serviceaccount {ns}/{sa_name} not found"))?;
+    let node_obj = api.get_object("", "nodes", "", node).ok_or_else(|| format!("node {node} not found"))?;
+    let pod_uid = util::uid(&pod);
+    let source = util::s(&req, "/source");
+    let (existing, _) = api.store().list(certificates::GROUP, "podcertificaterequests", Some(ns));
+    for old in existing.iter().filter(|p| {
+        util::s(p, "/spec/podUID") == pod_uid && util::s(p, &format!("/metadata/labels/{}", PCR_SOURCE_LABEL.replace('/', "~1"))) == source
+    }) {
+        if certificates::pcr_outcome(old) != Ok(None) {
+            let _ = api.delete_named(certificates::GROUP, "podcertificaterequests", ns, &util::s(old, "/metadata/name").to_string());
+        }
+    }
+    let mut spec = json!({
+        "signerName": req["signerName"],
+        "podName": pod_name,
+        "podUID": pod_uid,
+        "serviceAccountName": sa_name,
+        "serviceAccountUID": util::uid(&sa),
+        "nodeName": node,
+        "nodeUID": util::uid(&node_obj),
+        "stubPKCS10Request": req["stubPKCS10Request"],
+    });
+    for field in ["maxExpirationSeconds", "unverifiedUserAnnotations"] {
+        if let Some(v) = req.get(field).filter(|v| !v.is_null()) {
+            spec[field] = v.clone();
+        }
+    }
+    let pcr = json!({
+        "apiVersion": "certificates.k8s.io/v1",
+        "kind": "PodCertificateRequest",
+        "metadata": {
+            "generateName": format!("{pod_name}-"),
+            "namespace": ns,
+            "labels": {PCR_SOURCE_LABEL: source},
+            "ownerReferences": [{"apiVersion": "v1", "kind": "Pod", "name": pod_name, "uid": pod_uid, "controller": false, "blockOwnerDeletion": false}],
+        },
+        "spec": spec,
+    });
+    api.create_object(certificates::GROUP, "podcertificaterequests", Some(ns), pcr).map_err(|e| e.message)
 }
 
 /// (name, image) of containers whose running instance is new in `status`.

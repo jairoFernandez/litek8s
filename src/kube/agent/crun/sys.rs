@@ -129,8 +129,16 @@ mod linux {
     /// Create the pod's namespaces on a throwaway thread and keep them alive
     /// as bind mounts: IPC at `ipc`, and network at `net` (unless the pod
     /// uses the host's). `ip_batch` runs inside the new network namespace;
-    /// `sysctls` (`net.ipv4.x` = value) are set there.
-    pub(crate) fn create_namespaces(net: Option<PathBuf>, ipc: PathBuf, ip_batch: Option<String>, sysctls: Vec<(String, String)>) -> Result<()> {
+    /// `sysctls` (`net.ipv4.x` = value) are set there, and `defaults` where
+    /// the kernel lets us (a rootless sandbox's user namespace may not map
+    /// every group `ping_group_range` names).
+    pub(crate) fn create_namespaces(
+        net: Option<PathBuf>,
+        ipc: PathBuf,
+        ip_batch: Option<String>,
+        sysctls: Vec<(String, String)>,
+        defaults: Vec<(String, String)>,
+    ) -> Result<()> {
         std::thread::spawn(move || -> Result<()> {
             let mut flags = libc::CLONE_NEWIPC;
             if net.is_some() {
@@ -144,6 +152,9 @@ mod linux {
             bind(Path::new("/proc/thread-self/ns/ipc"), &ipc)?;
             if let Some(n) = &net {
                 bind(Path::new("/proc/thread-self/ns/net"), n)?;
+            }
+            for (key, value) in &defaults {
+                let _ = std::fs::write(format!("/proc/sys/{}", key.replace('.', "/")), value);
             }
             for (key, value) in &sysctls {
                 let path = format!("/proc/sys/{}", key.replace('.', "/"));
@@ -303,7 +314,7 @@ mod other {
     pub(crate) fn ensure_shared_dir(_: &Path) -> Result<()> {
         bail!("the crun runtime needs Linux")
     }
-    pub(crate) fn create_namespaces(_: Option<PathBuf>, _: PathBuf, _: Option<String>, _: Vec<(String, String)>) -> Result<()> {
+    pub(crate) fn create_namespaces(_: Option<PathBuf>, _: PathBuf, _: Option<String>, _: Vec<(String, String)>, _: Vec<(String, String)>) -> Result<()> {
         bail!("the crun runtime needs Linux")
     }
     pub(crate) fn remove_ns_file(_: &Path) {}

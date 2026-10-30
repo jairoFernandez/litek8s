@@ -1342,6 +1342,7 @@ impl Engine {
                 target: m.destination.clone(),
                 kind: if m.kind == "tmpfs" { cspec::MountKind::Tmpfs } else { cspec::MountKind::Bind },
                 read_only: !m.rw,
+                propagation: Default::default(),
             })
             .collect();
         let image = cspec::ImageConfig::default();
@@ -1444,7 +1445,7 @@ impl Engine {
             .map(|m| m.iter().filter(|(k, _)| k.starts_with("net.")).map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect())
             .unwrap_or_default();
         let (n, i) = (PathBuf::from(&netns), PathBuf::from(&ipc));
-        let result = tokio::task::spawn_blocking(move || sys::create_namespaces(Some(n), i, Some(batch), sysctls)).await?;
+        let result = tokio::task::spawn_blocking(move || sys::create_namespaces(Some(n), i, Some(batch), sysctls, Vec::new())).await?;
         if let Err(e) = result {
             self.release_addresses(&rec.id);
             return Err(e);

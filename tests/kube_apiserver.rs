@@ -806,3 +806,114 @@ async fn default_cluster_roles_and_aggregation() -> Result<()> {
     assert_eq!(call_as(&addr, "GET", "/api/v1/namespaces/default/secrets", &[("Authorization", v.as_str())], None).await?.0, 403);
     Ok(())
 }
+
+/// docs/specs/09-pod-certificates.md: what Agent Substrate needs from the
+/// API: pods with podCertificate / clusterTrustBundle projections,
+/// ClusterTrustBundles and PodCertificateRequests in v1 and v1beta1, and a
+/// signer issuing through `/status`.
+#[tokio::test]
+async fn pod_certificates_and_cluster_trust_bundles() -> Result<()> {
+    use base64::Engine;
+    let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+    let addr = start().await?;
+    let (_, discovery) = get(&addr, "/apis/certificates.k8s.io").await?;
+    let versions: Vec<_> = discovery["versions"].as_array().unwrap().iter().map(|v| v["version"].clone()).collect();
+    assert!(versions.contains(&json!("v1")) && versions.contains(&json!("v1beta1")), "{discovery}");
+
+    let (code, node) = post(&addr, "/api/v1/nodes", json!({"metadata": {"name": "n1"}})).await?;
+    assert_eq!(code, 201, "{node}");
+    let (code, sa) = post(&addr, "/api/v1/namespaces/default/serviceaccounts", json!({"metadata": {"name": "agent"}})).await?;
+    assert_eq!(code, 201, "{sa}");
+    let pod = json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "worker"}, "spec": {
+        "nodeName": "n1", "serviceAccountName": "agent",
+        "containers": [{"name": "c", "image": "busybox"}],
+        "volumes": [{"name": "identity", "projected": {"sources": [
+            {"podCertificate": {"signerName": "podidentity.podcert.ate.dev/identity", "keyType": "ECDSAP256",
+                "maxExpirationSeconds": 86400, "credentialBundlePath": "credentials.pem",
+                "userAnnotations": {"ate.dev/role": "worker"}}},
+            {"clusterTrustBundle": {"signerName": "podidentity.podcert.ate.dev/identity", "labelSelector": {}, "path": "ca.pem"}},
+            {"clusterTrustBundle": {"name": "egress-mitm", "path": "egress.pem", "optional": true}},
+        ]}}],
+    }});
+    let (code, created) = post(&addr, "/api/v1/namespaces/default/pods?fieldValidation=Strict", pod.clone()).await?;
+    assert_eq!(code, 201, "{created}");
+    assert_eq!(created.pointer("/spec/volumes/0/projected/sources/0/podCertificate/keyType"), Some(&json!("ECDSAP256")));
+    let mut bad = pod.clone();
+    bad["metadata"]["name"] = json!("bad");
+    bad["spec"]["volumes"][0]["projected"]["sources"][0]["podCertificate"]["keyType"] = json!("DSA");
+    let (code, err) = post(&addr, "/api/v1/namespaces/default/pods", bad).await?;
+    assert_eq!(code, 422, "{err}");
+    assert!(err["message"].as_str().unwrap().contains("podCertificate.keyType: Unsupported value: \"DSA\""), "{err}");
+
+    // A ClusterTrustBundle through v1beta1, read back through v1.
+    let ca_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519)?;
+    let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new())?;
+    ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+    let ca = ca_params.self_signed(&ca_key)?;
+    let ctb = json!({"apiVersion": "certificates.k8s.io/v1beta1", "kind": "ClusterTrustBundle",
+        "metadata": {"name": "podidentity.podcert.ate.dev:identity:v1"},
+        "spec": {"signerName": "podidentity.podcert.ate.dev/identity", "trustBundle": ca.pem()}});
+    let (code, out) = post(&addr, "/apis/certificates.k8s.io/v1beta1/clustertrustbundles", ctb.clone()).await?;
+    assert_eq!(code, 201, "{out}");
+    let (code, v1) = get(&addr, "/apis/certificates.k8s.io/v1/clustertrustbundles/podidentity.podcert.ate.dev:identity:v1").await?;
+    assert_eq!((code, v1["apiVersion"].clone()), (200, json!("certificates.k8s.io/v1")));
+    let (_, list) = get(&addr, "/apis/certificates.k8s.io/v1beta1/clustertrustbundles?fieldSelector=spec.signerName%3Dpodidentity.podcert.ate.dev%2Fidentity").await?;
+    assert_eq!(list["items"].as_array().map(Vec::len), Some(1));
+    let mut misnamed = ctb.clone();
+    misnamed["metadata"]["name"] = json!("other");
+    let (code, err) = post(&addr, "/apis/certificates.k8s.io/v1/clustertrustbundles", misnamed).await?;
+    assert_eq!(code, 422, "{err}");
+
+    // The kubelet's request: a stub CSR for the pod's new key.
+    let key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256)?;
+    let mut csr = rcgen::CertificateParams::default();
+    csr.distinguished_name = rcgen::DistinguishedName::new();
+    let csr = csr.serialize_request(&key)?;
+    let pcr = json!({"apiVersion": "certificates.k8s.io/v1beta1", "kind": "PodCertificateRequest",
+        "metadata": {"generateName": "worker-"},
+        "spec": {"signerName": "podidentity.podcert.ate.dev/identity", "podName": "worker",
+            "podUID": created["metadata"]["uid"], "serviceAccountName": "agent", "serviceAccountUID": sa["metadata"]["uid"],
+            "nodeName": "n1", "nodeUID": node["metadata"]["uid"], "stubPKCS10Request": b64(csr.der()),
+            "unverifiedUserAnnotations": {"ate.dev/role": "worker"}}});
+    let base = "/apis/certificates.k8s.io/v1beta1/namespaces/default/podcertificaterequests";
+    // As upstream, only nodes are held to real pods (litek8s nodes ask
+    // through the hub): a client may name any pod, as Substrate's CLI does.
+    let mut outside = pcr.clone();
+    outside["spec"]["podName"] = json!("kubectl-ate");
+    outside["spec"]["podUID"] = json!("not-a-pod");
+    let (code, out) = post(&addr, base, outside).await?;
+    assert_eq!(code, 201, "{out}");
+    let (code, req) = post(&addr, &format!("{base}?fieldValidation=Strict"), pcr).await?;
+    assert_eq!(code, 201, "{req}");
+    assert_eq!(req["spec"]["maxExpirationSeconds"], json!(86400));
+    let name = req["metadata"]["name"].as_str().unwrap().to_string();
+
+    // A signer issues it through /status (v1, as Substrate does when it can).
+    let now = chrono::Utc::now().timestamp();
+    let mut leaf = rcgen::CertificateParams::new(Vec::<String>::new())?;
+    leaf.not_before = time::OffsetDateTime::from_unix_timestamp(now)?;
+    leaf.not_after = time::OffsetDateTime::from_unix_timestamp(now + 3 * 3600)?;
+    let leaf = leaf.signed_by(&key, &ca, &ca_key)?;
+    let ts = |t: i64| chrono::DateTime::from_timestamp(t, 0).unwrap().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let v1_path = format!("/apis/certificates.k8s.io/v1/namespaces/default/podcertificaterequests/{name}");
+    let (_, mut current) = get(&addr, &v1_path).await?;
+    assert_eq!(current["apiVersion"], json!("certificates.k8s.io/v1"));
+    current["status"] = json!({
+        "conditions": [{"type": "Issued", "status": "True", "reason": "Issued", "message": "", "lastTransitionTime": ts(now)}],
+        "certificateChain": leaf.pem(), "notBefore": ts(now), "notAfter": ts(now + 3 * 3600), "beginRefreshAt": ts(now + 2 * 3600),
+    });
+    let (code, issued) = call(&addr, "PUT", &format!("{v1_path}/status"), "application/json", &current.to_string()).await?;
+    assert_eq!(code, 200, "{issued}");
+    assert_eq!(issued["status"]["conditions"][0]["type"], json!("Issued"));
+    // Issued is final.
+    let mut again = issued.clone();
+    again["status"]["beginRefreshAt"] = json!(ts(now + 2 * 3600 + 60));
+    let (code, err) = call(&addr, "PUT", &format!("{v1_path}/status"), "application/json", &again.to_string()).await?;
+    assert_eq!(code, 422, "{err}");
+    // And the spec never changes.
+    let mut respec = issued.clone();
+    respec["spec"]["signerName"] = json!("example.com/other");
+    let (code, err) = call(&addr, "PUT", &v1_path, "application/json", &respec.to_string()).await?;
+    assert_eq!(code, 422, "{err}");
+    Ok(())
+}

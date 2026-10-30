@@ -1,7 +1,9 @@
 //! Just enough SPDY/3.1 for `kubectl port-forward` (the
 //! `portforward.k8s.io` protocol), either over a plain `SPDY/3.1` upgrade or
 //! tunneled through a WebSocket (`SPDY/3.1+portforward.k8s.io`, what kubectl
-//! 1.31+ tries first).
+//! 1.31+ tries first), and for exec/attach over a plain `SPDY/3.1` upgrade
+//! (`v4.channel.k8s.io`, what client-go's `NewSPDYExecutor` speaks;
+//! [`serve_exec`]).
 //!
 //! The client opens two streams per forwarded connection, an error stream
 //! and a data stream, tied together by a `requestid` header. Data stream
@@ -337,6 +339,194 @@ where
     result
 }
 
+/// Which streams an exec client opens (from the request's query).
+#[derive(Debug, Clone, Copy)]
+pub struct ExecStreams {
+    pub stdin: bool,
+    pub stdout: bool,
+    pub stderr: bool,
+    pub tty: bool,
+}
+
+impl ExecStreams {
+    fn expected(&self) -> Vec<&'static str> {
+        let mut out = vec!["error"];
+        if self.stdin {
+            out.push("stdin");
+        }
+        if self.stdout {
+            out.push("stdout");
+        }
+        if self.stderr && !self.tty {
+            out.push("stderr");
+        }
+        if self.tty {
+            out.push("resize");
+        }
+        out
+    }
+}
+
+/// exec/attach over SPDY: the client opens one stream per channel
+/// (`streamtype` error, stdin, stdout, stderr, resize); once they are all
+/// there, the node's output goes to stdout/stderr, stdin and resizes go to
+/// the node, and the end is a Status on the error stream (JSON with
+/// `v4.channel.k8s.io`, the error text before it: `json_status` false).
+pub async fn serve_exec<S>(io: S, mut handle: StreamHandle, want: ExecStreams, json_status: bool) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Send + 'static,
+{
+    let (mut reader, mut writer) = tokio::io::split(io);
+    let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let writer_task = tokio::spawn(async move {
+        while let Some(frame) = out_rx.recv().await {
+            if writer.write_all(&frame).await.is_err() {
+                break;
+            }
+            if out_rx.is_empty() && writer.flush().await.is_err() {
+                break;
+            }
+        }
+        let _ = writer.shutdown().await;
+    });
+    let expected = want.expected();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel::<HashMap<String, u32>>();
+    let input = handle.input();
+    let replies = out_tx.clone();
+    let reader_task = tokio::spawn(async move {
+        let mut headers_out = HeaderWriter { started: false };
+        let mut headers_in = HeaderReader::new();
+        let mut by_type: HashMap<String, u32> = HashMap::new();
+        let mut ready_tx = Some(ready_tx);
+        let result: Result<()> = async {
+            loop {
+                let mut head = [0u8; 8];
+                match reader.read_exact(&mut head).await {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+                    Err(e) => return Err(e.into()),
+                }
+                let flags = head[4];
+                let len = u32::from_be_bytes([0, head[5], head[6], head[7]]) as usize;
+                let mut payload = vec![0u8; len];
+                reader.read_exact(&mut payload).await?;
+                if head[0] & 0x80 == 0 {
+                    let sid = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) & 0x7fff_ffff;
+                    if by_type.get("stdin") == Some(&sid) {
+                        if !payload.is_empty() {
+                            input.send(0, Bytes::from(payload)).await;
+                        }
+                        if flags & FLAG_FIN != 0 {
+                            input.close().await;
+                        }
+                    } else if by_type.get("resize") == Some(&sid) {
+                        // A JSON object per resize, possibly several per frame.
+                        let sizes: Vec<(u16, u16)> = serde_json::Deserializer::from_slice(&payload)
+                            .into_iter::<serde_json::Value>()
+                            .flatten()
+                            .map(|size| {
+                                let w = size.get("Width").and_then(serde_json::Value::as_u64).unwrap_or(80) as u16;
+                                let h = size.get("Height").and_then(serde_json::Value::as_u64).unwrap_or(24) as u16;
+                                (w, h)
+                            })
+                            .collect();
+                        for (w, h) in sizes {
+                            input.resize(w, h).await;
+                        }
+                    }
+                    continue;
+                }
+                match u16::from_be_bytes([head[2], head[3]]) {
+                    TYPE_SYN_STREAM => {
+                        if payload.len() < 10 {
+                            bail!("short SYN_STREAM");
+                        }
+                        let sid = u32::from_be_bytes(payload[0..4].try_into()?) & 0x7fff_ffff;
+                        let headers = headers_in.block(&payload[10..])?;
+                        let mut body = sid.to_be_bytes().to_vec();
+                        body.extend_from_slice(&headers_out.block(&[]));
+                        let _ = replies.send(control(TYPE_SYN_REPLY, 0, &body));
+                        let kind = headers.get("streamtype").cloned().unwrap_or_default();
+                        by_type.insert(kind, sid);
+                        if expected.iter().all(|t| by_type.contains_key(*t)) {
+                            if let Some(tx) = ready_tx.take() {
+                                let _ = tx.send(by_type.clone());
+                            }
+                        }
+                    }
+                    TYPE_PING => {
+                        let _ = replies.send(control(TYPE_PING, 0, &payload));
+                    }
+                    TYPE_GOAWAY => return Ok(()),
+                    _ => {}
+                }
+            }
+        }
+        .await;
+        input.close().await;
+        result
+    });
+    // The kubelet waits as long for the client's streams.
+    let ids = match tokio::time::timeout(std::time::Duration::from_secs(30), ready_rx).await {
+        Ok(Ok(ids)) => ids,
+        _ => {
+            reader_task.abort();
+            writer_task.abort();
+            bail!("exec client did not open its streams");
+        }
+    };
+    let stdout = ids.get("stdout").copied();
+    let stderr = ids.get("stderr").copied().or(if want.tty { stdout } else { None });
+    let error = ids["error"];
+    let mut status = None;
+    while let Some(event) = handle.events.recv().await {
+        match event {
+            StreamEvent::Data { channel, bytes } => {
+                let target = if channel == 2 { stderr } else { stdout };
+                if let Some(sid) = target {
+                    for chunk in bytes.chunks(32 * 1024) {
+                        let _ = out_tx.send(data(sid, 0, chunk));
+                    }
+                }
+            }
+            StreamEvent::Done { exit_code, error } => {
+                status = Some((exit_code, error));
+                break;
+            }
+        }
+    }
+    let (exit_code, err) = status.unwrap_or((None, Some("the exec stream ended".into())));
+    let message = match (&exit_code, &err) {
+        (_, Some(e)) => Some(serde_json::json!({"metadata": {}, "status": "Failure", "message": e, "reason": "InternalError", "code": 500})),
+        (Some(0) | None, None) => None,
+        (Some(code), None) => Some(serde_json::json!({
+            "metadata": {},
+            "status": "Failure",
+            "message": format!("command terminated with non-zero exit code: exit status {code}"),
+            "reason": "NonZeroExitCode",
+            "details": {"causes": [{"reason": "ExitCode", "message": code.to_string()}]},
+        })),
+    };
+    let body = match (message, json_status) {
+        (Some(s), true) => s.to_string().into_bytes(),
+        (None, true) => serde_json::json!({"metadata": {}, "status": "Success"}).to_string().into_bytes(),
+        (Some(s), false) => s["message"].as_str().unwrap_or_default().as_bytes().to_vec(),
+        (None, false) => Vec::new(),
+    };
+    for sid in [stdout, ids.get("stderr").copied()].into_iter().flatten() {
+        let _ = out_tx.send(data(sid, FLAG_FIN, &[]));
+    }
+    if !body.is_empty() {
+        let _ = out_tx.send(data(error, 0, &body));
+    }
+    let _ = out_tx.send(data(error, FLAG_FIN, &[]));
+    drop(out_tx);
+    // The client hangs up once it has the status; give it the time to.
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), reader_task).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), writer_task).await;
+    Ok(())
+}
+
 /// The client side, for one forwarded connection: `conn`'s bytes go to the
 /// pod's `port` over the SPDY session on `io` (an upgraded
 /// `POST .../pods/<name>/portforward`) and back. Errors the server reports
@@ -506,6 +696,62 @@ mod tests {
         assert_eq!(&buf, b"HELLO");
         drop(user);
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), fwd).await;
+    }
+
+    /// client-go's SPDY executor: error, stdin, stdout and stderr streams;
+    /// stdin goes to the command, its output comes back on stdout, and the
+    /// v4 Status on the error stream ends it.
+    #[tokio::test]
+    async fn exec_over_spdy() {
+        use crate::kube::agent::hub::StreamHandle;
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        let want = ExecStreams { stdin: true, stdout: true, stderr: true, tty: false };
+        let server = tokio::spawn(serve_exec(server, StreamHandle::echo_upper_for_tests(), want, true));
+        let (mut rd, mut wr) = tokio::io::split(client);
+        let mut headers = HeaderWriter { started: false };
+        for (sid, kind) in [(1u32, "error"), (3, "stdin"), (5, "stdout"), (7, "stderr")] {
+            let mut body = sid.to_be_bytes().to_vec();
+            body.extend_from_slice(&[0, 0, 0, 0, 0, 0]);
+            body.extend_from_slice(&headers.block(&[("streamtype", kind)]));
+            wr.write_all(&control(TYPE_SYN_STREAM, 0, &body)).await.unwrap();
+        }
+        wr.write_all(&data(3, 0, b"abc")).await.unwrap();
+        wr.write_all(&data(3, FLAG_FIN, &[])).await.unwrap();
+        let (mut stdout, mut error, mut replies) = (Vec::new(), Vec::new(), 0);
+        let read = async {
+            loop {
+                let mut head = [0u8; 8];
+                rd.read_exact(&mut head).await.unwrap();
+                let len = u32::from_be_bytes([0, head[5], head[6], head[7]]) as usize;
+                let mut payload = vec![0u8; len];
+                rd.read_exact(&mut payload).await.unwrap();
+                if head[0] & 0x80 != 0 {
+                    if u16::from_be_bytes([head[2], head[3]]) == TYPE_SYN_REPLY {
+                        replies += 1;
+                    }
+                    continue;
+                }
+                let sid = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
+                match sid {
+                    5 => stdout.extend_from_slice(&payload),
+                    1 => {
+                        error.extend_from_slice(&payload);
+                        if head[4] & FLAG_FIN != 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), read).await.expect("exec finished");
+        assert_eq!(replies, 4);
+        assert_eq!(stdout, b"ABC");
+        let status: serde_json::Value = serde_json::from_slice(&error).unwrap();
+        assert_eq!(status["status"], "Success");
+        drop(wr);
+        drop(rd);
+        tokio::time::timeout(std::time::Duration::from_secs(10), server).await.unwrap().unwrap().unwrap();
     }
 
     #[test]

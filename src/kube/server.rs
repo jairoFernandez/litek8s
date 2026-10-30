@@ -996,6 +996,19 @@ impl Req {
         self.headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or_default()
     }
 
+    /// Every value of a header that may repeat or be comma-separated
+    /// (`X-Stream-Protocol-Version`).
+    pub(crate) fn header_all(&self, name: &str) -> Vec<String> {
+        self.headers
+            .get_all(name)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(','))
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .collect()
+    }
+
     pub(crate) fn method(&self) -> &Method {
         &self.method
     }
@@ -2267,7 +2280,8 @@ impl ApiState {
     /// Custom resources as the requested version (CRD conversion).
     async fn served_as(&self, rt: &ResourceType, objects: Vec<Value>) -> Result<Vec<Value>, ApiError> {
         if !rt.custom {
-            return Ok(objects);
+            // Built-in types served in two versions from one object.
+            return Ok(objects.into_iter().map(|o| super::certificates::serve_as(rt, o)).collect());
         }
         let Some(crd) = self.crd(rt) else {
             return Ok(objects);
@@ -3003,6 +3017,12 @@ impl ApiState {
                 }
             }
             self.enforce_crd_schema(rt, &mut result, Some(old))?;
+            if rt.group == super::certificates::GROUP && rt.kind == "PodCertificateRequest" {
+                let errs = super::certificates::validate_pcr_status(&result, old, chrono::Utc::now().timestamp());
+                if !errs.is_empty() {
+                    return Err(ApiError::invalid_fields(rt, url_name, &errs));
+                }
+            }
             return Ok(result);
         }
         new["kind"] = json!(rt.kind);
@@ -3550,6 +3570,7 @@ impl ApiState {
                 }
             }
             ("", "Service") => self.default_service(obj, old),
+            (super::certificates::GROUP, "PodCertificateRequest") if old.is_none() => super::certificates::default_pcr(obj),
             ("", "Node") => {
                 // The API server stamps when a NoExecute taint was added.
                 let old_taints: Vec<Value> = old.and_then(|o| o.pointer("/spec/taints")).and_then(Value::as_array).cloned().unwrap_or_default();
@@ -4081,6 +4102,9 @@ impl ApiState {
                 initial = kept;
             }
             let encode = |mut event: Value| -> Bytes {
+                if super::certificates::versioned(&rt) && event["type"] != "ERROR" && event["type"] != "BOOKMARK" {
+                    event["object"] = super::certificates::serve_as(&rt, event["object"].take());
+                }
                 if event["type"] == "ERROR" {
                     // A Status, sent as is.
                 } else if as_table && event["type"] != "BOOKMARK" {
