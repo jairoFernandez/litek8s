@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.15
 
 - **`litek8s ui`: the CPU breakdown is scaled to the CPUs of what it shows**:
   for the whole cluster or a node, the box reads "7.5% of 16 CPUs = 1.2 CPUs
