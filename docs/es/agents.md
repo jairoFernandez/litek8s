@@ -66,7 +66,7 @@ Docker reciben `cluster`.
 
 Recursos: `litek8s://skill/SKILL.md`, `litek8s://skill/references/*.md` y
 `litek8s://docs/*.md` (este archivo, dev, docker, observability, ha, crds, ui,
-CONFORMANCE), compilados dentro del binario.
+litecd, CONFORMANCE), compilados dentro del binario.
 
 ## Salvaguardas
 

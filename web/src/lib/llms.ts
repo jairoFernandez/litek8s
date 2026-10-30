@@ -19,7 +19,8 @@ Agents: prefer \`litek8s mcp\` (tools for dev clusters, get/apply/logs/PromQL,
 diagnose_pod) and its resources \`litek8s://skill/...\` and \`litek8s://docs/...\`;
 \`litek8s skill\` prints the same guide. Servers authenticate clients and
 enforce RBAC since 0.2.12: a 401 or 403 on a cluster made with an earlier
-release is fixed as in "Authentication and RBAC" below.`;
+release is fixed as in "Authentication and RBAC" below. GitOps with Argo CD's
+manifests in one small pod: litecd ("GitOps with litecd" below).`;
 
 export function llmsTxt(site: URL): string {
   const out = ['# litek8s', '', SUMMARY, ''];

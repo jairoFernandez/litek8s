@@ -262,6 +262,7 @@ export const es: Dict = {
         ],
       },
     ],
+    made: { before: 'Hecho con', after: 'por', label: 'ideascol.com', href: 'https://ideascol.com' },
     legal: 'Apache-2.0. Kubernetes es una marca registrada de The Linux Foundation; litek8s no está afiliado a ella.',
   },
 };

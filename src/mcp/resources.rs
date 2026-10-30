@@ -35,6 +35,7 @@ pub const DOCS: &[Doc] = &[
     Doc { path: "registries.md", description: "Private registries and mirrors for image pulls (registries.yaml)", text: include_str!("../../docs/registries.md") },
     Doc { path: "crds.md", description: "CRDs: schemas, CEL, server-side apply", text: include_str!("../../docs/crds.md") },
     Doc { path: "ui.md", description: "litek8s ui, the terminal UI", text: include_str!("../../docs/ui.md") },
+    Doc { path: "litecd.md", description: "GitOps with litecd: Argo CD manifests in one small pod; install, move over from Argo CD, numbers", text: include_str!("../../docs/litecd.md") },
     Doc { path: "CONFORMANCE.md", description: "Kubernetes conformance score and what fails", text: include_str!("../../compat/CONFORMANCE.md") },
 ];
 

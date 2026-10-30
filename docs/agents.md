@@ -65,7 +65,7 @@ default dev cluster). Docker tools take `cluster`.
 
 Resources: `litek8s://skill/SKILL.md`, `litek8s://skill/references/*.md`
 and `litek8s://docs/*.md` (this file, dev, docker, observability, ha, crds,
-ui, CONFORMANCE), compiled into the binary.
+ui, litecd, CONFORMANCE), compiled into the binary.
 
 ## Guardrails
 

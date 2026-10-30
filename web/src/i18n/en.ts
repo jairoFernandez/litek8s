@@ -458,6 +458,7 @@ export const en = {
         ],
       },
     ],
+    made: { before: 'Built with', after: 'by', label: 'ideascol.com', href: 'https://ideascol.com' },
     legal: 'Apache-2.0. Kubernetes is a registered trademark of The Linux Foundation; litek8s is not affiliated with it.',
   },
 };

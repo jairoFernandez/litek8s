@@ -1,0 +1,19 @@
+# The app of apps: litecd syncs everything under gitops/apps/ from this
+# repository. up.sh applies it (with REPO_URL and REVISION filled in);
+# from then on git is the source of truth.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: root
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/jairoFernandez/litek8s
+    targetRevision: main
+    path: examples/litecd/gitops/apps
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    automated: {prune: true, selfHeal: true}

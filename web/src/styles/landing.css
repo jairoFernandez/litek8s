@@ -619,6 +619,10 @@ tbody tr:hover { background: var(--surface); }
 .footer a:hover { color: var(--fg); }
 .footer-brand p { margin-top: 12px; max-width: 32ch; }
 .footer-legal { margin-top: 44px; padding-top: 22px; border-top: 1px solid var(--line); color: var(--fg-3); font-size: 0.8rem; }
+.footer-made { margin-top: 10px; color: var(--fg-3); font-size: 0.8rem; }
+.footer-made a { color: var(--fg-2); text-decoration: underline; text-underline-offset: 2px; }
+.footer-made a:hover { color: var(--fg); }
+.footer-made .heart { color: #e5484d; }
 
 /* ---------- reduced motion: no transitions or loops anywhere ---------- */
 @media (prefers-reduced-motion: reduce) {

@@ -1,0 +1,30 @@
+# A Helm chart from a Helm repository, values inline. Wave 1: it comes up
+# before the guestbook.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: podinfo
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: demo
+  source:
+    repoURL: https://stefanprodan.github.io/podinfo
+    chart: podinfo
+    targetRevision: 6.17.0
+    helm:
+      valuesObject:
+        replicaCount: 2
+        ui:
+          message: deployed by litecd on litek8s
+        service:
+          type: NodePort
+        resources:
+          requests: {cpu: 10m, memory: 16Mi}
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: demo-podinfo
+  syncPolicy:
+    automated: {prune: true, selfHeal: true}
+    syncOptions: [CreateNamespace=true]

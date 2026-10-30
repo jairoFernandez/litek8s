@@ -1,0 +1,19 @@
+# The project the demo apps run in: only these repositories, only the
+# demo-* namespaces, and no cluster-scoped objects but Namespaces.
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: demo
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+spec:
+  description: litek8s + litecd demo apps
+  sourceRepos:
+    - https://stefanprodan.github.io/podinfo
+    - https://github.com/argoproj/argocd-example-apps
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: demo-*
+  clusterResourceWhitelist:
+    - {group: "", kind: Namespace}
