@@ -396,6 +396,25 @@ act on this machine's dev clusters, so Home refuses them for a remote one,
 and the Docker views (3 to 6), which read this machine's dev cluster's Docker
 API unless `--docker-host` names another, say so instead of failing.
 
+Under the CPU and memory meters, a line says what the pods **reserve**
+(their requests) and **may use** (their limits) of the nodes shown, against
+those nodes' allocatable resources, the way the scheduler and `kubectl
+describe node` count them (a pod's requests are the larger of its
+containers' sum and its largest init container; Succeeded and Failed pods
+reserve nothing), and how many pods have no limit:
+
+```
+reserved 10.6 GiB 35% · limits 28.1 GiB 93% · 14 pods without a limit
+```
+
+The meter is what is used now; this line is what the scheduler has
+promised. Limits above 100% (red) mean the pods could together ask for
+more than the nodes have. With several nodes, `n` steps from the whole
+cluster to each node, and the line follows. In the Kubernetes view, the
+nodes table (`:nodes`) gets the same per node: `CPU REQ`, `CPU LIM`, `MEM
+REQ`, `MEM LIM`, each with its share of the node's allocatable, next to
+`CPU` and `MEM` (use, from metrics.k8s.io).
+
 After `u` on a stopped cluster, the output of `litek8s dev up` shows under
 it (here on Linux, over SSH):
 

@@ -157,7 +157,20 @@ fn tls_config(ca: Option<Vec<u8>>, client: Option<(Vec<u8>, Vec<u8>)>, insecure:
 /// a list, then a watch from its resourceVersion; re-list when the watch
 /// ends. Only what `model::pod` reads is kept of each pod.
 pub fn spawn_watches(ep: Endpoint, tx: UnboundedSender<Msg>) -> Vec<tokio::task::JoinHandle<()>> {
-    vec![tokio::spawn(watch_pods(ep, tx))]
+    vec![tokio::spawn(watch_pods(ep.clone(), tx.clone())), tokio::spawn(poll_nodes(ep, tx))]
+}
+
+/// The nodes' allocatable CPUs and memory, what Home's reserved figures are
+/// shares of: a list every 30 s (nodes come and go rarely).
+async fn poll_nodes(ep: Endpoint, tx: UnboundedSender<Msg>) {
+    loop {
+        if let Ok(list) = ep.json_accept::<Value>("/api/v1/nodes", "application/json").await {
+            if tx.send(Msg::Nodes(model::nodes_alloc(&list))).is_err() {
+                return;
+            }
+        }
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    }
 }
 
 fn key_of(o: &Value) -> String {
@@ -202,6 +215,8 @@ struct Named {
 #[serde(default, rename_all = "camelCase")]
 struct PodSpec {
     containers: Vec<ContainerLite>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    init_containers: Vec<ContainerLite>,
     #[serde(skip_serializing_if = "Option::is_none")]
     node_name: Option<String>,
 }
@@ -212,6 +227,17 @@ struct ContainerLite {
     name: String,
     image: String,
     ports: Vec<PortLite>,
+    /// Requests and limits only (what Home's reserved figures add up).
+    resources: ResourcesLite,
+}
+
+#[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
+#[serde(default)]
+struct ResourcesLite {
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    requests: BTreeMap<String, String>,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    limits: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Default, serde::Deserialize, serde::Serialize)]
