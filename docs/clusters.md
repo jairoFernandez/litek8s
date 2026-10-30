@@ -141,8 +141,9 @@ fields are errors, and `apply` lists every problem of a file at once.
 The laptop needs SSH to every machine and HTTPS to the first server's port
 6443 (behind NAT or a jump host: forward it and set `apiAddress`). Agents
 need the first server's `joinUrl`. Pods on different nodes talk over the
-WireGuard overlay (UDP 51820 between nodes). Remember the API has no client
-authentication: keep 6443 on a trusted network.
+WireGuard overlay (UDP 51820 between nodes). The API authenticates clients and
+enforces RBAC ([Authentication and RBAC](auth.md)); still, keep 6443 on a
+trusted network or a tailnet.
 
 ## Testing
 

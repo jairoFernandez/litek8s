@@ -13,8 +13,8 @@ litek8s ui            # terminal UI for the cluster, containers and images
 ```
 
 > **Status: early preview (v0.x).** Built and tested by one person; expect
-> rough edges. There is no client authentication yet: keep the API on
-> localhost or a trusted network ([Limitations](limitations.md)).
+> rough edges. Servers authenticate clients and enforce RBAC
+> ([Authentication and RBAC](auth.md)); see [Limitations](limitations.md).
 > Feedback and issues are very welcome.
 
 ## What's in the binary
