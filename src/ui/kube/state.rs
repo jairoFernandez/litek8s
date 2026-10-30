@@ -1279,7 +1279,9 @@ impl KubeUi {
 
     fn ext_for(&self, kind: &str) -> Vec<(String, Arc<HashMap<String, String>>)> {
         let mut v: Vec<(String, Arc<HashMap<String, String>>)> = self.ext.iter().filter(|((k, _), _)| k == kind).map(|((_, c), m)| (c.clone(), m.clone())).collect();
-        v.sort_by(|a, b| a.0.cmp(&b.0));
+        // Alphabetical, a request before its limit (CPU REQ, CPU LIM).
+        let key = |c: &str| c.replace(" REQ", " 1").replace(" LIM", " 2");
+        v.sort_by(|a, b| key(&a.0).cmp(&key(&b.0)));
         v
     }
 

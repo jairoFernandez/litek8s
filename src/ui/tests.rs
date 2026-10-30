@@ -1314,3 +1314,40 @@ fn the_vm_disk_shows_its_size_and_how_to_grow_it() {
     assert_eq!(app.restart_needed(), vec!["disk"]);
     assert!(render(&app, 80, 24).contains("Restart needed for disk"));
 }
+
+#[test]
+fn home_and_nodes_show_what_the_pods_reserve() {
+    use super::model::{Alloc, NodeAlloc};
+    let mut app = remote_app();
+    let gib = 1073741824.0;
+    let node = |n: &str| crate::dev::memory::NodeMemory { node: n.into(), usage: crate::dev::memory::Usage { litek8s: 8 << 20, pods: 1 << 30, docker: 0, cache: 0 }, meminfo: None };
+    let mut r = super::app::NodeReports::default();
+    r.memory = vec![node("lab2-a"), node("lab2-b")];
+    app.apply(Msg::Home(Box::new(HomeSample { status: DevStatus::Remote, nodes: Some(r), ..Default::default() })));
+    let pod = |name: &str, node: &str, req: f64, lim: Option<f64>| Pod {
+        namespace: "default".into(),
+        name: name.into(),
+        status: "Running".into(),
+        node: node.into(),
+        alloc: Alloc { cpu_req: 0.5, cpu_lim: Some(1.0), mem_req: req * gib, mem_lim: lim.map(|l| l * gib) },
+        ..Default::default()
+    };
+    app.apply(Msg::Pods(vec![pod("web", "lab2-a", 1.0, Some(2.0)), pod("db", "lab2-a", 2.0, None), pod("api", "lab2-b", 1.0, Some(3.0))]));
+    app.apply(Msg::Nodes(vec![NodeAlloc { name: "lab2-a".into(), cpu: 4.0, memory: 8.0 * gib }, NodeAlloc { name: "lab2-b".into(), cpu: 4.0, memory: 8.0 * gib }]));
+    // The cluster: 4 GiB of 16 reserved, 5 GiB limited, one pod unlimited.
+    let s = render(&app, 140, 40);
+    assert!(s.contains("reserved 4.0 GiB 25%") && s.contains("limits 5.0 GiB 31%"), "{s}");
+    assert!(s.contains("reserved 1.50 CPUs 19%") && s.contains("1 pod without a limit"), "{s}");
+    // One node (n): only its pods, against its own allocatable.
+    app.key(key('n'));
+    let s = render(&app, 140, 40);
+    assert!(s.contains("reserved 3.0 GiB 38%"), "{s}");
+    // Narrow Home too.
+    let s = render(&app, 80, 30);
+    assert!(s.contains("reserved"), "{s}");
+    // The nodes table's extra columns, a request before its limit.
+    let ext = &app.kube.ext;
+    assert_eq!(ext.get(&("Node".into(), "MEM REQ".into())).and_then(|m| m.get("lab2-a")).map(String::as_str), Some("3072Mi 38%"));
+    assert_eq!(ext.get(&("Node".into(), "CPU LIM".into())).and_then(|m| m.get("lab2-b")).map(String::as_str), Some("1000m 25%"));
+}
+

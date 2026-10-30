@@ -170,6 +170,8 @@ pub enum Msg {
     DockerInfo { version: String, cpus: Option<u64>, memory: Option<u64>, os: String },
     DockerDown(String),
     Pods(Vec<Pod>),
+    /// The nodes' allocatable resources (Home's reserved figures).
+    Nodes(Vec<super::model::NodeAlloc>),
     KubeDown(String),
     /// The Kubernetes view's.
     Kube(KMsg),
@@ -511,6 +513,8 @@ pub struct App {
     pub kube_error: Option<String>,
     /// Every pod (Home counts them, names cgroups and images by them).
     pub pods: Vec<Pod>,
+    /// The nodes' allocatable resources, for what the pods reserve.
+    pub nodes_alloc: Vec<super::model::NodeAlloc>,
     /// The Kubernetes view: a cluster UI of its own (src/ui/kube).
     pub kube: KubeUi,
 
@@ -604,6 +608,7 @@ impl App {
             oom_killed: BTreeSet::new(),
             kube_error: None,
             pods: Vec::new(),
+            nodes_alloc: Vec::new(),
             kube: KubeUi::new(None),
             home: HomeSample::default(),
             cluster: crate::dev::cluster::DEFAULT.into(),
@@ -1000,6 +1005,11 @@ impl App {
                 self.kube_error = None;
                 self.pods = p;
                 self.relink();
+                self.publish_node_alloc();
+            }
+            Msg::Nodes(n) => {
+                self.nodes_alloc = n;
+                self.publish_node_alloc();
             }
             Msg::KubeDown(e) => {
                 self.kube_error = Some(e);
@@ -1233,6 +1243,40 @@ impl App {
     }
 
     /// The next (`step` 1) or previous (-1) scope: the cluster, then each node.
+    /// What the pods reserve and may use on the nodes Home shows: the
+    /// whole cluster, or the node picked with `n`. `None` before the nodes
+    /// are known.
+    pub fn allocated(&self) -> Option<super::model::Allocated> {
+        if self.nodes_alloc.is_empty() || self.kube_error.is_some() {
+            return None;
+        }
+        let node = self.scope.as_deref().filter(|n| self.nodes_alloc.iter().any(|x| x.name == *n));
+        Some(super::model::Allocated::of(&self.pods, &self.nodes_alloc, node))
+    }
+
+    /// The Kubernetes view's nodes table gets each node's requests and
+    /// limits (with their share of its allocatable), as `kubectl describe
+    /// node` sums them: columns CPU REQ, CPU LIM, MEM REQ, MEM LIM.
+    fn publish_node_alloc(&mut self) {
+        if self.nodes_alloc.is_empty() {
+            return;
+        }
+        let mut cols: [(&str, HashMap<String, String>); 4] = [("CPU REQ", HashMap::new()), ("CPU LIM", HashMap::new()), ("MEM REQ", HashMap::new()), ("MEM LIM", HashMap::new())];
+        for n in &self.nodes_alloc {
+            let a = super::model::Allocated::of(&self.pods, &self.nodes_alloc, Some(&n.name));
+            let share = |v: f64, of: f64| if of > 0.0 { format!("{:.0}%", v / of * 100.0) } else { "–".into() };
+            let cpu = |v: f64| format!("{}m {}", (v * 1000.0).round() as u64, share(v, a.cpu));
+            let mem = |v: f64| format!("{}Mi {}", (v / 1048576.0).round() as u64, share(v, a.memory));
+            cols[0].1.insert(n.name.clone(), cpu(a.cpu_req));
+            cols[1].1.insert(n.name.clone(), cpu(a.cpu_lim));
+            cols[2].1.insert(n.name.clone(), mem(a.mem_req));
+            cols[3].1.insert(n.name.clone(), mem(a.mem_lim));
+        }
+        for (column, values) in cols {
+            self.kube.apply(KMsg::Ext { kind: "Node".into(), column: column.into(), values });
+        }
+    }
+
     pub fn cycle_scope(&mut self, step: isize) {
         let names = self.node_reports.names();
         if names.len() < 2 {

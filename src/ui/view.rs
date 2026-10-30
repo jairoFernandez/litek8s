@@ -585,7 +585,8 @@ fn home(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     let remote = h.status == DevStatus::Remote;
     // A remote litek8s: its nodes in the box; else this machine's Docker
     // in a box of its own under the cluster's.
-    let res_h = if remote { 7u16 } else { 6 }.min(area.height);
+    let alloc = app.allocated();
+    let res_h = (if remote { 7u16 } else { 6 } + if alloc.is_some() { 2 } else { 0 }).min(area.height);
     let docker_h = if remote { 0 } else { 3u16.min(area.height.saturating_sub(res_h)) };
     // The breakdown `b` picked first, then the connections if they fit,
     // then the other breakdowns while there is room.
@@ -625,11 +626,21 @@ fn home(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     // One meter width for the three, from the longest figure.
     let tw = [&fig.cpu.1, &fig.mem.1, &fig.disk.1].iter().map(|s| s.chars().count()).max().unwrap_or(0);
     let mw = w.saturating_sub(8 + if history.is_some() { 15 } else { 0 } + 7 + tw).clamp(4, 36);
-    let mut lines = vec![
-        meter_line(t, "cpu", history.map(|_| cpu_hist.as_slice()), cpu_max, fig.cpu.0, &fig.cpu.1, None, mw),
-        meter_line(t, "memory", history.map(|_| mem_hist.as_slice()), 1.0, fig.mem.0, &fig.mem.1, fig.stack.as_ref(), mw),
-        meter_line(t, "disk", history.map(|_| &[][..]), 1.0, fig.disk.0, &fig.disk.1, None, mw),
-    ];
+    let mut lines = vec![meter_line(t, "cpu", history.map(|_| cpu_hist.as_slice()), cpu_max, fig.cpu.0, &fig.cpu.1, None, mw)];
+    // Under each meter, what the pods reserve of it (indented to the bars).
+    let indent = |l: Line<'static>| {
+        let mut spans = vec![Span::raw("       ")];
+        spans.extend(l.spans);
+        Line::from(spans)
+    };
+    if let Some(a) = &alloc {
+        lines.push(indent(reserved_line(t, a, false)));
+    }
+    lines.push(meter_line(t, "memory", history.map(|_| mem_hist.as_slice()), 1.0, fig.mem.0, &fig.mem.1, fig.stack.as_ref(), mw));
+    if let Some(a) = &alloc {
+        lines.push(indent(reserved_line(t, a, true)));
+    }
+    lines.push(meter_line(t, "disk", history.map(|_| &[][..]), 1.0, fig.disk.0, &fig.disk.1, None, mw));
     let flat = |chips: Vec<Vec<Span<'static>>>| chips.into_iter().flatten().collect::<Vec<_>>();
     let mut pods = vec![Span::styled(" pods   ", t.dim)];
     if kube_down {
@@ -793,7 +804,7 @@ fn home_wide(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     let find = |k: usize| all.iter().find(|b| b.kind == k);
     let (mem_b, cpu_b, disk_b) = (find(0), find(1), find(2));
     let lines_of = |b: Option<&Explain>| b.map(|b| b.lines.len() as u16).unwrap_or(0);
-    let need_a = 4 + lines_of(cpu_b).max(lines_of(mem_b));
+    let need_a = 4 + lines_of(cpu_b).max(lines_of(mem_b)) + u16::from(app.allocated().is_some());
     // The pods' box and the docker box (containers, images) beside disk.
     let need_b = (3 + lines_of(disk_b)).max(if h.status == DevStatus::Remote { 6 } else { 7 });
     let room = area.height.saturating_sub(conn_h + out_rows);
@@ -814,9 +825,10 @@ fn home_wide(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     let cpu_hist: Vec<f64> = app.history.iter().map(|(c, _)| *c as f64).collect();
     let mem_hist: Vec<f64> = app.history.iter().map(|(_, m)| *m as f64).collect();
     let cpu_max = cpu_hist.iter().cloned().fold(0.1, f64::max);
-    resource_box(f, t, cpu_r, "cpu", cpu_b, Some((&cpu_hist, cpu_max)), graph_h, fig.cpu.0, fig.cpu.1.clone(), None);
-    resource_box(f, t, mem_r, "memory", mem_b, Some((&mem_hist, 1.0)), graph_h, fig.mem.0, fig.mem.1.clone(), fig.stack.as_ref());
-    resource_box(f, t, disk_r, "disk", disk_b, None, 0, fig.disk.0, fig.disk.1.clone(), None);
+    let alloc = app.allocated();
+    resource_box(f, t, cpu_r, "cpu", cpu_b, Some((&cpu_hist, cpu_max)), graph_h, fig.cpu.0, fig.cpu.1.clone(), None, alloc.as_ref().map(|a| reserved_line(t, a, false)));
+    resource_box(f, t, mem_r, "memory", mem_b, Some((&mem_hist, 1.0)), graph_h, fig.mem.0, fig.mem.1.clone(), fig.stack.as_ref(), alloc.as_ref().map(|a| reserved_line(t, a, true)));
+    resource_box(f, t, disk_r, "disk", disk_b, None, 0, fig.disk.0, fig.disk.1.clone(), None, None);
 
     let mut lines = Vec::new();
     let ww = work_r.width.saturating_sub(2) as usize;
@@ -853,6 +865,28 @@ fn home_wide(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     } else {
         tip(f, app, t, out);
     }
+}
+
+/// What the pods reserve (requests) and may use (limits) of the nodes Home
+/// shows, against their allocatable CPUs or memory: the scheduler's view,
+/// next to the meter's actual use.
+fn reserved_line(t: &Theme, a: &super::model::Allocated, memory: bool) -> Line<'static> {
+    let (req, lim, of, unlimited) = if memory { (a.mem_req, a.mem_lim, a.memory, a.mem_unlimited) } else { (a.cpu_req, a.cpu_lim, a.cpu, a.cpu_unlimited) };
+    let amount = |v: f64| if memory { gib(v as u64) } else { format!("{v:.2} CPUs") };
+    let share = |v: f64| -> Span<'static> {
+        if of <= 0.0 {
+            return Span::styled("–", t.dim);
+        }
+        let p = v / of * 100.0;
+        let style = if p > 100.0 { t.bad } else if p >= 85.0 { t.warn } else { Style::new() };
+        Span::styled(format!("{p:.0}%"), style)
+    };
+    let mut spans = vec![Span::styled(" reserved ", t.dim), Span::raw(format!("{} ", amount(req))), share(req), Span::styled(" · limits ", t.dim), Span::raw(format!("{} ", amount(lim))), share(lim)];
+    if unlimited > 0 {
+        spans.push(Span::styled(" · ", t.dim));
+        spans.push(Span::styled(format!("{unlimited} {} without a limit", if unlimited == 1 { "pod" } else { "pods" }), t.warn));
+    }
+    Line::from(spans)
 }
 
 /// A remote litek8s's nodes: the whole cluster, then each node, with its
@@ -901,7 +935,7 @@ fn node_lines(app: &App, t: &Theme, width: usize) -> Vec<Line<'static>> {
 /// A resource in a box: its history, a meter, then its breakdown as
 /// inline bars, as many lines as fit (`+N` says how many did not).
 #[allow(clippy::too_many_arguments)]
-fn resource_box(f: &mut Frame, t: &Theme, area: Rect, name: &str, b: Option<&Explain>, hist: Option<(&[f64], f64)>, graph_h: u16, ratio: Option<f64>, text: String, stack: Option<&Stack>) {
+fn resource_box(f: &mut Frame, t: &Theme, area: Rect, name: &str, b: Option<&Explain>, hist: Option<(&[f64], f64)>, graph_h: u16, ratio: Option<f64>, text: String, stack: Option<&Stack>, under: Option<Line<'static>>) {
     if area.height < 3 {
         return;
     }
@@ -937,6 +971,9 @@ fn resource_box(f: &mut Frame, t: &Theme, area: Rect, name: &str, b: Option<&Exp
             lines.push(Line::from(spans));
         }
         None => lines.push(Line::styled(format!(" {text}"), t.dim)),
+    }
+    if let Some(l) = under {
+        lines.push(l);
     }
     let mut more = 0;
     if let Some(b) = b {

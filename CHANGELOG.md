@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **`litek8s ui` shows what the pods reserve, for the cluster and for each
+  node**: under Home's CPU and memory meters, the pods' requests and limits
+  against the nodes' allocatable resources (as `kubectl describe node`
+  counts them) and how many pods have no limit, for the whole cluster or the
+  node `n` picks; the Kubernetes view's nodes table gets `CPU REQ`, `CPU
+  LIM`, `MEM REQ` and `MEM LIM` columns with each node's share. The meter is
+  what is used now; this is what the scheduler has promised, and limits
+  above 100% show that pods could ask for more than the nodes have.
+
 ## 0.2.13
 
 - **`litek8s ui --context <remote litek8s>` shows that cluster while a dev

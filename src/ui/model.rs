@@ -300,6 +300,106 @@ pub struct Pod {
     pub ports: Vec<u16>,
     pub owner: Option<String>,
     pub deleting: bool,
+    /// What the scheduler reserves for it and what it may use at most.
+    pub alloc: Alloc,
+    /// Succeeded or Failed: it reserves nothing any more.
+    pub finished: bool,
+}
+
+/// A pod's effective requests and limits, as the scheduler counts them
+/// (`kubectl describe node`): the larger of its containers' sum and its
+/// largest init container. A limit is `None` when a container has none.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Alloc {
+    /// CPUs.
+    pub cpu_req: f64,
+    pub cpu_lim: Option<f64>,
+    /// Bytes.
+    pub mem_req: f64,
+    pub mem_lim: Option<f64>,
+}
+
+impl Alloc {
+    pub fn of(spec: &Value) -> Alloc {
+        let q = |c: &Value, kind: &str, res: &str| c.pointer(&format!("/resources/{kind}/{res}")).and_then(Value::as_str).and_then(super::kube::table::quantity);
+        let containers: Vec<&Value> = spec["containers"].as_array().map(|a| a.iter().collect()).unwrap_or_default();
+        let inits: Vec<&Value> = spec["initContainers"].as_array().map(|a| a.iter().collect()).unwrap_or_default();
+        let init_max = |kind: &str, res: &str| inits.iter().filter_map(|c| q(c, kind, res)).fold(0.0, f64::max);
+        // A limit only counts when every container has one (a request
+        // defaults to the limit, as the API server fills it in).
+        let limit = |res: &str| {
+            let each: Option<Vec<f64>> = containers.iter().map(|c| q(c, "limits", res)).collect();
+            each.filter(|v| !v.is_empty()).map(|v| v.iter().sum::<f64>().max(init_max("limits", res)))
+        };
+        let request = |res: &str| {
+            let each = containers.iter().map(|c| q(c, "requests", res).or_else(|| q(c, "limits", res)).unwrap_or(0.0)).sum::<f64>();
+            let init = inits.iter().filter_map(|c| q(c, "requests", res).or_else(|| q(c, "limits", res))).fold(0.0, f64::max);
+            each.max(init)
+        };
+        Alloc { cpu_req: request("cpu"), cpu_lim: limit("cpu"), mem_req: request("memory"), mem_lim: limit("memory") }
+    }
+}
+
+/// A node's allocatable CPUs and memory.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct NodeAlloc {
+    pub name: String,
+    pub cpu: f64,
+    pub memory: f64,
+}
+
+pub fn nodes_alloc(list: &Value) -> Vec<NodeAlloc> {
+    let mut out: Vec<NodeAlloc> = list["items"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|n| {
+            let a = |r: &str| n.pointer(&format!("/status/allocatable/{r}")).and_then(Value::as_str).and_then(super::kube::table::quantity).unwrap_or(0.0);
+            NodeAlloc { name: n.pointer("/metadata/name").and_then(Value::as_str).unwrap_or_default().to_string(), cpu: a("cpu"), memory: a("memory") }
+        })
+        .collect();
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out
+}
+
+/// What the pods on some nodes (all of them, or one: `node`) reserve and
+/// may use, against those nodes' allocatable resources.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Allocated {
+    pub cpu_req: f64,
+    pub cpu_lim: f64,
+    pub mem_req: f64,
+    pub mem_lim: f64,
+    /// Pods with no CPU / memory limit on some container.
+    pub cpu_unlimited: usize,
+    pub mem_unlimited: usize,
+    pub pods: usize,
+    pub cpu: f64,
+    pub memory: f64,
+}
+
+impl Allocated {
+    pub fn of(pods: &[Pod], nodes: &[NodeAlloc], node: Option<&str>) -> Allocated {
+        let mut a = Allocated::default();
+        for n in nodes.iter().filter(|n| node.is_none_or(|x| x == n.name)) {
+            a.cpu += n.cpu;
+            a.memory += n.memory;
+        }
+        for p in pods.iter().filter(|p| !p.finished && !p.node.is_empty() && node.is_none_or(|x| x == p.node)) {
+            a.pods += 1;
+            a.cpu_req += p.alloc.cpu_req;
+            a.mem_req += p.alloc.mem_req;
+            match p.alloc.cpu_lim {
+                Some(l) => a.cpu_lim += l,
+                None => a.cpu_unlimited += 1,
+            }
+            match p.alloc.mem_lim {
+                Some(l) => a.mem_lim += l,
+                None => a.mem_unlimited += 1,
+            }
+        }
+        a
+    }
 }
 
 pub fn pods(list: &Value) -> Vec<Pod> {
@@ -344,6 +444,8 @@ pub fn pod(p: &Value) -> Pod {
         ports: specs.iter().flat_map(|c| c["ports"].as_array().into_iter().flatten()).filter_map(|p| p["containerPort"].as_u64().map(|n| n as u16)).collect(),
         owner: p.pointer("/metadata/ownerReferences/0/name").and_then(Value::as_str).map(str::to_string),
         deleting,
+        alloc: Alloc::of(&p["spec"]),
+        finished: matches!(p.pointer("/status/phase").and_then(Value::as_str), Some("Succeeded" | "Failed")),
     }
 }
 
@@ -435,6 +537,49 @@ pub fn ibytes(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pod_alloc_counts_like_the_scheduler() {
+        // Two containers, one without a memory limit; an init container
+        // that asks for more CPU than both together.
+        let spec = serde_json::json!({
+            "initContainers": [{"name": "migrate", "resources": {"requests": {"cpu": "2", "memory": "64Mi"}}}],
+            "containers": [
+                {"name": "app", "resources": {"requests": {"cpu": "250m", "memory": "256Mi"}, "limits": {"cpu": "1", "memory": "512Mi"}}},
+                {"name": "sidecar", "resources": {"limits": {"cpu": "100m"}}}
+            ]
+        });
+        let a = Alloc::of(&spec);
+        // Requests: max(0.25 + 0.1 (the sidecar's limit stands in), 2) CPUs; 256Mi.
+        assert!((a.cpu_req - 2.0).abs() < 1e-9, "{a:?}");
+        assert_eq!(a.mem_req, 256.0 * 1048576.0);
+        // The init container has no CPU limit: 1 + 0.1, as kubectl describe node counts it.
+        assert!((a.cpu_lim.unwrap() - 1.1).abs() < 1e-9, "{a:?}");
+        assert_eq!(a.mem_lim, None, "the sidecar has no memory limit");
+        assert_eq!(Alloc::of(&serde_json::json!({"containers": [{"name": "x"}]})), Alloc::default());
+    }
+
+    #[test]
+    fn allocated_sums_a_node_or_the_cluster() {
+        let nodes = vec![
+            NodeAlloc { name: "a".into(), cpu: 4.0, memory: 8.0 * 1073741824.0 },
+            NodeAlloc { name: "b".into(), cpu: 4.0, memory: 8.0 * 1073741824.0 },
+        ];
+        let pod = |node: &str, req: f64, lim: Option<f64>, finished: bool| Pod {
+            node: node.into(),
+            finished,
+            alloc: Alloc { cpu_req: 0.5, cpu_lim: Some(1.0), mem_req: req * 1073741824.0, mem_lim: lim.map(|l| l * 1073741824.0) },
+            ..Default::default()
+        };
+        let pods = vec![pod("a", 1.0, Some(2.0), false), pod("a", 2.0, None, false), pod("b", 1.0, Some(4.0), false), pod("b", 9.0, Some(9.0), true), pod("", 5.0, None, false)];
+        let all = Allocated::of(&pods, &nodes, None);
+        assert_eq!((all.pods, all.mem_unlimited), (3, 1), "finished and unscheduled pods reserve nothing");
+        assert_eq!(all.mem_req, 4.0 * 1073741824.0);
+        assert_eq!(all.mem_lim, 6.0 * 1073741824.0);
+        assert_eq!((all.cpu, all.cpu_req), (8.0, 1.5));
+        let a = Allocated::of(&pods, &nodes, Some("a"));
+        assert_eq!((a.pods, a.memory, a.mem_req), (2, 8.0 * 1073741824.0, 3.0 * 1073741824.0));
+    }
     use serde_json::json;
 
     #[test]
