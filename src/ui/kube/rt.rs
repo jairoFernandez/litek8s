@@ -449,10 +449,10 @@ pub async fn effect(run: &mut crate::ui::Runtime, e: KEffect, terminal: &mut cra
             });
         }
         KEffect::Trigger(obj) => rt.spawn(async move { done(ops::trigger(&ep, &obj).await) }),
-        KEffect::AppSync { objs, prune } => rt.spawn(async move {
+        KEffect::AppSync { objs, prune, force } => rt.spawn(async move {
             let mut said = Vec::new();
             for o in &objs {
-                match super::gitops::sync(&ep, o, "litek8s ui", prune, None).await {
+                match super::gitops::sync(&ep, o, "litek8s ui", prune, force, None).await {
                     Ok(m) => said.push(m),
                     Err(e) => return done(Err(e)),
                 }

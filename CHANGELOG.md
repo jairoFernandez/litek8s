@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- **`litek8s ui` has an Apps view (`0`) for Argo CD and litecd**: on
+  clusters that serve `applications.argoproj.io` a tenth tab lists every
+  Application with its sync, health, revision, when it last synced and
+  what its operation says (running, failed), names the controller that
+  runs them (Argo CD or litecd, with its version), and counts what is out
+  of sync, progressing, degraded or syncing; `A` lists the
+  ApplicationSets. `enter` opens an app: source, destination, policy,
+  operation and conditions, then its resources with their sync and health
+  (read from the live objects where Argo CD v3 leaves it out of the
+  status, and from child Applications' own status), its sync history and
+  its last sync's result per resource. `s` syncs after a dialog where `p`
+  turns on prune and `f` force, `r`/`R` refresh and hard refresh, `T`
+  terminates a running sync (asks); they patch the Application as the
+  argocd CLI does, so they work for either controller, and are refused on
+  read-only contexts. `D` and `d` open the diff and the describe in the
+  Kubernetes view, and `esc` comes back. The tab is hidden on clusters
+  without the CRD, and reads only while on screen.
+
 ## 0.2.14
 
 - **`litek8s ui` shows what the pods reserve, for the cluster and for each

@@ -14,6 +14,8 @@ use super::app::{App, Bounds, CRow, DevStatus, Field, InputKind, NewCluster, Ove
 use super::model::{age, bytes, ibytes};
 use super::theme::{Health, Theme};
 
+mod apps;
+
 /// Terminals at least this tall get the boxed header.
 const TALL: u16 = 30;
 
@@ -39,6 +41,7 @@ pub fn draw(f: &mut Frame, app: &App) {
             Tab::Kube => super::kube::draw::draw(f, app, body),
             Tab::Settings => settings(f, app, &t, body),
             Tab::Observe => observe(f, app, &t, body),
+            Tab::Apps => apps::draw(f, app, &t, body),
         }
     }
     footer(f, app, &t, bottom);
@@ -49,6 +52,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Overlay::Confirm { title, lines, .. } => confirm(f, &t, title, lines, area),
         Overlay::Input { prompt, value, error, kind } => input(f, &t, prompt, value, error.as_deref(), kind, area),
         Overlay::NewCluster(form) => new_cluster(f, app, &t, form, area),
+        Overlay::Sync { objs, prune, force } => apps::sync_dialog(f, &t, objs, *prune, *force, area),
     }
     if t.ascii {
         super::theme::asciify(f.buffer_mut());
@@ -80,7 +84,7 @@ fn tab_spans(app: &App, t: &Theme, width: usize) -> (Vec<Span<'static>>, Vec<(u1
     let tabs: Vec<(usize, Tab)> = app.visible_tabs().into_iter().map(|tab| (TABS.iter().position(|x| *x == tab).unwrap_or(0), tab)).collect();
     for tier in 0..5 {
         let tight = tier >= 3;
-        let label = |i: usize, tab: Tab| if tier == 4 && tab != app.tab { format!("{}", i + 1) } else { format!("{} {}", i + 1, tab_name(tab, tier.min(2))) };
+        let label = |_: usize, tab: Tab| if tier == 4 && tab != app.tab { format!("{}", tab.key()) } else { format!("{} {}", tab.key(), tab_name(tab, tier.min(2))) };
         // A tight slot is its label and a space; the current one is padded.
         let slot = |i: usize, tab: Tab| label(i, tab).chars().count() + if !tight || tab == app.tab { 2 } else { 1 };
         let need: usize = tabs.iter().map(|(i, tab)| slot(*i, *tab)).sum();
@@ -246,6 +250,7 @@ fn footer(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
                 }
                 Tab::Settings => &[("enter", "edit"), ("del", "default"), ("space", "toggle")],
                 Tab::Observe => &[("l", "logs"), ("L", "search logs"), ("s", "sort"), ("a/A", "ack"), ("n", "namespace")],
+                Tab::Apps => apps::hints(app),
             }
         };
         Line::from(key_chips(t, keys, left.width as usize))
@@ -1813,7 +1818,7 @@ fn input(f: &mut Frame, t: &Theme, prompt: &str, value: &str, error: Option<&str
 
 /// The help screen: per view, its keys (each line fits 76 columns).
 pub const HELP: &[(&str, &[(&str, &str)])] = &[
-    ("Everywhere", &[("1-9 tab", "views"), ("↑↓ jk", "move"), ("/", "filter"), ("ctrl-r", "refresh"), ("q", "quit")]),
+    ("Everywhere", &[("1-9 0 tab", "views"), ("↑↓ jk", "move"), ("/", "filter"), ("ctrl-r", "refresh"), ("q", "quit")]),
     ("Home", &[("u d R", "start stop delete"), ("n", "nodes"), ("b", "memory/CPU/disk"), ("c", "copy API")]),
     ("Clusters", &[("n", "new"), ("u d D", "start stop delete"), ("enter", "use it"), ("c", "copy context")]),
     ("Containers", &[("l", "logs"), ("s", "shell"), ("u x r", "start stop restart"), ("d", "remove"), ("space", "fold")]),
@@ -1823,6 +1828,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
     ("Kubernetes", &[(":", "resources, ctx, ns"), ("/", "filter"), ("d y e", "describe yaml edit"), ("?", "all")]),
     ("Settings", &[("enter", "edit"), ("del", "default"), ("space", "toggle / switch context")]),
     ("Observe", &[("l", "logs"), ("L", "search logs"), ("s", "sort"), ("a A", "ack pod/all")]),
+    ("Apps", &[("enter", "open"), ("s", "sync"), ("r R", "refresh"), ("T", "stop"), ("D", "diff"), ("A", "sets")]),
     ("Logs", &[("f", "follow"), ("w", "wrap"), ("PgUp PgDn", "scroll"), ("g G", "top/end"), ("esc", "back")]),
 ];
 
