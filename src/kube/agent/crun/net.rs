@@ -177,18 +177,29 @@ iptables -t nat -N LITEK8S-HOSTPORTS 2>/dev/null; \
 for c in PREROUTING OUTPUT; do iptables -t nat -C $c -m addrtype --dst-type LOCAL -j LITEK8S-HOSTPORTS 2>/dev/null || \
 iptables -t nat -A $c -m addrtype --dst-type LOCAL -j LITEK8S-HOSTPORTS; done";
 
-/// The sysctls of a pod's own network namespace: containerd's defaults
-/// (and Docker's for the first) under the pod's own: any port and ICMP
+/// containerd's defaults (and Docker's for the first) for a pod's own
+/// network namespace, those the pod does not set itself: any port and ICMP
 /// echo sockets without privileges, so a non-root process can listen on
 /// :443 as it can on other Kubernetes nodes.
-pub(crate) fn pod_sysctls(own: &[(String, String)]) -> Vec<(String, String)> {
-    let defaults = [("net.ipv4.ip_unprivileged_port_start", "0"), ("net.ipv4.ping_group_range", "0 2147483647")];
-    defaults
-        .iter()
-        .filter(|(k, _)| !own.iter().any(|(o, _)| o == k))
-        .map(|(k, v)| (k.to_string(), v.to_string()))
-        .chain(own.iter().cloned())
-        .collect()
+pub(crate) fn default_pod_sysctls(own: &[(String, String)]) -> Vec<(String, String)> {
+    let gid_map = std::fs::read_to_string("/proc/self/gid_map").unwrap_or_default();
+    let defaults = [("net.ipv4.ip_unprivileged_port_start".to_string(), "0".to_string()), ("net.ipv4.ping_group_range".to_string(), ping_group_range(&gid_map))];
+    defaults.into_iter().filter(|(k, _)| !own.iter().any(|(o, _)| o == k)).collect()
+}
+
+/// containerd's `0 2147483647`, within the groups this user namespace maps
+/// (in a rootless sandbox the kernel refuses unmapped ones).
+fn ping_group_range(gid_map: &str) -> String {
+    let last = gid_map
+        .lines()
+        .filter_map(|l| {
+            let f: Vec<u64> = l.split_whitespace().filter_map(|x| x.parse().ok()).collect();
+            (f.len() == 3 && f[0] == 0).then(|| f[2].saturating_sub(1))
+        })
+        .max()
+        .unwrap_or(2147483647)
+        .min(2147483647);
+    format!("0 {last}")
 }
 
 /// `ip -batch` commands run inside a new pod network namespace: loopback
@@ -228,12 +239,14 @@ mod tests {
 
     #[test]
     fn pods_get_unprivileged_ports_and_ping() {
-        let got = pod_sysctls(&[("net.ipv4.ip_unprivileged_port_start".into(), "1024".into())]);
-        assert_eq!(got, vec![
-            ("net.ipv4.ping_group_range".to_string(), "0 2147483647".to_string()),
-            ("net.ipv4.ip_unprivileged_port_start".to_string(), "1024".to_string()),
-        ]);
-        assert_eq!(pod_sysctls(&[]).len(), 2);
+        let got = default_pod_sysctls(&[("net.ipv4.ip_unprivileged_port_start".into(), "1024".into())]);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "net.ipv4.ping_group_range");
+        assert_eq!(default_pod_sysctls(&[]).len(), 2);
+        // The initial namespace, and a rootless sandbox that maps 65536 groups.
+        assert_eq!(ping_group_range("         0          0 4294967295\n"), "0 2147483647");
+        assert_eq!(ping_group_range("         0       1000      65536\n"), "0 65535");
+        assert_eq!(ping_group_range(""), "0 2147483647");
     }
 
     #[test]

@@ -816,8 +816,8 @@ impl PodRuntime for CrunPods {
             let ip = if spec.host_network { None } else { Some(self.inner.ipam.lock().unwrap().allocate(&id)?) };
             let host_if = format!("lk{short}");
             let batch = ip.map(|ip| net::pod_link_commands(&host_if, ip, &self.inner.subnet, self.inner.mtu));
-            let sysctls = if spec.host_network { spec.sysctls.clone() } else { net::pod_sysctls(&spec.sysctls) };
-            sys::create_namespaces(meta.netns.as_ref().map(PathBuf::from), PathBuf::from(&meta.ipc), batch, sysctls)?;
+            let defaults = if spec.host_network { Vec::new() } else { net::default_pod_sysctls(&spec.sysctls) };
+            sys::create_namespaces(meta.netns.as_ref().map(PathBuf::from), PathBuf::from(&meta.ipc), batch, spec.sysctls.clone(), defaults)?;
             if ip.is_some() {
                 sys::bridge_attach(net::BRIDGE, &host_if)?;
             }
