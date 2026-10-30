@@ -1581,3 +1581,67 @@ fn apps_say_why_when_they_cannot_be_read() {
     let s = render(&app, 80, 24);
     assert!(s.contains("is forbidden") && s.contains("Argo CD's or litecd's"), "{s}");
 }
+
+/// A k3s cluster (not litek8s): three nodes with metrics.k8s.io, one of
+/// them short of memory; names share a long prefix, as managed ones do.
+fn k3s_cluster(metrics: bool) -> crate::ui::generic::Cluster {
+    use crate::ui::generic::{Cluster, Node, Source};
+    let gib = 1u64 << 30;
+    let node = |id: &str, cpu: f64, mem: u64| Node {
+        name: format!("k3s-edge-lab-pool-7f3a-{id}"),
+        ready: true,
+        cpu_alloc: 4.0,
+        mem_alloc: 8 * gib,
+        cpu_capacity: 4.0,
+        mem_capacity: 8 * gib,
+        cpu_used: metrics.then_some(cpu),
+        mem_used: metrics.then_some(mem),
+        fs: None,
+    };
+    Cluster {
+        distro: "k3s".into(),
+        version: "v1.35.0+k3s1".into(),
+        nodes: vec![node("aaaaa", 0.4, 2 * gib), node("bbbbb", 1.2, 15 * gib / 2), node("ccccc", 0.2, 4 * gib)],
+        metrics: if metrics { Source::Served } else { Source::Missing("metrics.k8s.io not served".into()) },
+        disk: Source::Missing("kubelet stats: forbidden".into()),
+    }
+}
+
+#[test]
+fn a_k3s_cluster_shows_its_nodes_from_the_kubernetes_api() {
+    let mut app = remote_app();
+    for _ in 0..3 {
+        app.apply(Msg::Home(Box::new(HomeSample { status: DevStatus::Remote, generic: Some(k3s_cluster(true)), ..Default::default() })));
+    }
+    // kubectl top's figures: use against allocatable, graphed.
+    assert_eq!(app.history.len(), 3);
+    let (c, m) = *app.history.back().unwrap();
+    assert!((c - 1.8 / 12.0).abs() < 1e-6 && (m - 13.5 / 24.0).abs() < 1e-6, "{:?}", app.history);
+    let s = render(&app, 140, 44);
+    assert!(s.contains("lab2 · k3s v1.35.0+k3s1") && !s.contains("· remote"), "the header says what it is:\n{s}");
+    assert!(s.contains("1.8 of 12.0 CPUs") && s.contains("13.5 of 24.0 GiB"), "{s}");
+    assert!(s.contains("…bbbbb") && s.contains("94%") && !s.contains("k3s-edge-lab-pool"), "per node, the shared prefix dropped:\n{s}");
+    assert!(s.contains("not available (kubelet stats: forbidden)"), "{s}");
+    assert!(!s.contains("collecting") && !s.contains("rest of the machine") && !s.contains("cluster · 0 nodes"), "{s}");
+    assert!(!s.contains("Engine") && !s.contains("not this machine's dev cluster") && !s.contains("a litek8s"), "nothing of litek8s's or this machine's Docker:\n{s}");
+    assert!(s.contains("Connected to k3s v1.35.0+k3s1, not litek8s"), "{s}");
+    // n: one node's figures and history.
+    app.key(key('n'));
+    assert_eq!(app.scope.as_deref(), Some("k3s-edge-lab-pool-7f3a-aaaaa"));
+    assert_eq!(app.history.len(), 3, "each node has its own history");
+    let s = render(&app, 140, 44);
+    assert!(s.contains("node …aaaaa") && s.contains("0.4 of 4.0 CPUs"), "{s}");
+    let s = render(&app, 80, 24);
+    assert!(s.contains("nodes  3 · showing node …aaaaa"), "{s}");
+}
+
+#[test]
+fn a_k3s_cluster_without_metrics_says_so() {
+    let mut app = remote_app();
+    app.apply(Msg::Home(Box::new(HomeSample { status: DevStatus::Remote, generic: Some(k3s_cluster(false)), ..Default::default() })));
+    assert!(app.history.is_empty());
+    let s = render(&app, 140, 44);
+    assert!(s.contains("12.0 CPUs allocatable · metrics.k8s.io not served") && s.contains("install metrics-server"), "{s}");
+    let s = render(&app, 80, 24);
+    assert!(s.contains("metrics.k8s.io not served") && !s.contains("collecting"), "{s}");
+}

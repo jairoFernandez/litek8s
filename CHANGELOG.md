@@ -1,7 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.2.17
 
+- **`litek8s ui`'s Home works on clusters that are not litek8s** (k3s,
+  kubeadm, managed ones): it no longer waits on "collecting…" forever or
+  calls them "a litek8s". The header names the distribution and version from
+  `/version`; CPU and memory are each node's use from `metrics.k8s.io`
+  against its allocatable (what `kubectl top nodes` shows), added up or for
+  the node `n` picks, with history graphs; the breakdowns are per node, near
+  full in yellow or red; disk comes from the kubelets' `/stats/summary` when
+  RBAC allows the node proxy, else "not available". Without metrics-server
+  it says so. Docker, engine and VM lines, which are this machine's, are gone
+  there. litek8s clusters are unchanged.
 - **Pod certificates and ClusterTrustBundles, for Agent Substrate**:
   `certificates.k8s.io` `ClusterTrustBundle` and `PodCertificateRequest` are
   served in `v1` and `v1beta1` with Kubernetes 1.37's validation, and pods may

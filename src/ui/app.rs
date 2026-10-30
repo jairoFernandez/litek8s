@@ -380,6 +380,9 @@ pub struct HomeSample {
     /// A remote litek8s: every node's machine (the App adds them up or
     /// picks one, see [`App::scope`]).
     pub nodes: Option<NodeReports>,
+    /// A remote cluster that is not litek8s (k3s, kubeadm, a managed
+    /// one): its nodes from the public API (see `ui::generic`).
+    pub generic: Option<super::generic::Cluster>,
 }
 
 /// What each node of a remote litek8s reports about its machine.
@@ -1107,6 +1110,12 @@ impl App {
                 if sample.status == DevStatus::Remote && self.tab.docker() {
                     self.tab = Tab::Home;
                 }
+                if sample.generic.is_some() {
+                    self.home = sample;
+                    self.absorb_generic();
+                    self.apply_scope();
+                    return;
+                }
                 if let Some(reports) = sample.nodes.take() {
                     self.absorb_nodes(reports);
                     self.home = sample;
@@ -1284,6 +1293,40 @@ impl App {
         self.node_reports = r;
     }
 
+    /// A cluster that is not litek8s: every scope's history (the whole
+    /// cluster and each node: use against allocatable), while Home is on
+    /// screen; forget nodes that left.
+    fn absorb_generic(&mut self) {
+        let Some(g) = &self.home.generic else { return };
+        let names = g.names();
+        if self.tab == Tab::Home && self.logs.is_none() {
+            let scopes = std::iter::once(None).chain(names.iter().map(|n| Some(n.as_str())));
+            for scope in scopes {
+                let t = g.totals(scope);
+                if let (Some(c), Some(m)) = (t.cpu_ratio(), t.mem_ratio()) {
+                    let h = self.scoped_history.entry(scope.unwrap_or_default().to_string()).or_default();
+                    if h.len() == HISTORY {
+                        h.pop_front();
+                    }
+                    h.push_back((c as f32, m as f32));
+                }
+            }
+        }
+        self.scoped_history.retain(|k, _| k.is_empty() || names.contains(k));
+        if self.scope.as_ref().is_some_and(|s| !names.contains(s)) {
+            self.scope = None;
+        }
+    }
+
+    /// The nodes `n` cycles through: a litek8s's reports, or the Nodes of
+    /// a cluster that is not litek8s.
+    pub fn scope_names(&self) -> Vec<String> {
+        match &self.home.generic {
+            Some(g) => g.names(),
+            None => self.node_reports.names(),
+        }
+    }
+
     /// Whose numbers Home shows: `cluster · 3 nodes` or `node <name>`.
     fn scope_what(&self, key: &str, names: &[String]) -> String {
         match key {
@@ -1298,6 +1341,12 @@ impl App {
     pub fn apply_scope(&mut self) {
         use crate::dev::{disk, memory};
         if self.home.status != DevStatus::Remote {
+            return;
+        }
+        if self.home.generic.is_some() {
+            // Its figures are worked out when drawn (`generic::Cluster::totals`).
+            self.cpu = None;
+            self.history = self.scoped_history.get(self.scope.as_deref().unwrap_or_default()).cloned().unwrap_or_default();
             return;
         }
         let r = &self.node_reports;
@@ -1360,7 +1409,7 @@ impl App {
     }
 
     pub fn cycle_scope(&mut self, step: isize) {
-        let names = self.node_reports.names();
+        let names = self.scope_names();
         if names.len() < 2 {
             self.flash("one node: the cluster is that node".to_string(), false);
             return;
