@@ -89,6 +89,29 @@ pub struct MountSpec {
     pub source: MountSource,
     pub target: String,
     pub read_only: bool,
+    pub propagation: Propagation,
+}
+
+/// A volume mount's `mountPropagation`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Propagation {
+    /// `None`: private.
+    #[default]
+    Private,
+    /// Mounts the host makes later under the source show up in the container.
+    HostToContainer,
+    /// Both ways (privileged containers only).
+    Bidirectional,
+}
+
+impl Propagation {
+    pub fn parse(mode: &str) -> Self {
+        match mode {
+            "HostToContainer" => Self::HostToContainer,
+            "Bidirectional" => Self::Bidirectional,
+            _ => Self::Private,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

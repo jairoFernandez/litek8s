@@ -874,7 +874,7 @@ impl Builder {
                             }
                         }
                     }
-                    resolved.push(cspec::ResolvedMount { source: dir.to_string_lossy().to_string(), target: m.target.clone(), kind: cspec::MountKind::Bind, read_only: false });
+                    resolved.push(cspec::ResolvedMount { source: dir.to_string_lossy().to_string(), target: m.target.clone(), kind: cspec::MountKind::Bind, read_only: false, propagation: Default::default() });
                 }
                 "bind" => {
                     let src = match &m.from {
@@ -893,9 +893,9 @@ impl Builder {
                         super::engine::copy_tree(&src, &copy)?;
                         copy
                     };
-                    resolved.push(cspec::ResolvedMount { source: source.to_string_lossy().to_string(), target: m.target.clone(), kind: cspec::MountKind::Bind, read_only: m.read_only });
+                    resolved.push(cspec::ResolvedMount { source: source.to_string_lossy().to_string(), target: m.target.clone(), kind: cspec::MountKind::Bind, read_only: m.read_only, propagation: Default::default() });
                 }
-                "tmpfs" => resolved.push(cspec::ResolvedMount { source: String::new(), target: m.target.clone(), kind: cspec::MountKind::Tmpfs, read_only: false }),
+                "tmpfs" => resolved.push(cspec::ResolvedMount { source: String::new(), target: m.target.clone(), kind: cspec::MountKind::Tmpfs, read_only: false, propagation: Default::default() }),
                 other => self.say(format!("[Warning] RUN --mount=type={other} is not supported; skipped\n")),
             }
         }
@@ -908,7 +908,7 @@ impl Builder {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(0o755))?;
             }
-            resolved.push(cspec::ResolvedMount { source: dir.to_string_lossy().to_string(), target: "/dev/pipes".into(), kind: cspec::MountKind::Bind, read_only: true });
+            resolved.push(cspec::ResolvedMount { source: dir.to_string_lossy().to_string(), target: "/dev/pipes".into(), kind: cspec::MountKind::Bind, read_only: true, propagation: Default::default() });
         }
         let mut env: Vec<String> = st.image["config"]["Env"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(str::to_string)).collect();
         for (k, v) in &st.args {

@@ -20,7 +20,7 @@ use super::probe::{self, ProbeKind, ProbeResult, ProbeTarget};
 use super::protocol::Message;
 use super::runtime::{
     ContainerSpec, LABEL_ATTEMPT, LABEL_CONTAINER, LABEL_HASH, LABEL_NODE, LABEL_POD_NAME, LABEL_POD_NAMESPACE, LABEL_POD_UID, LABEL_ROLE,
-    MountSource, MountSpec, PodRuntime, SandboxInfo, SandboxSpec,
+    MountSource, MountSpec, PodRuntime, Propagation, SandboxInfo, SandboxSpec,
 };
 use super::volumes::{self, Prepared};
 use super::{Agent, PodView};
@@ -718,7 +718,7 @@ impl<R: PodRuntime> Worker<R> {
         for (name, prepared) in self.volumes.iter().flatten() {
             if let Prepared::Named { volume, fresh: is_fresh, empty_dir } = prepared {
                 let target = format!("/.litek8s/volumes/{name}");
-                mounts.push(MountSpec { source: MountSource::Volume { name: volume.clone(), subpath: None }, target: target.clone(), read_only: false });
+                mounts.push(MountSpec { source: MountSource::Volume { name: volume.clone(), subpath: None }, target: target.clone(), read_only: false, propagation: Propagation::Private });
                 if *is_fresh || *empty_dir {
                     fresh.push(target);
                 }
@@ -1282,7 +1282,8 @@ impl<R: PodRuntime> Worker<R> {
                 }
             };
             let read_only = read_only || (matches!(prepared, Prepared::Dir(_)) && target == SA_MOUNT);
-            mounts.push(MountSpec { source, target, read_only });
+            let propagation = Propagation::parse(s(m, "/mountPropagation"));
+            mounts.push(MountSpec { source, target, read_only, propagation });
         }
         // The termination message file, read back when the container exits.
         if let Some(path) = self.termination_file(c) {
@@ -1291,13 +1292,13 @@ impl<R: PodRuntime> Worker<R> {
                 t => t.to_string(),
             };
             if !mounts.iter().any(|m: &MountSpec| m.target == target) {
-                mounts.push(MountSpec { source: MountSource::Bind(path.to_string_lossy().to_string()), target, read_only: false });
+                mounts.push(MountSpec { source: MountSource::Bind(path.to_string_lossy().to_string()), target, read_only: false, propagation: Propagation::Private });
             }
         }
         for (file, target) in [("etc-hosts", "/etc/hosts"), ("resolv.conf", "/etc/resolv.conf")] {
             let path = self.dir.join(file);
             if path.exists() && !mounts.iter().any(|m: &MountSpec| m.target == target) {
-                mounts.push(MountSpec { source: MountSource::Bind(path.to_string_lossy().to_string()), target: target.into(), read_only: false });
+                mounts.push(MountSpec { source: MountSource::Bind(path.to_string_lossy().to_string()), target: target.into(), read_only: false, propagation: Propagation::Private });
             }
         }
         let security = spec.get("securityContext").cloned().unwrap_or(Value::Null);

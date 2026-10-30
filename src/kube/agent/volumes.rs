@@ -222,6 +222,11 @@ impl<R: PodRuntime> Agent<R> {
                     }
                 }
             } else if let Some(path) = volume.pointer("/hostPath/path").and_then(Value::as_str) {
+                // Where containers see this host's files (crun): the
+                // kubelet's type checks, and DirectoryOrCreate/FileOrCreate.
+                if self.runtime().scheme() == "crun" {
+                    host_path_type(Path::new(path), s(volume, "/hostPath/type"))?;
+                }
                 Prepared::HostPath(path.to_string())
             } else if let Some(src) = volume.get("configMap") {
                 let stage = begin_write(&dir)?;
@@ -424,24 +429,31 @@ fn publish(dir: &Path, stage: &Path, fs_group: Option<u32>) -> Result<(), String
     Ok(())
 }
 
-/// Give the pod's `fsGroup` access the way the kubelet does (group
-/// ownership). Where the agent may not change ownership (not root), the
-/// group's permissions are granted to owner and others as well.
+/// Give the pod's `fsGroup` access the way the kubelet does for these
+/// read-only volumes (`SetVolumeOwnership`): group ownership, plus read for
+/// owner and group (`0440`; directories `2550`), so a `defaultMode: 0600`
+/// file is readable by the pod's group. Where the agent may not change
+/// ownership (not root), the group's permissions are granted to owner and
+/// others as well.
 fn apply_fs_group(dir: &Path, gid: u32) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
-        if std::os::unix::fs::chown(&path, None, Some(gid)).is_err() {
-            if let Ok(meta) = std::fs::metadata(&path) {
-                let mode = meta.permissions().mode() & 0o777;
-                // Owner too: VM-backed Docker shows bind-mounted files as
-                // owned by whoever reads them (so there, owner bits suffice).
-                let group = (mode >> 3) & 0o7;
-                let widened = if cfg!(target_os = "linux") { mode | (group << 6) | group } else { mode | (group << 6) };
-                let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(widened));
-            }
+        let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+        if meta.file_type().is_symlink() {
+            continue;
         }
-        if path.is_dir() {
+        let mask = if meta.is_dir() { 0o2550 } else { 0o440 };
+        let mode = (meta.permissions().mode() & 0o7777) | mask;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode));
+        if std::os::unix::fs::chown(&path, None, Some(gid)).is_err() {
+            // Owner too: VM-backed Docker shows bind-mounted files as
+            // owned by whoever reads them (so there, owner bits suffice).
+            let group = (mode >> 3) & 0o7;
+            let widened = if cfg!(target_os = "linux") { mode | (group << 6) | group } else { mode | (group << 6) };
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(widened));
+        }
+        if meta.is_dir() {
             apply_fs_group(&path, gid);
         }
     }
@@ -450,6 +462,42 @@ fn apply_fs_group(dir: &Path, gid: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fs_group_can_read_private_files() {
+        // The kubelet's SetVolumeOwnership: a 0600 file becomes 0640.
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("credential-bundle.pem");
+        std::fs::write(&f, "x").unwrap();
+        std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // Our own group: chown succeeds without root.
+        let gid = unsafe { libc::getegid() };
+        apply_fs_group(dir.path(), gid);
+        let meta = std::fs::metadata(&f).unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o640);
+        assert_eq!(std::os::unix::fs::MetadataExt::gid(&meta), gid);
+    }
+
+    #[test]
+    fn host_path_types() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path().join("var/lib/ate");
+        host_path_type(&d, "DirectoryOrCreate").unwrap();
+        assert!(d.is_dir());
+        assert_eq!(std::fs::metadata(&d).unwrap().permissions().mode() & 0o777, 0o755);
+        let f = dir.path().join("etc/srv/auth.yaml");
+        host_path_type(&f, "FileOrCreate").unwrap();
+        assert!(f.is_file());
+        host_path_type(&f, "FileOrCreate").unwrap();
+        host_path_type(&d, "Directory").unwrap();
+        host_path_type(&f, "File").unwrap();
+        assert!(host_path_type(&f, "Directory").unwrap_err().contains("is not a directory"));
+        assert!(host_path_type(&d, "FileOrCreate").unwrap_err().contains("is not a file"));
+        assert!(host_path_type(&dir.path().join("missing"), "Directory").is_err());
+        assert!(host_path_type(&f, "Socket").is_err());
+        host_path_type(&dir.path().join("untouched"), "").unwrap();
+        assert!(!dir.path().join("untouched").exists());
+    }
     use serde_json::json;
 
     #[test]
@@ -489,6 +537,64 @@ mod tests {
         assert_eq!(resource_ref(&pod, "c", "limits.memory", None, &node), (64 * 1024 * 1024).to_string());
         assert_eq!(resource_ref(&pod, "c", "limits.memory", Some(&json!("1Mi")), &node), "64");
         assert_eq!(resource_ref(&pod, "c", "requests.cpu", Some(&json!("1m")), &node), "4000");
+    }
+}
+
+/// A `hostPath` volume's `type`, as the kubelet applies it: create the
+/// directory (0755) or empty file (0644) for the `...OrCreate` types, check
+/// what is there for the others.
+fn host_path_type(path: &Path, ty: &str) -> Result<(), String> {
+    use std::os::unix::fs::FileTypeExt;
+    let meta = std::fs::metadata(path);
+    let fail = |what: &str| Err(format!("hostPath type check failed: {} is not {what}", path.display()));
+    match ty {
+        "" => Ok(()),
+        "DirectoryOrCreate" => match meta {
+            Ok(m) if m.is_dir() => Ok(()),
+            Ok(_) => fail("a directory"),
+            Err(_) => {
+                std::fs::create_dir_all(path).map_err(|e| format!("failed to create hostPath {}: {e}", path.display()))?;
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
+                Ok(())
+            }
+        },
+        "FileOrCreate" => match meta {
+            Ok(m) if m.is_file() => Ok(()),
+            Ok(_) => fail("a file"),
+            Err(_) => {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .map_err(|e| format!("failed to create hostPath {}: {e}", path.display()))?;
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o644));
+                Ok(())
+            }
+        },
+        "Directory" => match meta {
+            Ok(m) if m.is_dir() => Ok(()),
+            _ => fail("a directory"),
+        },
+        "File" => match meta {
+            Ok(m) if m.is_file() => Ok(()),
+            _ => fail("a file"),
+        },
+        "Socket" => match meta {
+            Ok(m) if m.file_type().is_socket() => Ok(()),
+            _ => fail("a socket file"),
+        },
+        "CharDevice" => match meta {
+            Ok(m) if m.file_type().is_char_device() => Ok(()),
+            _ => fail("a character device"),
+        },
+        "BlockDevice" => match meta {
+            Ok(m) if m.file_type().is_block_device() => Ok(()),
+            _ => fail("a block device"),
+        },
+        other => Err(format!("hostPath type {other:?} is not supported")),
     }
 }
 

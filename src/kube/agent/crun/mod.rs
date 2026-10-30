@@ -534,7 +534,7 @@ impl CrunPods {
                 }
                 MountSource::Tmpfs => (String::new(), spec::MountKind::Tmpfs),
             };
-            out.push(spec::ResolvedMount { source, target: m.target.clone(), kind, read_only: m.read_only });
+            out.push(spec::ResolvedMount { source, target: m.target.clone(), kind, read_only: m.read_only, propagation: m.propagation });
         }
         Ok(out)
     }

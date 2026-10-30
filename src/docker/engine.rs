@@ -1342,6 +1342,7 @@ impl Engine {
                 target: m.destination.clone(),
                 kind: if m.kind == "tmpfs" { cspec::MountKind::Tmpfs } else { cspec::MountKind::Bind },
                 read_only: !m.rw,
+                propagation: Default::default(),
             })
             .collect();
         let image = cspec::ImageConfig::default();

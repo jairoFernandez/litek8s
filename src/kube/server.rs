@@ -996,6 +996,19 @@ impl Req {
         self.headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or_default()
     }
 
+    /// Every value of a header that may repeat or be comma-separated
+    /// (`X-Stream-Protocol-Version`).
+    pub(crate) fn header_all(&self, name: &str) -> Vec<String> {
+        self.headers
+            .get_all(name)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(','))
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .collect()
+    }
+
     pub(crate) fn method(&self) -> &Method {
         &self.method
     }

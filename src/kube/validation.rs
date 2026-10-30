@@ -66,6 +66,21 @@ pub fn validate(group: &str, kind: &str, obj: &Value, old: Option<&Value>) -> Ve
             errs.extend(super::certificates::projection_errors(obj));
             for field in ["initContainers", "containers"] {
                 for (i, c) in obj.pointer(&format!("/spec/{field}")).and_then(Value::as_array).into_iter().flatten().enumerate() {
+                    let privileged = c.pointer("/securityContext/privileged").and_then(Value::as_bool) == Some(true);
+                    for (j, m) in c.get("volumeMounts").and_then(Value::as_array).into_iter().flatten().enumerate() {
+                        let mode = m.get("mountPropagation").and_then(Value::as_str).unwrap_or_default();
+                        let path = format!("spec.{field}[{i}].volumeMounts[{j}].mountPropagation");
+                        match mode {
+                            "" | "None" | "HostToContainer" => {}
+                            "Bidirectional" if privileged => {}
+                            "Bidirectional" => errs.push(format!("{path}: Forbidden: Bidirectional mount propagation is available only to privileged containers")),
+                            other => errs.push(format!("{path}: Unsupported value: \"{other}\": supported values: \"Bidirectional\", \"HostToContainer\", \"None\"")),
+                        }
+                    }
+                }
+            }
+            for field in ["initContainers", "containers"] {
+                for (i, c) in obj.pointer(&format!("/spec/{field}")).and_then(Value::as_array).into_iter().flatten().enumerate() {
                     let limits = c.pointer("/resources/limits").and_then(Value::as_object);
                     for (res, req) in c.pointer("/resources/requests").and_then(Value::as_object).into_iter().flatten() {
                         let limit = limits.and_then(|l| l.get(res));
@@ -207,6 +222,17 @@ pub fn default_requests_to_limits(resources: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mount_propagation() {
+        let pod = |mode: &str, privileged: bool| json!({"spec": {"containers": [{"name": "c", "securityContext": {"privileged": privileged},
+            "volumeMounts": [{"name": "v", "mountPath": "/v", "mountPropagation": mode}]}]}});
+        assert!(validate("", "Pod", &pod("HostToContainer", false), None).is_empty());
+        assert!(validate("", "Pod", &pod("Bidirectional", true), None).is_empty());
+        let errs = validate("", "Pod", &pod("Bidirectional", false), None);
+        assert!(errs[0].contains("available only to privileged containers"), "{errs:?}");
+        assert!(validate("", "Pod", &pod("Sideways", false), None)[0].contains("Unsupported value"));
+    }
 
     #[test]
     fn sysctl_names() {
