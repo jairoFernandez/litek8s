@@ -284,14 +284,18 @@ fn detail(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
 
 /// The sync dialog: what it does, prune and force (each says what it
 /// costs), the keys.
-pub fn sync_dialog(f: &mut Frame, t: &Theme, objs: &[ObjRef], prune: bool, force: bool, area: Rect) {
+pub fn sync_dialog(f: &mut Frame, t: &Theme, objs: &[ObjRef], prune: bool, force: bool, litecd: bool, area: Rect) {
     let what = if objs.len() == 1 { objs[0].label() } else { format!("{} apps", objs.len()) };
     let check = |on: bool| if on { "[x]" } else { "[ ]" };
     let mut lines = vec![Line::raw("Applies what git has: writes an operation on the app, as argocd app sync,"), Line::raw("for whichever controller reconciles it (Argo CD or litecd)."), Line::raw("")];
     lines.push(Line::from(vec![Span::styled(format!("{} ", check(prune)), if prune { t.bad } else { t.dim }), Span::styled("p prune ", t.bold), Span::styled("deletes what git no longer has", if prune { t.bad } else { t.dim })]));
-    lines.push(Line::from(vec![Span::styled(format!("{} ", check(force)), if force { t.bad } else { t.dim }), Span::styled("f force ", t.bold), Span::styled("deletes and recreates what cannot be patched", if force { t.bad } else { t.dim })]));
+    if litecd {
+        lines.push(Line::from(vec![Span::styled("    f force ", t.dim), Span::styled("not available: litecd has no force sync (Argo CD only)", t.dim)]));
+    } else {
+        lines.push(Line::from(vec![Span::styled(format!("{} ", check(force)), if force { t.bad } else { t.dim }), Span::styled("f force ", t.bold), Span::styled("deletes and recreates what cannot be patched", if force { t.bad } else { t.dim })]));
+    }
     lines.push(Line::raw(""));
-    lines.push(Line::from(key_chips(t, &[("y", "sync"), ("p", "prune"), ("f", "force"), ("n/esc", "cancel")], 66)));
+    lines.push(Line::from(key_chips(t, if litecd { &[("y", "sync"), ("p", "prune"), ("n/esc", "cancel")] } else { &[("y", "sync"), ("p", "prune"), ("f", "force"), ("n/esc", "cancel")] }, 66)));
     let r = centered(area, 80, lines.len() as u16 + 2);
     f.render_widget(Clear, r);
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).block(t.dialog(Line::from(vec![Span::styled("⚠ ", t.warn), Span::styled(format!("Sync {what}?"), t.bold)]), t.warn).padding(Padding::horizontal(1))), r);

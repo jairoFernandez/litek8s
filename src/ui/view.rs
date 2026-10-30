@@ -52,7 +52,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Overlay::Confirm { title, lines, .. } => confirm(f, &t, title, lines, area),
         Overlay::Input { prompt, value, error, kind } => input(f, &t, prompt, value, error.as_deref(), kind, area),
         Overlay::NewCluster(form) => new_cluster(f, app, &t, form, area),
-        Overlay::Sync { objs, prune, force } => apps::sync_dialog(f, &t, objs, *prune, *force, area),
+        Overlay::Sync { objs, prune, force } => apps::sync_dialog(f, &t, objs, *prune, *force, app.argo.sample.litecd(), area),
     }
     if t.ascii {
         super::theme::asciify(f.buffer_mut());

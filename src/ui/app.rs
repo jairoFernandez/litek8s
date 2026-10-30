@@ -1483,7 +1483,8 @@ impl App {
                         Vec::new()
                     }
                     KeyCode::Char('f') => {
-                        self.overlay = Overlay::Sync { objs, prune, force: !force };
+                        let force = !force && !self.argo.sample.litecd();
+                        self.overlay = Overlay::Sync { objs, prune, force };
                         Vec::new()
                     }
                     _ => {
@@ -1900,6 +1901,8 @@ impl App {
             KeyCode::Char('T') => {
                 if !super::argo::running(&app) {
                     self.flash(format!("{} has no sync running", obj.label()), false);
+                } else if self.argo.sample.litecd() {
+                    self.flash("litecd cannot terminate a running sync (Argo CD only): it ends on its own or at its retry limit".to_string(), false);
                 } else if self.argo_writable() {
                     let msg = super::argo::operation(&app).map(|(_, m)| m).unwrap_or_default();
                     let mut lines = vec!["Stops its running operation (as argocd app terminate-op): what it applied stays.".to_string()];

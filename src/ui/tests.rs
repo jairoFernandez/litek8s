@@ -1502,6 +1502,8 @@ fn apps_sync_asks_with_prune_and_force_refresh_and_terminate() {
     use crate::ui::kube::KEffect;
     let mut app = sample_app();
     with_argo(&mut app);
+    // Argo CD runs them here: force and terminate exist (litecd has neither).
+    app.argo.sample.controller = Some(crate::ui::argo::Controller { name: "Argo CD".into(), version: "v3.1.0".into(), namespace: "argocd".into() });
     app.key(key('0'));
     app.key(key('G'));
     // s: the sync dialog; p and f turn prune and force on.
@@ -1535,6 +1537,24 @@ fn apps_sync_asks_with_prune_and_force_refresh_and_terminate() {
     let effects = app.key(key('D'));
     assert_eq!(app.tab, Tab::Kube);
     assert!(matches!(&effects[..], [Effect::Kube(KEffect::AppDiff { obj, .. })] if obj.name == "payments"), "{effects:?}");
+}
+
+#[test]
+fn apps_on_litecd_have_no_force_or_terminate() {
+    use crate::ui::kube::KEffect;
+    let mut app = sample_app();
+    with_argo(&mut app);
+    app.key(key('0'));
+    app.key(key('G'));
+    app.key(key('s'));
+    app.key(key('f'));
+    let s = render(&app, 80, 24);
+    assert!(s.contains("not available: litecd") && !s.contains("[x] f force"), "{s}");
+    assert!(matches!(&app.key(key('y'))[..], [Effect::Kube(KEffect::AppSync { force: false, .. })]));
+    app.key(key('g'));
+    assert!(app.key(key('T')).is_empty());
+    assert_eq!(app.overlay, Overlay::None);
+    assert!(app.status.as_ref().is_some_and(|(m, _)| m.contains("litecd cannot terminate")), "{:?}", app.status);
 }
 
 #[test]

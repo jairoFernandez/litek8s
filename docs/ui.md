@@ -25,7 +25,7 @@ that run Argo CD or litecd; `?` for the keys of each:
 | **7 Kubernetes** | a cluster UI for any cluster or context (litek8s, k3s, EKS, GKE, …), k9s-style: `:` any resource (CRDs too), `/` filters and selectors, describe, YAML, edit with a server dry run and a diff, logs of pods and whole workloads, shells, port-forwards, xray trees; see [Kubernetes](#kubernetes-a-cluster-ui) |
 | **8 Settings** | CPUs, memory, the VM's disk (grows in place), shared directories, API port, where published ports listen; switch the docker and kubectl contexts to litek8s and back; edit the settings file in `$EDITOR` |
 | **9 Observe** | the cluster's alerts and its pods by CPU or memory with sparklines of the last 30 minutes, from the API server's built-in metrics; every log of a pod (gone containers included), a regex search of every pod's logs, acknowledge alerts; see [Observe](#observe) and [observability.md](observability.md) |
-| **0 Apps** | only where the cluster serves `applications.argoproj.io`: Argo CD's Applications (run by Argo CD or by litecd) with sync, health, revision, last sync and what the operation says; one app's resources, sync history and last result; sync (with prune and force), refresh, hard refresh, terminate a sync; see [Apps](#apps-argo-cd-and-litecd) |
+| **0 Apps** | only where the cluster serves `applications.argoproj.io`: Argo CD's Applications (run by Argo CD or by litecd) with sync, health, revision, last sync and what the operation says; one app's resources, sync history and last result; sync (with prune, and force on Argo CD), refresh, hard refresh, terminate a sync (Argo CD); see [Apps](#apps-argo-cd-and-litecd) |
 
 Everything that deletes or stops asks first, and says what goes: removing a
 compose project lists its containers, deleting a cluster says it deletes
@@ -1291,9 +1291,9 @@ Actions, on the selected app (list) or the open one:
 
 | key | does |
 |---|---|
-| `s` | sync: a dialog says what it does; `p` turns on **prune** (deletes what git no longer has), `f` **force** (deletes and recreates what cannot be patched, as `argocd app sync --force`); `y` writes the `operation` the argocd CLI writes (the app's sync options, the hook strategy, `prune`, `hook.force`), `n`/`esc` cancels. Refused while another operation runs |
+| `s` | sync: a dialog says what it does; `p` turns on **prune** (deletes what git no longer has), `f` **force** (deletes and recreates what cannot be patched, as `argocd app sync --force`); `y` writes the `operation` the argocd CLI writes (the app's sync options, the hook strategy, `prune`, `hook.force`), `n`/`esc` cancels. Refused while another operation runs. **force is Argo CD only**: litecd has no force sync, so the dialog leaves it out there |
 | `r` / `R` | refresh / hard refresh: the `argocd.argoproj.io/refresh` annotation (`normal`, `hard`: render the manifests again) |
-| `T` | terminate the running sync (as `argocd app terminate-op`: its phase to `Terminating`), after asking; only while one runs |
+| `T` | terminate the running sync (as `argocd app terminate-op`: its phase to `Terminating`), after asking; only while one runs. **Argo CD only**: litecd cannot terminate a sync, and the view says so |
 
 They are changes, so they follow the Kubernetes view's rule: allowed on
 litek8s clusters, refused (and the footer says why) on other contexts

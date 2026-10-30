@@ -132,6 +132,14 @@ pub fn spawn(tx: UnboundedSender<Msg>, visible: Arc<AtomicBool>, wake: Arc<Notif
     })
 }
 
+impl ArgoSample {
+    /// litecd runs these apps: it applies syncs and refreshes, but has no
+    /// force (delete and recreate) and cannot terminate a running sync.
+    pub fn litecd(&self) -> bool {
+        self.controller.as_ref().is_some_and(|c| c.name == "litecd")
+    }
+}
+
 pub async fn sample(ep: &Endpoint) -> Result<ArgoSample> {
     let list = ep.json(Method::GET, APPS, None).await?;
     let mut apps: Vec<Value> = list["items"].as_array().cloned().unwrap_or_default();

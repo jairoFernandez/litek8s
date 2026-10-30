@@ -15,8 +15,9 @@
   its last sync's result per resource. `s` syncs after a dialog where `p`
   turns on prune and `f` force, `r`/`R` refresh and hard refresh, `T`
   terminates a running sync (asks); they patch the Application as the
-  argocd CLI does, so they work for either controller, and are refused on
-  read-only contexts. `D` and `d` open the diff and the describe in the
+  argocd CLI does, so they work for either controller (force and
+  terminate are Argo CD only: litecd has neither, and the view says so),
+  and are refused on read-only contexts. `D` and `d` open the diff and the describe in the
   Kubernetes view, and `esc` comes back. The tab is hidden on clusters
   without the CRD, and reads only while on screen.
 
