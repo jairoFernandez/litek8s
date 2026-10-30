@@ -11,7 +11,8 @@ litek8s ui --cluster ci     # starting on the local cluster `ci`
 ssh -t box litek8s ui       # another machine's, in your terminal
 ```
 
-Nine views, `1`-`9` (or `tab`) to switch, `?` for the keys of each:
+Nine views, `1`-`9` (or `tab`) to switch, and a tenth, `0`, on clusters
+that run Argo CD or litecd; `?` for the keys of each:
 
 | view | what it gives you |
 |---|---|
@@ -24,6 +25,7 @@ Nine views, `1`-`9` (or `tab`) to switch, `?` for the keys of each:
 | **7 Kubernetes** | a cluster UI for any cluster or context (litek8s, k3s, EKS, GKE, …), k9s-style: `:` any resource (CRDs too), `/` filters and selectors, describe, YAML, edit with a server dry run and a diff, logs of pods and whole workloads, shells, port-forwards, xray trees; see [Kubernetes](#kubernetes-a-cluster-ui) |
 | **8 Settings** | CPUs, memory, the VM's disk (grows in place), shared directories, API port, where published ports listen; switch the docker and kubectl contexts to litek8s and back; edit the settings file in `$EDITOR` |
 | **9 Observe** | the cluster's alerts and its pods by CPU or memory with sparklines of the last 30 minutes, from the API server's built-in metrics; every log of a pod (gone containers included), a regex search of every pod's logs, acknowledge alerts; see [Observe](#observe) and [observability.md](observability.md) |
+| **0 Apps** | only where the cluster serves `applications.argoproj.io`: Argo CD's Applications (run by Argo CD or by litecd) with sync, health, revision, last sync and what the operation says; one app's resources, sync history and last result; sync (with prune, and force on Argo CD), refresh, hard refresh, terminate a sync (Argo CD); see [Apps](#apps-argo-cd-and-litecd) |
 
 Everything that deletes or stops asks first, and says what goes: removing a
 compose project lists its containers, deleting a cluster says it deletes
@@ -1223,6 +1225,86 @@ uses the API port the running cluster recorded (and reconnects when it
 moves), and says "not running" rather than falling back to whatever listens
 on 6443.
 
+## Apps: Argo CD and litecd
+
+View 0 shows up on clusters that serve Argo CD's Application CRD
+(`applications.argoproj.io`), whoever reconciles it: Argo CD, or
+litecd, which reads and writes
+the same objects. It replaces the basics of Argo CD's web UI with nothing
+but the Kubernetes API: the list, an app's resources and history, and the
+actions, which patch the Application the way the argocd CLI does, so they
+work for either controller and need neither's API server nor a login.
+
+```
+ litek8s 1 Home 2 Clust 7 Kube 8 Set 9 Obs  0 Apps            ● lkmgmt · remote
+╭─ Applications · litecd latest · argocd ────────────── 40 apps · 2 OutOfSync ─╮
+│ NAME                       SYNC      HEALTH      REV     SYNCED MESSAGE      │
+│▌● argo                     Synced    Healthy     0.20.1  5h                  │
+│ ● cert-manager             Synced    Healthy     v1.14.4 23h                 │
+│ ◐ development              Synced    Progressing f69cca8 23h                 │
+│ ● developme…nt-groveback   Synced    Healthy     f69cca8 5h                  │
+│ ◐ production-env…ifybot    OutOfSync Healthy     f69cca8 3m                  │
+│ ◐ registry                 OutOfSync Progressing f69cca8 23h    sync running…│
+│ ✕ web                      OutOfSync Degraded    0123456 9m     sync failed:…│
+╰──────────────────────────────────────────────────────────────────────────────╯
+╭─ argocd/argo ─────────────────────────────────── enter: resources & history ─╮
+│ source   https://argoproj.github.io/argo-helm argo-workflows@0.20.1          │
+│ dest     in-cluster/argo · auto (prune, self-heal)                           │
+│ status   Synced · Healthy  compared 11s ago                                  │
+╰──────────────────────────────────────────────────────────────────────────────╯
+ enter open  s sync  r/R refresh  T terminate  D diff  A appsets        ?  help
+```
+
+- **The list**: every Application of every namespace, by name. The glyph
+  is health and sync together (`✕` Degraded, `◐` Progressing, Missing, out
+  of sync or syncing, `●` Synced and Healthy); `REV` the revision it is
+  synced to (a commit's first 7 characters, a chart's version), `SYNCED`
+  when its last operation ended (else the last deploy in its history), and
+  the message of a running or failed operation, else its first condition,
+  else its health message. The title says which controller runs them (the
+  Deployment or StatefulSet in the apps' controller namespace: litecd, or
+  Argo CD's application controller, with its image's tag); the right side
+  counts the apps, degraded, out of sync, progressing and syncing. Under
+  the list, the selected app's source(s), destination and sync policy.
+  Wide terminals (140 columns) add the project and a short source. `/`
+  filters by name, namespace, project, sync or health (`/OutOfSync`).
+- **`A`** switches to the ApplicationSets (when there are any): their
+  generators, how many apps each owns, and an error condition if one is
+  set.
+- **`enter`** opens the app: its source(s), destination, project and
+  policy, the revision, when it synced and was last compared, the
+  operation (phase, who started it, its message), the health message and
+  conditions; under it the resources of its status with their sync and
+  health (`requires pruning`, hooks). Argo CD v3 leaves the resources'
+  health out of the status (`resourceHealthSource: appTree`); there it is
+  read from the live objects (as the Kubernetes view's tree does) while the
+  app is open, and child Applications (app of apps) get their own status's
+  health. `h` cycles the list between resources, the **sync history**
+  (newest first: id, revision, when, by whom or `auto`, source) and the
+  **last sync result** (each resource's result and message). `enter` on a
+  resource describes it in the Kubernetes view; `esc` there comes back.
+- **`D`** the diff with git (the [published diff](#argo-cd-applications)
+  Secret litecd writes; Argo CD keeps its own in argocd-server), `d` the
+  Application described, both in the Kubernetes view; `esc` comes back.
+
+Actions, on the selected app (list) or the open one:
+
+| key | does |
+|---|---|
+| `s` | sync: a dialog says what it does; `p` turns on **prune** (deletes what git no longer has), `f` **force** (deletes and recreates what cannot be patched, as `argocd app sync --force`); `y` writes the `operation` the argocd CLI writes (the app's sync options, the hook strategy, `prune`, `hook.force`), `n`/`esc` cancels. Refused while another operation runs. **force is Argo CD only**: litecd has no force sync, so the dialog leaves it out there |
+| `r` / `R` | refresh / hard refresh: the `argocd.argoproj.io/refresh` annotation (`normal`, `hard`: render the manifests again) |
+| `T` | terminate the running sync (as `argocd app terminate-op`: its phase to `Terminating`), after asking; only while one runs. **Argo CD only**: litecd cannot terminate a sync, and the view says so |
+
+They are changes, so they follow the Kubernetes view's rule: allowed on
+litek8s clusters, refused (and the footer says why) on other contexts
+unless `W` or `writableContexts` allows them, and everywhere with
+`readOnly: true`. The view lists `/apis/argoproj.io/v1alpha1/applications`
+and `.../applicationsets` every 5 s while it is on screen and not at all
+otherwise (once more right after an action); the controller is looked up
+once per cluster (`list` on Deployments and StatefulSets of its namespace;
+without that permission it says `controller unknown`). On a cluster
+without the CRD the tab is not there and `0` says why.
+
 ## Light on the machine
 
 The UI draws only when a key, a window resize or new data changes what is
@@ -1328,7 +1410,7 @@ stripped macOS arm64 binary (33.41 MB on main c620693, 35.43 MB with it;
 
 | where | keys |
 |---|---|
-| everywhere | `1`-`9`/`tab`/`shift-tab` views, `↑↓`/`jk`/`PgUp`/`PgDn`/`g`/`G` move, `/` filter the list (`esc` clears), `ctrl-r` refresh, `?` help, `q` or `ctrl-c` quit |
+| everywhere | `1`-`9`, `0`/`tab`/`shift-tab` views, `↑↓`/`jk`/`PgUp`/`PgDn`/`g`/`G` move, `/` filter the list (`esc` clears), `ctrl-r` refresh, `?` help, `q` or `ctrl-c` quit |
 | Home | `u` up, `d` down (asks), `R` delete the cluster (asks), `b` the next breakdown (memory, CPU, disk), `c` copy the API address |
 | Clusters | `n` new (`tab` between name and nodes), `u` up, `d` down (asks), `D`/`del` delete (asks), `enter` show it (a local cluster: every view, then asks about `kubectl`/`docker`; another context: the Kubernetes view), `t` straight into its tree, `c` copy its context name |
 | Containers | `l`/`enter` logs, `s` shell, `u` start, `x` stop (asks), `r` restart (asks), `d`/`del` remove (asks), `space` fold a project |
@@ -1337,6 +1419,7 @@ stripped macOS arm64 binary (33.41 MB on main c620693, 35.43 MB with it;
 | Kubernetes | see [its keys](#kubernetes-keys); `?` there lists the ones of what is shown |
 | Settings | `enter` edit, `del` back to the default, `space` toggle / switch a context |
 | Observe | `l`/`enter` the pod's logs, `L` search every pod's logs, `s` sort by CPU/memory, `n`/`N` namespace, `a` acknowledge the pod's alerts, `A` all (asks) |
+| Apps | `enter` open the app (`esc` back), `h` resources / sync history / last result, `s` sync (`p` prune, `f` force; asks), `r`/`R` refresh / hard refresh, `T` terminate the sync (asks), `D` diff, `d` describe, `A` ApplicationSets; on a resource `enter` describes it |
 | logs | `f` follow, `w` wrap, `c` clear, `esc` back |
 
 `--mouse` turns on clicks (tabs, rows) and the wheel; it is off by default
