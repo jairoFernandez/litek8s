@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.17
 
 - **`litek8s ui`'s Home works on clusters that are not litek8s** (k3s,
   kubeadm, managed ones): it no longer waits on "collecting…" forever or
