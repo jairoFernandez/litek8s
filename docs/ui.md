@@ -398,6 +398,25 @@ act on this machine's dev clusters, so Home refuses them for a remote one,
 and the Docker views (3 to 6), which read this machine's dev cluster's Docker
 API unless `--docker-host` names another, say so instead of failing.
 
+Against a cluster that is not litek8s (k3s, kubeadm, a managed one: its
+`/version` has no `+litek8s`), there are no such endpoints, so Home reads
+the public API instead. The header names what it is (`k3s v1.35.0+k3s1`,
+`RKE2`, `EKS`, `GKE`, else `Kubernetes`). CPU and memory are what `kubectl top
+nodes` shows: each node's use from `metrics.k8s.io` (metrics-server's
+NodeMetrics, asked every 2 s while Home is on screen) against what its Node
+object has allocatable (listed every 30 s); the meters add up the cluster or
+show the node `n` picked, and each scope's history graph fills from then on.
+The breakdowns are per node: memory, CPU and disk as shares of each node's
+allocatable (its root filesystem for disk), past 80 % in yellow and past 90 %
+in red, with the prefix all node names share left out (`…x7k2p`). Disk comes
+from each kubelet's `/stats/summary` through the API server's node proxy
+(`nodes/proxy` get, every 30 s); refused by RBAC, Home says "not available"
+and stops asking. Without metrics-server the meters show the allocatable
+figures and say `metrics.k8s.io not served` instead of waiting. The
+connections box says where the figures come from (no Docker, engine or VM:
+those are this machine's). Home only reads there; the Kubernetes view stays
+read-only unless `W` or `writableContexts`.
+
 Under the CPU and memory meters, a line says what the pods **reserve**
 (their requests) and **may use** (their limits) of the nodes shown, against
 those nodes' allocatable resources, the way the scheduler and `kubectl
@@ -837,7 +856,7 @@ what you see elsewhere:
 | changes (delete, edit, scale, shells, …) | allowed | read-only until `W` or `writableContexts` |
 | CPU and MEM columns | from `metrics.k8s.io` when served | the same: shown when the cluster has metrics-server, absent otherwise |
 | Observe (9): pod CPU/memory history, alerts, log search | the API server's built-in metrics, alerts and log store | not there: the view says the cluster is not litek8s (logs: `l` on a pod or workload) |
-| Home (1) with `--context`: node memory, CPU, disk | litek8s's node endpoints | dashes |
+| Home (1) with `--context`: node memory, CPU, disk | litek8s's node endpoints | Nodes' allocatable, `metrics.k8s.io` and the kubelets' stats when allowed ([Screens](#screens)) |
 | Docker views (3-6) | the cluster's Docker socket | whatever `--docker-host` points at, independent of the context |
 | the tree's Services → pods | from the Service Table's Selector column | the same (kubectl's wide column; older servers: read as objects) |
 

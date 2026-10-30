@@ -14,6 +14,7 @@ mod clusters;
 mod ctx;
 pub(crate) mod docker;
 mod exec;
+mod generic;
 mod home;
 mod kube;
 mod obs;

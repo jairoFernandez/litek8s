@@ -149,6 +149,8 @@ fn badge(app: &App, t: &Theme, room: usize) -> Vec<Span<'static>> {
                 parts.push(format!("up {}", duration(h.uptime_s)));
             }
         }
+        // A cluster that is not litek8s says what it is (`k3s v1.35.0+k3s1`).
+        DevStatus::Remote if h.generic.is_some() => parts.push(h.generic.as_ref().unwrap().label()),
         s => parts.push(s.label().to_string()),
     }
     parts.retain(|p| !p.is_empty());
@@ -427,6 +429,9 @@ fn memory_stack(t: &Theme, b: &crate::dev::memory::Breakdown) -> Option<((Option
 
 fn figures(app: &App) -> Figures {
     let h = &app.home;
+    if let Some(g) = &h.generic {
+        return generic_figures(app, g);
+    }
     let cpus = app.home_cpus();
     let mem_total = app.home_memory();
     let remote_cpu = app.cpu.as_ref().filter(|_| h.status == DevStatus::Remote && h.cpu_pct.is_none());
@@ -450,6 +455,41 @@ fn figures(app: &App) -> Figures {
     };
     let disk = disk_figure(h);
     Figures { cpu, mem, disk, stack: stacked.map(|(_, s)| s) }
+}
+
+/// A cluster that is not litek8s: the nodes Home shows (all, or the one
+/// `n` picked), their use from `metrics.k8s.io` against what they have
+/// allocatable (what `kubectl top nodes` shows), and their root
+/// filesystems from the kubelets when the API server lets us ask.
+fn generic_figures(app: &App, g: &super::generic::Cluster) -> Figures {
+    use super::generic::Source;
+    let t = g.totals(app.scope.as_deref());
+    let why = |alloc: String| match &g.metrics {
+        Source::Missing(m) => format!("{alloc} allocatable · {m}"),
+        Source::Pending | Source::Served => format!("{alloc} allocatable · asking metrics.k8s.io"),
+    };
+    let cpu = match (t.cpu_ratio(), t.cpu_used) {
+        _ if t.nodes == 0 => (None, "-".into()),
+        (Some(r), Some(u)) => (Some(r), format!("{u:.1} of {:.1} CPUs", t.cpu_alloc)),
+        _ => (None, why(format!("{:.1} CPUs", t.cpu_alloc))),
+    };
+    let mem = match (t.mem_ratio(), t.mem_used) {
+        _ if t.nodes == 0 => (None, "-".into()),
+        (Some(r), Some(u)) => {
+            let mut text = format!("{:.1} of {}", u as f64 / (1u64 << 30) as f64, gib(t.mem_alloc));
+            if r >= 0.9 {
+                text.push_str(" · short");
+            }
+            (Some(r), text)
+        }
+        _ => (None, why(gib(t.mem_alloc))),
+    };
+    let disk = match (t.fs, &g.disk) {
+        (Some((used, cap)), _) => (Some(used as f64 / cap.max(1) as f64), format!("{} used · {} free", bytes(used), bytes(cap.saturating_sub(used)))),
+        (None, Source::Missing(m)) => (None, format!("not available ({m})")),
+        _ => (None, "-".into()),
+    };
+    Figures { cpu, mem, disk, stack: None }
 }
 
 /// The disk meter. The macOS VM's: what its data disk holds against its
@@ -699,9 +739,10 @@ fn home(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     lines.push(Line::from(pods));
     if remote {
         let mut nodes = vec![Span::styled(" nodes  ", t.dim)];
-        let names = app.node_reports.names();
+        let names = app.scope_names();
         nodes.push(Span::styled(names.len().to_string(), t.bold));
-        nodes.push(Span::raw(format!(" · showing {}", app.scope.as_deref().map(|n| format!("node {n}")).unwrap_or_else(|| "the cluster".into()))));
+        let shown = |n: &str| h.generic.as_ref().map(|g| g.short_name(n)).unwrap_or_else(|| n.to_string());
+        nodes.push(Span::raw(format!(" · showing {}", app.scope.as_deref().map(|n| format!("node {}", shown(n))).unwrap_or_else(|| "the cluster".into()))));
         if names.len() > 1 {
             nodes.push(Span::styled("  n: next", t.dim));
         }
@@ -778,7 +819,10 @@ fn docker_store_spans(app: &App, t: &Theme, always: bool) -> Vec<Span<'static>> 
 fn tip(f: &mut Frame, app: &App, t: &Theme, out: Rect) {
     let tip = match app.home.status {
         DevStatus::Down => format!("{} is down: press u to start it (2: all clusters).", app.cluster),
-        DevStatus::Remote => "Connected to a litek8s that is not this machine's dev cluster.".into(),
+        DevStatus::Remote => match &app.home.generic {
+            Some(g) => format!("Connected to {}, not litek8s: figures from its API, read-only.", g.label()),
+            None => "Connected to a litek8s that is not this machine's dev cluster.".into(),
+        },
         _ => "Switch docker/kubectl to litek8s in Settings (8). Help: ?".into(),
     };
     f.render_widget(Paragraph::new(Span::styled(format!(" {tip}"), t.dim)), out);
@@ -788,6 +832,9 @@ fn tip(f: &mut Frame, app: &App, t: &Theme, out: Rect) {
 /// `kubectl` point: two columns.
 fn connections(f: &mut Frame, app: &App, t: &Theme, area: Rect, wide: bool) {
     let h = &app.home;
+    if let Some(g) = &h.generic {
+        return generic_connections(f, app, t, g, area, wide);
+    }
     let down = matches!(h.status, DevStatus::Down);
     let b = t.block("connections · your tools point at");
     let inner = b.inner(area);
@@ -837,6 +884,43 @@ fn connections(f: &mut Frame, app: &App, t: &Theme, area: Rect, wide: bool) {
     f.render_widget(Paragraph::new(right), r);
 }
 
+/// A cluster that is not litek8s: its API server and what it is, where
+/// the figures come from; and kubectl's context (Docker, the engine and the
+/// VM are this machine's dev cluster's, nothing of this cluster's).
+fn generic_connections(f: &mut Frame, app: &App, t: &Theme, g: &super::generic::Cluster, area: Rect, wide: bool) {
+    use super::generic::Source;
+    let b = t.block("connections · where the figures come from");
+    let inner = b.inner(area);
+    f.render_widget(b, area);
+    let [l, r] = Layout::horizontal([Constraint::Percentage(48), Constraint::Percentage(52)]).areas(inner);
+    let w = (l.width as usize).saturating_sub(10);
+    let kv = |k: &str, v: String, style: Style| Line::from(vec![Span::styled(format!(" {k:<8}"), t.dim), Span::styled(v, style)]);
+    let source = |s: &Source, ok: &str| match s {
+        Source::Pending => ("…".to_string(), t.dim),
+        Source::Served => (ok.to_string(), Style::new()),
+        Source::Missing(m) => (m.clone(), t.warn),
+    };
+    let mut left = vec![kv("API", trunc(&app.kube_endpoint, w), if app.kube_error.is_some() { t.bad } else { Style::new() }), kv("Server", trunc(&g.label(), w), Style::new())];
+    let (m, ms) = source(&g.metrics, "metrics.k8s.io");
+    left.push(kv("Use", trunc(&m, w), ms));
+    if wide {
+        let (d, ds) = source(&g.disk, "kubelet stats (node proxy)");
+        left.push(kv("Disk", trunc(&d, w), ds));
+    }
+    f.render_widget(Paragraph::new(left), l);
+    let c = &app.home.contexts;
+    let cw = (r.width as usize).saturating_sub(19);
+    let kname = if c.kube_context.is_empty() { "-".to_string() } else { c.kube_context.clone() };
+    let mut right = vec![
+        Line::from(vec![Span::raw("  "), Span::styled("shown context    ", t.dim), Span::raw(trunc(&app.kube_context, cw))]),
+        Line::from(vec![Span::raw("  "), Span::styled("kubectl context  ", t.dim), Span::raw(trunc(&kname, cw))]),
+    ];
+    if wide {
+        right.push(Line::from(vec![Span::raw("  "), Span::styled("kubeconfig       ", t.dim), Span::styled(trunc_left(&home_dir_short(&c.kubeconfig), cw), t.dim)]));
+    }
+    f.render_widget(Paragraph::new(right), r);
+}
+
 /// Wide and tall: CPU and memory side by side with their history and
 /// what they are made of, disk and the workloads under them, then the
 /// connections.
@@ -855,6 +939,8 @@ fn home_wide(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     let need_a = 4 + lines_of(cpu_b).max(lines_of(mem_b)) + u16::from(app.allocated().is_some());
     // The pods' box and the docker box (containers, images) beside disk.
     let need_b = (3 + lines_of(disk_b)).max(if h.status == DevStatus::Remote { 6 } else { 7 });
+    // A cluster that is not litek8s: room for every node (and the cluster's row).
+    let need_b = need_b.max(h.generic.as_ref().map_or(0, |g| 3 + g.nodes.len() as u16 + u16::from(g.nodes.len() > 1)));
     let room = area.height.saturating_sub(conn_h + out_rows);
     // Room to spare goes to the history graphs (up to 8 rows).
     let graph_h = 1 + room.saturating_sub(need_a + need_b).min(7);
@@ -874,8 +960,11 @@ fn home_wide(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     let mem_hist: Vec<f64> = app.history.iter().map(|(_, m)| *m as f64).collect();
     let cpu_max = cpu_hist.iter().cloned().fold(0.1, f64::max);
     let alloc = app.allocated();
-    resource_box(f, t, cpu_r, "cpu", cpu_b, Some((&cpu_hist, cpu_max)), graph_h, fig.cpu.0, fig.cpu.1.clone(), None, alloc.as_ref().map(|a| reserved_line(t, a, false)), alloc.as_ref().map(|a| marks_of(a, false)));
-    resource_box(f, t, mem_r, "memory", mem_b, Some((&mem_hist, 1.0)), graph_h, fig.mem.0, fig.mem.1.clone(), fig.stack.as_ref(), alloc.as_ref().map(|a| reserved_line(t, a, true)), alloc.as_ref().map(|a| marks_of(a, true)));
+    // No history to wait for when a cluster that is not litek8s has no metrics.k8s.io.
+    let graphs = !h.generic.as_ref().is_some_and(|g| matches!(g.metrics, super::generic::Source::Missing(_)));
+    let (cpu_g, mem_g) = if graphs { (Some((&cpu_hist[..], cpu_max)), Some((&mem_hist[..], 1.0))) } else { (None, None) };
+    resource_box(f, t, cpu_r, "cpu", cpu_b, cpu_g, graph_h, fig.cpu.0, fig.cpu.1.clone(), None, alloc.as_ref().map(|a| reserved_line(t, a, false)), alloc.as_ref().map(|a| marks_of(a, false)));
+    resource_box(f, t, mem_r, "memory", mem_b, mem_g, graph_h, fig.mem.0, fig.mem.1.clone(), fig.stack.as_ref(), alloc.as_ref().map(|a| reserved_line(t, a, true)), alloc.as_ref().map(|a| marks_of(a, true)));
     resource_box(f, t, disk_r, "disk", disk_b, None, 0, fig.disk.0, fig.disk.1.clone(), None, None, None);
 
     let mut lines = Vec::new();
@@ -888,7 +977,10 @@ fn home_wide(f: &mut Frame, app: &App, t: &Theme, area: Rect) {
     let remote = h.status == DevStatus::Remote;
     if remote {
         // A remote litek8s: its nodes (this machine's Docker is not its).
-        lines.extend(node_lines(app, t, ww));
+        match &h.generic {
+            Some(g) => lines.extend(generic_node_lines(app, t, g, ww)),
+            None => lines.extend(node_lines(app, t, ww)),
+        }
         f.render_widget(Paragraph::new(lines).block(t.block("workloads · nodes")), work_r);
     } else {
         // The cluster's pods, then the Docker API's containers in a box of
@@ -941,6 +1033,52 @@ fn reserved_line(t: &Theme, a: &super::model::Allocated, memory: bool) -> Line<'
 fn marks_of(a: &super::model::Allocated, memory: bool) -> (f64, f64) {
     let (req, lim, of) = if memory { (a.mem_req, a.mem_lim, a.memory) } else { (a.cpu_req, a.cpu_lim, a.cpu) };
     if of <= 0.0 { (0.0, 0.0) } else { (req / of, lim / of) }
+}
+
+/// A cluster that is not litek8s: the whole cluster, then each node, with
+/// its CPU and memory in use against what it has allocatable (near full in
+/// yellow or red) and its root filesystem when the kubelets say; the one
+/// Home shows (`n`) marked.
+fn generic_node_lines(app: &App, t: &Theme, g: &super::generic::Cluster, width: usize) -> Vec<Line<'static>> {
+    if g.nodes.is_empty() {
+        return vec![Line::from(vec![Span::styled(" nodes       ", t.dim), Span::styled("–", t.dim)])];
+    }
+    let short = super::generic::short_names(&g.names());
+    let name_w = short.iter().map(|n| n.chars().count()).max().unwrap_or(7).clamp(11, 24);
+    let share = |r: Option<f64>| -> Span<'static> {
+        match r {
+            Some(r) => Span::styled(format!("{:>4}", pct(r * 100.0, 0)), if r >= 0.9 { t.bad.add_modifier(Modifier::BOLD) } else if r >= 0.8 { t.warn.add_modifier(Modifier::BOLD) } else { Style::new() }),
+            None => Span::styled(format!("{:>4}", "–"), t.dim),
+        }
+    };
+    let row = |label: String, tot: super::generic::Totals, ready: bool, on: bool| {
+        let mark = if on { "▸ " } else { "  " };
+        let mut spans = vec![Span::styled(format!(" {mark}{:<name_w$} ", trunc(&label, name_w)), if on { t.bold } else { Style::new() })];
+        spans.push(Span::styled("cpu ", t.dim));
+        spans.push(share(tot.cpu_ratio()));
+        spans.push(Span::styled("  mem ", t.dim));
+        spans.push(share(tot.mem_ratio()));
+        if width > name_w + 36 {
+            let used = tot.mem_used.map(|u| format!("{:.1}", u as f64 / (1u64 << 30) as f64)).unwrap_or_else(|| "–".into());
+            spans.push(Span::styled(format!("  {used}/{:.1} GiB", tot.mem_alloc as f64 / (1u64 << 30) as f64), t.dim));
+        }
+        if let Some((u, c)) = tot.fs.filter(|_| width > name_w + 52) {
+            spans.push(Span::styled("  disk ", t.dim));
+            spans.push(share(Some(u as f64 / c.max(1) as f64)));
+        }
+        if !ready {
+            spans.push(Span::styled("  NotReady", t.bad));
+        }
+        Line::from(spans)
+    };
+    let mut lines = Vec::new();
+    if g.nodes.len() > 1 {
+        lines.push(row(format!("cluster ({})", g.nodes.len()), g.totals(None), true, app.scope.is_none()));
+    }
+    for (n, label) in g.nodes.iter().zip(short) {
+        lines.push(row(label, g.totals(Some(&n.name)), n.ready, g.nodes.len() == 1 || app.scope.as_deref() == Some(n.name.as_str())));
+    }
+    lines
 }
 
 /// A remote litek8s's nodes: the whole cluster, then each node, with its
@@ -1086,9 +1224,14 @@ struct ExplainLine {
     indent: bool,
     /// Its value against the box's scale (`Explain::scale`), for the bar.
     share: f64,
+    /// How full it is, when that is a warning past 80 % (a node's memory).
+    level: Option<f64>,
 }
 
 fn explain_boxes(app: &App) -> Vec<Explain> {
+    if let Some(g) = &app.home.generic {
+        return generic_boxes(app, g);
+    }
     let mut out = Vec::new();
     if let Some(m) = &app.home.memory {
         // Against the VM's or sandbox's limit (the meter's), else the total.
@@ -1101,7 +1244,7 @@ fn explain_boxes(app: &App) -> Vec<Explain> {
             title: format!("Memory · {} ({})", bytes(m.total), m.what),
             what: m.what.to_string(),
             scale: name,
-            lines: m.lines.iter().map(|l| ExplainLine { label: l.label.clone(), value: bytes(l.bytes), note: l.note.to_string(), indent: false, share: l.bytes as f64 / scale as f64 }).collect(),
+            lines: m.lines.iter().map(|l| ExplainLine { label: l.label.clone(), value: bytes(l.bytes), note: l.note.to_string(), indent: false, share: l.bytes as f64 / scale as f64, level: None }).collect(),
         });
     }
     if let Some(c) = &app.cpu {
@@ -1119,7 +1262,7 @@ fn explain_boxes(app: &App) -> Vec<Explain> {
             title,
             what: c.what.to_string(),
             scale,
-            lines: c.lines.iter().map(|l| ExplainLine { label: l.label.clone(), value: pct(l.pct / of, 1), note: l.note.clone(), indent: l.indent, share: l.pct / 100.0 / of }).collect(),
+            lines: c.lines.iter().map(|l| ExplainLine { label: l.label.clone(), value: pct(l.pct / of, 1), note: l.note.clone(), indent: l.indent, share: l.pct / 100.0 / of, level: None }).collect(),
         });
     }
     if let Some(d) = &app.disk_breakdown() {
@@ -1132,8 +1275,68 @@ fn explain_boxes(app: &App) -> Vec<Explain> {
                 .lines
                 .iter()
                 .filter(|l| l.bytes > 0 || !l.indent)
-                .map(|l| ExplainLine { label: l.label.clone(), value: bytes(l.bytes), note: l.note.clone(), indent: l.indent, share: l.bytes as f64 / d.total.max(1) as f64 })
+                .map(|l| ExplainLine { label: l.label.clone(), value: bytes(l.bytes), note: l.note.clone(), indent: l.indent, share: l.bytes as f64 / d.total.max(1) as f64, level: None })
                 .collect(),
+        });
+    }
+    out
+}
+
+/// A cluster that is not litek8s: memory, CPU and disk per node, as
+/// shares of what each has allocatable (disk: of its root filesystem);
+/// nodes near full in yellow or red, the one `n` picked marked.
+fn generic_boxes(app: &App, g: &super::generic::Cluster) -> Vec<Explain> {
+    use super::generic::{Node, Source};
+    let all = g.totals(None);
+    let row = |n: &Node, figure: Option<(f64, String)>| {
+        let on = app.scope.as_deref() == Some(n.name.as_str());
+        let short = g.short_name(&n.name);
+        let label = if on { format!("▸ {short}") } else { short };
+        let ready = if n.ready { "" } else { " · NotReady" };
+        match figure {
+            Some((r, note)) => ExplainLine { label, value: pct(r * 100.0, 0), note: format!("{note}{ready}"), indent: false, share: r, level: Some(r) },
+            None => ExplainLine { label, value: "–".into(), note: ready.trim_start_matches(" · ").to_string(), indent: false, share: 0.0, level: None },
+        }
+    };
+    let g1 = |b: u64| format!("{:.1}", b as f64 / (1u64 << 30) as f64);
+    let missing = |lines: &mut Vec<ExplainLine>| {
+        if let Source::Missing(m) = &g.metrics {
+            lines.insert(0, ExplainLine { label: "no metrics.k8s.io".into(), value: "–".into(), note: format!("install metrics-server ({m})"), indent: false, share: 0.0, level: None });
+        }
+    };
+    let mut mem: Vec<ExplainLine> = g.nodes.iter().map(|n| row(n, n.mem_ratio().map(|r| (r, format!("{}/{} GiB", g1(n.mem_used.unwrap_or(0)), g1(n.mem_alloc)))))).collect();
+    missing(&mut mem);
+    let mut cpu: Vec<ExplainLine> = g.nodes.iter().map(|n| row(n, n.cpu_ratio().map(|r| (r, format!("{:.2}/{:.1} CPUs", n.cpu_used.unwrap_or(0.0), n.cpu_alloc))))).collect();
+    missing(&mut cpu);
+    let total = |used: Option<String>, alloc: String| used.map(|u| format!("{u} of {alloc}")).unwrap_or(alloc);
+    // What the meters above the rows show: the cluster, or the node `n` picked.
+    let what = match app.scope.as_deref() {
+        Some(n) => format!("node {}", g.short_name(n)),
+        None => format!("cluster · {} nodes", g.nodes.len()),
+    };
+    let mut out = vec![
+        Explain {
+            kind: 0,
+            title: format!("Memory · per node · {} allocatable", total(all.mem_used.map(gib), gib(all.mem_alloc))),
+            what: what.clone(),
+            scale: "bar: node allocatable".into(),
+            lines: mem,
+        },
+        Explain {
+            kind: 1,
+            title: format!("CPU · per node · {} allocatable", total(all.cpu_used.map(|c| format!("{c:.1}")), format!("{:.1} CPUs", all.cpu_alloc))),
+            what: what.clone(),
+            scale: "bar: node allocatable".into(),
+            lines: cpu,
+        },
+    ];
+    if let Some((used, cap)) = all.fs {
+        out.push(Explain {
+            kind: 2,
+            title: format!("Disk · per node · {} of {}", bytes(used), bytes(cap)),
+            what: what.clone(),
+            scale: "bar: node filesystem".into(),
+            lines: g.nodes.iter().map(|n| row(n, n.fs.map(|(u, c)| (u as f64 / c.max(1) as f64, format!("{}/{}", bytes(u), bytes(c)))))).collect(),
         });
     }
     out
@@ -1145,10 +1348,15 @@ fn explain_line(t: &Theme, l: &ExplainLine, width: usize, label_w: usize) -> Lin
     let label_w = label_w.clamp(8, 24).min(width / 3);
     let bar_w = (width.saturating_sub(label_w + 12) / 4).clamp(4, 14);
     let label = if l.indent { format!("  {}", l.label) } else { l.label.clone() };
+    let hot = match l.level {
+        Some(r) if r >= 0.9 => Some(t.bad),
+        Some(r) if r >= 0.8 => Some(t.warn),
+        _ => None,
+    };
     let mut spans = vec![
         Span::styled(format!(" {:<label_w$} ", trunc(&label, label_w)), if l.indent { t.dim } else { Style::new() }),
-        t.bar(l.share, bar_w, if l.indent { t.dim } else { t.accent.remove_modifier(Modifier::BOLD) }),
-        Span::styled(format!("{:>9}", l.value), if l.indent { Style::new() } else { t.bold }),
+        t.bar(l.share, bar_w, hot.unwrap_or(if l.indent { t.dim } else { t.accent.remove_modifier(Modifier::BOLD) })),
+        Span::styled(format!("{:>9}", l.value), hot.map(|s| s.add_modifier(Modifier::BOLD)).unwrap_or(if l.indent { Style::new() } else { t.bold })),
     ];
     let room = width.saturating_sub(label_w + bar_w + 14);
     if room > 4 && !l.note.is_empty() {

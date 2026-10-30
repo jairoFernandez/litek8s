@@ -33,9 +33,37 @@ pub fn spawn(
         // A remote litek8s: every node's disk from the last walk.
         let mut node_disks: Option<Reports<crate::dev::disk::NodeDisk>> = None;
         let dev_home = crate::dev::dev_home().unwrap_or_default();
+        // A remote cluster that is not litek8s (its `/version` says so): its
+        // figures come from the public API instead (see generic.rs).
+        let mut generic: Option<super::generic::Cluster> = None;
+        let mut remote_litek8s = false;
+        let (mut nodes_at, mut disk_at): (Option<Instant>, Option<Instant>) = (None, None);
+        let mut disk_refused = false;
         loop {
             let name = active.lock().unwrap().clone();
             let cluster = crate::dev::cluster::Cluster { name: name.clone() };
+            if let Some(ep) = remote.as_ref().filter(|_| !remote_litek8s && generic.is_none()) {
+                // Unanswered: the litek8s path below, as before, until it answers.
+                if let Some(v) = version(ep).await {
+                    match super::generic::distro(&v) {
+                        "litek8s" => remote_litek8s = true,
+                        d => generic = Some(super::generic::Cluster { distro: d.to_string(), version: v, ..Default::default() }),
+                    }
+                }
+            }
+            if let (Some(ep), Some(g)) = (&remote, generic.as_mut()) {
+                let every = pace.load(Ordering::Relaxed);
+                sample_generic(ep, g, every == VISIBLE, &mut nodes_at, (&mut disk_at, &mut disk_refused)).await;
+                let s = HomeSample { status: DevStatus::Remote, contexts: super::ctx::detect(&cluster, None), generic: Some(g.clone()), ..Default::default() };
+                if tx.send(Msg::Home(Box::new(s))).is_err() {
+                    return;
+                }
+                tokio::select! {
+                    _ = tokio::time::sleep(Duration::from_secs(every)) => {}
+                    _ = wake.notified() => {}
+                }
+                continue;
+            }
             // macOS: the clusters' data is in the VM's disk, in the dev data
             // directory; Linux: each cluster's own directory.
             let home = if cfg!(target_os = "macos") { dev_home.clone() } else { cluster.data_dir(&dev_home) };
@@ -154,6 +182,87 @@ pub fn spawn(
             }
         }
     })
+}
+
+/// The API server's gitVersion (`v1.35.0+k3s1`).
+async fn version(ep: &super::client::Endpoint) -> Option<String> {
+    let (status, v) = get(ep, "/version", 5).await.ok()?;
+    (status == 200).then(|| v["gitVersion"].as_str().unwrap_or_default().to_string())
+}
+
+/// A GET's status and JSON body (`null` when it is not JSON).
+async fn get(ep: &super::client::Endpoint, path: &str, secs: u64) -> anyhow::Result<(u16, serde_json::Value)> {
+    use http_body_util::BodyExt;
+    let resp = tokio::time::timeout(Duration::from_secs(secs), ep.send(hyper::Method::GET, path, None, Vec::new())).await??;
+    let status = resp.status().as_u16();
+    let data = tokio::time::timeout(Duration::from_secs(secs), resp.into_body().collect()).await??.to_bytes();
+    Ok((status, serde_json::from_slice(&data).unwrap_or(serde_json::Value::Null)))
+}
+
+/// Seconds between lists of the Node objects (they change rarely, and
+/// carry their image lists) and between walks of the kubelets' stats.
+const NODES_EVERY: u64 = 30;
+const DISK_EVERY: u64 = 30;
+
+/// A cluster that is not litek8s: its Nodes every 30 s; while Home is on
+/// screen, their use from `metrics.k8s.io` every sample and their root
+/// filesystems from the kubelets' `/stats/summary` every 30 s (not again
+/// once refused: RBAC does not change under a running UI often).
+async fn sample_generic(ep: &super::client::Endpoint, g: &mut super::generic::Cluster, visible: bool, nodes_at: &mut Option<Instant>, (disk_at, refused): (&mut Option<Instant>, &mut bool)) {
+    use super::generic::{self, Source};
+    if nodes_at.is_none_or(|at| at.elapsed() >= Duration::from_secs(NODES_EVERY)) {
+        if let Ok((200, list)) = get(ep, "/api/v1/nodes", 15).await {
+            let mut fresh = generic::nodes(&list);
+            // Keep the last use and disk of nodes still there.
+            for n in &mut fresh {
+                if let Some(old) = g.nodes.iter().find(|o| o.name == n.name) {
+                    (n.cpu_used, n.mem_used, n.fs) = (old.cpu_used, old.mem_used, old.fs);
+                }
+            }
+            g.nodes = fresh;
+            *nodes_at = Some(Instant::now());
+        }
+    }
+    if !visible {
+        return;
+    }
+    match get(ep, "/apis/metrics.k8s.io/v1beta1/nodes", 5).await {
+        Ok((200, list)) => {
+            generic::apply_metrics(&mut g.nodes, &list);
+            g.metrics = Source::Served;
+        }
+        Ok((status, v)) => {
+            generic::apply_metrics(&mut g.nodes, &serde_json::Value::Null);
+            g.metrics = Source::Missing(generic::missing("metrics.k8s.io", status, v["message"].as_str().unwrap_or_default()));
+        }
+        // Unreachable for a moment: keep the last figures.
+        Err(_) => {}
+    }
+    if *refused || g.nodes.is_empty() || disk_at.is_some_and(|at| at.elapsed() < Duration::from_secs(DISK_EVERY)) {
+        return;
+    }
+    *disk_at = Some(Instant::now());
+    let asks = g.nodes.iter().map(|n| {
+        let path = format!("/api/v1/nodes/{}/proxy/stats/summary", super::client::enc(&n.name));
+        async move { get(ep, &path, 5).await }
+    });
+    let answers = futures_util::future::join_all(asks).await;
+    let mut any = false;
+    for (n, a) in g.nodes.iter_mut().zip(answers) {
+        match a {
+            Ok((200, v)) => {
+                n.fs = generic::summary_fs(&v);
+                any |= n.fs.is_some();
+            }
+            Ok((403, v)) => {
+                *refused = true;
+                g.disk = Source::Missing(generic::missing("kubelet stats", 403, v["message"].as_str().unwrap_or_default()));
+                return;
+            }
+            _ => n.fs = None,
+        }
+    }
+    g.disk = if any { Source::Served } else { Source::Missing("kubelet stats unavailable".into()) };
 }
 
 /// Nodes' reports, and the nodes that gave none (with why).
