@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.14
 
 - **`litek8s ui` shows what the pods reserve, for the cluster and for each
   node**: under Home's CPU and memory meters, the pods' requests and limits
