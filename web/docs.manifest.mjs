@@ -72,6 +72,16 @@ export const groups = [
     ],
   },
   {
+    label: 'Ecosystem', translations: { es: 'Ecosistema' },
+    pages: [
+      {
+        slug: 'litecd', label: 'GitOps with litecd', seoTitle: 'GitOps with litecd: Argo CD manifests in one small pod', source: 'docs/litecd.md',
+        description: 'Run Argo CD Applications on litek8s with litecd: the same manifests and status in one Rust pod of 7 MiB instead of Argo CD\'s 310 MiB.',
+        translations: { es: { source: 'docs/es/litecd.md', label: 'GitOps con litecd', seoTitle: 'GitOps con litecd: manifiestos de Argo CD en un pod pequeño', description: 'Corre Applications de Argo CD en litek8s con litecd: los mismos manifiestos y status en un pod de Rust de 7 MiB en vez de los 310 MiB de Argo CD.' } },
+      },
+    ],
+  },
+  {
     label: 'Contributing', translations: { es: 'Contribuir' },
     pages: [
       { slug: 'contributing', label: 'Building and testing', source: 'CONTRIBUTING.md', translations: { es: { source: 'docs/es/contributing.md', label: "Compilar y probar" } } },
