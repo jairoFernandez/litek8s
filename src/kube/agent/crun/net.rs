@@ -177,6 +177,20 @@ iptables -t nat -N LITEK8S-HOSTPORTS 2>/dev/null; \
 for c in PREROUTING OUTPUT; do iptables -t nat -C $c -m addrtype --dst-type LOCAL -j LITEK8S-HOSTPORTS 2>/dev/null || \
 iptables -t nat -A $c -m addrtype --dst-type LOCAL -j LITEK8S-HOSTPORTS; done";
 
+/// The sysctls of a pod's own network namespace: containerd's defaults
+/// (and Docker's for the first) under the pod's own: any port and ICMP
+/// echo sockets without privileges, so a non-root process can listen on
+/// :443 as it can on other Kubernetes nodes.
+pub(crate) fn pod_sysctls(own: &[(String, String)]) -> Vec<(String, String)> {
+    let defaults = [("net.ipv4.ip_unprivileged_port_start", "0"), ("net.ipv4.ping_group_range", "0 2147483647")];
+    defaults
+        .iter()
+        .filter(|(k, _)| !own.iter().any(|(o, _)| o == k))
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .chain(own.iter().cloned())
+        .collect()
+}
+
 /// `ip -batch` commands run inside a new pod network namespace: loopback
 /// up, a veth whose peer goes to the host (named `host_if`), the address
 /// and the default route.
@@ -211,6 +225,16 @@ ip link set {BRIDGE} address {mac}; ip addr replace {gw}/{prefix} dev {BRIDGE}; 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pods_get_unprivileged_ports_and_ping() {
+        let got = pod_sysctls(&[("net.ipv4.ip_unprivileged_port_start".into(), "1024".into())]);
+        assert_eq!(got, vec![
+            ("net.ipv4.ping_group_range".to_string(), "0 2147483647".to_string()),
+            ("net.ipv4.ip_unprivileged_port_start".to_string(), "1024".to_string()),
+        ]);
+        assert_eq!(pod_sysctls(&[]).len(), 2);
+    }
 
     #[test]
     fn subnet_math() {

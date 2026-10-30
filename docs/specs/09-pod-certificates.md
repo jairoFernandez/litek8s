@@ -87,9 +87,11 @@ PodCertificateRequest (create):
   SHA-256). Tipos: RSA3072/4096, ECDSA P256/P384/P521, ED25519. `ring` no verifica firmas P-521 ni
   RSA-PSS: esos pedidos se rechazan (Substrate usa P256).
 - `unverifiedUserAnnotations`: claves con prefijo de dominio, ≤ 256 KiB en total.
-- Coherencia (lo que upstream hace con NodeRestriction + strategy): el pod existe con ese UID, en ese
-  nodo, con esa service account, y el UID de nodo y SA coinciden. Así nadie pide un certificado a
-  nombre de otro pod.
+- Coherencia pod/nodo/SA: upstream sólo la exige a pedidos de un nodo (NodeRestriction); otros
+  clientes con permiso de crear PCRs pueden nombrar pods que no existen (el CLI de Substrate lo
+  hace para pedir su certificado de cliente). En litek8s los nodos piden por la conexión del agente
+  y el hub completa pod, SA y nodo desde el store, así que un nodo sólo obtiene certificados de sus
+  propios pods.
 - `spec` inmutable en updates.
 
 PodCertificateRequest (`/status`):
@@ -143,7 +145,7 @@ de renovación pendiente). Al borrar el pod se borra su estado (los PCR tienen o
 - Unitarias: x509/DER, validaciones de CTB/PCR/pod, generación de clave + CSR verificable, normalización
   de PEM.
 - `tests/kube_apiserver.rs`: pod con ambas fuentes aceptado (JSON estricto); CTB/PCR por v1 y v1beta1;
-  rechazos; coherencia pod/nodo; flujo de `/status` con un firmante de prueba.
+  rechazos; flujo de `/status` con un firmante de prueba.
 - Agente: `podcert` con un cliente falso que hace de firmante: archivos escritos, renovación, pedido
   denegado.
 
@@ -155,7 +157,8 @@ hostPaths y device plugins en nodos crun).
 ## Decisiones tomadas
 
 - Servir v1 y v1beta1 sobre el mismo objeto, sin conversión salvo quitar los dos campos de v1beta1.
-- Validación de coherencia pod/nodo/SA en el servidor, no sólo confiar en el agente.
+- Coherencia pod/nodo/SA sólo para nodos (hub), como upstream; la API acepta otros clientes
+  (corregido tras probar Substrate: `kubectl ate proxy` pide un certificado sin pod).
 - Estado del certificado en disco por pod para no regenerar claves en cada reinicio del agente.
 
 ## Siguiente paso recomendado

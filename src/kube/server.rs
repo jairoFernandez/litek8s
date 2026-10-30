@@ -2947,10 +2947,7 @@ impl ApiState {
         }
         self.default_by_kind(rt, obj, None)?;
         self.enforce_crd_schema(rt, obj, None)?;
-        let mut errs = super::validation::validate(&rt.group, &rt.kind, obj, None);
-        if errs.is_empty() && rt.group == super::certificates::GROUP && rt.kind == "PodCertificateRequest" {
-            errs = self.pcr_binding_errors(obj);
-        }
+        let errs = super::validation::validate(&rt.group, &rt.kind, obj, None);
         if !errs.is_empty() {
             return Err(ApiError::invalid_fields(rt, &name_of(obj), &errs));
         }
@@ -3074,17 +3071,6 @@ impl ApiState {
             return Err(ApiError::invalid_fields(rt, url_name, &errs));
         }
         Ok(new)
-    }
-
-    /// A new PodCertificateRequest must name its pod as it is (UID, service
-    /// account, node): `certificates::binding_errors`.
-    fn pcr_binding_errors(&self, pcr: &Value) -> Vec<String> {
-        let s = |p: &str| pcr.pointer(p).and_then(Value::as_str).unwrap_or_default().to_string();
-        let ns = s("/metadata/namespace");
-        let pod = self.store.get(&ObjectKey::new("", "pods", &ns, &s("/spec/podName")));
-        let sa = self.store.get(&ObjectKey::new("", "serviceaccounts", &ns, &s("/spec/serviceAccountName")));
-        let node = self.store.get(&ObjectKey::new("", "nodes", "", &s("/spec/nodeName")));
-        super::certificates::binding_errors(pcr, pod.as_ref(), sa.as_ref(), node.as_ref())
     }
 
     /// A signed token for a service account (which must exist), optionally

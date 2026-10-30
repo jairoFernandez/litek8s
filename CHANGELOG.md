@@ -4,13 +4,26 @@
 
 - **Pod certificates and ClusterTrustBundles, for Agent Substrate**:
   `certificates.k8s.io` `ClusterTrustBundle` and `PodCertificateRequest` are
-  served in `v1` and `v1beta1` with Kubernetes 1.37's validation (a request
-  must also match its pod's UID, service account and node), and pods may
+  served in `v1` and `v1beta1` with Kubernetes 1.37's validation, and pods may
   project `podCertificate` and `clusterTrustBundle` sources: the node
   generates the key, asks for the certificate, waits for the signer, writes
   the files and renews them from `beginRefreshAt`; trust bundles follow their
-  ClusterTrustBundles. What else Substrate's gVisor workers need:
+  ClusterTrustBundles. Agent Substrate installs and runs gVisor actors on a
+  single crun node (suspend/resume in about 110 ms). What it needed besides:
   [docs/substrate.md](docs/substrate.md).
+- **exec and attach over SPDY**: client-go's `NewSPDYExecutor` (operators,
+  installers, older kubectl) works, not only WebSocket clients.
+- **Pods may listen on ports below 1024 and ping without privileges**: each
+  pod's network namespace gets `net.ipv4.ip_unprivileged_port_start=0` and
+  `net.ipv4.ping_group_range=0 2147483647`, as with containerd, unless the
+  pod sets them.
+- **`hostPath` `type`** is applied like the kubelet: `DirectoryOrCreate` and
+  `FileOrCreate` create what is missing, the other types are checked.
+- **`mountPropagation`**: `HostToContainer` (slave) and `Bidirectional`
+  (shared, privileged containers only) bind mounts.
+- **Fix: `fsGroup` could not read `defaultMode: 0600` files**: secret,
+  configMap and projected files now get owner and group read, as the
+  kubelet gives them.
 
 ## 0.2.15
 

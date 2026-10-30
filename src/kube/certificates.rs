@@ -2,8 +2,10 @@
 //! (served in v1 and v1beta1) and the pod's `podCertificate` /
 //! `clusterTrustBundle` projected volume sources: validation as upstream
 //! 1.37 does it (`pkg/apis/certificates/validation`, `pkg/apis/core/
-//! validation`), plus the binding check NodeRestriction makes. See
-//! docs/specs/09-pod-certificates.md.
+//! validation`). As upstream, a request's pod, service account and node
+//! are only checked when a node makes it: here nodes ask through their
+//! agent connection, and the hub fills those in from the store
+//! (`agent::hub::create_pcr`). See docs/specs/09-pod-certificates.md.
 
 use std::collections::BTreeMap;
 
@@ -326,33 +328,6 @@ fn validate_pcr_create(obj: &Value) -> Vec<String> {
             }
         }
         _ => errs.push("spec: Invalid value: exactly one of (stubPKCS10Request) or (pkixPublicKey, proofOfPossession) must be set".into()),
-    }
-    errs
-}
-
-/// The PodCertificateRequest must name the pod it is for as it is: same
-/// UID, service account and node (what NodeRestriction and the strategy
-/// check upstream), so no one gets a certificate for another pod.
-pub fn binding_errors(pcr: &Value, pod: Option<&Value>, sa: Option<&Value>, node: Option<&Value>) -> Vec<String> {
-    let mut errs = Vec::new();
-    let Some(pod) = pod else {
-        return vec![invalid("spec.podName", s(pcr, "/spec/podName"), "pod not found")];
-    };
-    let pod_sa = match s(pod, "/spec/serviceAccountName") {
-        "" => "default",
-        sa => sa,
-    };
-    let checks = [
-        ("spec.podUID", s(pcr, "/spec/podUID"), s(pod, "/metadata/uid")),
-        ("spec.serviceAccountName", s(pcr, "/spec/serviceAccountName"), pod_sa),
-        ("spec.nodeName", s(pcr, "/spec/nodeName"), s(pod, "/spec/nodeName")),
-        ("spec.serviceAccountUID", s(pcr, "/spec/serviceAccountUID"), sa.map(|v| s(v, "/metadata/uid")).unwrap_or("<not found>")),
-        ("spec.nodeUID", s(pcr, "/spec/nodeUID"), node.map(|v| s(v, "/metadata/uid")).unwrap_or("<not found>")),
-    ];
-    for (path, got, want) in checks {
-        if got != want {
-            errs.push(invalid(path, got, &format!("does not match the pod (want \"{want}\")")));
-        }
     }
     errs
 }
@@ -791,20 +766,5 @@ mod tests {
         ] {
             assert!(joined.contains(want), "missing {want:?} in\n{joined}");
         }
-    }
-
-    #[test]
-    fn bindings() {
-        let p = pcr(b"");
-        let pod = json!({"metadata": {"uid": "pod-uid"}, "spec": {"nodeName": "n1"}});
-        let sa = json!({"metadata": {"uid": "sa-uid"}});
-        let node = json!({"metadata": {"uid": "node-uid"}});
-        assert!(binding_errors(&p, Some(&pod), Some(&sa), Some(&node)).is_empty());
-        assert!(binding_errors(&p, None, None, None)[0].contains("pod not found"));
-        let moved = json!({"metadata": {"uid": "pod-uid"}, "spec": {"nodeName": "n2"}});
-        assert!(binding_errors(&p, Some(&moved), Some(&sa), Some(&node))[0].contains("spec.nodeName"));
-        let mut other_sa = p.clone();
-        other_sa["spec"]["serviceAccountName"] = json!("admin");
-        assert!(binding_errors(&other_sa, Some(&pod), Some(&sa), Some(&node))[0].contains("spec.serviceAccountName"));
     }
 }

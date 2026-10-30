@@ -876,11 +876,13 @@ async fn pod_certificates_and_cluster_trust_bundles() -> Result<()> {
             "nodeName": "n1", "nodeUID": node["metadata"]["uid"], "stubPKCS10Request": b64(csr.der()),
             "unverifiedUserAnnotations": {"ate.dev/role": "worker"}}});
     let base = "/apis/certificates.k8s.io/v1beta1/namespaces/default/podcertificaterequests";
-    let mut forged = pcr.clone();
-    forged["spec"]["podUID"] = json!("someone-else");
-    let (code, err) = post(&addr, base, forged).await?;
-    assert_eq!(code, 422, "{err}");
-    assert!(err["message"].as_str().unwrap().contains("spec.podUID"), "{err}");
+    // As upstream, only nodes are held to real pods (litek8s nodes ask
+    // through the hub): a client may name any pod, as Substrate's CLI does.
+    let mut outside = pcr.clone();
+    outside["spec"]["podName"] = json!("kubectl-ate");
+    outside["spec"]["podUID"] = json!("not-a-pod");
+    let (code, out) = post(&addr, base, outside).await?;
+    assert_eq!(code, 201, "{out}");
     let (code, req) = post(&addr, &format!("{base}?fieldValidation=Strict"), pcr).await?;
     assert_eq!(code, 201, "{req}");
     assert_eq!(req["spec"]["maxExpirationSeconds"], json!(86400));
