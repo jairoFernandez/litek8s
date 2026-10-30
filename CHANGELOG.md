@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+- **Pod certificates and ClusterTrustBundles, for Agent Substrate**:
+  `certificates.k8s.io` `ClusterTrustBundle` and `PodCertificateRequest` are
+  served in `v1` and `v1beta1` with Kubernetes 1.37's validation (a request
+  must also match its pod's UID, service account and node), and pods may
+  project `podCertificate` and `clusterTrustBundle` sources: the node
+  generates the key, asks for the certificate, waits for the signer, writes
+  the files and renews them from `beginRefreshAt`; trust bundles follow their
+  ClusterTrustBundles. What else Substrate's gVisor workers need:
+  [docs/substrate.md](docs/substrate.md).
+
 ## 0.2.15
 
 - **`litek8s ui`: the CPU breakdown is scaled to the CPUs of what it shows**:

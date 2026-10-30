@@ -43,6 +43,10 @@ La idea es que cada sesión futura pueda arrancar desde aquí sin re-descubrir e
 
 7. `07-vpc-lite.md`
 
+### P1 — cargas de agentes (Agent Substrate)
+
+9. `09-pod-certificates.md` — PodCertificateRequest, ClusterTrustBundle y sus proyecciones en pods.
+
 ### P3 — extensiones futuras
 
 8. `08-ai-inference-mesh.md` — diferido hasta tener multi-VM liviano, scheduling por capacidad y conectividad privada.
@@ -94,3 +98,4 @@ Razón:
 - `docs/specs/06-scheduler-cost-aware.md`
 - `docs/specs/07-vpc-lite.md`
 - `docs/specs/08-ai-inference-mesh.md`
+- `docs/specs/09-pod-certificates.md`

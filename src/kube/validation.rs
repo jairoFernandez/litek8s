@@ -61,7 +61,9 @@ pub fn validate(group: &str, kind: &str, obj: &Value, old: Option<&Value>) -> Ve
                 }
             }
         }
+        (super::certificates::GROUP, kind) => errs.extend(super::certificates::validate(kind, obj, old)),
         ("", "Pod") if old.is_none() => {
+            errs.extend(super::certificates::projection_errors(obj));
             for field in ["initContainers", "containers"] {
                 for (i, c) in obj.pointer(&format!("/spec/{field}")).and_then(Value::as_array).into_iter().flatten().enumerate() {
                     let limits = c.pointer("/resources/limits").and_then(Value::as_object);

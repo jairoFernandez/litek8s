@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+use super::podcert;
 use super::probe::{self, ProbeKind, ProbeResult, ProbeTarget};
 use super::protocol::Message;
 use super::runtime::{
@@ -147,6 +148,8 @@ struct Worker<R: PodRuntime> {
     condition_times: HashMap<String, (String, String)>,
     last_sent: Option<Value>,
     wake_at: Option<Instant>,
+    /// An answer to a pending PodCertificateRequest arrived.
+    certs_due_now: bool,
     node: Value,
 }
 
@@ -197,6 +200,7 @@ pub(crate) async fn run<R: PodRuntime>(
         condition_times: HashMap::new(),
         last_sent: None,
         wake_at: None,
+        certs_due_now: false,
         pod,
     };
     if w.start_time.is_empty() {
@@ -230,6 +234,7 @@ pub(crate) async fn run<R: PodRuntime>(
             break;
         }
         w.step().await;
+        w.refresh_certificates().await;
         w.publish_view();
         w.report().await;
         let wake = w.wake_at.take();
@@ -241,7 +246,19 @@ pub(crate) async fn run<R: PodRuntime>(
                 Some(PodMsg::Probe(result)) => w.on_probe(result).await,
                 Some(PodMsg::Wake) => {}
                 Some(PodMsg::ObjectChanged { resource, namespace, name }) => {
-                    if namespace == w.ns && w.volumes.is_some() && volumes::uses_object(&w.pod, &resource, &name) {
+                    let relevant = match resource.as_str() {
+                        "clustertrustbundles" => volumes::uses_trust_bundles(&w.pod),
+                        // An answer to this pod's request: `step` (no volumes
+                        // yet) or the refresh picks it up now.
+                        "podcertificaterequests" => {
+                            if namespace == w.ns && podcert::waits_for(&w.dir, &name) {
+                                w.certs_due_now = true;
+                            }
+                            false
+                        }
+                        _ => namespace == w.ns && volumes::uses_object(&w.pod, &resource, &name),
+                    };
+                    if relevant && w.volumes.is_some() {
                         if let Ok(v) = w.agent.prepare_volumes(&w.pod, &w.dir, &w.node).await {
                             w.volumes = Some(v);
                         }
@@ -1577,6 +1594,25 @@ impl<R: PodRuntime> Worker<R> {
     }
 
     /// Stop and remove everything the pod had on this node.
+    /// Pod certificates: renew the ones due (`podcert::ensure` asks for a
+    /// new one from `beginRefreshAt` on and looks at pending requests),
+    /// rewriting the volumes, and wake up for the next one.
+    async fn refresh_certificates(&mut self) {
+        if self.volumes.is_none() {
+            return;
+        }
+        let now = chrono::Utc::now().timestamp();
+        let Some(due) = podcert::next_due(&self.dir) else { return };
+        if now >= due || std::mem::take(&mut self.certs_due_now) {
+            if let Ok(v) = self.agent.prepare_volumes(&self.pod, &self.dir, &self.node).await {
+                self.volumes = Some(v);
+            }
+        }
+        if let Some(due) = podcert::next_due(&self.dir) {
+            self.wake_in(Duration::from_secs((due - now).clamp(1, 3600) as u64));
+        }
+    }
+
     async fn teardown(&mut self) {
         let grace = self
             .pod

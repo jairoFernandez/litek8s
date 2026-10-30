@@ -25,6 +25,9 @@ pub mod netpol;
 mod obs;
 pub mod overlay;
 mod pod;
+mod podcert;
+#[cfg(test)]
+mod podcert_e2e;
 pub(crate) mod probe;
 pub mod protocol;
 mod proxy;

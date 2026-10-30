@@ -8,6 +8,7 @@ pub mod aggregator;
 pub mod agent;
 pub mod authn;
 pub mod cel;
+pub mod certificates;
 pub mod controllers;
 pub mod crd_schema;
 pub mod defaults;
@@ -39,5 +40,6 @@ pub mod table;
 pub mod tls;
 pub mod validation;
 mod ws;
+pub mod x509;
 
 pub use server::{ApiServerConfig, ApiState, serve, serve_listener, write_kubeconfig};

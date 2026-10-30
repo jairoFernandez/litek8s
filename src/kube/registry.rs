@@ -141,6 +141,11 @@ const BUILTINS: &[Builtin] = &[
     ("flowcontrol.apiserver.k8s.io", "v1", "PriorityLevelConfiguration", "prioritylevelconfigurations", &[], false, true, false),
     ("node.k8s.io", "v1", "RuntimeClass", "runtimeclasses", &[], false, false, false),
     ("certificates.k8s.io", "v1", "CertificateSigningRequest", "certificatesigningrequests", &["csr"], false, true, false),
+    // One stored object each, served in both versions (`certificates::serve_as`).
+    ("certificates.k8s.io", "v1", "ClusterTrustBundle", "clustertrustbundles", &[], false, false, false),
+    ("certificates.k8s.io", "v1beta1", "ClusterTrustBundle", "clustertrustbundles", &[], false, false, false),
+    ("certificates.k8s.io", "v1", "PodCertificateRequest", "podcertificaterequests", &[], true, true, false),
+    ("certificates.k8s.io", "v1beta1", "PodCertificateRequest", "podcertificaterequests", &[], true, true, false),
     ("authentication.k8s.io", "v1", "TokenReview", "tokenreviews", &[], false, false, false),
     ("authentication.k8s.io", "v1", "SelfSubjectReview", "selfsubjectreviews", &[], false, false, false),
     ("authorization.k8s.io", "v1", "SubjectAccessReview", "subjectaccessreviews", &[], false, false, false),
