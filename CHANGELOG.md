@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.20
+
+- **`kubectl get` is 2.4× faster on the server**: building a Table copied
+  every row and then the whole table once more before sending it (serde's
+  `json!` copies any value put in it); it now moves them. On a laptop,
+  1,000 ConfigMaps as a Table: 364 → 864 lists/s, p50 20.8 → 7.6 ms. Lists
+  of custom resources and PartialObjectMetadata lose the same copy.
+
 ## 0.2.19
 
 - **`litek8s volume move <claim> --to <node>`** moves a `local-path` volume
