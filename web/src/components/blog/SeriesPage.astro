@@ -1,0 +1,25 @@
+---
+// One series' page: its parts, oldest first.
+import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
+import { seriesParts, postUrl, dateFmt, blogRoot, strings, type Lang } from '../../lib/blog';
+import '../../styles/blog.css';
+
+const { id, lang } = Astro.props as { id: string; lang: Lang };
+const t = strings[lang];
+const s = await seriesParts(id, lang);
+---
+<StarlightPage frontmatter={{ title: s.title, description: s.description, tableOfContents: false }}>
+  <p class="blog-lead">{s.description} {t.seriesLead(s.parts.length)}</p>
+  <ol class="series-list not-content">
+    {s.parts.map((p) => (
+      <li>
+        <a href={postUrl(p)}>
+          <span class="series-list-title">{p.data.title}</span>
+          <time datetime={p.data.date.toISOString()}>{dateFmt(p.data.date, lang)}</time>
+          <span class="series-list-desc">{p.data.description}</span>
+        </a>
+      </li>
+    ))}
+  </ol>
+  <p><a href={blogRoot(lang)}>{t.allPosts}</a></p>
+</StarlightPage>

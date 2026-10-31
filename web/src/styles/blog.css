@@ -150,3 +150,70 @@ img.post-cover {
   background: var(--sl-color-gray-6);
 }
 h1#_top { width: fit-content; max-width: 100%; overflow-wrap: anywhere; }
+
+/* ---- Series ---- */
+/* On the index card: the series first, outlined instead of filled. */
+.blog-tag.blog-series {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--sl-color-accent);
+}
+/* On a post: the series' parts, this one marked. */
+.series-box {
+  margin-block: 0 2rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--sl-color-hairline);
+  border-left: 3px solid var(--sl-color-accent);
+  border-radius: 0.5rem;
+  background: var(--sl-color-gray-6);
+  font-size: var(--sl-text-sm);
+}
+.series-box-head { margin: 0 0 0.5rem; color: var(--sl-color-gray-2); }
+.series-box-head a { font-weight: 600; }
+.series-box ol { margin: 0; padding-inline-start: 1.4rem; }
+.series-box li { margin-block: 0.2rem; overflow-wrap: anywhere; }
+.series-box li[aria-current] span { font-weight: 600; color: var(--sl-color-white); }
+/* Previous / next part at a post's end. */
+.series-pager {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+  gap: 1rem;
+  margin-block: 2.5rem 1rem;
+}
+.series-pager a {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  padding: 0.9rem 1.1rem;
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 0.75rem;
+  color: var(--sl-color-white);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.series-pager a:hover { border-color: var(--sl-color-accent); }
+.series-pager span { font-size: var(--sl-text-xs); color: var(--sl-color-gray-3); }
+.series-pager .next { text-align: end; grid-column: -2; }
+/* A series' page. */
+.series-list { list-style: none; padding: 0; margin-block: 1.5rem; display: grid; gap: 1rem; counter-reset: part; }
+.series-list li { counter-increment: part; }
+.series-list a {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.2rem 1rem;
+  padding: 1rem 1.25rem;
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 0.75rem;
+  color: inherit;
+  text-decoration: none;
+}
+.series-list a::before {
+  content: counter(part);
+  grid-row: span 3;
+  font-family: var(--lk-font-display);
+  font-size: 1.6rem;
+  color: var(--sl-color-accent-high);
+}
+.series-list a:hover { border-color: var(--sl-color-accent); }
+.series-list-title { font-weight: 600; color: var(--sl-color-white); overflow-wrap: anywhere; }
+.series-list time { font-family: var(--sl-font-mono); font-size: 0.75rem; color: var(--sl-color-gray-3); }
+.series-list-desc { font-size: var(--sl-text-sm); color: var(--sl-color-gray-2); }

@@ -1,0 +1,21 @@
+---
+// A series' parts on one of its posts: where this post is, links to the others.
+import { postUrl, strings, type Post } from '../../lib/blog';
+
+interface Props {
+  post: Post;
+  series: { title: string; url: string; parts: Post[]; index: number };
+}
+const { post, series } = Astro.props;
+const t = strings[post.data.lang];
+---
+<nav class="series-box not-content" aria-label={series.title}>
+  <p class="series-box-head">
+    {t.seriesPart(series.index + 1, series.parts.length)} <a href={series.url}>{series.title}</a>
+  </p>
+  <ol>
+    {series.parts.map((p) =>
+      p.id === post.id ? <li aria-current="page"><span>{p.data.title}</span></li> : <li><a href={postUrl(p)}>{p.data.title}</a></li>,
+    )}
+  </ol>
+</nav>

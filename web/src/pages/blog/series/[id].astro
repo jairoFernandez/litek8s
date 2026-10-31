@@ -1,0 +1,11 @@
+---
+import SeriesPage from '../../../components/blog/SeriesPage.astro';
+import { posts } from '../../../lib/blog';
+
+// A page per series that has a published English post.
+export async function getStaticPaths() {
+  const ids = new Set((await posts('en')).flatMap((p) => (p.data.series ? [p.data.series] : [])));
+  return [...ids].map((id) => ({ params: { id } }));
+}
+---
+<SeriesPage id={Astro.params.id!} lang="en" />
