@@ -5,6 +5,8 @@
 import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
 import { render } from 'astro:content';
 import { blogCard } from '../../lib/og';
+import { coverOf, transitionName } from '../../lib/cover';
+import '../../styles/blog.css';
 import { postUrl, docsLinks, dateFmt, blogRoot, translationOf, strings, type Post } from '../../lib/blog';
 
 const { post } = Astro.props as { post: Post };
@@ -18,6 +20,11 @@ const t = strings[lang];
 const docs = docsLinks(post);
 const other = await translationOf(post);
 const blog = new URL(blogRoot(lang), site).href;
+// The header image (illustration, else the social card) and the view
+// transition names it and the title share with this post's card on the index.
+const cover = coverOf(post);
+const coverName = transitionName('cover', post);
+const titleName = transitionName('title', post);
 
 const ld = JSON.stringify({
   '@context': 'https://schema.org',
@@ -61,6 +68,10 @@ const head = [
   ...tags.map((tag) => ({ tag: 'meta', attrs: { property: 'article:tag', content: tag } })),
   ...alternates,
   { tag: 'script', attrs: { type: 'application/ld+json' }, content: ld },
+  // Starlight renders the title; name it for the card-to-post transition.
+  { tag: 'style', content: `h1#_top { view-transition-name: ${titleName}; view-transition-class: blog-title; }` },
+  // Hold the first render until the header image is parsed, so the transition has its target.
+  ...(cover ? [{ tag: 'link', attrs: { rel: 'expect', href: '#post-cover', blocking: 'render' } }] : []),
 ] as const;
 ---
 <StarlightPage frontmatter={{ title, description, head: [...head] }} headings={headings}>
@@ -68,7 +79,20 @@ const head = [
     <time datetime={date.toISOString()}>{dateFmt(date, lang)}</time>{tags.length > 0 && <> · {tags.join(' · ')}</>}
     {other && <> · <a href={postUrl(other)} hreflang={other.data.lang} lang={other.data.lang}>{t.translated}</a></>}
   </p>
-  {card && <img class="post-cover" src={card} alt="" width="1200" height="630" loading="eager" decoding="async" />}
+  {cover && (
+    <img
+      id="post-cover"
+      class="post-cover"
+      src={cover.src}
+      alt=""
+      width={cover.width}
+      height={cover.height}
+      loading="eager"
+      fetchpriority="high"
+      decoding="async"
+      style={`view-transition-name: ${coverName}; view-transition-class: blog-cover`}
+    />
+  )}
   <Content />
   {docs.length > 0 && (
     <>
@@ -78,8 +102,3 @@ const head = [
   )}
   <p><a href={blogRoot(lang)}>{t.allPosts}</a></p>
 </StarlightPage>
-
-<style>
-  .post-meta { color: var(--sl-color-gray-3); font-size: var(--sl-text-sm); }
-  .post-cover { display: block; width: 100%; height: auto; aspect-ratio: 1200 / 630; border-radius: 0.75rem; border: 1px solid var(--sl-color-hairline); margin-block: 1rem 1.5rem; }
-</style>

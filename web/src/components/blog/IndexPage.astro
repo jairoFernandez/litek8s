@@ -2,7 +2,9 @@
 // The blog's index for one language: its posts, newest first.
 import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
 import { posts, postUrl, dateFmt, blogRoot, strings, type Lang } from '../../lib/blog';
+import { coverOf, transitionName } from '../../lib/cover';
 import { localRoute } from '../../../docs.manifest.mjs';
+import '../../styles/blog.css';
 
 const { lang } = Astro.props as { lang: Lang };
 const t = strings[lang];
@@ -22,30 +24,62 @@ const ld = JSON.stringify({
     datePublished: p.data.date.toISOString(),
   })),
 }).replace(/</g, '\\u003c');
+// View transition names must be unique on a page: a post's card gets
+// cover-/title-<english id>, and a duplicate (never expected) gets none.
+const seen = new Set<string>();
+const cards = list.map((p) => {
+  const cover = transitionName('cover', p);
+  const unique = !seen.has(cover);
+  seen.add(cover);
+  return {
+    post: p,
+    image: coverOf(p),
+    coverName: unique ? cover : undefined,
+    titleName: unique ? transitionName('title', p) : undefined,
+  };
+});
 const alternates = (['en', 'es'] as const).map((l) => ({ tag: 'link', attrs: { rel: 'alternate', hreflang: l, href: new URL(blogRoot(l), site).href, 'data-blog': true } }));
 ---
 <StarlightPage
   frontmatter={{
     title: t.title,
     description: t.description,
+    tableOfContents: false,
     head: [...alternates, { tag: 'script', attrs: { type: 'application/ld+json' }, content: ld }],
   }}
 >
-  <p set:html={t.intro(localRoute('', lang), `${root}rss.xml`)} />
-  <p><a href={blogRoot(t.other.lang)} hreflang={t.other.lang} lang={t.other.lang}>{t.other.label}</a></p>
-  <ul class="posts">
-    {list.map((p) => (
-      <li>
-        <a href={postUrl(p)}><strong>{p.data.title}</strong></a>
-        <br /><small><time datetime={p.data.date.toISOString()}>{dateFmt(p.data.date, lang)}</time></small>
-        <p>{p.data.description}</p>
+  <p class="blog-lead" set:html={t.intro(localRoute('', lang), `${root}rss.xml`)} />
+  <p class="blog-links"><a href={blogRoot(t.other.lang)} hreflang={t.other.lang} lang={t.other.lang}>{t.other.label}</a></p>
+  <div class="blog-wrap not-content">
+  <ul class="blog-grid">
+    {cards.map(({ post: p, image, coverName, titleName }, i) => (
+      <li class:list={[{ featured: i === 0 }]}>
+        <a class="blog-card" href={postUrl(p)}>
+          <div class="blog-card-media">
+            {image && (
+              <img
+                src={image.src}
+                alt=""
+                width={image.width}
+                height={image.height}
+                loading={i < 3 ? 'eager' : 'lazy'}
+                fetchpriority={i === 0 ? 'high' : undefined}
+                decoding="async"
+                style={coverName ? `view-transition-name: ${coverName}; view-transition-class: blog-cover` : undefined}
+              />
+            )}
+          </div>
+          <div class="blog-card-body">
+            <p class="blog-card-meta">
+              <time datetime={p.data.date.toISOString()}>{dateFmt(p.data.date, lang)}</time>
+              {p.data.tags.slice(0, 3).map((tag) => <span class="blog-tag">{tag}</span>)}
+            </p>
+            <h2 class="blog-card-title" style={titleName ? `view-transition-name: ${titleName}; view-transition-class: blog-title` : undefined}>{p.data.title}</h2>
+            <p class="blog-card-desc">{p.data.description}</p>
+          </div>
+        </a>
       </li>
     ))}
   </ul>
+  </div>
 </StarlightPage>
-
-<style>
-  .posts { list-style: none; padding: 0; }
-  .posts li + li { margin-top: 1.5rem; }
-  .posts p { margin-top: 0.25rem; }
-</style>

@@ -1,0 +1,146 @@
+/* The blog's index and posts (loaded by both, not by the docs).
+   Cross-document View Transitions: a card's image grows into the post's
+   header image (view-transition-name cover-<english id>, title-<english id>,
+   set per element). Browsers without support navigate normally; with
+   reduced motion there is no transition at all. */
+@media (prefers-reduced-motion: no-preference) {
+  @view-transition { navigation: auto; }
+}
+
+/* Starlight's header stays put instead of cross-fading. */
+header.header { view-transition-name: lk-header; }
+
+::view-transition-group(*.blog-cover),
+::view-transition-group(*.blog-title) {
+  animation-duration: 0.38s;
+  animation-timing-function: cubic-bezier(0.2, 0, 0, 1);
+}
+/* Both images fill the moving box, cropped like the pages crop them. */
+::view-transition-old(*.blog-cover),
+::view-transition-new(*.blog-cover) {
+  height: 100%;
+  object-fit: cover;
+  overflow: clip;
+}
+::view-transition-group(*.blog-cover) { border-radius: 0.75rem; overflow: clip; }
+
+/* ---- Index ---- */
+.blog-lead { color: var(--sl-color-gray-2); }
+.blog-links { display: flex; flex-wrap: wrap; gap: 0.25rem 1rem; font-size: var(--sl-text-sm); }
+
+.blog-wrap { container-type: inline-size; }
+.blog-grid {
+  list-style: none;
+  padding: 0;
+  margin-block: 2rem 1rem;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1.5rem;
+}
+/* Two columns once the content column (not the window) is wide enough. */
+@container (min-width: 36rem) {
+  .blog-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .blog-grid > .featured { grid-column: 1 / -1; }
+}
+
+.blog-card {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  color: inherit;
+  text-decoration: none;
+  background: var(--sl-color-gray-6);
+  border: 1px solid var(--sl-color-hairline);
+  border-radius: 1rem;
+  transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s;
+}
+:root[data-theme='light'] .blog-card { background: var(--sl-color-gray-7); }
+.blog-card:hover {
+  border-color: var(--sl-color-accent);
+  box-shadow: 0 10px 30px -14px rgb(124 58 237 / 0.55);
+}
+@media (prefers-reduced-motion: no-preference) {
+  .blog-card:hover { transform: translateY(-2px); }
+}
+.blog-card:focus-visible {
+  outline: 2px solid var(--sl-color-accent-high);
+  outline-offset: 3px;
+}
+
+.blog-card-media {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background:
+    radial-gradient(120% 90% at 85% 10%, rgb(124 58 237 / 0.45), transparent 60%),
+    var(--sl-color-gray-5);
+  border-bottom: 1px solid var(--sl-color-hairline);
+}
+.blog-card .blog-card-media img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 0;
+}
+
+.blog-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  padding: 1.1rem 1.25rem 1.35rem;
+  flex: 1;
+}
+.blog-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.35rem 0.5rem;
+  font-family: var(--sl-font-mono);
+  font-size: 0.75rem;
+  color: var(--sl-color-gray-3);
+}
+.blog-tag {
+  color: var(--sl-color-accent-high);
+  background: var(--sl-color-accent-low);
+  border-radius: 999px;
+  padding: 0.05rem 0.55rem;
+}
+.blog-card-title {
+  margin: 0;
+  font-family: var(--lk-font-display);
+  font-size: 1.3rem;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+  color: var(--sl-color-white);
+  width: fit-content;
+}
+.blog-card:hover .blog-card-title { color: var(--sl-color-accent-high); }
+.blog-card-desc {
+  margin: 0;
+  font-size: var(--sl-text-sm);
+  line-height: 1.55;
+  color: var(--sl-color-gray-2);
+}
+
+/* The newest post, larger, across the whole row. */
+.featured .blog-card-title { font-size: clamp(1.45rem, 3.2vw, 1.9rem); }
+.featured .blog-card-desc { font-size: var(--sl-text-base); }
+@container (min-width: 36rem) {
+  .featured .blog-card-body { padding: 1.4rem 1.75rem 1.75rem; }
+}
+
+/* ---- Post ---- */
+.post-meta { color: var(--sl-color-gray-3); font-size: var(--sl-text-sm); }
+img.post-cover {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border-radius: 0.75rem;
+  border: 1px solid var(--sl-color-hairline);
+  margin-block: 1rem 2rem;
+  background: var(--sl-color-gray-6);
+}
+h1#_top { width: fit-content; }
