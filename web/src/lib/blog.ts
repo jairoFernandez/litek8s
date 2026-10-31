@@ -37,6 +37,34 @@ export function docsLinks(p: Post) {
   });
 }
 
+/** Series of posts on one subject, by id (a post's `series`), in each language. */
+export const series = {
+  speed: {
+    en: { title: 'Making litek8s fast', description: 'Measuring the API server, finding where its time goes and taking it back, one profile at a time.' },
+    es: { title: 'Haciendo litek8s veloz', description: 'Medir el API server, encontrar en qué se le va el tiempo y recuperarlo, un perfil a la vez.' },
+  },
+} as const satisfies Record<string, Record<Lang, { title: string; description: string }>>;
+
+export type SeriesId = keyof typeof series;
+
+/** A series' page for a language. */
+export const seriesUrl = (id: string, lang: Lang) => `${blogRoot(lang)}series/${id}/`;
+
+/** A series' id, title and parts (oldest first) in a language; throws on an unknown id. */
+export async function seriesParts(id: string, lang: Lang) {
+  const meta = (series as Record<string, (typeof series)[SeriesId]>)[id];
+  if (!meta) throw new Error(`blog: no series "${id}" in src/lib/blog.ts`);
+  const parts = (await posts(lang)).filter((p) => p.data.series === id).reverse();
+  return { id, ...meta[lang], url: seriesUrl(id, lang), parts };
+}
+
+/** The series a post is part of, with its position (0-based). */
+export async function seriesOf(p: Post) {
+  if (!p.data.series) return undefined;
+  const s = await seriesParts(p.data.series, p.data.lang);
+  return { ...s, index: s.parts.findIndex((q) => q.id === p.id) };
+}
+
 export const dateFmt = (d: Date, lang: Lang = 'en') =>
   d.toLocaleDateString(lang, { year: 'numeric', month: 'long', day: 'numeric', timeZone: 'UTC' });
 
@@ -52,6 +80,11 @@ export const strings = {
     readDocs: 'Read the docs',
     allPosts: '← All posts',
     translated: 'Leer en español',
+    series: 'Series',
+    seriesPart: (n: number, total: number) => `Part ${n} of ${total} in the series`,
+    seriesLead: (n: number) => `${n} ${n === 1 ? 'post' : 'posts'}, oldest first.`,
+    previous: 'Previous',
+    next: 'Next',
   },
   es: {
     title: 'Blog',
@@ -63,5 +96,10 @@ export const strings = {
     readDocs: 'Lee la documentación',
     allPosts: '← Todos los posts',
     translated: 'Read in English',
+    series: 'Series',
+    seriesPart: (n: number, total: number) => `Parte ${n} de ${total} de la serie`,
+    seriesLead: (n: number) => `${n} ${n === 1 ? 'post' : 'posts'}, del más antiguo al más nuevo.`,
+    previous: 'Anterior',
+    next: 'Siguiente',
   },
 } as const;

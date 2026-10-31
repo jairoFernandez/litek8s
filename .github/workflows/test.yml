@@ -2,11 +2,12 @@ name: test
 
 on:
   # The website (web/, Astro, deployed by Vercel) is not part of the crate:
-  # changes only there do not run the Rust tests.
+  # changes only there do not run the Rust tests. Pushes skip the workflow;
+  # pull requests run it (main requires its checks) and `changes` skips the
+  # work, see below.
   push:
     paths-ignore: ["web/**"]
   pull_request:
-    paths-ignore: ["web/**"]
   workflow_dispatch:
     inputs:
       loop_runs:
@@ -17,6 +18,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+  pull-requests: read
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
@@ -26,7 +31,32 @@ env:
   CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
+  # Whether anything outside web/ changed: a pull request that only touches
+  # the website skips the jobs below, and GitHub counts a skipped job as
+  # passed for main's required checks. Anything else (a push, a manual run,
+  # a failed lookup) runs everything.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      rust: ${{ steps.files.outputs.rust }}
+    steps:
+      - id: files
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          if [[ -z "$PR" ]] || ! files=$(gh pr diff "$PR" --repo "$GITHUB_REPOSITORY" --name-only) || [[ -z "$files" ]]; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+          elif grep -qv '^web/' <<<"$files"; then
+            echo "rust=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "only web/ changed: skipping the Rust jobs"
+            echo "rust=false" >> "$GITHUB_OUTPUT"
+          fi
+
   cargo-test:
+    needs: changes
     name: cargo test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -34,18 +64,26 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
+    # The steps, not the job, are skipped for web/-only changes: a skipped
+    # matrix job never reports its expanded names, which main requires.
+    env:
+      RUST_CHANGED: ${{ needs.changes.outputs.rust }}
     steps:
-      - uses: actions/checkout@v4
+      - if: env.RUST_CHANGED == 'true'
+        uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - if: env.RUST_CHANGED == 'true'
+        uses: dtolnay/rust-toolchain@stable
 
       # Saved from main only: branches and pull requests start from main's
       # cache, and their own would only push main's out of the 10 GB.
-      - uses: Swatinem/rust-cache@v2
+      - if: env.RUST_CHANGED == 'true'
+        uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      - uses: taiki-e/install-action@v2
+      - if: env.RUST_CHANGED == 'true'
+        uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
 
@@ -53,10 +91,14 @@ jobs:
       # (tests/ha.rs alone took 38 s of cargo test's 65); .config/nextest.toml
       # keeps the HA tests one at a time. There are no doctests.
       - name: cargo nextest
+        if: env.RUST_CHANGED == 'true'
         run: cargo nextest run --profile ci
 
   # The commit's litek8s binary for the jobs below.
+  # Skipped for web/-only changes, and with it the jobs that need it.
   build-linux:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

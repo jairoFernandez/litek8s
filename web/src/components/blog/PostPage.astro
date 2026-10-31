@@ -6,8 +6,9 @@ import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
 import { render } from 'astro:content';
 import { blogCard } from '../../lib/og';
 import { coverOf, transitionName } from '../../lib/cover';
+import SeriesBox from './SeriesBox.astro';
 import '../../styles/blog.css';
-import { postUrl, docsLinks, dateFmt, blogRoot, translationOf, strings, type Post } from '../../lib/blog';
+import { postUrl, docsLinks, dateFmt, blogRoot, translationOf, seriesOf, strings, type Post } from '../../lib/blog';
 
 const { post } = Astro.props as { post: Post };
 const { Content, headings } = await render(post);
@@ -19,6 +20,9 @@ const { title, description, date, updated, tags, lang } = post.data;
 const t = strings[lang];
 const docs = docsLinks(post);
 const other = await translationOf(post);
+const series = await seriesOf(post);
+const prev = series && series.index > 0 ? series.parts[series.index - 1] : undefined;
+const next = series ? series.parts[series.index + 1] : undefined;
 const blog = new URL(blogRoot(lang), site).href;
 // The header image (illustration, else the social card) and the view
 // transition names it and the title share with this post's card on the index.
@@ -93,12 +97,19 @@ const head = [
       style={`view-transition-name: ${coverName}; view-transition-class: blog-cover`}
     />
   )}
+  {series && <SeriesBox post={post} series={series} />}
   <Content />
   {docs.length > 0 && (
     <>
       <h2 id="read-the-docs">{t.readDocs}</h2>
       <ul>{docs.map((d) => <li><a href={d.href}>{d.label}</a></li>)}</ul>
     </>
+  )}
+  {(prev || next) && (
+    <nav class="series-pager not-content" aria-label={series!.title}>
+      {prev && <a class="prev" href={postUrl(prev)}><span>← {t.previous}</span>{prev.data.title}</a>}
+      {next && <a class="next" href={postUrl(next)}><span>{t.next} →</span>{next.data.title}</a>}
+    </nav>
   )}
   <p><a href={blogRoot(lang)}>{t.allPosts}</a></p>
 </StarlightPage>

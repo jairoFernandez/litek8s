@@ -11,6 +11,8 @@ import { docsSchema, i18nSchema } from '@astrojs/starlight/schema';
 // `translation` names the same post in the other language (its id: `es/<file>`
 // or `<file>`). `docs` lists the docs pages a post builds on (slugs from
 // docs.manifest.mjs, '' for the introduction), linked at its end.
+// `series` puts a post in a series (an id from `series` in src/lib/blog.ts):
+// its parts in date order, listed on each part and at /blog/series/<id>/.
 export const collections = {
   docs: defineCollection({ loader: docsLoader(), schema: docsSchema() }),
   i18n: defineCollection({ loader: i18nLoader(), schema: i18nSchema() }),
@@ -26,6 +28,7 @@ export const collections = {
       draft: z.boolean().default(false),
       lang: z.enum(['en', 'es']).default('en'),
       translation: z.string().optional(),
+      series: z.string().optional(),
     }),
   }),
 };

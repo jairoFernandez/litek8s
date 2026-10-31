@@ -1,7 +1,7 @@
 ---
 // The blog's index for one language: its posts, newest first.
 import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
-import { posts, postUrl, dateFmt, blogRoot, strings, type Lang } from '../../lib/blog';
+import { posts, postUrl, dateFmt, blogRoot, strings, series, seriesUrl, type Lang, type SeriesId } from '../../lib/blog';
 import { coverOf, transitionName } from '../../lib/cover';
 import { localRoute } from '../../../docs.manifest.mjs';
 import '../../styles/blog.css';
@@ -11,6 +11,9 @@ const t = strings[lang];
 const list = await posts(lang);
 const site = Astro.site ?? new URL('http://localhost:4321');
 const root = blogRoot(lang);
+// Series with a published post in this language.
+const seriesIds = [...new Set(list.flatMap((p) => (p.data.series ? [p.data.series as SeriesId] : [])))];
+const seriesTitle = (id: string) => series[id as SeriesId]?.[lang].title;
 const ld = JSON.stringify({
   '@context': 'https://schema.org',
   '@type': 'Blog',
@@ -49,7 +52,10 @@ const alternates = (['en', 'es'] as const).map((l) => ({ tag: 'link', attrs: { r
   }}
 >
   <p class="blog-lead" set:html={t.intro(localRoute('', lang), `${root}rss.xml`)} />
-  <p class="blog-links"><a href={blogRoot(t.other.lang)} hreflang={t.other.lang} lang={t.other.lang}>{t.other.label}</a></p>
+  <p class="blog-links">
+    <a href={blogRoot(t.other.lang)} hreflang={t.other.lang} lang={t.other.lang}>{t.other.label}</a>
+    {seriesIds.map((id) => <a href={seriesUrl(id, lang)}>{t.series}: {seriesTitle(id)}</a>)}
+  </p>
   <div class="blog-wrap not-content">
   <ul class="blog-grid">
     {cards.map(({ post: p, image, coverName, titleName }, i) => (
@@ -72,7 +78,8 @@ const alternates = (['en', 'es'] as const).map((l) => ({ tag: 'link', attrs: { r
           <div class="blog-card-body">
             <p class="blog-card-meta">
               <time datetime={p.data.date.toISOString()}>{dateFmt(p.data.date, lang)}</time>
-              {p.data.tags.slice(0, 3).map((tag) => <span class="blog-tag">{tag}</span>)}
+              {p.data.series && <span class="blog-tag blog-series">{seriesTitle(p.data.series)}</span>}
+              {p.data.tags.slice(0, p.data.series ? 2 : 3).map((tag) => <span class="blog-tag">{tag}</span>)}
             </p>
             <h2 class="blog-card-title" style={titleName ? `view-transition-name: ${titleName}; view-transition-class: blog-title` : undefined}>{p.data.title}</h2>
             <p class="blog-card-desc">{p.data.description}</p>
