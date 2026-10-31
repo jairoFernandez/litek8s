@@ -697,11 +697,7 @@ async fn feed_pods(api: Arc<ApiState>, node: String, tx: mpsc::Sender<Frame>, po
                     Message::ObjectChanged { resource: "podcertificaterequests".into(), namespace: event.key.namespace.clone(), name: event.key.name.clone() }
                 }
                 ("", "persistentvolumes") if event.event == EventType::Deleted => {
-                    let on_node = event
-                        .object
-                        .pointer("/spec/nodeAffinity/required/nodeSelectorTerms")
-                        .is_some_and(|t| t.to_string().contains(&format!("\"{node}\"")));
-                    if !on_node {
+                    if !deletes_volume_data(&event.object, &node) {
                         continue;
                     }
                     Message::VolumeDelete { name: event.key.name.clone() }
@@ -977,9 +973,39 @@ fn apply_pod_status(api: &ApiState, ns: &str, name: &str, uid: &str, mut status:
     }
 }
 
+/// Whether a deleted PersistentVolume's data on `node` goes with it: the
+/// volume lives on that node and its reclaim policy is `Delete`. `Retain`
+/// (or no policy) keeps the data, as Kubernetes does, so a volume can be
+/// re-created, here or on another node, over the same files.
+fn deletes_volume_data(pv: &Value, node: &str) -> bool {
+    let on_node = pv
+        .pointer("/spec/nodeAffinity/required/nodeSelectorTerms")
+        .is_some_and(|t| t.to_string().contains(&format!("\"{node}\"")));
+    on_node && util::s(pv, "/spec/persistentVolumeReclaimPolicy") == "Delete"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_delete_policy_removes_a_volumes_data() {
+        let pv = |node: &str, policy: Option<&str>| {
+            let mut v = json!({"spec": {"nodeAffinity": {"required": {"nodeSelectorTerms": [
+                {"matchExpressions": [{"key": "kubernetes.io/hostname", "operator": "In", "values": [node]}]}
+            ]}}}});
+            if let Some(p) = policy {
+                v["spec"]["persistentVolumeReclaimPolicy"] = json!(p);
+            }
+            v
+        };
+        assert!(deletes_volume_data(&pv("n1", Some("Delete")), "n1"));
+        assert!(!deletes_volume_data(&pv("n1", Some("Retain")), "n1"));
+        assert!(!deletes_volume_data(&pv("n1", None), "n1"));
+        assert!(!deletes_volume_data(&pv("n2", Some("Delete")), "n1"));
+        // A node whose name is a prefix of another's is not that node.
+        assert!(!deletes_volume_data(&pv("n10", Some("Delete")), "n1"));
+    }
     use crate::kube::store::ObjectKey;
 
     fn pod(name: &str, node: &str, app: &str, ip: &str) -> Value {

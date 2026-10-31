@@ -145,6 +145,31 @@ WireGuard overlay (UDP 51820 between nodes). The API authenticates clients and
 enforces RBAC ([Authentication and RBAC](auth.md)); still, keep 6443 on a
 trusted network or a tailnet.
 
+### Moving a volume to another node
+
+litek8s's `local-path` volumes live on one node: a PersistentVolume's node
+affinity pins the pods that use it there, and its data is a directory on that
+node (`<node dir>/crun/volumes/litek8s-pv-<pv>`). To take a node out, or to
+balance the nodes, move the volume:
+
+```bash
+litek8s volume move db/data-postgres-0 --to node-2 --scale
+```
+
+- `--scale` scales the StatefulSets and Deployments using the claim to 0 for
+  the copy, and back after; without it, stop them yourself first.
+- The data goes from one node to the other over SSH, through this machine
+  (the `cluster.litek8s.dev/ssh` annotation `apply` puts on each Node), and
+  the copy is checked (files and bytes) before anything else changes. If the
+  copy fails, the workloads are scaled back and nothing else changed.
+- The PV and the claim are re-created with the same names, the PV with the
+  new node in its affinity, so the StatefulSet's pod starts there.
+- The old copy stays on the old node until `--delete-source` (or remove it
+  yourself once the workload looks right). Nodes before 0.2.19 delete it with
+  the old PV object even with `Retain`.
+- A GitOps controller that heals replicas (Argo CD, litecd) can scale the
+  workload back mid-copy: pause it first.
+
 ## Testing
 
 `bench/cluster-e2e.sh` boots three Ubuntu 24.04 VMs (`bench/vm.sh`) and

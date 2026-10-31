@@ -12,4 +12,5 @@ pub mod registries;
 pub mod remote;
 pub mod tree;
 pub mod ui;
+pub mod volume;
 pub mod vpn;
