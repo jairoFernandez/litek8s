@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.19
 
 - **`litek8s volume move <claim> --to <node>`** moves a `local-path` volume
   to another node: with `--scale` it scales the StatefulSets/Deployments
