@@ -206,6 +206,11 @@ réplicas y las Applications antes del paso 4.
 
 ### Una migración en producción, medida
 
+> **Este cluster (todavía) no corre litek8s.** Es k3s normal: la migración
+> solo reemplazó el controlador de Argo CD por litecd, que usa únicamente la
+> API pública de Kubernetes, y los números de abajo son sobre k3s. Pasar el
+> cluster mismo a litek8s es otro paso, que no se hizo aquí.
+
 Un cluster k3s de 6 nodos (unas 4 CPUs y 5 GiB asignables cada uno)
 corría Argo CD v3.4 en HA (Redis HA, dos repo servers, dos API servers,
 login por OIDC): 59 Applications en un AppProject, ~690 recursos
@@ -264,6 +269,9 @@ interfaz:
   controlador de Argo CD); usa `D` en `litek8s ui` ([abajo](#en-litek8s-ui));
 - se quitará cuando litecd muestre él mismo los recursos de una app,
   calculados bajo demanda desde la API de Kubernetes.
+
+En el cluster k3s de arriba se probó conservando la interfaz de Argo CD. Sin él,
+`litek8s ui` muestra los recursos y el diff de una app en cualquier cluster, k3s incluido.
 
 Detalles: [README de litecd](https://github.com/ideascoldigital/litecd#deprecated-compatibility-argo-cds-web-ui).
 
