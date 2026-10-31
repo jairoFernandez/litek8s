@@ -2046,7 +2046,7 @@ impl ApiState {
 
         if req.wants_table() {
             let include = req.q("includeObject") != Some("None");
-            let mut t = table::build(rt, &items, list_rv, include);
+            let mut t = table::build(rt, items, list_rv, include);
             if let Some(c) = cont {
                 t["metadata"]["continue"] = json!(c);
             }
@@ -2061,18 +2061,10 @@ impl ApiState {
             let items: Vec<Value> = items.iter().map(partial_metadata).collect();
             return Ok(json_response(
                 StatusCode::OK,
-                &json!({"kind": "PartialObjectMetadataList", "apiVersion": "meta.k8s.io/v1", "metadata": list_meta, "items": items}),
+                &list_value("PartialObjectMetadataList".into(), "meta.k8s.io/v1".into(), list_meta, items),
             ));
         }
-        Ok(json_response(
-            StatusCode::OK,
-            &json!({
-                "kind": rt.list_kind(),
-                "apiVersion": rt.api_version(),
-                "metadata": list_meta,
-                "items": items,
-            }),
-        ))
+        Ok(json_response(StatusCode::OK, &list_value(rt.list_kind(), rt.api_version(), list_meta, items)))
     }
 
     /// A list of a built-in resource served as stored: the store keeps each
@@ -2185,7 +2177,7 @@ impl ApiState {
         }
         Ok(json_response(
             StatusCode::OK,
-            &json!({"kind": format!("{kind}List"), "apiVersion": format!("{}/{}", rm::GROUP, rm::VERSION), "metadata": {}, "items": items}),
+            &list_value(format!("{kind}List"), format!("{}/{}", rm::GROUP, rm::VERSION), json!({}), items),
         ))
     }
 
@@ -2333,7 +2325,7 @@ impl ApiState {
         let obj = self.served_as(rt, vec![obj]).await?.remove(0);
         if req.wants_table() {
             let rv = resource_version(&obj).unwrap_or(0);
-            return Ok(json_response(StatusCode::OK, &table::build(rt, &[obj], rv, true)));
+            return Ok(json_response(StatusCode::OK, &table::build(rt, vec![obj], rv, true)));
         }
         if req.wants_partial() {
             return Ok(json_response(StatusCode::OK, &partial_metadata(&obj)));
@@ -4109,7 +4101,7 @@ impl ApiState {
                 } else if as_table && event["type"] != "BOOKMARK" {
                     let obj = event["object"].take();
                     let rv = resource_version(&obj).unwrap_or(0);
-                    event["object"] = table::build(&rt, &[obj], rv, true);
+                    event["object"] = table::build(&rt, vec![obj], rv, true);
                 } else if as_partial {
                     event["object"] = partial_metadata(&event["object"]);
                 }
@@ -4569,6 +4561,17 @@ fn partial_metadata(obj: &Value) -> Value {
         "apiVersion": "meta.k8s.io/v1",
         "metadata": obj.get("metadata").cloned().unwrap_or_else(|| json!({})),
     })
+}
+
+/// A List object built from owned items. `json!({"items": items})` would
+/// copy every item (serde_json::to_value) before serializing it.
+fn list_value(kind: String, api_version: String, metadata: Value, items: Vec<Value>) -> Value {
+    let mut list = serde_json::Map::with_capacity(4);
+    list.insert("kind".into(), Value::String(kind));
+    list.insert("apiVersion".into(), Value::String(api_version));
+    list.insert("metadata".into(), metadata);
+    list.insert("items".into(), Value::Array(items));
+    Value::Object(list)
 }
 
 /// Whether a stored object passes the list's selectors.
