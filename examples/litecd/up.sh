@@ -51,7 +51,14 @@ curl -fsS "http://localhost:$port" | grep -o '"message": *"[^"]*"' >&2
 echo "  http://localhost:$port" >&2
 
 say "what the controller costs"
-k -n argocd top pod 2>/dev/null >&2 || echo "  (metrics not ready yet: kubectl --context $ctx -n argocd top pod)" >&2
+# The first samples take a few seconds after the pods start.
+top=""
+for _ in $(seq 1 12); do
+    top=$(k -n argocd top pod 2>/dev/null || true)
+    [[ $top == *litecd* ]] && break
+    sleep 5
+done
+if [[ $top == *litecd* ]]; then echo "$top" >&2; else echo "  (no metrics yet: kubectl --context $ctx -n argocd top pod)" >&2; fi
 
 cat >&2 <<EOF
 
