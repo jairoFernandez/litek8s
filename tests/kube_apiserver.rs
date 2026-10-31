@@ -917,3 +917,63 @@ async fn pod_certificates_and_cluster_trust_bundles() -> Result<()> {
     assert_eq!(code, 422, "{err}");
     Ok(())
 }
+
+#[tokio::test]
+async fn lists_select_and_paginate_stored_objects() -> Result<()> {
+    // Built-in lists are served from the stored bytes (list_stored); the
+    // result must be a regular List whatever the selectors and pages.
+    let addr = start().await?;
+    let base = "/api/v1/namespaces/default/configmaps";
+    for i in 0..7 {
+        let mut c = cm(&format!("c{i}"), json!({"i": i.to_string()}));
+        c["metadata"]["labels"] = json!({"group": if i % 2 == 0 { "even" } else { "odd" }});
+        let (code, _) = post(&addr, base, c).await?;
+        assert_eq!(code, 201);
+    }
+    let names = |l: &Value| -> Vec<String> {
+        l["items"].as_array().unwrap().iter().map(|o| o["metadata"]["name"].as_str().unwrap().to_string()).collect()
+    };
+
+    let (code, all) = get(&addr, base).await?;
+    assert_eq!(code, 200);
+    assert_eq!(all["kind"], "ConfigMapList");
+    assert_eq!(all["apiVersion"], "v1");
+    assert!(all["metadata"]["resourceVersion"].as_str().is_some_and(|rv| !rv.is_empty()));
+    assert_eq!(names(&all), ["c0", "c1", "c2", "c3", "c4", "c5", "c6"]);
+    assert_eq!(all["items"][3]["data"]["i"], "3");
+
+    let (_, even) = get(&addr, &format!("{base}?labelSelector=group%3Deven")).await?;
+    assert_eq!(names(&even), ["c0", "c2", "c4", "c6"]);
+    let (_, none) = get(&addr, &format!("{base}?labelSelector=group+notin+%28even%2Codd%29")).await?;
+    assert_eq!(names(&none), Vec::<String>::new());
+    let (_, by_field) = get(&addr, &format!("{base}?fieldSelector=data.i%3D5")).await?;
+    assert_eq!(names(&by_field), ["c5"]);
+    let (_, by_name) = get(&addr, &format!("{base}?fieldSelector=metadata.name%3Dc4&labelSelector=group%3Dodd")).await?;
+    assert_eq!(names(&by_name), Vec::<String>::new());
+
+    // Pages of 3 over the odd ones and then all: same items, one resourceVersion.
+    let mut seen = Vec::new();
+    let mut path = format!("{base}?limit=3");
+    let mut first_rv = None;
+    loop {
+        let (code, page) = get(&addr, &path).await?;
+        assert_eq!(code, 200);
+        let rv = page["metadata"]["resourceVersion"].clone();
+        assert_eq!(*first_rv.get_or_insert(rv.clone()), rv);
+        seen.extend(names(&page));
+        match page["metadata"]["continue"].as_str() {
+            Some(c) => {
+                assert!(page["metadata"]["remainingItemCount"].as_u64().is_some_and(|n| n > 0));
+                path = format!("{base}?limit=3&continue={}", c.replace('+', "%2B").replace('/', "%2F").replace('=', "%3D"));
+            }
+            None => break,
+        }
+    }
+    assert_eq!(seen, names(&all));
+
+    // Cluster-scoped.
+    let (_, ns) = get(&addr, "/api/v1/namespaces?fieldSelector=metadata.name%3Ddefault").await?;
+    assert_eq!(names(&ns), ["default"]);
+    assert_eq!(ns["kind"], "NamespaceList");
+    Ok(())
+}

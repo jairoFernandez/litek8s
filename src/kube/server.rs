@@ -2027,6 +2027,9 @@ impl ApiState {
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
         let fields = FieldSelector::parse(req.q("fieldSelector").unwrap_or_default())
             .map_err(|e| ApiError::bad_request(e.to_string()))?;
+        if !rt.custom && !super::certificates::versioned(rt) && !req.wants_table() && !req.wants_partial() {
+            return self.list_stored(rt, ns, req, &labels, &fields);
+        }
         let (items, rv) = match fields.exact_name() {
             Some(name) if ns.is_some() || !rt.namespaced => {
                 let found = self.store.get(&key_for(rt, ns, name));
@@ -2038,54 +2041,7 @@ impl ApiState {
         let mut items = if rt.custom { self.served_as(rt, items).await? } else { items };
         items.retain(|o| labels.matches(o) && fields.matches(o));
         let mut list_rv = rv;
-
-        // Pagination: the continue token carries the "namespace/name" of the
-        // last item returned (the store lists in that order) and when the
-        // list began. Like an etcd-backed server after compaction, a token
-        // older than CONTINUE_TTL is refused with a fresh, inconsistent one.
-        let b64 = base64::engine::general_purpose::STANDARD;
-        let now = chrono::Utc::now().timestamp();
-        let mut issued = now;
-        if let Some(token) = req.q("continue") {
-            let raw = b64
-                .decode(token)
-                .ok()
-                .and_then(|b| String::from_utf8(b).ok())
-                .ok_or_else(|| ApiError::bad_request("invalid continue token"))?;
-            let (after, at, token_rv) = match serde_json::from_str::<Value>(&raw) {
-                Ok(t) if t.is_object() => (
-                    t.get("start").and_then(Value::as_str).unwrap_or_default().to_string(),
-                    t.get("t").and_then(Value::as_i64).unwrap_or(now),
-                    t.get("rv").and_then(Value::as_u64),
-                ),
-                _ => (raw, now, None),
-            };
-            if now - at > CONTINUE_TTL_SECS {
-                let fresh = b64.encode(json!({"start": after, "t": now}).to_string());
-                let mut e = ApiError::new(
-                    StatusCode::GONE,
-                    "Expired",
-                    "The provided continue parameter is too old to display a consistent list result. You can start a new list without the continue parameter, or use the continue token in this response to retrieve the remainder of the results. Continuing with the provided token results in an inconsistent list - objects that were created, modified, or deleted between the time the first chunk was returned and now may show up in the list.",
-                );
-                e.list_meta = Some(json!({"continue": fresh}));
-                return Err(e);
-            }
-            issued = at;
-            // Every page of one list reports the first page's version.
-            if let Some(trv) = token_rv {
-                list_rv = trv;
-            }
-            items.retain(|o| item_cursor(o) > after);
-        }
-        let mut cont = None;
-        let mut remaining = None;
-        if let Some(limit) = req.q("limit").and_then(|l| l.parse::<usize>().ok()).filter(|l| *l > 0) {
-            if items.len() > limit {
-                remaining = Some(items.len() - limit);
-                items.truncate(limit);
-                cont = items.last().map(|o| b64.encode(json!({"start": item_cursor(o), "t": issued, "rv": list_rv}).to_string()));
-            }
-        }
+        let (cont, remaining) = paginate(&mut items, item_cursor, req, &mut list_rv)?;
         let items = if rt.custom { items } else { self.served_as(rt, items).await? };
 
         if req.wants_table() {
@@ -2117,6 +2073,49 @@ impl ApiState {
                 "items": items,
             }),
         ))
+    }
+
+    /// A list of a built-in resource served as stored: the store keeps each
+    /// object as compact JSON, so the items are copied into the response
+    /// without being parsed and serialized again. Only selectors parse, and
+    /// a label selector alone only `metadata.labels`.
+    fn list_stored(&self, rt: &ResourceType, ns: Option<&str>, req: &Req, labels: &LabelSelector, fields: &FieldSelector) -> Result<Response<Body>, ApiError> {
+        let (mut items, rv) = match fields.exact_name() {
+            Some(name) if ns.is_some() || !rt.namespaced => {
+                let key = key_for(rt, ns, name);
+                let found = self.store.get_raw(&key).map(|j| (key, j));
+                (found.into_iter().collect(), self.store.current_rv())
+            }
+            _ => self.store.list_raw(&rt.group, &rt.plural, if rt.namespaced { ns } else { None }),
+        };
+        if !labels.is_empty() || !fields.is_empty() {
+            items.retain(|(_, json)| stored_selected(json, labels, fields));
+        }
+        let mut list_rv = rv;
+        let (cont, remaining) = paginate(&mut items, |(k, _)| format!("{}/{}", k.namespace, k.name), req, &mut list_rv)?;
+        let mut list_meta = json!({"resourceVersion": list_rv.to_string()});
+        if let Some(c) = cont {
+            list_meta["continue"] = json!(c);
+            list_meta["remainingItemCount"] = json!(remaining.unwrap_or(0));
+        }
+        // Keys in the order serde_json writes a json!() object (sorted), so
+        // the bytes are the same as the general path's.
+        let mut out = Vec::with_capacity(items.iter().map(|(_, j)| j.len() + 1).sum::<usize>() + 256);
+        out.extend_from_slice(br#"{"apiVersion":"#);
+        serde_json::to_writer(&mut out, &rt.api_version()).unwrap_or_default();
+        out.extend_from_slice(br#","items":["#);
+        for (i, (_, json)) in items.iter().enumerate() {
+            if i > 0 {
+                out.push(b',');
+            }
+            out.extend_from_slice(json);
+        }
+        out.extend_from_slice(br#"],"kind":"#);
+        serde_json::to_writer(&mut out, &rt.list_kind()).unwrap_or_default();
+        out.extend_from_slice(br#","metadata":"#);
+        serde_json::to_writer(&mut out, &list_meta).unwrap_or_default();
+        out.push(b'}');
+        Ok(bytes_response(out, "application/json"))
     }
 
     /// `metrics.k8s.io/v1beta1` (NodeMetrics, PodMetrics: get and list)
@@ -4570,6 +4569,77 @@ fn partial_metadata(obj: &Value) -> Value {
         "apiVersion": "meta.k8s.io/v1",
         "metadata": obj.get("metadata").cloned().unwrap_or_else(|| json!({})),
     })
+}
+
+/// Whether a stored object passes the list's selectors.
+fn stored_selected(json: &[u8], labels: &LabelSelector, fields: &FieldSelector) -> bool {
+    if fields.is_empty() {
+        #[derive(serde::Deserialize)]
+        struct Labels {
+            #[serde(default)]
+            metadata: Meta,
+        }
+        #[derive(serde::Deserialize, Default)]
+        struct Meta {
+            #[serde(default)]
+            labels: Option<Value>,
+        }
+        return serde_json::from_slice::<Labels>(json).is_ok_and(|o| labels.matches_labels(o.metadata.labels.as_ref()));
+    }
+    let obj: Value = serde_json::from_slice(json).unwrap_or(Value::Null);
+    labels.matches(&obj) && fields.matches(&obj)
+}
+
+/// A list's pagination over items in store order ("namespace/name"): the
+/// continue token carries the cursor of the last item returned and when the
+/// list began. Like an etcd-backed server after compaction, a token older
+/// than CONTINUE_TTL is refused with a fresh, inconsistent one. Every page
+/// reports the first page's resourceVersion (`list_rv`). Returns the next
+/// token and the remaining item count.
+fn paginate<T>(items: &mut Vec<T>, cursor: impl Fn(&T) -> String, req: &Req, list_rv: &mut u64) -> Result<(Option<String>, Option<usize>), ApiError> {
+    let b64 = base64::engine::general_purpose::STANDARD;
+    let now = chrono::Utc::now().timestamp();
+    let mut issued = now;
+    if let Some(token) = req.q("continue") {
+        let raw = b64
+            .decode(token)
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+            .ok_or_else(|| ApiError::bad_request("invalid continue token"))?;
+        let (after, at, token_rv) = match serde_json::from_str::<Value>(&raw) {
+            Ok(t) if t.is_object() => (
+                t.get("start").and_then(Value::as_str).unwrap_or_default().to_string(),
+                t.get("t").and_then(Value::as_i64).unwrap_or(now),
+                t.get("rv").and_then(Value::as_u64),
+            ),
+            _ => (raw, now, None),
+        };
+        if now - at > CONTINUE_TTL_SECS {
+            let fresh = b64.encode(json!({"start": after, "t": now}).to_string());
+            let mut e = ApiError::new(
+                StatusCode::GONE,
+                "Expired",
+                "The provided continue parameter is too old to display a consistent list result. You can start a new list without the continue parameter, or use the continue token in this response to retrieve the remainder of the results. Continuing with the provided token results in an inconsistent list - objects that were created, modified, or deleted between the time the first chunk was returned and now may show up in the list.",
+            );
+            e.list_meta = Some(json!({"continue": fresh}));
+            return Err(e);
+        }
+        issued = at;
+        if let Some(trv) = token_rv {
+            *list_rv = trv;
+        }
+        items.retain(|o| cursor(o) > after);
+    }
+    let mut cont = None;
+    let mut remaining = None;
+    if let Some(limit) = req.q("limit").and_then(|l| l.parse::<usize>().ok()).filter(|l| *l > 0) {
+        if items.len() > limit {
+            remaining = Some(items.len() - limit);
+            items.truncate(limit);
+            cont = items.last().map(|o| b64.encode(json!({"start": cursor(o), "t": issued, "rv": *list_rv}).to_string()));
+        }
+    }
+    Ok((cont, remaining))
 }
 
 fn item_cursor(obj: &Value) -> String {

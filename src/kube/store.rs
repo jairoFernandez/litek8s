@@ -360,6 +360,24 @@ impl Store {
         (jsons.iter().map(|j| serde_json::from_slice(j).unwrap_or(Value::Null)).collect(), rv)
     }
 
+    /// Like [`Store::list`], without parsing: each object's key and its
+    /// stored compact JSON, for callers that send the bytes on as they are.
+    pub fn list_raw(&self, group: &str, resource: &str, namespace: Option<&str>) -> (Vec<(ObjectKey, Arc<[u8]>)>, u64) {
+        let inner = self.inner.lock().unwrap();
+        let items = inner
+            .objects
+            .range(range_start(group, resource, namespace)..)
+            .take_while(|(k, _)| k.group == group && k.resource == resource && namespace.is_none_or(|ns| k.namespace == ns))
+            .map(|(k, v)| (k.clone(), v.json.clone()))
+            .collect();
+        (items, inner.rv)
+    }
+
+    /// Like [`Store::get`], without parsing.
+    pub fn get_raw(&self, key: &ObjectKey) -> Option<Arc<[u8]>> {
+        self.inner.lock().unwrap().objects.get(key).map(|s| s.json.clone())
+    }
+
     /// Every key in a namespace, across all resources (namespace deletion).
     pub fn keys_in_namespace(&self, namespace: &str) -> Vec<ObjectKey> {
         let inner = self.inner.lock().unwrap();
