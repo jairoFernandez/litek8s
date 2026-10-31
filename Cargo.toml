@@ -92,6 +92,19 @@ time = "0.3"
 prost = "0.14"
 protox = "0.10.0"
 tempfile = "3.18.0"
+# Micro-benchmarks (benches/micro.rs); plots off to keep the build light.
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
+# `cargo bench --bench micro`: store, patch and JSON hot paths (criterion).
+[[bench]]
+name = "micro"
+harness = false
+
+# `cargo bench --bench api_load`: the API server under concurrent HTTP load
+# (throughput, p50/p99, watch latency, scheduling); see bench/PERF.md.
+[[bench]]
+name = "api_load"
+harness = false
 
 # lto/codegen-units=1 give a few % more for a much slower build; opt-level 3
 # already autovectorizes.
