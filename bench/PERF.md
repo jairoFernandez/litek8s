@@ -21,8 +21,9 @@ cargo bench --bench api_load -- list watch        # only matching scenarios
 cargo bench --bench api_load -- --save-baseline   # accept the current numbers
 ```
 
-Env: `PERF_SECS=5 PERF_CONC=32 PERF_OBJECTS=1000 PERF_REPLICAS=100 PERF_TOLERANCE=0.15
-PERF_MEMORY=1` (no WAL). Last run: `target/perf/latest.json`. The baseline is per machine:
+Env: `PERF_SECS=3 PERF_RUNS=3 PERF_CONC=32 PERF_OBJECTS=1000 PERF_REPLICAS=100 PERF_TOLERANCE=0.15
+PERF_MEMORY=1` (no WAL). Each scenario keeps the median of `PERF_RUNS` runs: a single
+run on a laptop varies by ±30 % (patch: 11k–22k ops/s), enough for false alarms. Last run: `target/perf/latest.json`. The baseline is per machine:
 save it on the machine you compare on (it is checked in from an Apple Silicon laptop).
 
 ## micro

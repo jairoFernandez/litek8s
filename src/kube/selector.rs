@@ -65,7 +65,11 @@ impl LabelSelector {
     }
 
     pub fn matches(&self, object: &Value) -> bool {
-        let labels = object.pointer("/metadata/labels");
+        self.matches_labels(object.pointer("/metadata/labels"))
+    }
+
+    /// [`LabelSelector::matches`] given only the object's `metadata.labels`.
+    pub fn matches_labels(&self, labels: Option<&Value>) -> bool {
         let get = |key: &str| labels.and_then(|l| l.get(key)).and_then(Value::as_str);
         self.0.iter().all(|req| match req {
             LabelRequirement::Equals(k, v) => get(k) == Some(v.as_str()),
@@ -155,6 +159,10 @@ impl FieldSelector {
             terms.push((path, value.trim().to_string(), negate));
         }
         Ok(Self(terms))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 
     /// The `metadata.name=` value, if the selector pins one; lets callers

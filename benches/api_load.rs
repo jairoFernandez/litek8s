@@ -6,7 +6,8 @@
 //!   cargo bench --bench api_load -- --save-baseline   # run and make this the baseline
 //!   cargo bench --bench api_load -- list watch        # only scenarios whose name contains a filter
 //!
-//! Knobs (env): PERF_SECS=5 (per throughput scenario), PERF_CONC=32 (clients),
+//! Knobs (env): PERF_SECS=3 (per run), PERF_RUNS=3 (runs per scenario, the
+//! median is kept), PERF_CONC=32 (clients),
 //! PERF_OBJECTS=1000 (objects listed), PERF_REPLICAS=100 (Deployment scaled),
 //! PERF_TOLERANCE=0.15 (regression threshold), PERF_MEMORY=1 (no WAL).
 //! Results: target/perf/latest.json. See bench/PERF.md.
@@ -279,11 +280,18 @@ async fn main() -> Result<()> {
     let filters: Vec<&String> = args.iter().filter(|a| !a.starts_with("--")).collect();
     let wanted = |name: &str| filters.is_empty() || filters.iter().any(|f| name.contains(f.as_str()));
 
-    let secs: f64 = env("PERF_SECS", 5.0);
+    let secs: f64 = env("PERF_SECS", 3.0);
+    let runs: usize = env("PERF_RUNS", 3).max(1);
     let conc: usize = env("PERF_CONC", 32);
     let objects: usize = env("PERF_OBJECTS", 1000);
     let replicas: usize = env("PERF_REPLICAS", 100);
     let tolerance: f64 = env("PERF_TOLERANCE", 0.15);
+
+    let mut load = [0f64; 3];
+    let cpus = std::thread::available_parallelism().map_or(1, |n| n.get()) as f64;
+    if unsafe { libc::getloadavg(load.as_mut_ptr(), 3) } == 3 && load[0] > cpus / 2.0 {
+        eprintln!("api_load: WARNING load average {:.1} on {cpus} CPUs: other work skews the numbers; don't save a baseline now", load[0]);
+    }
 
     let dir = tempfile::tempdir()?;
     let data_dir = (env("PERF_MEMORY", 0) == 0).then(|| dir.path().to_path_buf());
@@ -302,21 +310,13 @@ async fn main() -> Result<()> {
     }
 
     eprintln!(
-        "api_load: {conc} clients, {secs} s per scenario, {objects} objects, store {}",
+        "api_load: {conc} clients, {runs}×{secs} s per scenario, {objects} objects, store {}",
         if data_dir.is_some() { "with WAL" } else { "in memory" }
     );
     let mut report = Report { results: Vec::new() };
     let n = objects as u64;
 
     let scenarios: Vec<(&str, usize, OpFn)> = vec![
-        ("create", conc, Arc::new(|w, i| Op {
-            method: Method::POST,
-            path: "/api/v1/namespaces/bench-create/configmaps".into(),
-            content_type: JSON,
-            accept: JSON,
-            body: Bytes::from(configmap(&format!("c-{w}-{i}"), i as usize % 10).to_string()),
-            expect: 201,
-        })),
         ("get", conc, Arc::new(move |w, i| Op {
             method: Method::GET,
             path: format!("/api/v1/namespaces/bench/configmaps/cm-{}", (w as u64 * 7919 + i * 31) % n),
@@ -357,6 +357,15 @@ async fn main() -> Result<()> {
             body: Bytes::new(),
             expect: 200,
         })),
+        // Last: it grows the store, which every later scenario would pay for.
+        ("create", conc, Arc::new(|w, i| Op {
+            method: Method::POST,
+            path: "/api/v1/namespaces/bench-create/configmaps".into(),
+            content_type: JSON,
+            accept: JSON,
+            body: Bytes::from(configmap(&format!("c-{w}-{i}"), i as usize % 10).to_string()),
+            expect: 201,
+        })),
     ];
 
     if wanted("schedule") {
@@ -368,7 +377,13 @@ async fn main() -> Result<()> {
             continue;
         }
         eprintln!("  {name}…");
-        report.results.push((name.into(), throughput(&addr, c, secs, op).await?));
+        // Median of `runs` by ops/s: one run on a laptop varies by ±30 %.
+        let mut outs = Vec::new();
+        for _ in 0..runs {
+            outs.push(throughput(&addr, c, secs, op.clone()).await?);
+        }
+        outs.sort_by(|a, b| a.ops_per_sec.total_cmp(&b.ops_per_sec));
+        report.results.push((name.into(), outs.swap_remove(outs.len() / 2)));
     }
     if wanted("watch") {
         eprintln!("  watch…");
