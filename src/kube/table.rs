@@ -1,7 +1,7 @@
 //! Server-side printing: the `meta.k8s.io/v1` Table kubectl asks for with
 //! `Accept: application/json;as=Table`. kubectl prints these columns as-is.
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use super::registry::ResourceType;
 
@@ -584,7 +584,7 @@ fn json_path(v: &Value, path: &str) -> Value {
 
 /// Build a Table for `objects`. `include_object` adds each row's
 /// PartialObjectMetadata, which kubectl needs for -A and for watch output.
-pub fn build(rt: &ResourceType, objects: &[Value], rv: u64, include_object: bool) -> Value {
+pub fn build(rt: &ResourceType, objects: Vec<Value>, rv: u64, include_object: bool) -> Value {
     let builtin = columns_for(&rt.kind);
     let mut defs: Vec<Value> = Vec::new();
     let mut extractors: Vec<Box<dyn Fn(&Value) -> Value>> = Vec::new();
@@ -619,28 +619,35 @@ pub fn build(rt: &ResourceType, objects: &[Value], rv: u64, include_object: bool
             extractors.push(Box::new(col.cell));
         }
     }
+    // Built from owned values: json!() with a variable in it copies that
+    // value whole (serde_json::to_value), which was most of a Table's cost.
     let rows: Vec<Value> = objects
-        .iter()
-        .map(|obj| {
-            let cells: Vec<Value> = extractors.iter().map(|f| f(obj)).collect();
-            let mut row = json!({"cells": cells});
+        .into_iter()
+        .map(|mut obj| {
+            let cells: Vec<Value> = extractors.iter().map(|f| f(&obj)).collect();
+            let mut row = Map::with_capacity(2);
+            row.insert("cells".into(), Value::Array(cells));
             if include_object {
-                row["object"] = json!({
-                    "kind": "PartialObjectMetadata",
-                    "apiVersion": "meta.k8s.io/v1",
-                    "metadata": obj.get("metadata").cloned().unwrap_or(json!({})),
-                });
+                let metadata = match obj.get_mut("metadata") {
+                    Some(m) => m.take(),
+                    None => Value::Object(Map::new()),
+                };
+                let mut partial = Map::with_capacity(3);
+                partial.insert("kind".into(), "PartialObjectMetadata".into());
+                partial.insert("apiVersion".into(), "meta.k8s.io/v1".into());
+                partial.insert("metadata".into(), metadata);
+                row.insert("object".into(), Value::Object(partial));
             }
-            row
+            Value::Object(row)
         })
         .collect();
-    json!({
-        "kind": "Table",
-        "apiVersion": "meta.k8s.io/v1",
-        "metadata": {"resourceVersion": rv.to_string()},
-        "columnDefinitions": defs,
-        "rows": rows,
-    })
+    let mut table = Map::with_capacity(5);
+    table.insert("kind".into(), "Table".into());
+    table.insert("apiVersion".into(), "meta.k8s.io/v1".into());
+    table.insert("metadata".into(), json!({"resourceVersion": rv.to_string()}));
+    table.insert("columnDefinitions".into(), Value::Array(defs));
+    table.insert("rows".into(), Value::Array(rows));
+    Value::Object(table)
 }
 
 /// kubectl's age format (`45s`, `3m12s`, `5h`, `2d3h`, ...), approximately
