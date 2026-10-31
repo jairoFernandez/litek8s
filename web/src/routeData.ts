@@ -2,7 +2,8 @@
 // docs page adds to its <head> for search engines and link previews.
 // - `seoTitle` from docs.manifest.mjs replaces the short sidebar title in
 //   <title> and og:title ("Install" says little in a search result).
-// - The social card (public/og.png) for og:image and twitter:image; Starlight
+// - The social card (public/og.png, or a blog post's own from
+//   scripts/og-blog.mjs) for og:image and twitter:image; Starlight
 //   sets twitter:card=summary_large_image but no image.
 // - JSON-LD: the page as a TechArticle, and its place in the docs as a
 //   BreadcrumbList (Home > Docs > group > page).
@@ -13,6 +14,7 @@
 //   another language (other slug) or without a translation do not have.
 import { defineRouteMiddleware } from '@astrojs/starlight/route-data';
 import { groups } from '../docs.manifest.mjs';
+import { cardFor } from './lib/og';
 
 type Head = { tag: string; attrs?: Record<string, string | boolean | undefined>; content?: string }[];
 
@@ -52,8 +54,10 @@ export const onRequest = defineRouteMiddleware((context) => {
     if (og?.attrs) og.attrs.content = page.seoTitle;
   }
 
-  const image = new URL('/og.png', site).href;
-  const alt = 'litek8s: a lightweight Kubernetes in one binary';
+  // A blog post's own card when it has one (scripts/og-blog.mjs).
+  const card = cardFor(context.url.pathname);
+  const image = new URL(card, site).href;
+  const alt = card === '/og.png' ? 'litek8s: a lightweight Kubernetes in one binary' : route.entry.data.title;
   head.push(
     { tag: 'meta', attrs: { property: 'og:image', content: image } },
     { tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },

@@ -4,13 +4,14 @@
 // translation, and BlogPosting JSON-LD.
 import StarlightPage from '@astrojs/starlight/components/StarlightPage.astro';
 import { render } from 'astro:content';
+import { blogCard } from '../../lib/og';
 import { postUrl, docsLinks, dateFmt, blogRoot, translationOf, strings, type Post } from '../../lib/blog';
 
 const { post } = Astro.props as { post: Post };
 const { Content, headings } = await render(post);
 const site = Astro.site ?? new URL('http://localhost:4321');
 const url = new URL(postUrl(post), site).href;
-const image = new URL('/og.png', site).href;
+const image = new URL(blogCard(post.id) ?? '/og.png', site).href;
 const { title, description, date, updated, tags, lang } = post.data;
 const t = strings[lang];
 const docs = docsLinks(post);

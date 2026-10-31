@@ -32,9 +32,7 @@ Lista honesta; hay más en [skills/litek8s/references/differences.md](../../skil
 - Proyecto de una sola persona, con semanas de vida: las APIs, los flags y los
   formatos en disco pueden cambiar entre versiones 0.x sin migración.
 - No todo el comportamiento del kubelet: no hay eventos `Unhealthy`/`BackOff`,
-  un `emptyDir` en memoria es un tmpfs por cada montaje en un contenedor;
-  ValidatingAdmissionPolicy y los `matchConditions` de webhooks se aceptan pero
-  no se aplican.
+  un `emptyDir` en memoria es un tmpfs por cada montaje en un contenedor.
 - Las NetworkPolicies se aplican solo en nodos con crun (Linux); el runtime de
   Docker (servidores macOS) las guarda sin efecto. El tráfico de un nodo hacia
   sus propios pods (probes, relays de NodePort y LoadBalancer, que corren en el

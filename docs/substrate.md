@@ -76,8 +76,6 @@ tolerations, NetworkPolicies.
 - Docker on the same host sets the `FORWARD` policy to `DROP`.
 - The base manifests mount GKE paths (`/home/kubernetes/bin`,
   `/etc/srv/kubernetes/cri_auth_config.yaml`); the kind overlay drops them.
-- Its `sandboxconfig-validation.yaml` ValidatingAdmissionPolicy is stored but
-  not enforced by litek8s (Substrate's controllers still validate).
 
 ## Not done
 
