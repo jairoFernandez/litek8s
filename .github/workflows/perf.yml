@@ -1,0 +1,57 @@
+name: perf
+
+# The API server's speed (benches/api_load.rs) on a pull request against its
+# base, both measured in this one job on the same runner: a checked-in
+# baseline from another machine says nothing about a shared CI runner. Fails
+# when a scenario loses more than PERF_TOLERANCE of its ops/s (or its p99
+# grows by as much) twice in a row; the tables are in the job summary.
+# Same script locally: bench/perf-compare.sh main. Docs: bench/PERF.md.
+
+on:
+  pull_request:
+    paths-ignore: ["web/**", "docs/**", "*.md"]
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "Ref to compare with"
+        default: main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  api-load:
+    name: api_load vs base
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The base commit too, for its worktree.
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # Saved from main only, like test.yml.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: compare with the base
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || inputs.base }}
+          PERF_WORK: ${{ runner.temp }}/perf
+          # A 4-vCPU runner: fewer clients than on a laptop, longer runs.
+          PERF_CONC: "16"
+          PERF_SECS: "4"
+          PERF_RUNS: "3"
+          PERF_TOLERANCE: "0.20"
+        run: bench/perf-compare.sh "$BASE"

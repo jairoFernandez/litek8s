@@ -9,12 +9,17 @@
 //! Knobs (env): PERF_SECS=3 (per run), PERF_RUNS=3 (runs per scenario, the
 //! median is kept), PERF_CONC=32 (clients),
 //! PERF_OBJECTS=1000 (objects listed), PERF_REPLICAS=100 (Deployment scaled),
-//! PERF_TOLERANCE=0.15 (regression threshold), PERF_MEMORY=1 (no WAL).
+//! PERF_TOLERANCE=0.15 (regression threshold), PERF_MEMORY=1 (no WAL),
+//! PERF_BASELINE=<file> (instead of bench/perf-baseline.json),
+//! PERF_REGRESSIONS=<file> (the regressed scenarios' names are written there).
+//! A regression: ops/s down by more than the tolerance, p99 up by more than
+//! twice the tolerance (and 0.5 ms), or any failed request.
 //! Results: target/perf/latest.json. See bench/PERF.md.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -28,6 +33,9 @@ use serde_json::{Value, json};
 use tokio::net::{TcpListener, TcpStream};
 
 type Client = SendRequest<Full<Bytes>>;
+
+/// Names of created objects, unique for the whole run.
+static NEXT: AtomicU64 = AtomicU64::new(0);
 
 fn env<T: std::str::FromStr>(name: &str, default: T) -> T {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
@@ -127,6 +135,26 @@ fn summarize(mut lat_us: Vec<u64>, elapsed: Duration, errors: u64) -> Outcome {
     }
 }
 
+/// Each figure's median over several runs (taken separately: the run with
+/// the median ops/s can have the worst p99), errors and counts summed.
+fn median(runs: Vec<Outcome>) -> Outcome {
+    let mid = |f: fn(&Outcome) -> f64| {
+        let mut v: Vec<f64> = runs.iter().map(f).collect();
+        v.sort_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
+    Outcome {
+        ops_per_sec: mid(|o| o.ops_per_sec),
+        p50_ms: mid(|o| o.p50_ms),
+        p90_ms: mid(|o| o.p90_ms),
+        p99_ms: mid(|o| o.p99_ms),
+        max_ms: runs.iter().map(|o| o.max_ms).fold(0.0, f64::max),
+        count: runs.iter().map(|o| o.count).sum(),
+        errors: runs.iter().map(|o| o.errors).sum(),
+        total_ms: None,
+    }
+}
+
 /// `conc` clients send `op`s back to back for `secs` seconds.
 async fn throughput(addr: &str, conc: usize, secs: f64, op: OpFn) -> Result<Outcome> {
     let deadline = Instant::now() + Duration::from_secs_f64(secs);
@@ -198,7 +226,7 @@ async fn watch_latency(addr: &str, n: usize) -> Result<Outcome> {
     let mut sent = HashMap::new();
     let start = Instant::now();
     for i in 0..n {
-        let name = format!("w-{i}");
+        let name = format!("w-{}", NEXT.fetch_add(1, Ordering::Relaxed));
         let path = format!("/api/v1/namespaces/{ns}/configmaps");
         sent.insert(name.clone(), Instant::now());
         must(&mut tx, Method::POST, &path, "application/json", configmap(&name, i % 10)).await?;
@@ -269,8 +297,12 @@ struct Report {
     results: Vec<(String, Outcome)>,
 }
 
+/// bench/perf-baseline.json, or `PERF_BASELINE` (CI compares a pull
+/// request with its base on the same runner through a file of its own).
 fn baseline_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bench/perf-baseline.json")
+    std::env::var_os("PERF_BASELINE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bench/perf-baseline.json"))
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -363,7 +395,8 @@ async fn main() -> Result<()> {
             path: "/api/v1/namespaces/bench-create/configmaps".into(),
             content_type: JSON,
             accept: JSON,
-            body: Bytes::from(configmap(&format!("c-{w}-{i}"), i as usize % 10).to_string()),
+            // Unique across runs: a repeated name would be a 409.
+            body: Bytes::from(configmap(&format!("c-{}", NEXT.fetch_add(1, Ordering::Relaxed)), (w + i as usize) % 10).to_string()),
             expect: 201,
         })),
     ];
@@ -377,17 +410,20 @@ async fn main() -> Result<()> {
             continue;
         }
         eprintln!("  {name}…");
-        // Median of `runs` by ops/s: one run on a laptop varies by ±30 %.
+        // One run on a laptop varies by ±30 %: keep the median of `runs`.
         let mut outs = Vec::new();
         for _ in 0..runs {
             outs.push(throughput(&addr, c, secs, op.clone()).await?);
         }
-        outs.sort_by(|a, b| a.ops_per_sec.total_cmp(&b.ops_per_sec));
-        report.results.push((name.into(), outs.swap_remove(outs.len() / 2)));
+        report.results.push((name.into(), median(outs)));
     }
     if wanted("watch") {
         eprintln!("  watch…");
-        report.results.push(("watch_latency".into(), watch_latency(&addr, 500).await?));
+        let mut outs = Vec::new();
+        for _ in 0..runs {
+            outs.push(watch_latency(&addr, 500).await?);
+        }
+        report.results.push(("watch_latency".into(), median(outs)));
     }
 
     print_and_compare(&report, save, tolerance)
@@ -403,12 +439,18 @@ fn print_and_compare(report: &Report, save: bool, tolerance: f64) -> Result<()> 
     println!("{:<15} {:>11} {:>9} {:>9} {:>9} {:>9} {:>7}  vs baseline", "scenario", "ops/s", "p50 ms", "p90 ms", "p99 ms", "max ms", "errors");
     let mut regressions = Vec::new();
     for (name, o) in &report.results {
+        if o.errors > 0 {
+            regressions.push(format!("{name}: {} failed requests", o.errors));
+        }
         let delta = baseline.get(name).map(|b| {
             let thr = (o.ops_per_sec - b.ops_per_sec) / b.ops_per_sec.max(1e-9);
-            if thr < -tolerance {
+            // Its ops/s is only how fast 500 sequential creates went: judged by latency.
+            let judge_throughput = name != "watch_latency";
+            if judge_throughput && thr < -tolerance {
                 regressions.push(format!("{name}: ops/s {:.0} → {:.0} ({:+.0}%)", b.ops_per_sec, o.ops_per_sec, thr * 100.0));
             }
-            if b.p99_ms > 0.0 && o.p99_ms > b.p99_ms * (1.0 + tolerance) && o.p99_ms - b.p99_ms > 0.5 {
+            // The tail is noisier than throughput: twice the margin.
+            if b.p99_ms > 0.0 && o.p99_ms > b.p99_ms * (1.0 + 2.0 * tolerance) && o.p99_ms - b.p99_ms > 0.5 {
                 regressions.push(format!("{name}: p99 {:.2} → {:.2} ms", b.p99_ms, o.p99_ms));
             }
             format!("{:+.1}% ops/s", thr * 100.0)
@@ -432,7 +474,13 @@ fn print_and_compare(report: &Report, save: bool, tolerance: f64) -> Result<()> 
         }
         let sorted: std::collections::BTreeMap<_, _> = merged.into_iter().collect();
         std::fs::write(baseline_path(), serde_json::to_vec_pretty(&sorted)?)?;
-        println!("\nbaseline saved to bench/perf-baseline.json");
+        println!("\nbaseline saved to {}", baseline_path().display());
+    }
+    // For bench/perf-compare.sh: which scenarios regressed, one per line.
+    if let Some(file) = std::env::var_os("PERF_REGRESSIONS") {
+        let mut names: Vec<&str> = regressions.iter().map(|r| r.split(':').next().unwrap_or_default()).collect();
+        names.dedup();
+        std::fs::write(file, names.iter().map(|n| format!("{n}\n")).collect::<String>())?;
     }
     if !regressions.is_empty() && !save {
         println!("\nREGRESSIONS (> {:.0}%):", tolerance * 100.0);

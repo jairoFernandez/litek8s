@@ -32,7 +32,7 @@ Official conformance suite (e2e.test v1.33, ~30 min; scores in `compat/CONFORMAN
 KUBECONFIG=/tmp/litek8s.kubeconfig compat/conformance.sh --target litek8s
 ```
 
-Speed benchmarks (local, no VM; bench/PERF.md): `cargo bench --bench micro` (criterion: store, patch, JSON) and `cargo bench --bench api_load` (in-process API server under concurrent HTTP load; compares with bench/perf-baseline.json, `-- --save-baseline` to accept).
+Speed benchmarks (local, no VM; bench/PERF.md): `cargo bench --bench micro` (criterion: store, patch, JSON) and `cargo bench --bench api_load` (in-process API server under concurrent HTTP load; compares with bench/perf-baseline.json, `-- --save-baseline` to accept); CI compares each pull request with its base on one runner (`bench/perf-compare.sh <ref>`, `.github/workflows/perf.yml`).
 
 To run a single test:
 ```bash

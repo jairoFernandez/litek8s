@@ -22,9 +22,32 @@ cargo bench --bench api_load -- --save-baseline   # accept the current numbers
 ```
 
 Env: `PERF_SECS=3 PERF_RUNS=3 PERF_CONC=32 PERF_OBJECTS=1000 PERF_REPLICAS=100 PERF_TOLERANCE=0.15
-PERF_MEMORY=1` (no WAL). Each scenario keeps the median of `PERF_RUNS` runs: a single
-run on a laptop varies by ±30 % (patch: 11k–22k ops/s), enough for false alarms. Last run: `target/perf/latest.json`. The baseline is per machine:
+PERF_MEMORY=1` (no WAL). Each figure is the median of `PERF_RUNS` runs: a single run on
+a laptop varies by ±30 % (patch: 11k–22k ops/s), enough for false alarms. On a loaded
+machine (load average above half the CPUs) `api_load` warns: don't save a baseline then. Last run: `target/perf/latest.json`. The baseline is per machine:
 save it on the machine you compare on (it is checked in from an Apple Silicon laptop).
+
+## Regressions in CI
+
+`bench/perf-baseline.json` holds one machine's numbers; it catches regressions on that
+machine only. CI compares instead: `.github/workflows/perf.yml` runs
+`bench/perf-compare.sh <base sha>` on every pull request. In one job, on one runner, the
+base commit (a git worktree) runs `api_load -- --save-baseline` into a temporary file
+(`PERF_BASELINE`), then the pull request runs against that file. A regression: ops/s down
+by more than `PERF_TOLERANCE` (20 % in CI), p99 up by more than twice that (and 0.5 ms), or
+any failed request. Each figure is the median of `PERF_RUNS` runs. A regression is measured
+again (base, then head) and the job fails only if the same scenario regressed in every
+attempt: on a busy machine identical code flagged a different scenario each time. The tables
+are in the job summary.
+
+Locally, against any ref:
+
+```bash
+bench/perf-compare.sh main
+```
+
+A base from before `PERF_BASELINE` existed has nothing to compare with: the script says so
+and exits 0.
 
 ## micro
 
