@@ -2,6 +2,7 @@
 title: "Small is not enough: measuring litek8s's speed, and a 13× faster list"
 description: "We had numbers for memory and disk, none for speed. A load test for the API server, a list made 13× faster, and how CI now catches regressions."
 date: 2026-10-30
+series: speed
 tags: [performance, benchmarks, api-server, ci, rust]
 docs: [numbers, contributing]
 translation: es/pequeno-no-basta

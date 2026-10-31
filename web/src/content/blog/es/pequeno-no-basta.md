@@ -2,6 +2,7 @@
 title: "Pequeño no basta: medir la velocidad de litek8s, y un list 13× más rápido"
 description: "Teníamos números de memoria y disco, ninguno de velocidad. Un load test del API server, un list 13× más rápido y cómo CI ahora detecta regresiones."
 date: 2026-10-30
+series: speed
 tags: [rendimiento, benchmarks, api-server, ci, rust]
 docs: [numbers, contributing]
 lang: es
