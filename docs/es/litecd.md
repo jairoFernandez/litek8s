@@ -276,6 +276,13 @@ Kubernetes: ver [Apps: Argo CD y litecd](../ui.md#apps-argo-cd-y-litecd). `D`
 muestra el diff con git, que litecd publica para cada app fuera de sync como
 un Secret `<app>.diff` junto a ella; force y terminate son solo de Argo CD.
 
+![litek8s ui, la vista Apps en un cluster donde litecd corre 40 Applications: sync, salud, revisión y el mensaje de un sync en curso](../ui/apps-dark.svg)
+
+Al abrir una app (`enter`) se ven sus recursos; `h` su historial de sync
+y el resultado del último sync por recurso:
+
+![litek8s ui, un app of apps abierto: fuente, destino, su operación en curso, y las Applications y objetos que posee con su sync y salud](../ui/app-dark.svg)
+
 ## Revisa tus manifiestos
 
 `litecd check` lee un directorio de manifiestos y dice qué funciones usan y

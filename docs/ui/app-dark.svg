@@ -1,0 +1,211 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="944" height="564" viewBox="0 0 944 564" font-family="Menlo, Monaco, 'DejaVu Sans Mono', monospace" font-size="14">
+<rect width="100%" height="100%" rx="8" fill="#1e1e2e"/>
+<rect x="505.6" y="27" width="67.2" height="17" fill="#7c3aed"/>
+<rect x="18.4" y="197" width="907.2" height="17" fill="#372b5c"/>
+<rect x="18.4" y="214" width="907.2" height="17" fill="#292938"/>
+<rect x="18.4" y="248" width="907.2" height="17" fill="#292938"/>
+<rect x="18.4" y="282" width="907.2" height="17" fill="#292938"/>
+<rect x="18.4" y="316" width="907.2" height="17" fill="#292938"/>
+<rect x="18.4" y="350" width="907.2" height="17" fill="#292938"/>
+<rect x="18.4" y="384" width="907.2" height="17" fill="#292938"/>
+<rect x="18.4" y="418" width="907.2" height="17" fill="#292938"/>
+<rect x="18.4" y="452" width="907.2" height="17" fill="#292938"/>
+<rect x="18.4" y="486" width="907.2" height="17" fill="#292938"/>
+<rect x="18.4" y="537" width="42.0" height="17" fill="#2b2740"/>
+<rect x="119.2" y="537" width="25.2" height="17" fill="#2b2740"/>
+<rect x="287.2" y="537" width="58.8" height="17" fill="#2b2740"/>
+<rect x="438.4" y="537" width="25.2" height="17" fill="#2b2740"/>
+<rect x="522.4" y="537" width="42.0" height="17" fill="#2b2740"/>
+<rect x="648.4" y="537" width="25.2" height="17" fill="#2b2740"/>
+<rect x="774.4" y="537" width="25.2" height="17" fill="#2b2740"/>
+<rect x="858.4" y="537" width="25.2" height="17" fill="#2b2740"/>
+<text x="10.0" y="23" fill="#585d75" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs">╭─ </text>
+<text x="35.2" y="23" fill="#a78bfa" font-weight="bold" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs">litek8s</text>
+<text x="94.0" y="23" fill="#585d75" xml:space="preserve" textLength="672.0" lengthAdjust="spacingAndGlyphs"> ────────────────────────────────────────────────────────────────────────────── </text>
+<text x="766.0" y="23" fill="#60a5fa" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">● </text>
+<text x="782.8" y="23" fill="#cdd6f4" font-weight="bold" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">lkmgmt</text>
+<text x="833.2" y="23" fill="#8b90a5" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs"> · remote</text>
+<text x="908.8" y="23" fill="#585d75" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs"> ─╮</text>
+<text x="10.0" y="40" fill="#cdd6f4" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">│ </text>
+<text x="26.8" y="40" fill="#a78bfa" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs"> 1</text>
+<text x="43.6" y="40" fill="#cdd6f4" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs"> Home </text>
+<text x="94.0" y="40" fill="#a78bfa" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs"> 2</text>
+<text x="110.8" y="40" fill="#cdd6f4" xml:space="preserve" textLength="84.0" lengthAdjust="spacingAndGlyphs"> Clusters </text>
+<text x="194.8" y="40" fill="#a78bfa" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs"> 7</text>
+<text x="211.6" y="40" fill="#cdd6f4" xml:space="preserve" textLength="100.8" lengthAdjust="spacingAndGlyphs"> Kubernetes </text>
+<text x="312.4" y="40" fill="#a78bfa" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs"> 8</text>
+<text x="329.2" y="40" fill="#cdd6f4" xml:space="preserve" textLength="84.0" lengthAdjust="spacingAndGlyphs"> Settings </text>
+<text x="413.2" y="40" fill="#a78bfa" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs"> 9</text>
+<text x="430.0" y="40" fill="#cdd6f4" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs"> Observe </text>
+<text x="505.6" y="40" fill="#ffffff" font-weight="bold" xml:space="preserve" textLength="67.2" lengthAdjust="spacingAndGlyphs"> 0 Apps </text>
+<text x="925.6" y="40" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="57" fill="#cdd6f4" xml:space="preserve" textLength="924.0" lengthAdjust="spacingAndGlyphs">╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</text>
+<text x="10.0" y="74" fill="#cdd6f4" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs">╭─ </text>
+<text x="35.2" y="74" fill="#fbbf24" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">◐ </text>
+<text x="52.0" y="74" fill="#cdd6f4" font-weight="bold" xml:space="preserve" textLength="159.6" lengthAdjust="spacingAndGlyphs">app argocd/registry</text>
+<text x="211.6" y="74" fill="#585d75" xml:space="preserve" textLength="504.0" lengthAdjust="spacingAndGlyphs"> ────────────────────────────────────────────────────────── </text>
+<text x="715.6" y="74" fill="#fbbf24" xml:space="preserve" textLength="193.2" lengthAdjust="spacingAndGlyphs">OutOfSync · Progressing</text>
+<text x="908.8" y="74" fill="#585d75" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs"> ─╮</text>
+<text x="10.0" y="91" fill="#cdd6f4" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="91" fill="#8b90a5" xml:space="preserve" textLength="92.4" lengthAdjust="spacingAndGlyphs"> source    </text>
+<text x="110.8" y="91" fill="#cdd6f4" xml:space="preserve" textLength="814.8" lengthAdjust="spacingAndGlyphs">git://git-server.gitops.svc.cluster.local/gitops registry/clusters/mgmt@HEAD                     </text>
+<text x="925.6" y="91" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="108" fill="#cdd6f4" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="108" fill="#8b90a5" xml:space="preserve" textLength="92.4" lengthAdjust="spacingAndGlyphs"> dest      </text>
+<text x="110.8" y="108" fill="#cdd6f4" xml:space="preserve" textLength="814.8" lengthAdjust="spacingAndGlyphs">in-cluster/argocd · project default · auto (prune, self-heal)                                    </text>
+<text x="925.6" y="108" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="125" fill="#cdd6f4" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="125" fill="#8b90a5" xml:space="preserve" textLength="92.4" lengthAdjust="spacingAndGlyphs"> revision  </text>
+<text x="110.8" y="125" fill="#cdd6f4" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs">f69cca8</text>
+<text x="169.6" y="125" fill="#8b90a5" xml:space="preserve" textLength="302.4" lengthAdjust="spacingAndGlyphs"> · synced 44h ago · compared 44h ago</text>
+<text x="925.6" y="125" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="142" fill="#cdd6f4" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="142" fill="#8b90a5" xml:space="preserve" textLength="92.4" lengthAdjust="spacingAndGlyphs"> operation </text>
+<text x="110.8" y="142" fill="#fbbf24" xml:space="preserve" textLength="680.4" lengthAdjust="spacingAndGlyphs">◐ Running (auto): waiting for healthy state of argoproj.io/Application/production</text>
+<text x="925.6" y="142" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="159" fill="#cdd6f4" xml:space="preserve" textLength="924.0" lengthAdjust="spacingAndGlyphs">╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</text>
+<text x="10.0" y="176" fill="#cdd6f4" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs">╭─ </text>
+<text x="35.2" y="176" fill="#cdd6f4" font-weight="bold" xml:space="preserve" textLength="378.0" lengthAdjust="spacingAndGlyphs">resources · h: sync history, last sync result</text>
+<text x="413.2" y="176" fill="#585d75" xml:space="preserve" textLength="394.8" lengthAdjust="spacingAndGlyphs"> ───────────────────────────────────────────── </text>
+<text x="808.0" y="176" fill="#8b90a5" xml:space="preserve" textLength="100.8" lengthAdjust="spacingAndGlyphs">21/24 synced</text>
+<text x="908.8" y="176" fill="#585d75" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs"> ─╮</text>
+<text x="10.0" y="193" fill="#cdd6f4" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">│ </text>
+<text x="26.8" y="193" fill="#8b90a5" font-weight="bold" xml:space="preserve" textLength="33.6" lengthAdjust="spacingAndGlyphs">KIND</text>
+<text x="203.2" y="193" fill="#8b90a5" font-weight="bold" xml:space="preserve" textLength="33.6" lengthAdjust="spacingAndGlyphs">NAME</text>
+<text x="514.0" y="193" fill="#8b90a5" font-weight="bold" xml:space="preserve" textLength="33.6" lengthAdjust="spacingAndGlyphs">SYNC</text>
+<text x="598.0" y="193" fill="#8b90a5" font-weight="bold" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">HEALTH</text>
+<text x="698.8" y="193" fill="#8b90a5" font-weight="bold" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs">MESSAGE</text>
+<text x="925.6" y="193" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="210" fill="#cdd6f4" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="18.4" y="210" fill="#a78bfa" font-weight="bold" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">▌</text>
+<text x="26.8" y="210" fill="#4ade80" font-weight="bold" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">● </text>
+<text x="43.6" y="210" fill="#cdd6f4" font-weight="bold" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">Application        argocd/argo-components               </text>
+<text x="514.0" y="210" fill="#8b90a5" font-weight="bold" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">Synced</text>
+<text x="598.0" y="210" fill="#4ade80" font-weight="bold" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs">Healthy</text>
+<text x="925.6" y="210" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="227" fill="#cdd6f4" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">│ </text>
+<text x="26.8" y="227" fill="#4ade80" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">● </text>
+<text x="43.6" y="227" fill="#cdd6f4" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">Application        argocd/argocd-projects               </text>
+<text x="514.0" y="227" fill="#8b90a5" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">Synced</text>
+<text x="598.0" y="227" fill="#4ade80" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs">Healthy</text>
+<text x="925.6" y="227" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="244" fill="#cdd6f4" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">│ </text>
+<text x="26.8" y="244" fill="#4ade80" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">● </text>
+<text x="43.6" y="244" fill="#cdd6f4" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">Application        argocd/cert-issuers                  </text>
+<text x="514.0" y="244" fill="#8b90a5" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">Synced</text>
+<text x="598.0" y="244" fill="#4ade80" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs">Healthy</text>
+<text x="925.6" y="244" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="261" fill="#cdd6f4" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">│ </text>
+<text x="26.8" y="261" fill="#4ade80" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">● </text>
+<text x="43.6" y="261" fill="#cdd6f4" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">Application        argocd/cert-manager-components       </text>
+<text x="514.0" y="261" fill="#8b90a5" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">Synced</text>
+<text x="598.0" y="261" fill="#4ade80" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs">Healthy</text>
+<text x="925.6" y="261" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="278" fill="#cdd6f4" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">│ </text>
+<text x="26.8" y="278" fill="#4ade80" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">● </text>
+<text x="43.6" y="278" fill="#cdd6f4" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">Application        argocd/chartmuseum-components        </text>
+<text x="514.0" y="278" fill="#8b90a5" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">Synced</text>
+<text x="598.0" y="278" fill="#4ade80" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs">Healthy</text>
+<text x="925.6" y="278" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="295" fill="#cdd6f4" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">│ </text>
+<text x="26.8" y="295" fill="#4ade80" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">● </text>
+<text x="43.6" y="295" fill="#cdd6f4" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">Application        argocd/cluster-secret-store          </text>
+<text x="514.0" y="295" fill="#8b90a5" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">Synced</text>
+<text x="598.0" y="295" fill="#4ade80" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs">Healthy</text>
+<text x="925.6" y="295" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="312" fill="#cdd6f4" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">│ </text>
+<text x="26.8" y="312" fill="#fbbf24" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">◐ </text>
+<text x="43.6" y="312" fill="#cdd6f4" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">Application        argocd/clusters                      </text>
+<text x="514.0" y="312" fill="#fbbf24" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">OutOfSync</text>
+<text x="598.0" y="312" fill="#4ade80" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">-</text>
+<text x="925.6" y="312" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="329" fill="#cdd6f4" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">│ </text>
+<text x="26.8" y="329" fill="#4ade80" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">● </text>
+<text x="43.6" y="329" fill="#cdd6f4" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">Application        argocd/development                   </text>
+<text x="514.0" y="329" fill="#8b90a5" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">Synced</text>
+<text x="598.0" y="329" fill="#4ade80" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs">Healthy</text>
+<text x="925.6" y="329" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="346" fill="#cdd6f4" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">│ </text>
+<text x="26.8" y="346" fill="#4ade80" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">● </text>
+<text x="43.6" y="346" fill="#cdd6f4" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">Application        argocd/external-s…perator-components </text>
+<text x="514.0" y="346" fill="#8b90a5" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">Synced</text>
+<text x="598.0" y="346" fill="#4ade80" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs">Healthy</text>
+<text x="925.6" y="346" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="363" fill="#cdd6f4" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">│ </text>
+<text x="26.8" y="363" fill="#4ade80" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">● </text>
+<text x="43.6" y="363" fill="#cdd6f4" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">Application        argocd/ingress-nginx-components      </text>
+<text x="514.0" y="363" fill="#8b90a5" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">Synced</text>
+<text x="598.0" y="363" fill="#4ade80" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs">Healthy</text>
+<text x="925.6" y="363" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="380" fill="#cdd6f4" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">│ </text>
+<text x="26.8" y="380" fill="#fbbf24" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">◐ </text>
+<text x="43.6" y="380" fill="#cdd6f4" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">Application        argocd/production                    </text>
+<text x="514.0" y="380" fill="#8b90a5" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">Synced</text>
+<text x="598.0" y="380" fill="#fbbf24" xml:space="preserve" textLength="92.4" lengthAdjust="spacingAndGlyphs">Progressing</text>
+<text x="925.6" y="380" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="397" fill="#cdd6f4" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">│ </text>
+<text x="26.8" y="397" fill="#fbbf24" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">◐ </text>
+<text x="43.6" y="397" fill="#cdd6f4" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">Application        argocd/registry                      </text>
+<text x="514.0" y="397" fill="#fbbf24" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">OutOfSync</text>
+<text x="598.0" y="397" fill="#fbbf24" xml:space="preserve" textLength="92.4" lengthAdjust="spacingAndGlyphs">Progressing</text>
+<text x="925.6" y="397" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="414" fill="#cdd6f4" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">│ </text>
+<text x="26.8" y="414" fill="#4ade80" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">● </text>
+<text x="43.6" y="414" fill="#cdd6f4" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">Application        argocd/reloader-components           </text>
+<text x="514.0" y="414" fill="#8b90a5" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">Synced</text>
+<text x="598.0" y="414" fill="#4ade80" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs">Healthy</text>
+<text x="925.6" y="414" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="431" fill="#cdd6f4" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">│ </text>
+<text x="26.8" y="431" fill="#fbbf24" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">◐ </text>
+<text x="43.6" y="431" fill="#cdd6f4" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">Application        argocd/secrets                       </text>
+<text x="514.0" y="431" fill="#fbbf24" xml:space="preserve" textLength="75.6" lengthAdjust="spacingAndGlyphs">OutOfSync</text>
+<text x="598.0" y="431" fill="#4ade80" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">-</text>
+<text x="925.6" y="431" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="448" fill="#cdd6f4" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">│ </text>
+<text x="26.8" y="448" fill="#4ade80" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">● </text>
+<text x="43.6" y="448" fill="#cdd6f4" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">Application        argocd/staging                       </text>
+<text x="514.0" y="448" fill="#8b90a5" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">Synced</text>
+<text x="598.0" y="448" fill="#4ade80" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs">Healthy</text>
+<text x="925.6" y="448" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="465" fill="#cdd6f4" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">│ </text>
+<text x="26.8" y="465" fill="#4ade80" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">● </text>
+<text x="43.6" y="465" fill="#cdd6f4" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">Application        argocd/vault-components              </text>
+<text x="514.0" y="465" fill="#8b90a5" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">Synced</text>
+<text x="598.0" y="465" fill="#4ade80" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs">Healthy</text>
+<text x="925.6" y="465" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="482" fill="#cdd6f4" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">│ </text>
+<text x="26.8" y="482" fill="#4ade80" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">● </text>
+<text x="43.6" y="482" fill="#cdd6f4" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">ClusterRoleBinding argo-admin-admin-clusterrole         </text>
+<text x="514.0" y="482" fill="#8b90a5" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">Synced</text>
+<text x="598.0" y="482" fill="#4ade80" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">-</text>
+<text x="925.6" y="482" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="499" fill="#cdd6f4" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">│ </text>
+<text x="26.8" y="499" fill="#4ade80" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">● </text>
+<text x="43.6" y="499" fill="#cdd6f4" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">ClusterRoleBinding argo-admin-clusterrole               </text>
+<text x="514.0" y="499" fill="#8b90a5" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">Synced</text>
+<text x="598.0" y="499" fill="#4ade80" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">-</text>
+<text x="925.6" y="499" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="516" fill="#cdd6f4" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">│ </text>
+<text x="26.8" y="516" fill="#4ade80" xml:space="preserve" textLength="16.8" lengthAdjust="spacingAndGlyphs">● </text>
+<text x="43.6" y="516" fill="#cdd6f4" xml:space="preserve" textLength="470.4" lengthAdjust="spacingAndGlyphs">ClusterRoleBinding argo-clusterrole                     </text>
+<text x="514.0" y="516" fill="#8b90a5" xml:space="preserve" textLength="50.4" lengthAdjust="spacingAndGlyphs">Synced</text>
+<text x="598.0" y="516" fill="#4ade80" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">-</text>
+<text x="925.6" y="516" fill="#585d75" xml:space="preserve" textLength="8.4" lengthAdjust="spacingAndGlyphs">│</text>
+<text x="10.0" y="533" fill="#cdd6f4" xml:space="preserve" textLength="924.0" lengthAdjust="spacingAndGlyphs">╰────────────────────────────────────────────────────────────────────────────────────────────────────────────╯</text>
+<text x="18.4" y="550" fill="#a78bfa" font-weight="bold" xml:space="preserve" textLength="42.0" lengthAdjust="spacingAndGlyphs"> esc </text>
+<text x="60.4" y="550" fill="#8b90a5" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs"> back  </text>
+<text x="119.2" y="550" fill="#a78bfa" font-weight="bold" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs"> h </text>
+<text x="144.4" y="550" fill="#8b90a5" xml:space="preserve" textLength="142.8" lengthAdjust="spacingAndGlyphs"> history/result  </text>
+<text x="287.2" y="550" fill="#a78bfa" font-weight="bold" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs"> enter </text>
+<text x="346.0" y="550" fill="#8b90a5" xml:space="preserve" textLength="92.4" lengthAdjust="spacingAndGlyphs"> describe  </text>
+<text x="438.4" y="550" fill="#a78bfa" font-weight="bold" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs"> s </text>
+<text x="463.6" y="550" fill="#8b90a5" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs"> sync  </text>
+<text x="522.4" y="550" fill="#a78bfa" font-weight="bold" xml:space="preserve" textLength="42.0" lengthAdjust="spacingAndGlyphs"> r/R </text>
+<text x="564.4" y="550" fill="#8b90a5" xml:space="preserve" textLength="84.0" lengthAdjust="spacingAndGlyphs"> refresh  </text>
+<text x="648.4" y="550" fill="#a78bfa" font-weight="bold" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs"> T </text>
+<text x="673.6" y="550" fill="#8b90a5" xml:space="preserve" textLength="100.8" lengthAdjust="spacingAndGlyphs"> terminate  </text>
+<text x="774.4" y="550" fill="#a78bfa" font-weight="bold" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs"> D </text>
+<text x="799.6" y="550" fill="#8b90a5" xml:space="preserve" textLength="58.8" lengthAdjust="spacingAndGlyphs"> diff  </text>
+<text x="858.4" y="550" fill="#a78bfa" font-weight="bold" xml:space="preserve" textLength="25.2" lengthAdjust="spacingAndGlyphs"> ? </text>
+<text x="883.6" y="550" fill="#8b90a5" xml:space="preserve" textLength="42.0" lengthAdjust="spacingAndGlyphs"> help</text>
+</svg>

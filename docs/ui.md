@@ -1254,6 +1254,10 @@ but the Kubernetes API: the list, an app's resources and history, and the
 actions, which patch the Application the way the argocd CLI does, so they
 work for either controller and need neither's API server nor a login.
 
+![litek8s ui, the Apps view on a cluster where litecd runs 40 Applications: sync, health, revision and the message of a running sync](ui/apps-dark.svg)
+
+![litek8s ui, one app of apps opened: source, destination, its running operation, and the Applications and objects it owns with their sync and health](ui/app-dark.svg)
+
 ```
  litek8s 1 Home 2 Clust 7 Kube 8 Set 9 Obs  0 Apps            ● lkmgmt · remote
 ╭─ Applications · litecd latest · argocd ────────────── 40 apps · 2 OutOfSync ─╮

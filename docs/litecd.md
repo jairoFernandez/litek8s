@@ -263,6 +263,13 @@ refreshes and diffs them through the Kubernetes API alone: see
 with git, which litecd publishes for each app out of sync as a Secret
 `<app>.diff` next to it; force and terminate are Argo CD only.
 
+![litek8s ui, the Apps view on a cluster where litecd runs 40 Applications: sync, health, revision and the message of a running sync](ui/apps-dark.svg)
+
+Opening an app (`enter`) shows its resources; `h` its sync history and
+the last sync's result per resource:
+
+![litek8s ui, one app of apps opened: source, destination, its running operation, and the Applications and objects it owns with their sync and health](ui/app-dark.svg)
+
 ## Check your manifests
 
 `litecd check` reads a directory of manifests and reports which features

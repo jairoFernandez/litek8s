@@ -1278,6 +1278,10 @@ historial de una app, y las acciones, que hacen patch a la Application como lo
 hace la CLI de argocd, así que funcionan con cualquiera de los dos controllers
 y no necesitan el API server de ninguno ni un login.
 
+![litek8s ui, la vista Apps en un cluster donde litecd corre 40 Applications: sync, salud, revisión y el mensaje de un sync en curso](../ui/apps-dark.svg)
+
+![litek8s ui, un app of apps abierto: fuente, destino, su operación en curso, y las Applications y objetos que posee con su sync y salud](../ui/app-dark.svg)
+
 ```
  litek8s 1 Home 2 Clust 7 Kube 8 Set 9 Obs  0 Apps            ● lkmgmt · remote
 ╭─ Applications · litecd latest · argocd ────────────── 40 apps · 2 OutOfSync ─╮
