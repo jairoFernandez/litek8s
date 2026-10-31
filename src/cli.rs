@@ -32,6 +32,7 @@ Kubernetes:
   install        Run litek8s as a systemd service on this Linux server, or on another over --ssh
   uninstall      Stop and remove the litek8s systemd service and its pods
   cluster        Clusters of machines over SSH from a cluster file (apply, status, delete)
+  volume         Move a local volume to another node (its pods stopped, the data copied over SSH)
 
 Observability (built into the API server):
   logs           Search and follow pod logs, including containers that are gone
@@ -624,7 +625,32 @@ enum Command {
         #[command(subcommand)]
         command: ClusterCommand,
     },
+    #[command(
+        about = "Move a local volume to another node (its pods stopped, the data copied over SSH)",
+        help_template = HELP_TEMPLATE,
+        after_help = VOLUME_AFTER_HELP
+    )]
+    Volume {
+        #[command(subcommand)]
+        command: VolumeCommand,
+    },
 }
+
+#[derive(Debug, Subcommand)]
+enum VolumeCommand {
+    #[command(about = "Move a claim's local-path volume to another node", help_template = HELP_TEMPLATE)]
+    Move(crate::volume::MoveArgs),
+}
+
+const VOLUME_AFTER_HELP: &str = "\
+Examples:
+  litek8s volume move db/data-postgres-0 --to node-2 --scale
+  litek8s volume move data-0 -n db --to node-2 --scale --delete-source --yes
+
+The nodes must have been installed by `litek8s cluster apply` (their SSH is on
+the Node). The data goes from one node to the other through this machine, the
+copy is checked (files and bytes) before the volume changes node, and the
+old copy stays unless --delete-source.";
 
 #[derive(Debug, Subcommand)]
 enum InstallRole {
@@ -936,6 +962,7 @@ pub async fn run() -> Result<()> {
         Command::Logs(args) => crate::obs::cli::logs(args).await,
         Command::Top { watch, interval_secs, kube } => run_kube_top(kube, watch, Duration::from_secs(interval_secs)).await,
         Command::Tree { watch, interval_secs, kube } => run_kube_tree(kube, watch, Duration::from_secs(interval_secs)).await,
+        Command::Volume { command: VolumeCommand::Move(args) } => crate::volume::run(args).await,
         Command::Cluster { command } => match command {
             ClusterCommand::Apply { file, prune, purge, binary, release, skip_checks, timeout } => {
                 let f = crate::cluster::ClusterFile::load(&file)?;

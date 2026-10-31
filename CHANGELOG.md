@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **`litek8s volume move <claim> --to <node>`** moves a `local-path` volume
+  to another node: with `--scale` it scales the StatefulSets/Deployments
+  using the claim to 0, copies the data over SSH (the nodes `cluster apply`
+  installed), checks files and bytes on both sides, re-creates the PV on the
+  new node and the claim, and scales them back. The old copy stays until
+  `--delete-source`. See [docs/clusters.md](docs/clusters.md#moving-a-volume-to-another-node).
+- **Fix: a PersistentVolume with `persistentVolumeReclaimPolicy: Retain`
+  kept its data only in name.** Deleting the PV object made its node remove
+  the data directory whatever the policy; now only `Delete` does, as in
+  Kubernetes.
+
 ## 0.2.18
 
 - **Lists of built-in resources are up to 13× faster**: the store keeps
