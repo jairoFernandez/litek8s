@@ -34,9 +34,10 @@ header.header { view-transition-name: lk-header; }
   padding: 0;
   margin-block: 2rem 1rem;
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
   gap: 1.5rem;
 }
+.blog-grid > li { min-width: 0; }
 /* Two columns once the content column (not the window) is wide enough. */
 @container (min-width: 36rem) {
   .blog-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -45,6 +46,8 @@ header.header { view-transition-name: lk-header; }
 
 .blog-card {
   display: flex;
+  min-width: 0;
+  max-width: 100%;
   flex-direction: column;
   height: 100%;
   overflow: hidden;
@@ -114,10 +117,13 @@ header.header { view-transition-name: lk-header; }
   letter-spacing: -0.02em;
   color: var(--sl-color-white);
   width: fit-content;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 .blog-card:hover .blog-card-title { color: var(--sl-color-accent-high); }
 .blog-card-desc {
   margin: 0;
+  overflow-wrap: anywhere;
   font-size: var(--sl-text-sm);
   line-height: 1.55;
   color: var(--sl-color-gray-2);
@@ -143,4 +149,4 @@ img.post-cover {
   margin-block: 1rem 2rem;
   background: var(--sl-color-gray-6);
 }
-h1#_top { width: fit-content; }
+h1#_top { width: fit-content; max-width: 100%; overflow-wrap: anywhere; }
