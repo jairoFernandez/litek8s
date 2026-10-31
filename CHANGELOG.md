@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.2.18
+
+- **Lists of built-in resources are up to 13× faster**: the store keeps
+  every object as compact JSON, and a list now copies those bytes into the
+  response instead of parsing each object and serializing it again; a label
+  selector alone reads only `metadata.labels`. On a laptop, 1,000
+  ConfigMaps: 507 → 6,616 lists/s (p99 33 → 2.1 ms); 100 of them by
+  `labelSelector`: 865 → 5,667/s; `kubectl get` (Tables) +23%. Responses
+  are byte for byte the same; Tables, PartialObjectMetadata and custom
+  resources take the path they took before.
+- **Speed benchmarks**: `cargo bench --bench api_load` drives an in-process
+  API server (WAL on disk, controllers running) with concurrent HTTP
+  clients and reports ops/s and p50/p90/p99 for get, create, patch, lists,
+  watch latency and scheduling 100 replicas; `cargo bench --bench micro`
+  covers the store, patches and JSON. Pull requests are compared with their
+  base on the same CI runner (`bench/perf-compare.sh`). See
+  [bench/PERF.md](bench/PERF.md).
+
 ## 0.2.17
 
 - **`litek8s ui`'s Home works on clusters that are not litek8s** (k3s,
