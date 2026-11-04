@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.21
 
 - **Fix: a Job's `activeDeadlineSeconds` was not enforced while its pod
   stayed Pending.** The controller checked the deadline only when the Job or
