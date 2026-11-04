@@ -224,6 +224,16 @@ pub(crate) fn reconcile(api: &ApiState, ns: &str, name: &str) -> Result<Requeue,
         }
         status["active"] = json!(active.len());
         status["ready"] = json!(active.iter().filter(|p| util::is_ready(p)).count());
+        // Come back when the deadline passes: a pod left Pending (nothing
+        // fits) changes nothing, so no event would bring the controller back.
+        let deadline_left = i(&job, "/spec/activeDeadlineSeconds").and_then(|d| {
+            let start = status.get("startTime").and_then(Value::as_str).and_then(util::parse_time)?;
+            Some((d - (now - start).num_seconds()).max(1) as u64)
+        });
+        if let Some(left) = deadline_left {
+            let left = Duration::from_secs(left);
+            requeue = Some(requeue.map_or(left, |r: Duration| r.min(left)));
+        }
     }
     status["succeeded"] = json!(succeeded);
     status["failed"] = json!(failed);
@@ -783,6 +793,29 @@ mod tests {
         let j = job(&api);
         assert_eq!(condition_of(&j, "Failed"), Some(("True".into(), "DeadlineExceeded".into())));
         assert!(active_pods(&api).is_empty());
+    }
+
+    #[test]
+    fn an_active_job_is_requeued_for_its_deadline() {
+        // Its pod may stay Pending (no node fits) and never change again: the
+        // controller must come back on its own when the deadline passes.
+        let api = api();
+        create_job(&api, json!({"activeDeadlineSeconds": 60}));
+        let left = reconcile_job(&api).expect("requeued for the deadline");
+        assert!(left > Duration::from_secs(55) && left <= Duration::from_secs(60), "{left:?}");
+
+        // Closer to the deadline, sooner.
+        let j = job(&api);
+        let mut st = j["status"].clone();
+        st["startTime"] = json!(util::rfc3339(util::now() - chrono::Duration::seconds(57)));
+        util::write_status(&api, "batch", "jobs", &j, st).unwrap();
+        let left = reconcile_job(&api).expect("requeued for the deadline");
+        assert!(left <= Duration::from_secs(3), "{left:?}");
+
+        // Without a deadline nothing is scheduled.
+        let other = ApiState::open(None, "127.0.0.1:0".into(), false).unwrap();
+        create_job(&other, json!({}));
+        assert_eq!(reconcile_job(&other), None);
     }
 
     #[test]

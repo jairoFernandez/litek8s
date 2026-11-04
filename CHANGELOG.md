@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Fix: a Job's `activeDeadlineSeconds` was not enforced while its pod
+  stayed Pending.** The controller checked the deadline only when the Job or
+  its pods changed; a pod that no node fits never changes, so the Job waited
+  for ever (or until an unrelated event, such as another Job finishing). An
+  active Job with a deadline is now requeued for the moment it passes and
+  fails with `DeadlineExceeded`, like upstream.
+
 ## 0.2.20
 
 - **`kubectl get` is 2.4× faster on the server**: building a Table copied
