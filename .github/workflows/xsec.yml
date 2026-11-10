@@ -1,0 +1,56 @@
+name: xsec
+
+# Security checks with xsec (https://github.com/xtruct-col/xsec-action):
+#
+# - On each pull request: a review of the lines it adds (secrets, injection,
+#   unsafe shell/SQL/HTML, ...) and of web/package-lock.json against recent
+#   advisories, as one sticky comment plus line comments. With XSEC_TOKEN the
+#   review also asks xsec's AI review: the changed lines (secrets redacted)
+#   go to xsec and OpenAI, and the report goes to the xsec dashboard. It
+#   fails on high-severity findings; AI findings and guesses never fail it.
+# - By hand (Actions → xsec → Run workflow): a passive scan of litek8s.dev
+#   for the OWASP Top 10 (only what a browser sees: no payloads, no guessed
+#   paths).
+#
+# Vercel previews are not scanned: they sit behind Vercel's login. To scan
+# them, add a "Protection Bypass for Automation" secret and a
+# deployment_status job (see the action's README, "Protected previews").
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write   # the sticky comment and the line comments
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0     # the base commit, to review only what the PR adds
+      - uses: xtruct-col/xsec-action@v1
+        with:
+          review-fail-on: high
+          xsec-token: ${{ secrets.XSEC_TOKEN }}
+
+  scan:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: xtruct-col/xsec-action@v1
+        with:
+          url: https://litek8s.dev
+          passive: true
+          comment: false
+          fail-on: high
+          xsec-token: ${{ secrets.XSEC_TOKEN }}
