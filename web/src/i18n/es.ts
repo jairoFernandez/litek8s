@@ -215,7 +215,7 @@ export const es: Dict = {
     items: [
       { title: 'La autenticación y RBAC son más simples que en upstream.', text: 'Los servidores autentican clientes y aplican RBAC desde la 0.2.12, pero no hay login OIDC ni webhook ni revocación de certificados. Los clusters de desarrollo siguen abiertos en 127.0.0.1; en un servidor, igual mantén el puerto 6443 (y el de Raft, 6444) fuera de redes no confiables.', strong: true },
       { title: 'Tiene semanas.', text: 'Las APIs, flags y formatos en disco pueden cambiar entre versiones 0.x sin migración.' },
-      { title: 'No todo el comportamiento del kubelet.', text: 'Sin eventos Unhealthy/BackOff; un emptyDir en memoria es un tmpfs por montaje de contenedor; ValidatingAdmissionPolicy y los matchConditions de webhooks se aceptan pero no se aplican.' },
+      { title: 'Algunos bordes difieren de upstream.', text: 'Los eventos de probes fallidas dicen qué se revisó, no la salida de la probe; las escrituras de los controladores internos no pasan por los webhooks de admisión; la API de Docker todavía no puede hacer push de imágenes.' },
       { title: 'Las métricas llegan hasta la plataforma.', text: 'Cubren contenedores, nodos y estado del cluster; los endpoints /metrics de las aplicaciones no se scrapean.' },
       { title: 'La VM de macOS conserva la memoria que tocó.', text: 'Un límite de Virtualization.framework; litek8s mantiene pequeño el guest a cambio.' },
       { title: 'Los servidores macOS son para desarrollo.', text: 'Usan Docker para los pods; corre servidores y nodos reales en Linux.' },

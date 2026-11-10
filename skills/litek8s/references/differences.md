@@ -37,9 +37,9 @@ Linux (crun; 413/419 on macOS with the Docker runtime); the compatibility corpus
   admin need their RBAC: check the server log in RBAC-audit first. Not
   there: OIDC/static/webhook authenticators, the Node authorizer, client
   certificate revocation, front-proxy identity for aggregated APIs.
-- **ValidatingAdmissionPolicy** rules and webhook `matchConditions` are
-  accepted but not enforced. Writes made by the in-process controllers do
-  not go through admission webhooks.
+- **Admission**: ValidatingAdmissionPolicy rules and webhook
+  `matchConditions` are enforced (CEL). Writes made by the in-process
+  controllers do not go through admission webhooks.
 - **Events**: the kubelet's container events are recorded (Pulled,
   Created, Started, `Unhealthy` per probe failure, `Killing` before a
   liveness or startup restart, `BackOff` per crash-loop restart, `Failed`
@@ -52,8 +52,6 @@ Linux (crun; 413/419 on macOS with the Docker runtime); the compatibility corpus
 - **CRDs**: runtime CEL cost limits are not enforced (the static estimate
   at creation is); timezone arguments accept UTC and fixed offsets only;
   stored objects are not migrated between versions (as upstream).
-- A memory `emptyDir` is one tmpfs per container mount (upstream shares one
-  per pod).
 - Metrics: no scraping of application `/metrics` endpoints, no recording
   rules, no subqueries.
 - macOS (Docker runtime) cannot serve DNS over TCP on port 53 or hostPort

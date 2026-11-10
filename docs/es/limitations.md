@@ -31,8 +31,10 @@ Lista honesta; hay más en [skills/litek8s/references/differences.md](../../skil
   anterior y arreglar los 401/403: [auth.md](../auth.md).
 - Proyecto de una sola persona, con semanas de vida: las APIs, los flags y los
   formatos en disco pueden cambiar entre versiones 0.x sin migración.
-- No todo el comportamiento del kubelet: no hay eventos `Unhealthy`/`BackOff`,
-  un `emptyDir` en memoria es un tmpfs por cada montaje en un contenedor.
+- No todo el comportamiento del kubelet: los eventos de probes fallidas dicen
+  qué se revisó, no la salida de la probe; las escrituras de los controladores
+  internos no pasan por los webhooks de admisión; los límites de costo de CEL
+  de las reglas de CRDs no se aplican en ejecución (sí la estimación al crearlas).
 - Las NetworkPolicies se aplican solo en nodos con crun (Linux); el runtime de
   Docker (servidores macOS) las guarda sin efecto. El tráfico de un nodo hacia
   sus propios pods (probes, relays de NodePort y LoadBalancer, que corren en el
