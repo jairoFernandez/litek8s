@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.22
 
 - **419/419 on the official Kubernetes v1.33 conformance suite** on
   Linux (crun, a two-node rootless dev cluster; k3s: 416/419). See
