@@ -8,7 +8,8 @@
 # one worker, like the upstream conformance image. Results (JUnit XML, the
 # [Conformance] cases only, the gzipped ginkgo log, summary.md) go to
 # compat/results/conformance-<ts>-<target>/.
-# The test binaries are downloaded once into compat/.work/.
+# The test binaries and the kubectl of the same version are downloaded once
+# into compat/.work/.
 set -euo pipefail
 dir=$(cd "$(dirname "$0")" && pwd)
 version=${CONFORMANCE_VERSION:-v1.33.13}
@@ -37,13 +38,21 @@ if [ ! -x "$bin/e2e.test" ]; then
         tar xz -C "$dir/.work/k8s-test-$version-$os-$arch"
     xattr -dr com.apple.quarantine "$bin" 2>/dev/null || true
 fi
+# The suite runs kubectl and checks its output (`kubectl describe` lines
+# changed after 1.33): use the kubectl of the suite's version, not the PATH's.
+kubectl="$dir/.work/kubectl-$version-$os-$arch"
+if [ ! -x "$kubectl" ]; then
+    curl -fsSL -o "$kubectl.part" "https://dl.k8s.io/release/$version/bin/$os/$arch/kubectl"
+    chmod +x "$kubectl.part" && mv "$kubectl.part" "$kubectl"
+    xattr -d com.apple.quarantine "$kubectl" 2>/dev/null || true
+fi
 
 out="$dir/results/conformance-$(date +%Y%m%d-%H%M%S)-$target"
 mkdir -p "$out"
 kubeconfig=${KUBECONFIG:-$HOME/.kube/config}
 # ginkgo runs e2e.test from another directory.
 case $kubeconfig in /*) ;; *) kubeconfig=$PWD/$kubeconfig ;; esac
-e2e_args=(--kubeconfig="$kubeconfig" --provider=skeleton --disable-log-dump
+e2e_args=(--kubeconfig="$kubeconfig" --kubectl-path="$kubectl" --provider=skeleton --disable-log-dump
     --dump-logs-on-failure=false)
 
 run() { # <name> <ginkgo args...>

@@ -151,6 +151,16 @@ struct Worker<R: PodRuntime> {
     /// An answer to a pending PodCertificateRequest arrived.
     certs_due_now: bool,
     node: Value,
+    /// The pod's `imagePullSecrets` as last read (`None`: read them before
+    /// the next pull).
+    pull_secrets: Option<Vec<Value>>,
+}
+
+/// An init container waiting for its image shows `PodInitializing`, as
+/// with the kubelet, which publishes no status in the middle of a pull;
+/// pull errors (`ErrImagePull`, `ImagePullBackOff`) show as they are.
+fn init_shows_initializing(init: bool, reason: &str) -> bool {
+    init && reason == "ContainerCreating"
 }
 
 fn now_str() -> String {
@@ -201,6 +211,7 @@ pub(crate) async fn run<R: PodRuntime>(
         last_sent: None,
         wake_at: None,
         certs_due_now: false,
+        pull_secrets: None,
         pod,
     };
     if w.start_time.is_empty() {
@@ -783,6 +794,31 @@ impl<R: PodRuntime> Worker<R> {
         Ok(sandbox)
     }
 
+    /// The pod's pull Secrets, read once (again after a failed pull, so one
+    /// created or fixed since is used). Missing ones are skipped with the
+    /// kubelet's warning.
+    async fn pull_secrets(&mut self) -> &[Value] {
+        if self.pull_secrets.is_none() {
+            let mut found = Vec::new();
+            let mut missing = Vec::new();
+            for name in super::pull_secrets::names(&self.pod) {
+                match self.agent.lookup_object("secrets", &self.ns, &name).await {
+                    Some(secret) => found.push(secret),
+                    None => missing.push(name),
+                }
+            }
+            if !missing.is_empty() {
+                let message = format!(
+                    "Unable to retrieve some image pull secrets ({}); attempting to pull the image may not succeed.",
+                    missing.join(", ")
+                );
+                self.agent.pod_event(&self.ns, &self.name, &self.uid, "Warning", "FailedToRetrieveImagePullSecret", message).await;
+            }
+            self.pull_secrets = Some(found);
+        }
+        self.pull_secrets.as_deref().unwrap_or_default()
+    }
+
     /// Start (or restart) a container. Returns whether it is running.
     async fn start(&mut self, init: bool, i: usize) -> bool {
         let tx = self.tx.clone();
@@ -790,7 +826,8 @@ impl<R: PodRuntime> Worker<R> {
             let c = if init { &self.init[i] } else { &self.main[i] };
             (c.image().to_string(), s(&c.spec, "/imagePullPolicy") == "Always")
         };
-        match self.agent.image_ready(&image, always, &tx) {
+        let auth = super::pull_secrets::credentials_for(&image, self.pull_secrets().await);
+        match self.agent.image_ready(&image, always, auth, &tx) {
             Ok(true) => {}
             Ok(false) => {
                 let c = if init { &mut self.init[i] } else { &mut self.main[i] };
@@ -807,6 +844,7 @@ impl<R: PodRuntime> Worker<R> {
                     "ErrImagePull"
                 };
                 c.state = State::Waiting { reason: reason.into(), message: Some(error) };
+                self.pull_secrets = None;
                 self.wake_in(Duration::from_secs(10));
                 return false;
             }
@@ -978,6 +1016,14 @@ impl<R: PodRuntime> Worker<R> {
             *counter = (0, counter.1 + 1);
         }
         let (succ, fail) = *counter;
+        // (type, reason, message), sent once the container is no longer borrowed.
+        let mut events: Vec<(&str, &str, String)> = Vec::new();
+        if !r.ok {
+            let running_for = c.running_since.map(|t| t.elapsed()).unwrap_or_default();
+            if probe::report_failure(r.kind, c.ready, failure_threshold, running_for, &probe) {
+                events.push(("Warning", "Unhealthy", format!("{} probe failed: {}", r.kind.title(), probe::describe(&probe))));
+            }
+        }
         match r.kind {
             ProbeKind::Readiness => {
                 if succ >= success_threshold {
@@ -997,6 +1043,7 @@ impl<R: PodRuntime> Worker<R> {
                     }
                 } else if !c.started && fail >= failure_threshold {
                     if let Some(id) = c.id.clone() {
+                        events.push(("Normal", "Killing", format!("Container {} failed startup probe, will be restarted", c.name)));
                         c.stop_probes();
                         let grace = Duration::from_secs(probe.get("terminationGracePeriodSeconds").and_then(Value::as_u64).unwrap_or(2));
                         let rt = self.agent.runtime().clone();
@@ -1007,6 +1054,7 @@ impl<R: PodRuntime> Worker<R> {
             ProbeKind::Liveness => {
                 if fail >= failure_threshold {
                     if let Some(id) = c.id.clone() {
+                        events.push(("Normal", "Killing", format!("Container {} failed liveness probe, will be restarted", c.name)));
                         c.stop_probes();
                         c.ready = false;
                         let grace = Duration::from_secs(
@@ -1017,6 +1065,9 @@ impl<R: PodRuntime> Worker<R> {
                     }
                 }
             }
+        }
+        for (event_type, reason, message) in events {
+            self.agent.pod_event(&self.ns, &self.name, &self.uid, event_type, reason, message).await;
         }
     }
 
@@ -1452,6 +1503,9 @@ impl<R: PodRuntime> Worker<R> {
             (State::Waiting { .. }, None) if !c.init && !self.initialized => {
                 State::Waiting { reason: "PodInitializing".into(), message: None }
             }
+            (State::Waiting { reason, .. }, None) if init_shows_initializing(c.init, reason) => {
+                State::Waiting { reason: "PodInitializing".into(), message: None }
+            }
             _ => state,
         };
         let last_state = match (&c.last_state, &state) {
@@ -1793,6 +1847,14 @@ pub(crate) fn pod_dns(pod: &Value, ns: &str, host_network: bool, cluster: &Clust
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn init_containers_pulling_their_image_show_pod_initializing() {
+        assert!(init_shows_initializing(true, "ContainerCreating"));
+        assert!(!init_shows_initializing(true, "ErrImagePull"));
+        assert!(!init_shows_initializing(true, "ImagePullBackOff"));
+        assert!(!init_shows_initializing(false, "ContainerCreating"), "app containers show ContainerCreating");
+    }
 
     #[test]
     fn cluster_first_gets_the_cluster_dns_alone() {

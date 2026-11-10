@@ -1,0 +1,2 @@
+parallel exit 1
+serial exit 0

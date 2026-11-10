@@ -168,6 +168,11 @@ impl<R: PodRuntime> Agent<R> {
         link.get(resource, ns, name).await.map_err(|e| format!("{e:#}"))
     }
 
+    /// An object a pod needs, or `None` when it is missing or cannot be read now.
+    pub(crate) async fn lookup_object(&self, resource: &str, ns: &str, name: &str) -> Option<Value> {
+        self.lookup(resource, ns, name).await.ok().flatten()
+    }
+
     /// Make every volume of `pod` available; errors read like the kubelet's
     /// (they end up in the pod's waiting reason).
     pub(crate) async fn prepare_volumes(&self, pod: &Value, pod_dir: &Path, node: &Value) -> Result<HashMap<String, Prepared>, String> {

@@ -45,7 +45,7 @@ kubectl get nodes     # your kubectl, Helm and Argo CD work unchanged
   fresh, more once it has pulled and run images.
 - **Real Kubernetes, not a look-alike.** It serves the Kubernetes API, so
   kubectl, Helm and Argo CD just work: 119/119 on our compatibility corpus
-  (47 Helm charts included) and 413/419 on the official v1.33 conformance suite.
+  (47 Helm charts included) and 419/419 on the official v1.33 conformance suite.
 - **Batteries included.** A Docker-compatible API, a terminal UI, metrics,
   log search and alerts (+1.8 MiB, instead of 1.3 GiB for
   kube-prometheus-stack and Loki) and an MCP server for AI agents, all in
@@ -128,7 +128,7 @@ Other options (cargo, releases, servers and nodes):
 | Whole orchestrator, 5 nginx pods | **33.5 MiB** | k3s minimal 579 MiB |
 | Dev cluster idle memory, Linux | **47 MiB** | kind 526 MiB, k3d 398 MiB |
 | Metrics, logs and alerts | **+1.8 MiB** | kube-prometheus-stack + Loki 1,371 MiB |
-| Kubernetes v1.33 conformance | **413/419** | k3s 416/419 |
+| Kubernetes v1.33 conformance (Linux) | **419/419** | k3s 416/419 |
 
 Measured with the scripts in this repository; setups, raw data and caveats
 in [Numbers](https://litek8s.dev/docs/numbers/).

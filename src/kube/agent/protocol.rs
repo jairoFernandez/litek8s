@@ -30,6 +30,8 @@ pub const PROTOCOL_VERSION: &str = "litek8s-agent/v1";
 
 /// The agent answers [`Message::MachineReport`].
 pub const MACHINE_FEATURE: &str = "machine";
+/// The agent sends [`Message::PodEvent`]s.
+pub const POD_EVENTS_FEATURE: &str = "pod-events";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -65,6 +67,18 @@ pub enum Message {
     /// `crate::kube::agent::relay`), sent when it changes and after each
     /// (re)connection, only to servers whose `Welcome` asked for it.
     OverlayStatus { peers: super::relay::Reports },
+    /// An event about one of this node's pods only the node sees (a probe
+    /// failed, a container is killed for it), recorded by the server as the
+    /// kubelet's. Only to servers whose `Welcome` asked for them.
+    PodEvent {
+        namespace: String,
+        name: String,
+        uid: String,
+        /// `Normal` or `Warning`.
+        event_type: String,
+        reason: String,
+        message: String,
+    },
     /// A stream finished; for exec, with the command's exit code.
     StreamDone {
         stream: u32,
@@ -93,6 +107,9 @@ pub enum Message {
         /// `NetPolicy` messages follow (the agent announced `network-policy`).
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         network_policy: bool,
+        /// Send `PodEvent`s (the agent announced `pod-events`).
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        pod_events: bool,
     },
     HeartbeatAck,
     /// The other nodes of the pod overlay (all of them, each time), with

@@ -37,6 +37,14 @@ pub(crate) fn overlay_options(lowers: &[PathBuf], upper: &Path, work: &Path) -> 
 /// Whether this process runs in a user namespace other than the initial
 /// one (the rootless dev cluster): overlayfs then keeps its metadata in
 /// `user.overlay.*` xattrs (`userxattr`), as `trusted.*` needs real root.
+/// Whether something is mounted at `path` (it is on another device than its
+/// parent directory).
+pub(crate) fn is_mount_point(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(me), Some(Ok(parent))) = (std::fs::metadata(path), path.parent().map(std::fs::metadata)) else { return false };
+    me.dev() != parent.dev()
+}
+
 pub(crate) fn in_user_namespace() -> bool {
     static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CACHED.get_or_init(|| {
@@ -86,6 +94,16 @@ mod linux {
         let rc = unsafe {
             libc::mount(c"tmpfs".as_ptr(), t.as_ptr(), c"tmpfs".as_ptr(), libc::MS_NOSUID | libc::MS_NODEV | libc::MS_NOEXEC, data.as_ptr().cast())
         };
+        check(rc, || format!("failed to mount tmpfs at {}", target.display()))
+    }
+
+    /// A `medium: Memory` emptyDir: a tmpfs as upstream mounts it (world
+    /// writable, executables allowed), sized by the kernel's default (half
+    /// the memory) since the pod's memory limit caps what it can hold.
+    pub(crate) fn mount_tmpfs_volume(target: &Path) -> Result<()> {
+        let t = cstr(target)?;
+        // SAFETY: valid strings.
+        let rc = unsafe { libc::mount(c"tmpfs".as_ptr(), t.as_ptr(), c"tmpfs".as_ptr(), libc::MS_NOSUID | libc::MS_NODEV, c"mode=0777".as_ptr().cast()) };
         check(rc, || format!("failed to mount tmpfs at {}", target.display()))
     }
 
@@ -310,6 +328,9 @@ mod other {
     pub(crate) fn mount_tmpfs(_: &Path, _: &str) -> Result<()> {
         bail!("the crun runtime needs Linux")
     }
+    pub(crate) fn mount_tmpfs_volume(_: &Path) -> Result<()> {
+        bail!("the crun runtime needs Linux")
+    }
     pub(crate) fn unmount(_: &Path) {}
     pub(crate) fn ensure_shared_dir(_: &Path) -> Result<()> {
         bail!("the crun runtime needs Linux")
@@ -334,6 +355,16 @@ mod other {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mount_points_are_on_another_device_than_their_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("v");
+        std::fs::create_dir(&dir).unwrap();
+        assert!(!is_mount_point(&dir), "a plain directory");
+        assert!(!is_mount_point(&tmp.path().join("missing")));
+        assert!(!is_mount_point(Path::new("/")), "no parent to compare with");
+    }
+
     use super::*;
 
     #[test]

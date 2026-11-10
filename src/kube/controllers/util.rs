@@ -320,6 +320,68 @@ mod tests {
 }
 
 /// Record a core/v1 Event about `obj` (like client-go's event recorder).
+/// The name of the aggregated Event for one object, reason and message.
+fn counted_event_name(obj: &Value, reason: &str, message: &str) -> String {
+    let (_, name) = ns_name(obj);
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for part in [uid(obj).as_str(), reason, message] {
+        for b in part.bytes().chain(std::iter::once(0)) {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    format!("{name}.{h:016x}")
+}
+
+/// Like [`record_event`], but a repeat of the same reason and message for
+/// the same object adds to one Event's `count` and `lastTimestamp`, as the
+/// kubelet's event aggregation does: for events that recur (probe
+/// failures, back-off), so they do not fill the store.
+pub(crate) fn record_event_counted(api: &ApiState, obj: &Value, type_: &str, reason: &str, message: &str, component: &str) {
+    let (ns, _) = ns_name(obj);
+    let ns = if ns.is_empty() { "default".to_string() } else { ns };
+    let event_name = counted_event_name(obj, reason, message);
+    for _ in 0..3 {
+        let now = rfc3339(now());
+        match api.get_object("", "events", &ns, &event_name) {
+            Some(mut ev) => {
+                ev["count"] = json!(ev.get("count").and_then(Value::as_u64).unwrap_or(1) + 1);
+                ev["lastTimestamp"] = json!(now);
+                match api.update_object("", "events", ev) {
+                    Err(e) if e.is_conflict() => continue,
+                    _ => return,
+                }
+            }
+            None => {
+                let event = json!({
+                    "apiVersion": "v1",
+                    "kind": "Event",
+                    "metadata": {"name": event_name},
+                    "involvedObject": {
+                        "apiVersion": s(obj, "/apiVersion"), "kind": s(obj, "/kind"), "name": ns_name(obj).1,
+                        "namespace": s(obj, "/metadata/namespace"), "uid": uid(obj),
+                        "resourceVersion": s(obj, "/metadata/resourceVersion"),
+                    },
+                    "reason": reason,
+                    "message": message,
+                    "type": type_,
+                    "source": {"component": component},
+                    "reportingComponent": component,
+                    "reportingInstance": "",
+                    "firstTimestamp": now,
+                    "lastTimestamp": now,
+                    "count": 1,
+                });
+                match api.create_object("", "events", Some(&ns), event) {
+                    // Created meanwhile (another server, a concurrent report): count it.
+                    Err(e) if e.is_conflict() || e.is_already_exists() => continue,
+                    _ => return,
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn record_event(api: &ApiState, obj: &Value, type_: &str, reason: &str, message: &str, component: &str) {
     let (ns, name) = ns_name(obj);
     let ns = if ns.is_empty() { "default".to_string() } else { ns };

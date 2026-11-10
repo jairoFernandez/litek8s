@@ -40,7 +40,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use tokio::sync::{mpsc, watch};
 
 use super::runtime::{
-    ByteStream, ContainerInfo, ContainerSpec, ExecSession, LABEL_POD_UID, LogOptions, MachineInfo, MountSource, PodRuntime, RuntimeContainer,
+    ByteStream, ContainerInfo, ContainerSpec, ExecSession, LABEL_POD_UID, LABEL_TMPFS, LogOptions, MachineInfo, MountSource, PodRuntime, RuntimeContainer,
     SandboxInfo, SandboxSpec,
 };
 
@@ -730,11 +730,11 @@ impl PodRuntime for CrunPods {
         })
     }
 
-    async fn pull_image(&self, image: &str, always: bool) -> Result<()> {
+    async fn pull_image(&self, image: &str, always: bool, auth: Option<(String, String)>) -> Result<()> {
         // Make room first (a no-op below the GC threshold), and again after:
         // a pull that failed for lack of space must not wait 10 minutes.
         self.gc().await;
-        let result = self.inner.images.pull(image, always).await;
+        let result = self.inner.images.pull_with(image, &image::PullOptions { always, auth, ..Default::default() }).await;
         let pods = self.clone();
         tokio::spawn(async move { pods.gc().await });
         result.map(|_| ())
@@ -742,12 +742,16 @@ impl PodRuntime for CrunPods {
 
     async fn ensure_volume(&self, name: &str, labels: HashMap<String, String>) -> Result<bool> {
         let dir = self.volume_dir(name);
-        if dir.is_dir() {
-            return Ok(false);
+        let fresh = !dir.is_dir();
+        if fresh {
+            std::fs::create_dir_all(&dir).with_context(|| format!("failed to create volume {name}"))?;
+            write_json(&self.inner.root.join("volumes").join(format!("{name}.labels")), &labels)?;
         }
-        std::fs::create_dir_all(&dir).with_context(|| format!("failed to create volume {name}"))?;
-        write_json(&self.inner.root.join("volumes").join(format!("{name}.labels")), &labels)?;
-        Ok(true)
+        // `medium: Memory`: a tmpfs, mounted again if it went (a reboot).
+        if labels.get(LABEL_TMPFS).is_some_and(|v| v == "true") && !sys::is_mount_point(&dir) {
+            sys::mount_tmpfs_volume(&dir).with_context(|| format!("volume {name}"))?;
+        }
+        Ok(fresh)
     }
 
     async fn remove_volume(&self, name: &str) -> Result<()> {
@@ -756,6 +760,9 @@ impl PodRuntime for CrunPods {
         }
         let dir = self.volume_dir(name);
         if dir.exists() {
+            if sys::is_mount_point(&dir) {
+                sys::unmount(&dir);
+            }
             std::fs::remove_dir_all(&dir).with_context(|| format!("failed to remove volume {name}"))?;
         }
         let _ = std::fs::remove_file(self.inner.root.join("volumes").join(format!("{name}.labels")));

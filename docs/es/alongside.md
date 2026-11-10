@@ -36,7 +36,7 @@ flowchart LR
 - **Es la API de Kubernetes.** litek8s sirve Kubernetes v1.33
   (`kubectl version` muestra `v1.33.0+litek8s`): 119/119 en el corpus de
   compatibilidad (flujos de kubectl, CRDs, workloads, redes, 47 charts de Helm)
-  y 413/419 en la suite oficial de conformidad, donde k3s obtiene 416/419
+  y 419/419 en la suite oficial de conformidad (Linux), donde k3s obtiene 416/419
   ([compat/RESULTS.md](../../compat/RESULTS.md),
   [compat/CONFORMANCE.md](../../compat/CONFORMANCE.md)).
 - **Mismos manifiestos, mismos charts, en ambas direcciones.** Lo que aplicas a

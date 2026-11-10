@@ -30,17 +30,18 @@ Honest list; more in [skills/litek8s/references/differences.md](../skills/litek8
   fixing 401/403: [auth.md](auth.md).
 - One person's project, weeks old: APIs, flags and on-disk formats may
   change between 0.x releases without migration.
-- Not every kubelet behavior: no `Unhealthy`/`BackOff` events, a memory
-  `emptyDir` is one tmpfs per container mount.
+- Not every kubelet behavior: probe failure events say what was checked,
+  not the probe's output; a memory `emptyDir` is one tmpfs per container
+  mount.
 - NetworkPolicies are enforced on crun nodes (Linux) only; the Docker
   runtime (macOS servers) stores them without effect. Traffic from a node to
   its own pods (probes, NodePort and LoadBalancer relays, which run on the
   node) is always allowed, and pods with `NET_ADMIN` can forge source
   addresses on their node's bridge
   ([networking.md](networking.md#networkpolicies)).
-- Pods' `imagePullSecrets` are not used: nodes pull with the credentials of
-  their registry configuration ([registries.md](registries.md)), and the
-  Docker API cannot `docker push` yet.
+- The Docker API cannot `docker push` yet. An image pulled with a pod's
+  `imagePullSecrets` is then on the node for every pod, as with the
+  kubelet's default (no `KubeletEnsureSecretPulledImages`).
 - Metrics cover containers, nodes and cluster state; application
   `/metrics` endpoints are not scraped (point a Prometheus at them).
 - The macOS VM never returns memory to macOS once touched (a

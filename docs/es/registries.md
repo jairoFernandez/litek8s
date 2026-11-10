@@ -64,9 +64,15 @@ Cómo la usa una descarga:
   el archivo para el registry mismo (no para sus mirrors).
 - Los nombres de archivo relativos (`ca_file: ca.pem`) son relativos al archivo.
 
-Los `imagePullSecrets` de los pods no se usan: las credenciales vienen solo de
-la configuración de los nodos. La API de Docker todavía no soporta
-`docker push`.
+Los `imagePullSecrets` de los pods funcionan como con el kubelet: el nodo los
+lee (Secrets `kubernetes.io/dockerconfigjson` o `kubernetes.io/dockercfg` del
+namespace del pod, o los de su ServiceAccount si el pod no lista ninguno), y
+el primero con una entrada para el registry de la imagen (`ghcr.io`,
+`registry.example.com:5000`, `https://index.docker.io/v1/` para Docker Hub,
+`*.example.com` para una etiqueta) gana sobre esta configuración para ese
+registry; los mirrors conservan sus credenciales. Un Secret que no existe da
+al pod un aviso `FailedToRetrieveImagePullSecret` y el pull sigue sin él. La
+API de Docker todavía no soporta `docker push`.
 
 ## Dónde va
 

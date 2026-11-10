@@ -230,6 +230,7 @@ impl AgentHub {
                 obs: api.obs.get().filter(|_| features.iter().any(|f| f == "metrics")).map(|o| o.settings()),
                 overlay_status: features.iter().any(|f| f == super::OVERLAY_STATUS_FEATURE),
                 network_policy: features.iter().any(|f| f == netpol::FEATURE),
+                pod_events: features.iter().any(|f| f == super::protocol::POD_EVENTS_FEATURE),
             }))
             .await;
         let policies = features.iter().any(|f| f == netpol::FEATURE);
@@ -259,6 +260,13 @@ impl AgentHub {
                         }
                     }
                     Frame::Control(Message::OverlayStatus { peers }) => overlay_report(&api, &node_name, &peers),
+                    Frame::Control(Message::PodEvent { namespace, name, uid, event_type, reason, message }) => {
+                        // Only for a pod this node runs, and the same instance.
+                        if let Some(pod) = api.get_object("", "pods", &namespace, &name).filter(|p| util::uid(p) == uid && util::s(p, "/spec/nodeName") == node_name) {
+                            let event_type = if event_type == "Warning" { "Warning" } else { "Normal" };
+                            util::record_event_counted(&api, &pod, event_type, &reason, &message, "kubelet");
+                        }
+                    }
                     Frame::Control(msg) => handle_message(&api, &node_name, &tx, &streams, msg).await,
                     Frame::Data { stream, channel, bytes } => {
                         let sender = streams.lock().unwrap().get(&stream).cloned();
@@ -928,6 +936,42 @@ fn newly_started(pod: &Value, status: &Value) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The kubelet's warnings for containers that just went into a back-off or
+/// failed to pull, from the change between `pod`'s status and `status`:
+/// (type, reason, message). A container already waiting for the same reason
+/// is only reported again after another restart.
+fn waiting_events(pod: &Value, status: &Value) -> Vec<(&'static str, &'static str, String)> {
+    const FIELDS: [&str; 3] = ["containerStatuses", "initContainerStatuses", "ephemeralContainerStatuses"];
+    let statuses = |st: &Value| -> Vec<Value> { FIELDS.iter().flat_map(|f| st.get(*f).and_then(Value::as_array).cloned().unwrap_or_default()).collect() };
+    let old = statuses(&pod.get("status").cloned().unwrap_or_default());
+    let (ns, name, uid) = (util::s(pod, "/metadata/namespace"), util::name(pod), util::uid(pod));
+    let mut out = Vec::new();
+    for c in statuses(status) {
+        let cname = util::s(&c, "/name");
+        let reason = util::s(&c, "/state/waiting/reason");
+        let before = old.iter().find(|o| util::s(o, "/name") == cname);
+        let same = before.is_some_and(|o| util::s(o, "/state/waiting/reason") == reason && o.get("restartCount") == c.get("restartCount"));
+        if reason.is_empty() || same {
+            continue;
+        }
+        let image = util::s(&c, "/image");
+        let message = util::s(&c, "/state/waiting/message");
+        match reason {
+            "CrashLoopBackOff" => out.push(("Warning", "BackOff", format!("Back-off restarting failed container {cname} in pod {name}_{ns}({uid})"))),
+            "ErrImagePull" => {
+                out.push(("Warning", "Failed", format!("Failed to pull image \"{image}\": {message}")));
+                out.push(("Warning", "Failed", "Error: ErrImagePull".to_string()));
+            }
+            "ImagePullBackOff" => {
+                out.push(("Normal", "BackOff", format!("Back-off pulling image \"{image}\"")));
+                out.push(("Warning", "Failed", "Error: ImagePullBackOff".to_string()));
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Store a pod status reported by its node, keeping conditions owned by the
 /// control plane (PodScheduled, DisruptionTarget).
 fn apply_pod_status(api: &ApiState, ns: &str, name: &str, uid: &str, mut status: Value) {
@@ -953,13 +997,18 @@ fn apply_pod_status(api: &ApiState, ns: &str, name: &str, uid: &str, mut status:
             }
         }
         let started = newly_started(&pod, &status);
+        let waiting = waiting_events(&pod, &status);
         match util::write_status(api, "", "pods", &pod, status.clone()) {
             Ok(()) => {
-                // The kubelet's events for containers that just started.
+                // The kubelet's events for containers that just started
+                // (counted: a crash loop repeats them).
                 for (name, image) in started {
-                    util::record_event(api, &pod, "Normal", "Pulled", &format!("Container image \"{image}\" already present on machine"), "kubelet");
-                    util::record_event(api, &pod, "Normal", "Created", &format!("Created container: {name}"), "kubelet");
-                    util::record_event(api, &pod, "Normal", "Started", &format!("Started container {name}"), "kubelet");
+                    util::record_event_counted(api, &pod, "Normal", "Pulled", &format!("Container image \"{image}\" already present on machine"), "kubelet");
+                    util::record_event_counted(api, &pod, "Normal", "Created", &format!("Created container: {name}"), "kubelet");
+                    util::record_event_counted(api, &pod, "Normal", "Started", &format!("Started container {name}"), "kubelet");
+                }
+                for (type_, reason, message) in waiting {
+                    util::record_event_counted(api, &pod, type_, reason, &message, "kubelet");
                 }
                 return;
             }
@@ -987,6 +1036,27 @@ fn deletes_volume_data(pv: &Value, node: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn back_off_and_pull_failures_become_events_once_per_restart() {
+        let pod = |reason: &str, restarts: u64| {
+            json!({"metadata": {"namespace": "ns", "name": "p", "uid": "u1"}, "status": {"containerStatuses": [
+                {"name": "app", "image": "img:1", "restartCount": restarts, "state": {"waiting": {"reason": reason, "message": "boom"}}}
+            ]}})
+        };
+        let st = |reason: &str, restarts: u64| pod(reason, restarts)["status"].clone();
+        let ev = waiting_events(&pod("ContainerCreating", 0), &st("CrashLoopBackOff", 1));
+        assert_eq!(ev, vec![("Warning", "BackOff", "Back-off restarting failed container app in pod p_ns(u1)".to_string())]);
+        // Still in back-off, same restart: nothing new. Another restart: again.
+        assert!(waiting_events(&pod("CrashLoopBackOff", 1), &st("CrashLoopBackOff", 1)).is_empty());
+        assert_eq!(waiting_events(&pod("CrashLoopBackOff", 1), &st("CrashLoopBackOff", 2)).len(), 1);
+        let ev = waiting_events(&pod("ContainerCreating", 0), &st("ErrImagePull", 0));
+        assert_eq!(ev[0], ("Warning", "Failed", "Failed to pull image \"img:1\": boom".to_string()));
+        assert_eq!(ev[1].2, "Error: ErrImagePull");
+        let ev = waiting_events(&pod("ErrImagePull", 0), &st("ImagePullBackOff", 0));
+        assert_eq!(ev[0], ("Normal", "BackOff", "Back-off pulling image \"img:1\"".to_string()));
+        assert!(waiting_events(&pod("ContainerCreating", 0), &st("ContainerCreating", 0)).is_empty());
+    }
 
     #[test]
     fn only_a_delete_policy_removes_a_volumes_data() {
@@ -1054,6 +1124,68 @@ mod tests {
             Message::NetPolicy { pods, full } => Some((pods, *full)),
             _ => None,
         }
+    }
+
+    /// The events of namespace `shop`: (reason, message, count).
+    fn shop_events(api: &ApiState) -> Vec<(String, String, u64)> {
+        let (events, _) = api.store().list("", "events", Some("shop"));
+        let mut out: Vec<_> = events.iter().map(|e| (util::s(e, "/reason").to_string(), util::s(e, "/message").to_string(), e["count"].as_u64().unwrap_or(0))).collect();
+        out.sort();
+        out
+    }
+
+    async fn eventually(api: &ApiState, ok: impl Fn(&[(String, String, u64)]) -> bool) -> Vec<(String, String, u64)> {
+        for _ in 0..200 {
+            let ev = shop_events(api);
+            if ok(&ev) {
+                return ev;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("events never matched: {:?}", shop_events(api));
+    }
+
+    #[tokio::test]
+    async fn pod_events_from_the_node_are_counted_and_checked() {
+        let api = Arc::new(ApiState::open(None, "127.0.0.1:0".into(), false).unwrap());
+        api.create_object("", "namespaces", None, json!({"metadata": {"name": "shop"}})).unwrap();
+        let mine = put_pod(&api, pod("web", "n1", "web", "10.42.0.5"));
+        let other = put_pod(&api, pod("db", "n2", "db", "10.42.1.5"));
+        let (agent_end, server_end) = tokio::io::duplex(1 << 20);
+        let _server = tokio::spawn(AgentHub::serve_agent(api.clone(), server_end, "10.0.0.1".into(), 6443, None));
+        let (mut r, mut w) = tokio::io::split(agent_end);
+        let hello = Message::Hello { node: json!({"metadata": {"name": "n1"}, "status": {}}), features: vec![super::super::protocol::POD_EVENTS_FEATURE.into()] };
+        write_frame(&mut w, &Frame::Control(hello)).await.unwrap();
+        let msgs = until(&mut r, |m| matches!(m, Message::Welcome { .. })).await;
+        assert!(matches!(msgs.last().unwrap(), Message::Welcome { pod_events: true, .. }));
+
+        let ev = |p: &Value, uid: &str| Message::PodEvent {
+            namespace: "shop".into(),
+            name: util::name(p),
+            uid: uid.into(),
+            event_type: "Warning".into(),
+            reason: "Unhealthy".into(),
+            message: "Readiness probe failed: TCP connect to port 80 failed".into(),
+        };
+        // Another node's pod, or another instance of this one: ignored.
+        write_frame(&mut w, &Frame::Control(ev(&other, &util::uid(&other)))).await.unwrap();
+        write_frame(&mut w, &Frame::Control(ev(&mine, "not-its-uid"))).await.unwrap();
+        for _ in 0..3 {
+            write_frame(&mut w, &Frame::Control(ev(&mine, &util::uid(&mine)))).await.unwrap();
+        }
+        let got = eventually(&api, |e| e.iter().any(|(_, _, c)| *c == 3)).await;
+        assert_eq!(got, vec![("Unhealthy".to_string(), "Readiness probe failed: TCP connect to port 80 failed".to_string(), 3)]);
+
+        // A crash loop reported in the pod's status: one BackOff per restart.
+        let mut status = mine["status"].clone();
+        for restarts in [1, 1, 2] {
+            status["containerStatuses"] = json!([{"name": "c", "image": "busybox", "restartCount": restarts, "state": {"waiting": {"reason": "CrashLoopBackOff"}}}]);
+            let msg = Message::PodStatus { namespace: "shop".into(), name: "web".into(), uid: util::uid(&mine), status: status.clone() };
+            write_frame(&mut w, &Frame::Control(msg)).await.unwrap();
+        }
+        let back_off = |e: &[(String, String, u64)]| e.iter().find(|(r, _, _)| r == "BackOff").map(|(_, m, c)| (m.clone(), *c));
+        let got = eventually(&api, |e| back_off(e).is_some_and(|(_, c)| c == 2)).await;
+        assert_eq!(back_off(&got).unwrap().0, format!("Back-off restarting failed container c in pod web_shop({})", util::uid(&mine)));
     }
 
     #[tokio::test]

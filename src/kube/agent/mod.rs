@@ -31,7 +31,9 @@ mod podcert_e2e;
 pub(crate) mod probe;
 pub mod protocol;
 mod proxy;
+mod pull_secrets;
 pub mod relay;
+mod rtt;
 pub mod runtime;
 mod volumes;
 
@@ -176,6 +178,8 @@ pub struct Agent<R: PodRuntime> {
     overlay: Option<Arc<overlay::Overlay>>,
     /// The server takes `OverlayStatus` reports on this connection.
     overlay_reports: std::sync::atomic::AtomicBool,
+    /// The server takes `PodEvent`s on this connection.
+    pod_events: std::sync::atomic::AtomicBool,
     /// pod uid → its persistent volume claims (volume metrics).
     claims: Mutex<HashMap<String, Vec<crate::obs::node::ClaimRef>>>,
     /// Observability settings from the server, and the sampler task.
@@ -211,6 +215,7 @@ impl<R: PodRuntime> Agent<R> {
             netpol,
             overlay: overlay.map(Arc::new),
             overlay_reports: Default::default(),
+            pod_events: Default::default(),
             claims: Mutex::default(),
             obs: Mutex::default(),
         });
@@ -255,6 +260,25 @@ impl<R: PodRuntime> Agent<R> {
 
     pub(crate) fn link(&self) -> Option<Arc<Link>> {
         self.link.borrow().clone()
+    }
+
+    /// Tell the server about something that happened to a pod here (a probe
+    /// failed, a container is killed), when it takes such events.
+    pub(crate) async fn pod_event(&self, namespace: &str, name: &str, uid: &str, event_type: &str, reason: &str, message: String) {
+        if !self.pod_events.load(Ordering::Relaxed) {
+            return;
+        }
+        if let Some(link) = self.link() {
+            let msg = Message::PodEvent {
+                namespace: namespace.into(),
+                name: name.into(),
+                uid: uid.into(),
+                event_type: event_type.into(),
+                reason: reason.into(),
+                message,
+            };
+            link.send(msg).await;
+        }
     }
 
     pub(crate) fn subscribe_link(&self) -> watch::Receiver<Option<Arc<Link>>> {
@@ -322,16 +346,24 @@ impl<R: PodRuntime> Agent<R> {
     }
 
     /// Whether `image` is ready to run; if not, a pull is started (once per
-    /// image, shared by every pod that needs it) and `notify` hears when it
-    /// finishes. `Err` is the last pull failure, retried after a back-off.
+    /// image and credentials, shared by every pod that needs it) and `notify`
+    /// hears when it finishes. `Err` is the last pull failure, retried after
+    /// a back-off. `auth`: from the pod's `imagePullSecrets`.
     pub(crate) fn image_ready(
         self: &Arc<Self>,
         image: &str,
         always: bool,
+        auth: Option<(String, String)>,
         notify: &mpsc::UnboundedSender<pod::PodMsg>,
     ) -> Result<bool, String> {
+        // Pulls with other credentials (or none) are tracked apart: one that
+        // failed without them must not fail a pod that has them.
+        let key = match &auth {
+            None => image.to_string(),
+            Some(a) => format!("{image}\0{}", crate::kube::controllers::util::hash_of(&serde_json::json!([a.0, a.1]))),
+        };
         let mut images = self.images.lock().unwrap();
-        match images.get_mut(image) {
+        match images.get_mut(&key) {
             Some(ImageState::Ready) => return Ok(true),
             Some(ImageState::Pulling(waiters)) => {
                 waiters.push(notify.clone());
@@ -342,16 +374,16 @@ impl<R: PodRuntime> Agent<R> {
             }
             _ => {}
         }
-        images.insert(image.to_string(), ImageState::Pulling(vec![notify.clone()]));
+        images.insert(key.clone(), ImageState::Pulling(vec![notify.clone()]));
         let agent = self.clone();
         let image = image.to_string();
         tokio::spawn(async move {
-            let result = agent.rt.pull_image(&image, always).await;
+            let result = agent.rt.pull_image(&image, always, auth).await;
             let state = match result {
                 Ok(()) => ImageState::Ready,
                 Err(e) => ImageState::Failed(format!("{e:#}"), tokio::time::Instant::now()),
             };
-            let previous = agent.images.lock().unwrap().insert(image, state);
+            let previous = agent.images.lock().unwrap().insert(key, state);
             if let Some(ImageState::Pulling(waiters)) = previous {
                 for w in waiters {
                     let _ = w.send(pod::PodMsg::Wake);
@@ -442,6 +474,7 @@ impl<R: PodRuntime> Agent<R> {
             features.push(OVERLAY_STATUS_FEATURE.into());
         }
         features.push(protocol::MACHINE_FEATURE.into());
+        features.push(protocol::POD_EVENTS_FEATURE.into());
         if self.netpol.is_some() {
             features.push(netpol::FEATURE.into());
         }
@@ -511,7 +544,7 @@ impl<R: PodRuntime> Agent<R> {
 
     async fn handle(self: &Arc<Self>, link: &Arc<Link>, msg: Message) {
         match msg {
-            Message::Welcome { api_host, api_port, cluster_dns, obs, overlay_status, network_policy, .. } => {
+            Message::Welcome { api_host, api_port, cluster_dns, obs, overlay_status, network_policy, pod_events, .. } => {
                 if let Some(np) = self.netpol.clone() {
                     if !network_policy {
                         np.unsupported();
@@ -526,6 +559,7 @@ impl<R: PodRuntime> Agent<R> {
                 }
                 *self.api.lock().unwrap() = Some(ApiEndpoint { host: api_host, port: api_port, cluster_dns });
                 self.overlay_reports.store(overlay_status, Ordering::Relaxed);
+                self.pod_events.store(pod_events, Ordering::Relaxed);
                 self.link.send_replace(Some(link.clone()));
                 obs::configure(self, obs);
             }

@@ -233,7 +233,9 @@ pub trait PodRuntime: Send + Sync + 'static {
         "docker"
     }
     fn machine(&self) -> impl Future<Output = Result<MachineInfo>> + Send;
-    fn pull_image(&self, image: &str, always: bool) -> impl Future<Output = Result<()>> + Send;
+    /// `auth`: (user, password) for the image's registry, from the pod's
+    /// `imagePullSecrets`.
+    fn pull_image(&self, image: &str, always: bool, auth: Option<(String, String)>) -> impl Future<Output = Result<()>> + Send;
     fn ensure_volume(&self, name: &str, labels: HashMap<String, String>) -> impl Future<Output = Result<bool>> + Send;
     fn remove_volume(&self, name: &str) -> impl Future<Output = Result<()>> + Send;
     /// Volumes with a label: `key`, or `key=value`.
@@ -410,7 +412,7 @@ impl DockerPods {
             }
             let _ = self.remove(PROXY_CONTAINER).await;
         }
-        self.pull_image(PROXY_IMAGE, false).await?;
+        self.pull_image(PROXY_IMAGE, false, None).await?;
         let config = Config {
             image: Some(PROXY_IMAGE.to_string()),
             entrypoint: Some(vec!["sleep".into(), "infinity".into()]),
@@ -573,14 +575,15 @@ impl PodRuntime for DockerPods {
         Ok(())
     }
 
-    async fn pull_image(&self, image: &str, always: bool) -> Result<()> {
+    async fn pull_image(&self, image: &str, always: bool, auth: Option<(String, String)>) -> Result<()> {
         if !always && self.image_present(image).await {
             return Ok(());
         }
+        let credentials = auth.map(|(username, password)| bollard::auth::DockerCredentials { username: Some(username), password: Some(password), ..Default::default() });
         let mut stream = self.docker.create_image(
             Some(CreateImageOptions { from_image: image.to_string(), ..Default::default() }),
             None,
-            None,
+            credentials,
         );
         let mut result = Ok(());
         while let Some(event) = stream.next().await {
@@ -635,7 +638,7 @@ impl PodRuntime for DockerPods {
         if !spec.host_network {
             self.ensure_network().await?;
         }
-        self.pull_image(SANDBOX_IMAGE, false).await?;
+        self.pull_image(SANDBOX_IMAGE, false, None).await?;
         let mut exposed = HashMap::new();
         let mut bindings: HashMap<String, Option<Vec<PortBinding>>> = HashMap::new();
         for (i, (container_port, host_port, protocol)) in spec.host_ports.iter().enumerate() {
@@ -998,7 +1001,7 @@ impl PodRuntime for DockerPods {
     }
 
     async fn host_gateway_ip(&self) -> Result<String> {
-        self.pull_image(SANDBOX_IMAGE, false).await?;
+        self.pull_image(SANDBOX_IMAGE, false, None).await?;
         let config = Config {
             image: Some(SANDBOX_IMAGE.to_string()),
             cmd: Some(vec!["cat".into(), "/etc/hosts".into()]),
@@ -1126,8 +1129,8 @@ impl PodRuntime for NodeRuntime {
     async fn machine(&self) -> Result<MachineInfo> {
         each!(self, rt => rt.machine().await)
     }
-    async fn pull_image(&self, image: &str, always: bool) -> Result<()> {
-        each!(self, rt => rt.pull_image(image, always).await)
+    async fn pull_image(&self, image: &str, always: bool, auth: Option<(String, String)>) -> Result<()> {
+        each!(self, rt => rt.pull_image(image, always, auth).await)
     }
     async fn ensure_volume(&self, name: &str, labels: HashMap<String, String>) -> Result<bool> {
         each!(self, rt => rt.ensure_volume(name, labels).await)
