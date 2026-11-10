@@ -31,8 +31,9 @@ Honest list; more in [skills/litek8s/references/differences.md](../skills/litek8
 - One person's project, weeks old: APIs, flags and on-disk formats may
   change between 0.x releases without migration.
 - Not every kubelet behavior: probe failure events say what was checked,
-  not the probe's output; a memory `emptyDir` is one tmpfs per container
-  mount.
+  not the probe's output; writes made by the in-process controllers do not
+  go through admission webhooks; runtime CEL cost limits of CRD rules are
+  not enforced (the estimate at creation is).
 - NetworkPolicies are enforced on crun nodes (Linux) only; the Docker
   runtime (macOS servers) stores them without effect. Traffic from a node to
   its own pods (probes, NodePort and LoadBalancer relays, which run on the
