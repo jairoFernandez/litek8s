@@ -100,9 +100,10 @@ ui, litecd, CONFORMANCE), compiled into the binary.
  "events": [...], "logs": {"web": {"previous_logs": ["Error: DATABASE_URL is not set"]}}}
 ```
 
-litek8s's node agent records Pulled/Created/Started events but not
-kubelet's `Unhealthy`, `BackOff` or `Failed`, so the diagnosis reads
-container states, last terminations and probe specs rather than events.
+litek8s records the kubelet's container events (Pulled, Created, Started,
+`Unhealthy` with what the probe checks, `Killing`, `BackOff`, `Failed` for
+pulls; repeats counted on one Event), and the diagnosis also reads
+container states, last terminations and probe specs, which say more.
 
 ## `-o json`
 

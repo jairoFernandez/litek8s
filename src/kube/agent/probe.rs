@@ -56,6 +56,55 @@ fn resolve_port(port: Option<&Value>, target: &ProbeTarget) -> Option<u16> {
     }
 }
 
+impl ProbeKind {
+    pub(crate) fn title(self) -> &'static str {
+        match self {
+            ProbeKind::Startup => "Startup",
+            ProbeKind::Readiness => "Readiness",
+            ProbeKind::Liveness => "Liveness",
+        }
+    }
+}
+
+/// What a probe checks, for its failure event.
+pub(crate) fn describe(probe: &Value) -> String {
+    let port = |v: Option<&Value>| match v {
+        Some(Value::Number(n)) => n.to_string(),
+        Some(Value::String(s)) => s.clone(),
+        _ => "?".into(),
+    };
+    if let Some(command) = probe.pointer("/exec/command").and_then(Value::as_array) {
+        let command: Vec<&str> = command.iter().filter_map(Value::as_str).collect();
+        return format!("command {command:?} failed or timed out");
+    }
+    if let Some(http) = probe.get("httpGet") {
+        let scheme = http.get("scheme").and_then(Value::as_str).unwrap_or("HTTP");
+        let path = http.get("path").and_then(Value::as_str).unwrap_or("/");
+        return format!("{scheme} GET on port {}{path} failed or timed out", port(http.get("port")));
+    }
+    if let Some(tcp) = probe.get("tcpSocket") {
+        return format!("TCP connect to port {} failed", port(tcp.get("port")));
+    }
+    if let Some(grpc) = probe.get("grpc") {
+        return format!("gRPC port {} not reachable", port(grpc.get("port")));
+    }
+    "no handler".into()
+}
+
+/// Whether a failed probe is worth an `Unhealthy` event. Startup and
+/// liveness failures always are. Readiness ones are not while the container
+/// is still coming up (it was never ready and has run less than the time
+/// the probe gets to succeed): readiness is checked fast until its first
+/// success, which would be a burst of failures for any app that takes a
+/// moment to listen.
+pub(crate) fn report_failure(kind: ProbeKind, was_ready: bool, failure_threshold: u32, running_for: Duration, probe: &Value) -> bool {
+    if kind != ProbeKind::Readiness || was_ready {
+        return true;
+    }
+    let grace = secs(probe, "initialDelaySeconds", 0) + secs(probe, "periodSeconds", 10).max(1) * u64::from(failure_threshold.max(1));
+    running_for >= Duration::from_secs(grace)
+}
+
 /// Run one probe for the life of a container instance, reporting each
 /// result. Readiness and liveness wait for `started` (the startup probe).
 pub(crate) async fn run<R: PodRuntime>(
@@ -342,4 +391,32 @@ where
         .with_no_client_auth();
     let name = ServerName::try_from(host.to_string()).map_err(std::io::Error::other)?;
     tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, tcp).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn failures_described_by_what_the_probe_checks() {
+        assert_eq!(describe(&json!({"httpGet": {"path": "/healthz", "port": 8080}})), "HTTP GET on port 8080/healthz failed or timed out");
+        assert_eq!(describe(&json!({"httpGet": {"port": "web", "scheme": "HTTPS"}})), "HTTPS GET on port web/ failed or timed out");
+        assert_eq!(describe(&json!({"tcpSocket": {"port": 5432}})), "TCP connect to port 5432 failed");
+        assert_eq!(describe(&json!({"exec": {"command": ["cat", "/tmp/ok"]}})), r#"command ["cat", "/tmp/ok"] failed or timed out"#);
+        assert_eq!(describe(&json!({"grpc": {"port": 9000}})), "gRPC port 9000 not reachable");
+    }
+
+    #[test]
+    fn readiness_failures_while_starting_are_not_reported() {
+        let probe = json!({"periodSeconds": 5, "initialDelaySeconds": 2});
+        let s = Duration::from_secs;
+        // Never ready, within 2 + 5 * 3 s: still starting.
+        assert!(!report_failure(ProbeKind::Readiness, false, 3, s(16), &probe));
+        assert!(report_failure(ProbeKind::Readiness, false, 3, s(17), &probe));
+        // It was ready and now fails: always.
+        assert!(report_failure(ProbeKind::Readiness, true, 3, s(1), &probe));
+        assert!(report_failure(ProbeKind::Liveness, false, 3, s(0), &probe));
+        assert!(report_failure(ProbeKind::Startup, false, 3, s(0), &probe));
+    }
 }

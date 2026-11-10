@@ -37,7 +37,7 @@ flowchart LR
 - **It is the Kubernetes API.** litek8s serves Kubernetes v1.33
   (`kubectl version` shows `v1.33.0+litek8s`): 119/119 on the compatibility
   corpus (kubectl workflows, CRDs, workloads, networking, 47 Helm charts)
-  and 413/419 on the official conformance suite, where k3s scores 416/419
+  and 419/419 on the official conformance suite (Linux), where k3s scores 416/419
   ([compat/RESULTS.md](../compat/RESULTS.md),
   [compat/CONFORMANCE.md](../compat/CONFORMANCE.md)).
 - **Same manifests, same charts, both ways.** What you apply to litek8s

@@ -1,0 +1,647 @@
+<?xml version='1.0' encoding='utf-8'?>
+<testsuites tests="6759" disabled="6351" errors="0" failures="8" time="651.600077859">
+      <testsuite name="Kubernetes e2e suite" package="/home/jairo/litek8s-conf-src/compat/.work/k8s-test-v1.33.13-linux-amd64/kubernetes/test/bin" tests="6759" disabled="0" skipped="6351" errors="0" failures="8" time="651.600077859" timestamp="2026-11-09T18:31:11">
+          <properties>
+              <property name="SuiteSucceeded" value="false" />
+              <property name="SuiteHasProgrammaticFocus" value="false" />
+              <property name="SpecialSuiteFailureReason" value="" />
+              <property name="SuiteLabels" value="[]" />
+              <property name="RandomSeed" value="1794267070" />
+              <property name="RandomizeAllSpecs" value="true" />
+              <property name="LabelFilter" value="" />
+              <property name="FocusStrings" value="\[Conformance\]" />
+              <property name="SkipStrings" value="\[Serial\]" />
+              <property name="FocusFiles" value="" />
+              <property name="SkipFiles" value="" />
+              <property name="FailOnPending" value="false" />
+              <property name="FailOnEmpty" value="false" />
+              <property name="FailFast" value="false" />
+              <property name="FlakeAttempts" value="0" />
+              <property name="DryRun" value="false" />
+              <property name="ParallelTotal" value="8" />
+              <property name="OutputInterceptorMode" value="none" />
+          </properties>
+          <testcase name="[It] [sig-node] Probing container should be restarted with a GRPC liveness probe [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="66.06166593" />
+          <testcase name="[It] [sig-node] Pods should allow activeDeadlineSeconds to be updated [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="6.511896354" />
+          <testcase name="[It] [sig-network] DNS should provide DNS for the cluster [Conformance]" classname="Kubernetes e2e suite" status="passed" time="8.102248674" />
+          <testcase name="[It] [sig-api-machinery] Servers with support for API chunking should support continue listing from the last key if the original version has been compacted away, though the list is inconsistent [Slow] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="337.775066151" />
+          <testcase name="[It] [sig-storage] ConfigMap optional updates should be reflected in volume [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.024047693" />
+          <testcase name="[It] [sig-apps] Deployment RecreateDeployment should delete old pods and create new ones [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.02911339" />
+          <testcase name="[It] [sig-network] DNS should provide DNS for ExternalName services [Conformance]" classname="Kubernetes e2e suite" status="passed" time="8.092889445" />
+          <testcase name="[It] [sig-apps] Deployment deployment should delete old replica sets [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.011648995" />
+          <testcase name="[It] [sig-cli] Kubectl client Kubectl api-versions should check if v1 is in available api versions [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.050653905" />
+          <testcase name="[It] [sig-api-machinery] CustomResourceDefinition resources [Privileged:ClusterAdmin] Simple CustomResourceDefinition getting/updating/patching custom resource definition status sub-resource works [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.005709756" />
+          <testcase name="[It] [sig-network] Services should serve multiport endpoints from pods [Conformance]" classname="Kubernetes e2e suite" status="passed" time="8.235090298" />
+          <testcase name="[It] [sig-cli] Kubectl client Proxy server should support --unix-socket=/path [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.045547119" />
+          <testcase name="[It] [sig-node] Variable Expansion should succeed in writing subpaths in container [Conformance]" classname="Kubernetes e2e suite" status="passed" time="34.536077563" />
+          <testcase name="[It] [sig-node] Secrets should be consumable from pods in env vars [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.008757077" />
+          <testcase name="[It] [sig-node] PodTemplates should delete a collection of pod templates [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.005647978" />
+          <testcase name="[It] [sig-storage] Downward API volume should provide node allocatable (memory) as default memory limit if the limit is not set [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.008128544" />
+          <testcase name="[It] [sig-node] Probing container should be restarted with a exec &quot;cat /tmp/health&quot; liveness probe [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="18.016656044" />
+          <testcase name="[It] [sig-scheduling] SchedulerPredicates [Serial] validates that NodeSelector is respected if matching [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-apps] Daemon set [Serial] should run and stop simple daemon [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-scheduling] SchedulerPreemption [Serial] PriorityClass endpoints verify PriorityClass endpoints can be operated with different HTTP methods [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-api-machinery] Garbage collector should keep the rc around until all its pods are deleted if the deleteOptions says so [Serial] [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-apps] Daemon set [Serial] should rollback without unnecessary restarts [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-storage] EmptyDir wrapper volumes should not cause race condition when used for configmaps [Serial] [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-apps] ControllerRevision [Serial] should manage the lifecycle of a ControllerRevision [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-apps] Daemon set [Serial] should list and delete a collection of DaemonSets [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-scheduling] SchedulerPredicates [Serial] validates that there exists conflict between pods with same hostPort and protocol but one using 0.0.0.0 hostIP [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-node] NoExecuteTaintManager Multiple Pods [Serial] evicts pods with minTolerationSeconds [Disruptive] [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-api-machinery] Garbage collector should not delete dependents that have both valid owner and owner that's waiting for dependents to be deleted [Serial] [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-api-machinery] Namespaces [Serial] should ensure that all services are removed when a namespace is deleted [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-apps] Daemon set [Serial] should retry creating failed daemon pods [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-api-machinery] Namespaces [Serial] should ensure that all pods are removed when a namespace is deleted [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-api-machinery] Namespaces [Serial] should apply an update to a Namespace [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-api-machinery] Namespaces [Serial] should patch a Namespace [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-apps] Daemon set [Serial] should update pod when spec was updated and update strategy is RollingUpdate [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-scheduling] SchedulerPredicates [Serial] validates resource limits of pods that are allowed to run [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-api-machinery] Garbage collector should orphan pods created by rc if delete options say so [Serial] [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-scheduling] SchedulerPreemption [Serial] validates lower priority pod preemption by critical pod [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-scheduling] SchedulerPredicates [Serial] validates that NodeSelector is respected if not matching [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-api-machinery] Namespaces [Serial] should apply changes to a namespace status [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-apps] Daemon set [Serial] should run and stop complex daemon [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-api-machinery] Namespaces [Serial] should apply a finalizer to a Namespace [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-scheduling] SchedulerPreemption [Serial] validates basic preemption works [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-scheduling] SchedulerPreemption [Serial] validates pod disruption condition is added to the preempted pod [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-apps] Daemon set [Serial] should verify changes to a daemon set status [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-scheduling] SchedulerPreemption [Serial] PreemptionExecutionPath runs ReplicaSets to verify preemption running path [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-node] NoExecuteTaintManager Single Pod [Serial] removing taint cancels eviction [Disruptive] [Conformance]" classname="Kubernetes e2e suite" status="skipped" time="0">
+              <skipped message="skipped" />
+          </testcase>
+          <testcase name="[It] [sig-api-machinery] API priority and fairness should support PriorityLevelConfiguration API operations [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.018387846" />
+          <testcase name="[It] [sig-node] Pods should delete a collection of pods [Conformance]" classname="Kubernetes e2e suite" status="passed" time="7.017357021" />
+          <testcase name="[It] [sig-storage] CSIInlineVolumes should support CSIVolumeSource in Pod API [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.006675939" />
+          <testcase name="[It] [sig-node] Secrets should fail to create secret due to empty secret key [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.003067462" />
+          <testcase name="[It] [sig-scheduling] LimitRange should list, patch and delete a LimitRange by collection [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.004939865" />
+          <testcase name="[It] [sig-storage] Projected downwardAPI should provide container's cpu request [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.007222759" />
+          <testcase name="[It] [sig-auth] ServiceAccounts should mount projected service account token [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.005839769" />
+          <testcase name="[It] [sig-node] Pods should be updated [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.508741768" />
+          <testcase name="[It] [sig-storage] Subpath Atomic writer volumes should support subpaths with configmap pod with mountPath of existing file [Conformance]" classname="Kubernetes e2e suite" status="passed" time="22.017663925" />
+          <testcase name="[It] [sig-storage] Secrets should be immutable if `immutable` field is set [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.00443471" />
+          <testcase name="[It] [sig-api-machinery] FieldValidation should create/apply a CR with unknown fields for CRD with no validation schema [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.005610904" />
+          <testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should mutate pod and apply defaults after mutation [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.157071796" />
+          <testcase name="[It] [sig-apps] ReplicaSet should serve a basic image on each replica with a public image [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.015350805" />
+          <testcase name="[It] [sig-cli] Kubectl client Kubectl label should update the label on a resource [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.431193109" />
+          <testcase name="[It] [sig-node] Pods should patch a pod status [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.006093315" />
+          <testcase name="[It] [sig-cli] Kubectl client Kubectl expose should create services for rc [Conformance]" classname="Kubernetes e2e suite" status="passed" time="5.227558349" />
+          <testcase name="[It] [sig-storage] Projected downwardAPI should set mode on item file [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.00731556" />
+          <testcase name="[It] [sig-node] RuntimeClass should schedule a Pod requesting a RuntimeClass and initialize its Overhead [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.005778791" />
+          <testcase name="[It] [sig-storage] Projected downwardAPI should provide container's cpu limit [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.007029735" />
+          <testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should include webhook resources in discovery documents [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.076202637" />
+          <testcase name="[It] [sig-api-machinery] Watchers should be able to restart watching from the last resource version observed by the previous watch [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.008301643" />
+          <testcase name="[It] [sig-node] Container Runtime blackbox test on terminated container should report termination message if TerminationMessagePath is set as non-root user and at a non-default path [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="1.006697113" />
+          <testcase name="[It] [sig-node] Containers should use the image defaults if command and args are blank [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.005402429" />
+          <testcase name="[It] [sig-api-machinery] ResourceQuota should verify ResourceQuota with best effort scope. [Conformance]" classname="Kubernetes e2e suite" status="passed" time="16.076218732" />
+          <testcase name="[It] [sig-network] EndpointSlice should create Endpoints and EndpointSlices for Pods matching a Service [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.014377335" />
+          <testcase name="[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] works for multiple CRDs of same group and version but different kinds [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.145726366" />
+          <testcase name="[It] [sig-api-machinery] Watchers should observe an object deletion if it stops meeting the requirements of the selector [Conformance]" classname="Kubernetes e2e suite" status="passed" time="10.008796338" />
+          <testcase name="[It] [sig-storage] Secrets should be consumable from pods in volume with mappings and Item Mode set [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.008628566" />
+          <testcase name="[It] [sig-storage] Projected configMap should be consumable from pods in volume with mappings [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.009141575" />
+          <testcase name="[It] [sig-apps] Job should terminate job execution when the number of failed indexes exceeds maxFailedIndexes [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.009571808" />
+          <testcase name="[It] [sig-apps] Deployment deployment should support rollover [Conformance]" classname="Kubernetes e2e suite" status="passed" time="18.017236723" />
+          <testcase name="[It] [sig-network] Networking Granular Checks: Pods should function for node-pod communication: udp [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="16.03451359" />
+          <testcase name="[It] [sig-network] Services should be able to change the type from ExternalName to NodePort [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.231048067" />
+          <testcase name="[It] [sig-storage] Subpath Atomic writer volumes should support subpaths with downward pod [Conformance]" classname="Kubernetes e2e suite" status="passed" time="22.022552026" />
+          <testcase name="[It] [sig-node] Probing container should *not* be restarted with a exec &quot;cat /tmp/health&quot; liveness probe [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="242.132130043" />
+          <testcase name="[It] [sig-network] Proxy version v1 should proxy through a service and a pod [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.11474098" />
+          <testcase name="[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] works for multiple CRDs of same group but different versions [Conformance]" classname="Kubernetes e2e suite" status="passed" time="8.33759206" />
+          <testcase name="[It] [sig-storage] Projected secret optional updates should be reflected in volume [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.013302833" />
+          <testcase name="[It] [sig-api-machinery] Garbage collector should delete pods created by rc when not orphaning [Conformance]" classname="Kubernetes e2e suite" status="passed" time="10.011038425" />
+          <testcase name="[It] [sig-node] Container Lifecycle Hook when create a pod with lifecycle hook should execute poststart exec hook properly [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="6.012801209" />
+          <testcase name="[It] [sig-node] Sysctls [LinuxOnly] [NodeConformance] should support sysctls [MinimumKubeletVersion:1.21] [Environment:NotInUserNS] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.008214826" />
+          <testcase name="[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] works for CRD preserving unknown fields at the schema root [Conformance]" classname="Kubernetes e2e suite" status="passed" time="1.633540686" />
+          <testcase name="[It] [sig-api-machinery] FieldValidation should create/apply a valid CR for CRD with validation schema [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.008182651" />
+          <testcase name="[It] [sig-node] RuntimeClass should reject a Pod requesting a non-existent RuntimeClass [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.003029228" />
+          <testcase name="[It] [sig-storage] VolumeAttachment Conformance should run through the lifecycle of a VolumeAttachment [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.006131684" />
+          <testcase name="[It] [sig-network] Services should be able to change the type from ClusterIP to ExternalName [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.083378578" />
+          <testcase name="[It] [sig-storage] EmptyDir volumes should support (non-root,0666,tmpfs) [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="failed" time="2.007968938">
+              <failure message="" type="failed">[FAILED] expected "mount type of \"/test-volume\": tmpfs" in container output: Expected
+    &lt;string&gt;: mount type of "/test-volume": 2435016766
+    content of file "/test-volume/test-file": mount-tester new file
+    
+    perms of file "/test-volume/test-file": -rw-rw-rw-
+    
+to contain substring
+    &lt;string&gt;: mount type of "/test-volume": tmpfs
+In [It] at: k8s.io/kubernetes/test/e2e/framework/pod/output/output.go:263 @ 11/09/26 18:38:37.147
+</failure>
+              </testcase>
+          <testcase name="[It] [sig-storage] StorageClasses CSI Conformance should run through the lifecycle of a StorageClass [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.004692403" />
+          <testcase name="[It] [sig-node] PreStop should call prestop when killing a pod [Conformance]" classname="Kubernetes e2e suite" status="passed" time="9.011136622" />
+          <testcase name="[It] [sig-storage] EmptyDir volumes should support (root,0777,tmpfs) [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="failed" time="2.007450446">
+              <failure message="" type="failed">[FAILED] expected "mount type of \"/test-volume\": tmpfs" in container output: Expected
+    &lt;string&gt;: mount type of "/test-volume": 2435016766
+    content of file "/test-volume/test-file": mount-tester new file
+    
+    perms of file "/test-volume/test-file": -rwxrwxrwx
+    
+to contain substring
+    &lt;string&gt;: mount type of "/test-volume": tmpfs
+In [It] at: k8s.io/kubernetes/test/e2e/framework/pod/output/output.go:263 @ 11/09/26 18:38:48.173
+</failure>
+              </testcase>
+          <testcase name="[It] [sig-api-machinery] Aggregator Should be able to support the 1.17 Sample API Server using the current Aggregator [Conformance]" classname="Kubernetes e2e suite" status="passed" time="26.849487676" />
+          <testcase name="[It] [sig-apps] ReplicaSet Replace and Patch tests [Conformance]" classname="Kubernetes e2e suite" status="passed" time="5.042261462" />
+          <testcase name="[It] [sig-network] Services should serve endpoints on same port and different protocols [Conformance]" classname="Kubernetes e2e suite" status="passed" time="24.60900978" />
+          <testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should not be able to mutate or prevent deletion of webhook configuration objects [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.2641415719999998" />
+          <testcase name="[It] [sig-storage] Projected downwardAPI should provide container's memory limit [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.079843575" />
+          <testcase name="[It] [sig-scheduling] LimitRange should create a LimitRange with defaults and ensure pod has those defaults applied. [Conformance]" classname="Kubernetes e2e suite" status="passed" time="7.114187753" />
+          <testcase name="[It] [sig-node] Security Context should support container.SecurityContext.RunAsUser And container.SecurityContext.RunAsGroup [LinuxOnly] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.014866759" />
+          <testcase name="[It] [sig-storage] EmptyDir volumes should support (root,0777,default) [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.007385926" />
+          <testcase name="[It] [sig-node] Downward API should provide host IP as an env var [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.006912076" />
+          <testcase name="[It] [sig-storage] Projected secret should be consumable from pods in volume as non-root with defaultMode and fsGroup set [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.0099128" />
+          <testcase name="[It] [sig-api-machinery] FieldValidation should create/apply an invalid CR with extra properties for CRD with validation schema [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.006716696" />
+          <testcase name="[It] [sig-network] Networking Granular Checks: Pods should function for intra-pod communication: http [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="14.028939258" />
+          <testcase name="[It] [sig-storage] EmptyDir wrapper volumes should not conflict [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.016303678" />
+          <testcase name="[It] [sig-storage] Projected configMap should be consumable from pods in volume as non-root [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.013205996" />
+          <testcase name="[It] [sig-storage] Downward API volume should provide container's memory limit [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.006645995" />
+          <testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should mutate custom resource with pruning [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.221914029" />
+          <testcase name="[It] [sig-node] Containers should be able to override the image's default arguments (container cmd) [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.011927494" />
+          <testcase name="[It] [sig-node] Security Context When creating a pod with readOnlyRootFilesystem should run the container with writable rootfs when readOnlyRootFilesystem=false [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.005507476" />
+          <testcase name="[It] [sig-network] Services should have session affinity work for NodePort service [LinuxOnly] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.378223891" />
+          <testcase name="[It] [sig-apps] DisruptionController should create a PodDisruptionBudget [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.008042404" />
+          <testcase name="[It] [sig-node] InitContainer [NodeConformance] should not start app containers if init containers fail on a RestartAlways pod [Conformance]" classname="Kubernetes e2e suite" status="passed" time="30.411058605" />
+          <testcase name="[It] [sig-api-machinery] AggregatedDiscovery should support aggregated discovery interface for CRDs [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.007817096" />
+          <testcase name="[It] [sig-node] Container Runtime blackbox test on terminated container should report termination message from log output if TerminationMessagePolicy FallbackToLogsOnError is set [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="1.009113632" />
+          <testcase name="[It] [sig-apps] Job should allow to use a pod failure policy to ignore failure matching on DisruptionTarget condition [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.019433384" />
+          <testcase name="[It] [sig-node] Ephemeral Containers [NodeConformance] will start an ephemeral container in an existing pod [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.018188574" />
+          <testcase name="[It] [sig-node] Secrets should patch a secret [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.00620165" />
+          <testcase name="[It] [sig-network] Services should be able to create a functioning NodePort service [Conformance]" classname="Kubernetes e2e suite" status="passed" time="5.231954006" />
+          <testcase name="[It] [sig-network] Networking Granular Checks: Pods should function for node-pod communication: http [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="14.035437224" />
+          <testcase name="[It] [sig-node] RuntimeClass should reject a Pod requesting a deleted RuntimeClass [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.007772912" />
+          <testcase name="[It] [sig-api-machinery] ValidatingAdmissionPolicy [Privileged:ClusterAdmin] should support ValidatingAdmissionPolicyBinding API operations [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.014065273" />
+          <testcase name="[It] [sig-api-machinery] AggregatedDiscovery should support raw aggregated discovery endpoint Accept headers [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.008753166" />
+          <testcase name="[It] [sig-network] Services should be able to switch session affinity for NodePort service [LinuxOnly] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.422438975" />
+          <testcase name="[It] [sig-api-machinery] ValidatingAdmissionPolicy [Privileged:ClusterAdmin] should validate against a Deployment [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.013692066" />
+          <testcase name="[It] [sig-node] ConfigMap should run through a ConfigMap lifecycle [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.008140627" />
+          <testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should mutate configmap [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.175079005" />
+          <testcase name="[It] [sig-node] Kubelet when scheduling a busybox command in a pod should print the output to logs [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.009741026" />
+          <testcase name="[It] [sig-node] Kubelet when scheduling a busybox command that always fails in a pod should have an terminated reason [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.005558846" />
+          <testcase name="[It] [sig-storage] Subpath Atomic writer volumes should support subpaths with secret pod [Conformance]" classname="Kubernetes e2e suite" status="passed" time="22.019030028" />
+          <testcase name="[It] [sig-storage] EmptyDir volumes should support (non-root,0644,tmpfs) [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="failed" time="2.00848074">
+              <failure message="" type="failed">[FAILED] expected "mount type of \"/test-volume\": tmpfs" in container output: Expected
+    &lt;string&gt;: mount type of "/test-volume": 2435016766
+    content of file "/test-volume/test-file": mount-tester new file
+    
+    perms of file "/test-volume/test-file": -rw-r--r--
+    
+to contain substring
+    &lt;string&gt;: mount type of "/test-volume": tmpfs
+In [It] at: k8s.io/kubernetes/test/e2e/framework/pod/output/output.go:263 @ 11/09/26 18:34:08.894
+</failure>
+              </testcase>
+          <testcase name="[It] [sig-node] Variable Expansion should verify that a failing subpath expansion can be modified during the lifecycle of a container [Slow] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="154.528047935" />
+          <testcase name="[It] [sig-cli] Kubectl client Kubectl describe should check if kubectl describe prints relevant information for rc and pods [Conformance]" classname="Kubernetes e2e suite" status="failed" time="1.3943628860000001">
+              <failure message="" type="failed">[FAILED] failed to find Kube-Proxy Version: in Name:               litek8s-conf
+Roles:              control-plane
+Labels:             beta.kubernetes.io/arch=amd64
+                    beta.kubernetes.io/os=linux
+                    kubernetes.io/arch=amd64
+                    kubernetes.io/hostname=litek8s-conf
+                    kubernetes.io/os=linux
+                    node-role.kubernetes.io/control-plane=true
+                    node.kubernetes.io/instance-type=litek8s
+Annotations:        litek8s.dev/wireguard-endpoint: 10.231.0.2:51820
+                    litek8s.dev/wireguard-peers: {"litek8s-conf-worker":{"state":"direct","endpoint":"10.231.0.3:51820","rttMs":1}}
+                    litek8s.dev/wireguard-public-key: PmhewHinOiCDLDtknlHBIXscfij4H9s3pMRravPQRnk=
+                    litek8s.dev/wireguard-routes: {"litek8s-conf-worker":"direct"}
+                    node.alpha.kubernetes.io/ttl: 0
+CreationTimestamp:  Mon, 09 Nov 2026 18:30:35 -0500
+Taints:             &lt;none&gt;
+Unschedulable:      false
+Lease:
+  HolderIdentity:  litek8s-conf
+  AcquireTime:     Mon, 09 Nov 2026 18:30:35 -0500
+  RenewTime:       Mon, 09 Nov 2026 18:36:35 -0500
+Conditions:
+  Type             Status  LastHeartbeatTime                 LastTransitionTime                Reason                       Message
+  ----             ------  -----------------                 ------------------                ------                       -------
+  MemoryPressure   False   Mon, 09 Nov 2026 18:30:35 -0500   Mon, 09 Nov 2026 18:30:35 -0500   KubeletHasSufficientMemory   kubelet has sufficient memory available
+  DiskPressure     False   Mon, 09 Nov 2026 18:30:35 -0500   Mon, 09 Nov 2026 18:30:35 -0500   KubeletHasNoDiskPressure     kubelet has no disk pressure
+  PIDPressure      False   Mon, 09 Nov 2026 18:30:35 -0500   Mon, 09 Nov 2026 18:30:35 -0500   KubeletHasSufficientPID      kubelet has sufficient PID available
+  Ready            True    Mon, 09 Nov 2026 18:30:35 -0500   Mon, 09 Nov 2026 18:30:35 -0500   KubeletReady                 litek8s node agent is ready
+Addresses:
+  InternalIP:  10.231.0.2
+  Hostname:    litek8s-conf
+Capacity:
+  cpu:                16
+  ephemeral-storage:  100Gi
+  memory:             32793008Ki
+  pods:               110
+Allocatable:
+  cpu:                16
+  ephemeral-storage:  100Gi
+  memory:             32793008Ki
+  pods:               110
+System Info:
+  Machine ID:                 
+  System UUID:                
+  Boot ID:                    
+  Kernel Version:             7.2.15-1-omarchy
+  OS Image:                   Omarchy
+  Operating System:           linux
+  Architecture:               amd64
+  Container Runtime Version:  crun://1.23.1
+  Kubelet Version:            v1.33.0+litek8s
+PodCIDR:                      10.42.0.0/24
+PodCIDRs:                     10.42.0.0/24
+Non-terminated Pods:          (3 in total)
+  Namespace                   Name                                              CPU Requests  CPU Limits  Memory Requests  Memory Limits  Age
+  ---------                   ----                                              ------------  ----------  ---------------  -------------  ---
+  container-probe-2674        busybox-49655fa6-63e2-4749-bb2f-9ad352c26b3c      0 (0%)        0 (0%)      0 (0%)           0 (0%)         2m50s
+  container-probe-6733        test-grpc-71ffa277-cb80-4d0e-a925-6c9ce58c3730    0 (0%)        0 (0%)      0 (0%)           0 (0%)         81s
+  statefulset-4677            ss-0                                              0 (0%)        0 (0%)      0 (0%)           0 (0%)         10s
+Allocated resources:
+  (Total limits may be over 100 percent, i.e., overcommitted.)
+  Resource           Requests  Limits
+  --------           --------  ------
+  cpu                0 (0%)    0 (0%)
+  memory             0 (0%)    0 (0%)
+  ephemeral-storage  0 (0%)    0 (0%)
+Events:              &lt;none&gt;
+In [It] at: k8s.io/kubernetes/test/e2e/kubectl/kubectl.go:2174 @ 11/09/26 18:36:44.82
+</failure>
+              </testcase>
+          <testcase name="[It] [sig-storage] Subpath Atomic writer volumes should support subpaths with configmap pod [Conformance]" classname="Kubernetes e2e suite" status="passed" time="22.021951883" />
+          <testcase name="[It] [sig-node] Variable Expansion should allow substituting values in a container's command [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.0086895" />
+          <testcase name="[It] [sig-node] Variable Expansion should allow substituting values in a container's args [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.011771401" />
+          <testcase name="[It] [sig-storage] ConfigMap should be immutable if `immutable` field is set [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.005798915" />
+          <testcase name="[It] [sig-cli] Kubectl client Kubectl run pod should create a pod from an image when restart is Never [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.217947486" />
+          <testcase name="[It] [sig-node] InitContainer [NodeConformance] should not start app containers and fail the pod if init containers fail on a RestartNever pod [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.078121469" />
+          <testcase name="[It] [sig-apps] ReplicationController should surface a failure condition on a common issue like exceeded quota [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.008112925" />
+          <testcase name="[It] [sig-cli] Kubectl client Kubectl diff should check if kubectl diff finds a difference for Deployments [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.229090676" />
+          <testcase name="[It] [sig-auth] SubjectReview should support SubjectReview API operations [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.00487642" />
+          <testcase name="[It] [sig-storage] Projected downwardAPI should provide podname only [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.010204813" />
+          <testcase name="[It] [sig-storage] Downward API volume should set DefaultMode on files [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.008315785" />
+          <testcase name="[It] [sig-api-machinery] ValidatingAdmissionPolicy [Privileged:ClusterAdmin] should allow expressions to refer variables. [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.007055972" />
+          <testcase name="[It] [sig-storage] Projected downwardAPI should update annotations on modification [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.516971542" />
+          <testcase name="[It] [sig-apps] ReplicationController should get and update a ReplicationController scale [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.01689263" />
+          <testcase name="[It] [sig-apps] CronJob should not schedule new jobs when ForbidConcurrent [Slow] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="38.014633765" />
+          <testcase name="[It] [sig-storage] Projected downwardAPI should provide container's memory request [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.00754731" />
+          <testcase name="[It] [sig-node] Security Context When creating a pod with privileged should run the container as unprivileged when false [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.007481118" />
+          <testcase name="[It] [sig-api-machinery] CustomResourceDefinition resources [Privileged:ClusterAdmin] should include custom resource definition resources in discovery documents [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.003391302" />
+          <testcase name="[It] [sig-storage] Projected configMap should be consumable in multiple volumes in the same pod [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.006029398" />
+          <testcase name="[It] [sig-node] Containers should be able to override the image's default command and arguments [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.009460119" />
+          <testcase name="[It] [sig-storage] ConfigMap should be consumable from pods in volume with mappings and Item mode set [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.006865537" />
+          <testcase name="[It] [sig-node] Secrets should be consumable via the environment [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.008044609" />
+          <testcase name="[It] [sig-api-machinery] FieldValidation should detect unknown and duplicate fields of a typed object [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.004539614" />
+          <testcase name="[It] [sig-network] Services should delete a collection of services [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.004197838" />
+          <testcase name="[It] [sig-api-machinery] AggregatedDiscovery should support aggregated discovery interface [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.004091696" />
+          <testcase name="[It] [sig-storage] EmptyDir volumes should support (root,0666,tmpfs) [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="failed" time="2.007992815">
+              <failure message="" type="failed">[FAILED] expected "mount type of \"/test-volume\": tmpfs" in container output: Expected
+    &lt;string&gt;: mount type of "/test-volume": 2435016766
+    content of file "/test-volume/test-file": mount-tester new file
+    
+    perms of file "/test-volume/test-file": -rw-rw-rw-
+    
+to contain substring
+    &lt;string&gt;: mount type of "/test-volume": tmpfs
+In [It] at: k8s.io/kubernetes/test/e2e/framework/pod/output/output.go:263 @ 11/09/26 18:38:16.098
+</failure>
+              </testcase>
+          <testcase name="[It] [sig-api-machinery] ResourceQuota should create a ResourceQuota and capture the life of a service. [Conformance]" classname="Kubernetes e2e suite" status="passed" time="11.012015351" />
+          <testcase name="[It] [sig-node] Sysctls [LinuxOnly] [NodeConformance] should reject invalid sysctls [MinimumKubeletVersion:1.21] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.003854728" />
+          <testcase name="[It] [sig-node] Downward API should provide hostIPs as an env var [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.006658203" />
+          <testcase name="[It] [sig-node] Pods should run through the lifecycle of Pods and PodStatus [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.090630983" />
+          <testcase name="[It] [sig-storage] Downward API volume should update annotations on modification [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.509754197" />
+          <testcase name="[It] [sig-api-machinery] FieldValidation should detect unknown metadata fields in both the root and embedded object of a CR [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.006619296" />
+          <testcase name="[It] [sig-api-machinery] CustomResourceDefinition resources [Privileged:ClusterAdmin] Simple CustomResourceDefinition listing custom resource definition objects works [Conformance]" classname="Kubernetes e2e suite" status="passed" time="1.204505239" />
+          <testcase name="[It] [sig-apps] Job should allow to use the pod failure policy on exit code to fail the job early [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.005882243" />
+          <testcase name="[It] [sig-storage] Downward API volume should update labels on modification [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.511424234" />
+          <testcase name="[It] [sig-storage] Projected secret should be consumable from pods in volume with mappings [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.01883248" />
+          <testcase name="[It] [sig-apps] StatefulSet Basic StatefulSet functionality [StatefulSetBasic] should validate Statefulset Status endpoints [Conformance]" classname="Kubernetes e2e suite" status="passed" time="20.015713943" />
+          <testcase name="[It] [sig-network] Ingress API should support creating Ingress API operations [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.01096441" />
+          <testcase name="[It] [sig-cli] Kubectl client Guestbook application should create and stop a working application [Conformance]" classname="Kubernetes e2e suite" status="passed" time="10.739796742" />
+          <testcase name="[It] [sig-instrumentation] Events should manage the lifecycle of an event [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.007854551" />
+          <testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should be able to deny attaching pod [Conformance]" classname="Kubernetes e2e suite" status="passed" time="5.278927743" />
+          <testcase name="[It] [sig-storage] EmptyDir volumes should support (non-root,0777,default) [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.006587822" />
+          <testcase name="[It] [sig-node] Variable Expansion should allow composing env vars into new env vars [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.012217756" />
+          <testcase name="[It] [sig-node] Security Context when creating containers with AllowPrivilegeEscalation should not allow privilege escalation when false [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.006327187" />
+          <testcase name="[It] [sig-apps] ReplicaSet should list and delete a collection of ReplicaSets [Conformance]" classname="Kubernetes e2e suite" status="passed" time="5.006262047" />
+          <testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] listing validating webhooks should work [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.187002802" />
+          <testcase name="[It] [sig-apps] Job should execute all indexes despite some failing when using backoffLimitPerIndex [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.035936626" />
+          <testcase name="[It] [sig-node] Security Context should support pod.Spec.SecurityContext.RunAsUser And pod.Spec.SecurityContext.RunAsGroup [LinuxOnly] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.008396212" />
+          <testcase name="[It] [sig-storage] EmptyDir volumes pod should support shared volumes between containers [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.009510778" />
+          <testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should unconditionally reject operations on fail closed webhook [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.174108652" />
+          <testcase name="[It] [sig-network] Service endpoints latency should not be very high [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.887519759" />
+          <testcase name="[It] [sig-api-machinery] CustomResourceDefinition Watch [Privileged:ClusterAdmin] CustomResourceDefinition Watch watch on custom resource definition objects [Conformance]" classname="Kubernetes e2e suite" status="passed" time="60.015231609" />
+          <testcase name="[It] [sig-apps] StatefulSet Basic StatefulSet functionality [StatefulSetBasic] should list, patch and delete a collection of StatefulSets [Conformance]" classname="Kubernetes e2e suite" status="passed" time="20.014736741" />
+          <testcase name="[It] [sig-apps] Job with successPolicy succeededCount rule should succeeded even when some indexes remain pending [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.013872159" />
+          <testcase name="[It] [sig-node] Container Lifecycle Hook when create a pod with lifecycle hook should execute poststart http hook properly [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="6.014878647" />
+          <testcase name="[It] [sig-network] HostPort validates that there is no conflict between pods with same hostPort but different hostIP and protocol [LinuxOnly] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="13.036005651" />
+          <testcase name="[It] [sig-apps] CronJob should support CronJob API operations [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.018049389" />
+          <testcase name="[It] [sig-storage] PersistentVolumes CSI Conformance should apply changes to a pv/pvc status [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.009123666" />
+          <testcase name="[It] [sig-cli] Kubectl client Update Demo should scale a replication controller [Conformance]" classname="Kubernetes e2e suite" status="passed" time="16.379517767" />
+          <testcase name="[It] [sig-apps] Job with successPolicy succeededIndexes rule should succeeded even when some indexes remain pending [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.007949134" />
+          <testcase name="[It] [sig-storage] ConfigMap should be consumable from pods in volume as non-root [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.007934566" />
+          <testcase name="[It] [sig-storage] Projected configMap updates should be reflected in volume [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.009602728" />
+          <testcase name="[It] [sig-network] ServiceCIDR and IPAddress API should support IPAddress API operations [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.01223504" />
+          <testcase name="[It] [sig-storage] EmptyDir volumes should support (root,0666,default) [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.010180512" />
+          <testcase name="[It] [sig-api-machinery] CustomResourceFieldSelectors [Privileged:ClusterAdmin] CustomResourceFieldSelectors MUST list and watch custom resources matching the field selector [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.755040479" />
+          <testcase name="[It] [sig-api-machinery] ResourceQuota should create a ResourceQuota and capture the life of a configMap. [Conformance]" classname="Kubernetes e2e suite" status="passed" time="28.018024457" />
+          <testcase name="[It] [sig-apps] Job should create pods for an Indexed job with completion indexes and specified hostname [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.008915312" />
+          <testcase name="[It] [sig-auth] ServiceAccounts should allow opting out of API token automount [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.011947065" />
+          <testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should honor timeout [Conformance]" classname="Kubernetes e2e suite" status="passed" time="15.370865206" />
+          <testcase name="[It] [sig-api-machinery] ResourceQuota should verify ResourceQuota with terminating scopes. [Conformance]" classname="Kubernetes e2e suite" status="passed" time="16.019818911" />
+          <testcase name="[It] [sig-storage] Projected downwardAPI should provide node allocatable (cpu) as default cpu limit if the limit is not set [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.006435908" />
+          <testcase name="[It] [sig-apps] DisruptionController should observe PodDisruptionBudget status updated [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.009456552" />
+          <testcase name="[It] [sig-node] Container Lifecycle Hook when create a pod with lifecycle hook should execute prestop http hook properly [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="6.018256766" />
+          <testcase name="[It] [sig-api-machinery] server version should find the server version [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.009260663" />
+          <testcase name="[It] [sig-storage] ConfigMap should be consumable from pods in volume with defaultMode set [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.009284991" />
+          <testcase name="[It] [sig-apps] Deployment should validate Deployment Status endpoints [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.014370831" />
+          <testcase name="[It] [sig-network] DNS should support configurable pod DNS nameservers [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.03754137" />
+          <testcase name="[It] [sig-storage] Projected downwardAPI should update labels on modification [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.514069594" />
+          <testcase name="[It] [sig-auth] ServiceAccounts ServiceAccountIssuerDiscovery should support OIDC discovery of service account issuer [Conformance]" classname="Kubernetes e2e suite" status="passed" time="32.011982532" />
+          <testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should be able to deny pod and configmap creation [Conformance]" classname="Kubernetes e2e suite" status="passed" time="13.214559512" />
+          <testcase name="[It] [sig-node] Downward API should provide default limits.cpu/memory from node allocatable [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.016346442" />
+          <testcase name="[It] [sig-api-machinery] Garbage collector should not be blocked by dependency circle [Conformance]" classname="Kubernetes e2e suite" status="passed" time="5.012398703" />
+          <testcase name="[It] [sig-apps] StatefulSet Basic StatefulSet functionality [StatefulSetBasic] should have a working scale subresource [Conformance]" classname="Kubernetes e2e suite" status="passed" time="20.013960997" />
+          <testcase name="[It] [sig-node] Pods should be submitted and removed [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.166047719" />
+          <testcase name="[It] [sig-api-machinery] Servers with support for Table transformation should return a 406 for a backend which does not implement metadata [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.003281665" />
+          <testcase name="[It] [sig-storage] ConfigMap should be consumable from pods in volume with mappings as non-root [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.007960381" />
+          <testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should reject mutating webhook configurations with invalid match conditions [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.100433756" />
+          <testcase name="[It] [sig-storage] EmptyDir volumes volume on tmpfs should have the correct mode [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="failed" time="2.010347086">
+              <failure message="" type="failed">[FAILED] expected "mount type of \"/test-volume\": tmpfs" in container output: Expected
+    &lt;string&gt;: mount type of "/test-volume": 2435016766
+    perms of file "/test-volume": -rwxrwxrwx
+    
+to contain substring
+    &lt;string&gt;: mount type of "/test-volume": tmpfs
+In [It] at: k8s.io/kubernetes/test/e2e/framework/pod/output/output.go:263 @ 11/09/26 18:36:34.896
+</failure>
+              </testcase>
+          <testcase name="[It] [sig-network] EndpointSlice should create and delete Endpoints and EndpointSlices for a Service with a selector specified [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.008793268" />
+          <testcase name="[It] [sig-network] ServiceCIDR and IPAddress API should support ServiceCIDR API operations [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.005565975" />
+          <testcase name="[It] [sig-apps] StatefulSet Basic StatefulSet functionality [StatefulSetBasic] Scaling should happen in predictable order and halt if any stateful pod is unhealthy [Slow] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="70.504738847" />
+          <testcase name="[It] [sig-node] KubeletManagedEtcHosts should test kubelet managed /etc/hosts file [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.038999789" />
+          <testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should mutate everything except 'skip-me' configmaps [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.327481764" />
+          <testcase name="[It] [sig-storage] PersistentVolumes CSI Conformance should run through the lifecycle of a PV and a PVC [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.016670982" />
+          <testcase name="[It] [sig-storage] Secrets should be consumable in multiple volumes in a pod [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.009104163" />
+          <testcase name="[It] [sig-node] Downward API should provide pod UID as env vars [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.009298955" />
+          <testcase name="[It] [sig-storage] CSINodes CSI Conformance should run through the lifecycle of a csinode [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.009806433" />
+          <testcase name="[It] [sig-apps] ReplicationController should serve a basic image on each replica with a public image [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.011700238" />
+          <testcase name="[It] [sig-node] InitContainer [NodeConformance] should invoke init containers on a RestartAlways pod [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.098014969" />
+          <testcase name="[It] [sig-auth] ServiceAccounts should update a ServiceAccount [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.020077302" />
+          <testcase name="[It] [sig-instrumentation] Events API should delete a collection of events [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.019929734" />
+          <testcase name="[It] [sig-storage] Projected downwardAPI should set DefaultMode on files [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.016386193" />
+          <testcase name="[It] [sig-apps] DisruptionController should update/patch PodDisruptionBudget status [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.012914281" />
+          <testcase name="[It] [sig-storage] Projected configMap should be consumable from pods in volume with defaultMode set [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.011026225" />
+          <testcase name="[It] [sig-cli] Kubectl client Kubectl replace should update a single-container pod's image [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.400028238" />
+          <testcase name="[It] [sig-apps] StatefulSet Basic StatefulSet functionality [StatefulSetBasic] should perform canary updates and phased rolling updates of template modifications [Conformance]" classname="Kubernetes e2e suite" status="passed" time="70.024273728" />
+          <testcase name="[It] [sig-api-machinery] Discovery should validate PreferredVersion for each APIGroup [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.106162673" />
+          <testcase name="[It] [sig-node] Security Context When creating a container with runAsUser should run the container with uid 65534 [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.005355604" />
+          <testcase name="[It] [sig-network] DNS should resolve DNS of partial qualified names for services [LinuxOnly] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.019998283" />
+          <testcase name="[It] [sig-node] Node Lifecycle should run through the lifecycle of a node [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.006391444" />
+          <testcase name="[It] [sig-node] Pods Extended Pods Set QOS Class should be set on Pods with matching resource requests and limits for memory and cpu [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.005444865" />
+          <testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should deny crd creation [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.184680805" />
+          <testcase name="[It] [sig-node] Probing container should *not* be restarted with a /healthz http liveness probe [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="246.143853992" />
+          <testcase name="[It] [sig-storage] Secrets should be consumable from pods in volume with defaultMode set [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.00823483" />
+          <testcase name="[It] [sig-node] ConfigMap should be consumable via the environment [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.008421846" />
+          <testcase name="[It] [sig-cli] Kubectl client Proxy server should support proxy with --port 0 [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.047613934" />
+          <testcase name="[It] [sig-apps] Job should run a job to completion when tasks sometimes fail and are locally restarted [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.008647593" />
+          <testcase name="[It] [sig-api-machinery] Discovery should locate the groupVersion and a resource within each APIGroup [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.100707818" />
+          <testcase name="[It] [sig-auth] ServiceAccounts should create a serviceAccountToken and ensure a successful TokenReview [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.004948909" />
+          <testcase name="[It] [sig-node] Probing container should *not* be restarted with a GRPC liveness probe [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="242.142707411" />
+          <testcase name="[It] [sig-apps] Job should manage the lifecycle of a job [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.021616626" />
+          <testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should mutate custom resource with different stored version [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.215459011" />
+          <testcase name="[It] [sig-apps] StatefulSet Basic StatefulSet functionality [StatefulSetBasic] Should recreate evicted statefulset [Conformance]" classname="Kubernetes e2e suite" status="passed" time="18.015522833" />
+          <testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should be able to create and update validating webhook configurations with match conditions [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.112033894" />
+          <testcase name="[It] [sig-network] Services should be able to change the type from ExternalName to ClusterIP [Conformance]" classname="Kubernetes e2e suite" status="passed" time="6.123764954" />
+          <testcase name="[It] [sig-api-machinery] Watchers should receive events on concurrent watches in same order [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.901221404" />
+          <testcase name="[It] [sig-api-machinery] ResourceQuota should create a ResourceQuota and capture the life of a secret. [Conformance]" classname="Kubernetes e2e suite" status="passed" time="16.009962427" />
+          <testcase name="[It] [sig-node] Ephemeral Containers [NodeConformance] should update the ephemeral containers in an existing pod [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.016487002" />
+          <testcase name="[It] [sig-api-machinery] CustomResourceDefinition resources [Privileged:ClusterAdmin] custom resource defaulting for requests and from storage works [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.005139982" />
+          <testcase name="[It] [sig-apps] Job should apply changes to a job status [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.007470681" />
+          <testcase name="[It] [sig-network] EndpointSliceMirroring should mirror a custom Endpoints resource through create update and delete [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.006884945" />
+          <testcase name="[It] [sig-storage] Downward API volume should provide container's cpu request [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.007081107" />
+          <testcase name="[It] [sig-node] Container Runtime blackbox test when starting a container that exits should run with the expected status [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="13.176939136" />
+          <testcase name="[It] [sig-apps] CronJob should not schedule jobs when suspended [Slow] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="300.005050882" />
+          <testcase name="[It] [sig-apps] Deployment Deployment should have a working scale subresource [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.013327451" />
+          <testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should be able to create and update mutating webhook configurations with match conditions [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.083326121" />
+          <testcase name="[It] [sig-storage] Secrets should be consumable from pods in volume with mappings [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.014835957" />
+          <testcase name="[It] [sig-storage] CSIStorageCapacity should support CSIStorageCapacities API operations [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.010512398" />
+          <testcase name="[It] [sig-network] Services should test the lifecycle of an Endpoint [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.008627944" />
+          <testcase name="[It] [sig-api-machinery] ResourceQuota should apply changes to a resourcequota status [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.008453294" />
+          <testcase name="[It] [sig-auth] Certificates API [Privileged:ClusterAdmin] should support CSR API operations [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.189967481" />
+          <testcase name="[It] [sig-node] Lease lease API should be available [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.008743042" />
+          <testcase name="[It] [sig-api-machinery] API priority and fairness should support FlowSchema API operations [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.010828014" />
+          <testcase name="[It] [sig-node] Probing container with readiness probe should not be ready before initial delay and never restart [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="16.018803499" />
+          <testcase name="[It] [sig-node] ConfigMap should fail to create ConfigMap with empty key [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.004940301" />
+          <testcase name="[It] [sig-storage] EmptyDir volumes should support (non-root,0777,tmpfs) [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="failed" time="2.007414405">
+              <failure message="" type="failed">[FAILED] expected "mount type of \"/test-volume\": tmpfs" in container output: Expected
+    &lt;string&gt;: mount type of "/test-volume": 2435016766
+    content of file "/test-volume/test-file": mount-tester new file
+    
+    perms of file "/test-volume/test-file": -rwxrwxrwx
+    
+to contain substring
+    &lt;string&gt;: mount type of "/test-volume": tmpfs
+In [It] at: k8s.io/kubernetes/test/e2e/framework/pod/output/output.go:263 @ 11/09/26 18:37:55.628
+</failure>
+              </testcase>
+          <testcase name="[It] [sig-api-machinery] FieldValidation should detect unknown metadata fields of a typed object [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.005527742" />
+          <testcase name="[It] [sig-api-machinery] ResourceQuota should be able to update and delete ResourceQuota. [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.005465424" />
+          <testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should reject validating webhook configurations with invalid match conditions [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.088880248" />
+          <testcase name="[It] [sig-apps] ReplicationController should test the lifecycle of a ReplicationController [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.065982431" />
+          <testcase name="[It] [sig-network] Services should provide secure master service [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.004770179" />
+          <testcase name="[It] [sig-api-machinery] FieldValidation should detect duplicates in a CR when preserving unknown fields [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.008318349" />
+          <testcase name="[It] [sig-apps] ReplicationController should adopt matching pods on creation [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.009614916" />
+          <testcase name="[It] [sig-apps] Job should mark indexes as failed when the FailIndex action is matched in podFailurePolicy [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.006104873" />
+          <testcase name="[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] updates the published spec when one version gets renamed [Conformance]" classname="Kubernetes e2e suite" status="passed" time="6.228354697" />
+          <testcase name="[It] [sig-network] DNS should provide /etc/hosts entries for the cluster [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.010127193" />
+          <testcase name="[It] [sig-api-machinery] ResourceQuota should manage the lifecycle of a ResourceQuota [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.0108316" />
+          <testcase name="[It] [sig-node] ConfigMap should be consumable via environment variable [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.00574931" />
+          <testcase name="[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] works for CRD with validation schema [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.08824752" />
+          <testcase name="[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] works for multiple CRDs of different groups [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.160391062" />
+          <testcase name="[It] [sig-node] Variable Expansion should fail substituting values in a volume subpath with absolute path [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.00834492" />
+          <testcase name="[It] [sig-api-machinery] ResourceQuota should create a ResourceQuota and capture the life of a replica set. [Conformance]" classname="Kubernetes e2e suite" status="passed" time="11.00859032" />
+          <testcase name="[It] [sig-cli] Kubectl client Kubectl server-side dry-run should check if kubectl can dry-run update Pods [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.261069191" />
+          <testcase name="[It] [sig-storage] Downward API volume should set mode on item file [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.006120122" />
+          <testcase name="[It] [sig-cli] Kubectl client Update Demo should create and stop a replication controller [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.46666871" />
+          <testcase name="[It] [sig-network] EndpointSlice should have Endpoints and EndpointSlices pointing to API Server [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.003537238" />
+          <testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] listing mutating webhooks should work [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.6469028679999997" />
+          <testcase name="[It] [sig-architecture] Conformance Tests should have at least two untainted nodes [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.005066649" />
+          <testcase name="[It] [sig-network] DNS should provide DNS for pods for Hostname [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.009774963" />
+          <testcase name="[It] [sig-storage] EmptyDir volumes should support (root,0644,default) [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.006178688" />
+          <testcase name="[It] [sig-node] PodTemplates should run the lifecycle of PodTemplates [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.004130961" />
+          <testcase name="[It] [sig-storage] Projected secret should be consumable from pods in volume with defaultMode set [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.00704469" />
+          <testcase name="[It] [sig-node] Downward API should provide pod name, namespace and IP address as env vars [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.010266496" />
+          <testcase name="[It] [sig-apps] StatefulSet Basic StatefulSet functionality [StatefulSetBasic] Burst scaling should run to completion even with unhealthy pods [Slow] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="60.414838594" />
+          <testcase name="[It] [sig-storage] Projected downwardAPI should provide node allocatable (memory) as default memory limit if the limit is not set [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="6.016185888" />
+          <testcase name="[It] [sig-instrumentation] Events API should ensure that an event can be fetched, patched, deleted, and listed [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.005801795" />
+          <testcase name="[It] [sig-storage] ConfigMap should be consumable in multiple volumes in the same pod [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.008318609" />
+          <testcase name="[It] [sig-storage] Projected configMap should be consumable from pods in volume [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.006203604" />
+          <testcase name="[It] [sig-storage] Projected configMap optional updates should be reflected in volume [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.011069898" />
+          <testcase name="[It] [sig-storage] Downward API volume should provide container's memory request [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.006789171" />
+          <testcase name="[It] [sig-apps] Deployment deployment should support proportional scaling [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.022427462" />
+          <testcase name="[It] [sig-storage] EmptyDir volumes should support (non-root,0644,default) [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.009943939" />
+          <testcase name="[It] [sig-node] Downward API should provide container's limits.cpu/memory and requests.cpu/memory as env vars [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.006200423" />
+          <testcase name="[It] [sig-storage] ConfigMap binary data should be reflected in volume [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.006201622" />
+          <testcase name="[It] [sig-network] IngressClass API should support creating IngressClass API operations [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.008977292" />
+          <testcase name="[It] [sig-cli] Kubectl client Kubectl cluster-info should check if Kubernetes control plane services is included in cluster-info [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.051440369" />
+          <testcase name="[It] [sig-apps] ReplicaSet should validate Replicaset Status endpoints [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.013383485" />
+          <testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should be able to deny custom resource creation, update and deletion [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.350440644" />
+          <testcase name="[It] [sig-node] Kubelet when scheduling a busybox command that always fails in a pod should be possible to delete [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.004747501" />
+          <testcase name="[It] [sig-apps] Job should delete a job [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.15897425" />
+          <testcase name="[It] [sig-apps] Deployment should run the lifecycle of a Deployment [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.105159167" />
+          <testcase name="[It] [sig-auth] ServiceAccounts should guarantee kube-root-ca.crt exist in any namespace [Conformance]" classname="Kubernetes e2e suite" status="passed" time="1.006638263" />
+          <testcase name="[It] [sig-network] Networking Granular Checks: Pods should function for intra-pod communication: udp [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="14.029209424" />
+          <testcase name="[It] [sig-storage] CSIInlineVolumes should run through the lifecycle of a CSIDriver [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.009470795" />
+          <testcase name="[It] [sig-api-machinery] Garbage collector should orphan RS created by deployment when deleteOptions.PropagationPolicy is Orphan [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.607903498" />
+          <testcase name="[It] [sig-storage] Downward API volume should provide container's cpu limit [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.006797677" />
+          <testcase name="[It] [sig-apps] StatefulSet Basic StatefulSet functionality [StatefulSetBasic] should perform rolling updates and roll backs of template modifications [Conformance]" classname="Kubernetes e2e suite" status="passed" time="90.243950841" />
+          <testcase name="[It] [sig-storage] ConfigMap should be consumable from pods in volume [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.008416089" />
+          <testcase name="[It] [sig-storage] Subpath Atomic writer volumes should support subpaths with projected pod [Conformance]" classname="Kubernetes e2e suite" status="passed" time="22.019827005" />
+          <testcase name="[It] [sig-node] PodTemplates should replace a pod template [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.00411346" />
+          <testcase name="[It] [sig-api-machinery] CustomResourceConversionWebhook [Privileged:ClusterAdmin] should be able to convert from CR v1 to CR v2 [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.189804469" />
+          <testcase name="[It] [sig-node] Container Lifecycle Hook when create a pod with lifecycle hook should execute prestop exec hook properly [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="6.013911537" />
+          <testcase name="[It] [sig-storage] Secrets should be able to mount in a volume regardless of a different secret existing with same name in different namespace [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.010686373" />
+          <testcase name="[It] [sig-storage] Projected configMap should be consumable from pods in volume with mappings as non-root [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.010621631" />
+          <testcase name="[It] [sig-apps] Job should adopt matching orphans and release non-matching pods [Conformance]" classname="Kubernetes e2e suite" status="passed" time="7.015921344" />
+          <testcase name="[It] [sig-apps] Job with successPolicy should succeeded when all indexes succeeded [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.017994601" />
+          <testcase name="[It] [sig-api-machinery] ResourceQuota should create a ResourceQuota and capture the life of a replication controller. [Conformance]" classname="Kubernetes e2e suite" status="passed" time="11.010088053" />
+          <testcase name="[It] [sig-cli] Kubectl logs logs should be able to retrieve and filter logs [Conformance]" classname="Kubernetes e2e suite" status="passed" time="5.009206818" />
+          <testcase name="[It] [sig-network] Services should be able to change the type from NodePort to ExternalName [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.08508368" />
+          <testcase name="[It] [sig-node] Pods should support remote command execution over websockets [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.015931986" />
+          <testcase name="[It] [sig-apps] ReplicationController should release no longer matching pods [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.010485697" />
+          <testcase name="[It] [sig-node] Variable Expansion should allow substituting values in a volume subpath [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.018701886" />
+          <testcase name="[It] [sig-cli] Kubectl client Kubectl version should check is all data is printed [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.049120375" />
+          <testcase name="[It] [sig-storage] Projected secret should be consumable in multiple volumes in a pod [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.009032991" />
+          <testcase name="[It] [sig-api-machinery] Watchers should observe add, update, and delete watch notifications on configmaps [Conformance]" classname="Kubernetes e2e suite" status="passed" time="20.01038338" />
+          <testcase name="[It] [sig-apps] ReplicaSet should adopt matching pods on creation and release no longer matching pods [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.012842398" />
+          <testcase name="[It] [sig-api-machinery] CustomResourceConversionWebhook [Privileged:ClusterAdmin] should be able to convert a non homogeneous list of CRs [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.440453336" />
+          <testcase name="[It] [sig-network] DNS should provide DNS for pods for Subdomain [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.02044948" />
+          <testcase name="[It] [sig-auth] ServiceAccounts should run through the lifecycle of a ServiceAccount [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.012758428" />
+          <testcase name="[It] [sig-api-machinery] Watchers should be able to start watching from a specific resource version [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.004460795" />
+          <testcase name="[It] [sig-api-machinery] ResourceQuota should create a ResourceQuota and capture the life of a pod. [Conformance]" classname="Kubernetes e2e suite" status="passed" time="13.013640523" />
+          <testcase name="[It] [sig-api-machinery] ValidatingAdmissionPolicy [Privileged:ClusterAdmin] should support ValidatingAdmissionPolicy API operations [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.01203008" />
+          <testcase name="[It] [sig-cli] Kubectl client Kubectl patch should add annotations for pods in rc [Conformance]" classname="Kubernetes e2e suite" status="passed" time="1.121393323" />
+          <testcase name="[It] [sig-network] Services should be able to switch session affinity for service with type clusterIP [LinuxOnly] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="64.520752958" />
+          <testcase name="[It] [sig-storage] Projected combined should project all components that make up the projection API [Projection] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.012918326" />
+          <testcase name="[It] [sig-storage] ConfigMap updates should be reflected in volume [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.009342431" />
+          <testcase name="[It] [sig-node] Pods should support retrieving logs from the container over websockets [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.01309592" />
+          <testcase name="[It] [sig-network] EndpointSlice should support creating EndpointSlice API operations [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.009400275" />
+          <testcase name="[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] removes definition from spec when one version gets changed to not be served [Conformance]" classname="Kubernetes e2e suite" status="passed" time="5.639582059" />
+          <testcase name="[It] [sig-storage] EmptyDir volumes should support (non-root,0666,default) [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.007648221" />
+          <testcase name="[It] [sig-node] RuntimeClass should support RuntimeClasses API operations [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.011860407" />
+          <testcase name="[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] works for CRD without validation schema [Conformance]" classname="Kubernetes e2e suite" status="passed" time="1.679335999" />
+          <testcase name="[It] [sig-network] Services should complete a service status lifecycle [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.01264434" />
+          <testcase name="[It] [sig-node] Container Runtime blackbox test on terminated container should report termination message from file when pod succeeds and TerminationMessagePolicy FallbackToLogsOnError is set [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="1.00871591" />
+          <testcase name="[It] [sig-storage] Downward API volume should provide podname only [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.006388313" />
+          <testcase name="[It] [sig-storage] EmptyDir volumes should support (root,0644,tmpfs) [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="failed" time="2.008690308">
+              <failure message="" type="failed">[FAILED] expected "mount type of \"/test-volume\": tmpfs" in container output: Expected
+    &lt;string&gt;: mount type of "/test-volume": 2435016766
+    content of file "/test-volume/test-file": mount-tester new file
+    
+    perms of file "/test-volume/test-file": -rw-r--r--
+    
+to contain substring
+    &lt;string&gt;: mount type of "/test-volume": tmpfs
+In [It] at: k8s.io/kubernetes/test/e2e/framework/pod/output/output.go:263 @ 11/09/26 18:36:58.471
+</failure>
+              </testcase>
+          <testcase name="[It] [sig-node] Probing container should have monotonically increasing restart count [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="226.14275441" />
+          <testcase name="[It] [sig-api-machinery] ResourceQuota should create a ResourceQuota and ensure its status is promptly calculated. [Conformance]" classname="Kubernetes e2e suite" status="passed" time="7.009016152" />
+          <testcase name="[It] [sig-storage] Downward API volume should provide node allocatable (cpu) as default cpu limit if the limit is not set [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.007568292" />
+          <testcase name="[It] [sig-api-machinery] AggregatedDiscovery should support raw aggregated discovery request for CRDs [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.005617627" />
+          <testcase name="[It] [sig-node] Containers should be able to override the image's default command (container entrypoint) [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.006225328" />
+          <testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] patching/updating a mutating webhook should work [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.180629085" />
+          <testcase name="[It] [sig-apps] CronJob should schedule multiple jobs concurrently [Conformance]" classname="Kubernetes e2e suite" status="passed" time="96.007940219" />
+          <testcase name="[It] [sig-storage] Secrets should be consumable from pods in volume [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.008054184" />
+          <testcase name="[It] [sig-api-machinery] CustomResourceDefinition resources [Privileged:ClusterAdmin] Simple CustomResourceDefinition creating/deleting custom resource definition objects works [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.005346823" />
+          <testcase name="[It] [sig-network] Proxy version v1 A set of valid responses are returned for both pod and service Proxy [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.014372343" />
+          <testcase name="[It] [sig-network] DNS should provide DNS for services [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.030039505" />
+          <testcase name="[It] [sig-node] Kubelet when scheduling a read only busybox container should not write to root filesystem [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.011770279" />
+          <testcase name="[It] [sig-api-machinery] Garbage collector should delete RS created by deployment when not orphaning [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.007155775" />
+          <testcase name="[It] [sig-storage] ConfigMap should be consumable from pods in volume with mappings [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.005800126" />
+          <testcase name="[It] [sig-node] Probing container with readiness probe that fails should never be ready and never restart [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="60.007293574" />
+          <testcase name="[It] [sig-api-machinery] Servers with support for API chunking should return chunks of results for list calls [Conformance]" classname="Kubernetes e2e suite" status="passed" time="21.457133208" />
+          <testcase name="[It] [sig-node] Pods should contain environment variables for services [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.013701142" />
+          <testcase name="[It] [sig-node] RuntimeClass should schedule a Pod requesting a RuntimeClass without PodOverhead [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.008470435" />
+          <testcase name="[It] [sig-api-machinery] CustomResourcePublishOpenAPI [Privileged:ClusterAdmin] works for CRD preserving unknown fields in an embedded object [Conformance]" classname="Kubernetes e2e suite" status="passed" time="1.630468751" />
+          <testcase name="[It] [sig-network] Services should have session affinity work for service with type clusterIP [LinuxOnly] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.215224539" />
+          <testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] patching/updating a validating webhook should work [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.193542065" />
+          <testcase name="[It] [sig-node] Kubelet when scheduling an agnhost Pod with hostAliases should write entries to /etc/hosts [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.011071144" />
+          <testcase name="[It] [sig-node] Container Runtime blackbox test on terminated container should report termination message as empty when pod succeeds and TerminationMessagePolicy FallbackToLogsOnError is set [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="1.006204889" />
+          <testcase name="[It] [sig-apps] Deployment RollingUpdateDeployment should delete old pods and create new ones [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.011334071" />
+          <testcase name="[It] [sig-network] Services should serve a basic endpoint from pods [Conformance]" classname="Kubernetes e2e suite" status="passed" time="8.367228777" />
+          <testcase name="[It] [sig-storage] Projected secret should be consumable from pods in volume with mappings and Item Mode set [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.030481401" />
+          <testcase name="[It] [sig-node] Probing container should be restarted with a /healthz http liveness probe [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="16.016705168" />
+          <testcase name="[It] [sig-apps] DisruptionController Listing PodDisruptionBudgets for all namespaces should list and delete a collection of PodDisruptionBudgets [Conformance]" classname="Kubernetes e2e suite" status="passed" time="6.01603608" />
+          <testcase name="[It] [sig-network] Services should find a service from listing all namespaces [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.007150302" />
+          <testcase name="[It] [sig-network] Proxy version v1 A set of valid responses are returned for both pod and service ProxyWithPath [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.011901151" />
+          <testcase name="[It] [sig-storage] EmptyDir volumes volume on default medium should have the correct mode [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.007942366" />
+          <testcase name="[It] [sig-node] Pods should get a host IP [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.005724674" />
+          <testcase name="[It] [sig-node] Variable Expansion should fail substituting values in a volume subpath with backticks [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.013198911" />
+          <testcase name="[It] [sig-apps] ReplicaSet Replicaset should have a working scale subresource [Conformance]" classname="Kubernetes e2e suite" status="passed" time="5.008387294" />
+          <testcase name="[It] [sig-instrumentation] Events should delete a collection of events [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.015023099" />
+          <testcase name="[It] [sig-storage] Secrets should be consumable from pods in volume as non-root with defaultMode and fsGroup set [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.006592109" />
+          <testcase name="[It] [sig-auth] ServiceAccounts should mount an API token into pods [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.182284975" />
+          <testcase name="[It] [sig-storage] VolumeAttachment Conformance should apply changes to a volumeattachment status [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.017203833" />
+          <testcase name="[It] [sig-storage] Projected secret should be consumable from pods in volume [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.012539509" />
+          <testcase name="[It] [sig-storage] Projected configMap should be consumable from pods in volume with mappings and Item mode set [LinuxOnly] [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="2.008368933" />
+          <testcase name="[It] [sig-storage] Secrets optional updates should be reflected in volume [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="4.013423726" />
+          <testcase name="[It] [sig-apps] DisruptionController should block an eviction until the PDB is updated to allow it [Conformance]" classname="Kubernetes e2e suite" status="passed" time="6.022662833" />
+          <testcase name="[It] [sig-node] InitContainer [NodeConformance] should invoke init containers on a RestartNever pod [Conformance]" classname="Kubernetes e2e suite" status="passed" time="0.082640526" />
+          <testcase name="[It] [sig-api-machinery] AdmissionWebhook [Privileged:ClusterAdmin] should mutate custom resource [Conformance]" classname="Kubernetes e2e suite" status="passed" time="3.3067417470000002" />
+          <testcase name="[It] [sig-apps] CronJob should replace jobs when ReplaceConcurrent [Conformance]" classname="Kubernetes e2e suite" status="passed" time="116.008467615" />
+          <testcase name="[It] [sig-node] Probing container should *not* be restarted with a tcp:8080 liveness probe [NodeConformance] [Conformance]" classname="Kubernetes e2e suite" status="passed" time="242.130744295" />
+          </testsuite>
+  </testsuites>

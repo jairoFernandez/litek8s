@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+- **419/419 on the official Kubernetes v1.33 conformance suite** on
+  Linux (crun, a two-node rootless dev cluster; k3s: 416/419). See
+  [compat/CONFORMANCE.md](compat/CONFORMANCE.md).
+- **Round trips between nodes, and relays chosen by them**: every node
+  pings the others over the overlay every 10 s (UDP 7 on its overlay
+  address) and exports `litek8s_overlay_peer_rtt_seconds{peer,via}` and
+  `litek8s_overlay_peer_pings_lost_total{peer}`. A pair of nodes with no
+  direct path now goes through the relay with the lowest round trip
+  a → relay → b, and keeps it unless another is clearly faster (25 % + 2 ms);
+  without measurements (agents of earlier versions) the relay is hashed as
+  before. `bench/relay-rtt.sh` checks it on one Linux host, rootless: the
+  pair moved off a relay slowed by 30 ms in 20 s.
+  See [docs/networking.md](docs/networking.md#relays).
+- **The kubelet's container events**: `Unhealthy` for each probe failure
+  (saying what the probe checks), `Killing` before a liveness or startup
+  restart, `BackOff` per crash-loop restart, `Failed` and `BackOff` for
+  image pulls. Repeats are counted on one Event (`count`,
+  `lastTimestamp`), as are Pulled/Created/Started in a crash loop.
+- **Pods' `imagePullSecrets` are used**: the node reads the pod's
+  `kubernetes.io/dockerconfigjson` (or `dockercfg`) Secrets, or its
+  ServiceAccount's when it lists none, and pulls with the entry for the
+  image's registry; a missing Secret gives a
+  `FailedToRetrieveImagePullSecret` warning. See
+  [docs/registries.md](docs/registries.md).
+- **Fix: a `medium: Memory` emptyDir on crun nodes was a directory on
+  disk**, not a tmpfs (the Docker runtime had it right). It is a tmpfs
+  now, shared by the pod's containers.
+- **Fix: an init container waiting for its first image pull showed
+  `ContainerCreating`**; it shows `PodInitializing`, as with the kubelet
+  (a conformance spec watches for it on a node that has to pull).
+- `compat/conformance.sh` runs the suite with the kubectl of its version
+  (a newer kubectl's `describe` output fails a spec).
+
 ## 0.2.21
 
 - **Fix: a Job's `activeDeadlineSeconds` was not enforced while its pod

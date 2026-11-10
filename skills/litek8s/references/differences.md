@@ -2,8 +2,8 @@
 
 The API is upstream's (v1.33 objects, discovery, server-side apply,
 strategic merge patch, watch, Tables, CRDs with schemas and CEL, admission
-webhooks, API aggregation). Conformance: 413/419 of the v1.33 suite on
-macOS, the rest pass on Linux; the compatibility corpus (kubectl, Helm with
+webhooks, API aggregation). Conformance: 419/419 of the v1.33 suite on
+Linux (crun; 413/419 on macOS with the Docker runtime); the compatibility corpus (kubectl, Helm with
 47 charts) passes 119/119. Assume upstream behavior unless listed here.
 
 ## Architecture
@@ -40,10 +40,15 @@ macOS, the rest pass on Linux; the compatibility corpus (kubectl, Helm with
 - **ValidatingAdmissionPolicy** rules and webhook `matchConditions` are
   accepted but not enforced. Writes made by the in-process controllers do
   not go through admission webhooks.
-- **Events**: the node agent records Pulled/Created/Started, not kubelet's
-  `Unhealthy` (probe failures), `BackOff` or `Failed` (pull errors). Read
-  container states instead (`diagnose_pod` does): waiting reasons and
-  messages, last termination, restart counts.
+- **Events**: the kubelet's container events are recorded (Pulled,
+  Created, Started, `Unhealthy` per probe failure, `Killing` before a
+  liveness or startup restart, `BackOff` per crash-loop restart, `Failed`
+  for pull errors), repeats counted on one Event. Differences: the
+  `Unhealthy` message says what the probe checks (`HTTP GET on port
+  8080/healthz failed or timed out`), not its output; readiness failures
+  are not reported while a container that was never ready is still within
+  `initialDelaySeconds + periodSeconds × failureThreshold`; nodes of
+  earlier versions send no `Unhealthy`/`Killing`.
 - **CRDs**: runtime CEL cost limits are not enforced (the static estimate
   at creation is); timezone arguments accept UTC and fixed offsets only;
   stored objects are not migrated between versions (as upstream).

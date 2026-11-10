@@ -62,9 +62,17 @@ accepts from each only its own pod addresses (or, through a relay, those of
 the nodes behind it), so the relay is no open forwarder.
 
 A pair's relay is the same seen from both sides (replies have to come back
-the way the traffic went, or WireGuard drops them), chosen by rendezvous
-hashing among the relays both sides reach: pairs spread over relays and stay
-put when another relay is added.
+the way the traffic went, or WireGuard drops them): among the relays both
+sides reach, the one with the lowest round trip a → relay → b. Each agent
+reports the round trip to every peer it reaches directly (the pings below,
+smoothed, in steps of about a quarter: 1, 2, 3, 4, 5, 6, 8, 10, 13, 16, 20,
+25, 32, 40, 50, 63, 79, 100 ms...), each link counting the mean of what its
+two ends report. A pair keeps its relay while that path is at most 25 %
+slower than the best one plus 2 ms, so it does not flap between two close
+relays; a relay that stops qualifying is left at once. Relays not measured
+yet (agents of earlier versions) are used only when none is: then by
+rendezvous hashing, so pairs spread over relays and stay put when another
+relay is added.
 
 ## How a node finds out
 
@@ -139,11 +147,22 @@ per node:
 | `litek8s_overlay_peer_direct{peer}` | 1 direct, 0 unreachable |
 | `litek8s_overlay_peer_relayed{peer,via}` | 1 when reached through `via` |
 | `litek8s_overlay_relayed_bytes_total` | on relays: bytes forwarded for others |
+| `litek8s_overlay_peer_rtt_seconds{peer,via}` | round trip of the last ping to the peer over the overlay (`via` set when relayed); absent when unanswered |
+| `litek8s_overlay_peer_pings_lost_total{peer}` | pings to the peer never answered |
 
 ```bash
 litek8s query 'rate(litek8s_overlay_relayed_bytes_total[5m])'
 litek8s query 'litek8s_overlay_peer_relayed == 1'
+litek8s query 'avg_over_time(litek8s_overlay_peer_rtt_seconds[5m])'
+litek8s query 'rate(litek8s_overlay_peer_pings_lost_total[5m]) * 10'   # share of pings lost
 ```
+
+Round trips: every node answers pings on its overlay address (UDP port 7)
+and pings every other node's once every 10 s from there, so pings take the
+path pods' traffic takes, through the relay when a pair is relayed. A pong
+not back by the next round counts as lost. Only the cluster CIDR is
+answered, with a packet the size of the ping. Nodes on a version without it
+do not answer: their peers count every ping as lost.
 
 ## A cloud VM with a public IP
 
@@ -285,8 +304,17 @@ each): the homes were relayed 44 s after their agents started, went direct
 their path was cut and were direct again 141 s after it came back (the next
 handshake on the direct entry); M1 5/5 and M2 2/2.
 
+`bench/relay-rtt.sh` checks relay choice by round trip on one Linux host,
+rootless, with no VM: a 5-node dev cluster whose server does not relay, two
+workers with WireGuard between them dropped (iptables in one's cell) and two
+relay workers. The pair must go through a relay; that relay is slowed by
+30 ms (netem on its cell's `eth0`) and the pair must move to the other one,
+both sides agreeing, with overlay traffic between the two workers still
+flowing. Last run (2026-11-09, omarchy): relayed 49 s after the cut, moved
+20 s after the delay.
+
 The route computation, observation, peer diffing and rules have unit tests
-(`src/kube/agent/relay.rs`, `src/kube/agent/overlay.rs`).
+(`src/kube/agent/relay.rs`, `src/kube/agent/overlay.rs`, `src/kube/agent/rtt.rs`).
 
 ## Limits
 

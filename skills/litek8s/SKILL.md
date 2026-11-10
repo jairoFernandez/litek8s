@@ -6,7 +6,7 @@ description: Operate litek8s, a Kubernetes API server in one Rust binary with lo
 # litek8s
 
 litek8s serves the real Kubernetes API (`/version` says `v1.33.0+litek8s`;
-conformance 413/419), so **kubectl, Helm and everything you know about
+conformance 419/419), so **kubectl, Helm and everything you know about
 Kubernetes objects work unchanged**. What kubectl does not cover is
 litek8s's own surface: dev clusters, the Docker socket, metrics/logs/alerts
 without Prometheus or Loki, HA and node join. Use the litek8s tools (MCP

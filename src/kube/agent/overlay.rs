@@ -17,7 +17,8 @@
 //! direct path is tried all the time; [`Overlay::tick`] sends each directly
 //! routed peer a probe, watches what comes back from each peer, tries the
 //! other endpoints known for peers that stay silent, and returns what the
-//! agent reports to the server. Peers are
+//! agent reports to the server. It also pings every peer over the overlay
+//! and keeps the round-trip times for metrics ([`super::rtt`]). Peers are
 //! changed in place, so a route change keeps the other sessions and the
 //! endpoints WireGuard learned from peers behind NAT.
 
@@ -58,6 +59,9 @@ const HANDSHAKE_FRESH_SECS: i64 = 180;
 /// attempts, and less than the 30 s NATs keep an unanswered UDP mapping, so
 /// two nodes trying each other's public address overlap.
 const ROTATE_AFTER: Duration = Duration::from_secs(20);
+/// A peer's smoothed round trip is forgotten after this many pings in a
+/// row go unanswered.
+const RTT_MISSES: u8 = 3;
 /// The filter chain that lets relays forward between peers.
 const CHAIN: &str = "LITEK8S-OVERLAY";
 
@@ -92,6 +96,10 @@ pub(crate) struct PeerSnapshot {
     pub tx_bytes: u64,
     /// Seconds since the last handshake (`None`: never).
     pub handshake_age: Option<i64>,
+    /// Round trip of the last ping over the overlay (`None`: unanswered).
+    pub rtt: Option<Duration>,
+    /// Pings never answered (`None`: this node does not ping).
+    pub pings_lost: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -121,11 +129,35 @@ struct Probe {
     reach: Reach,
     /// Routed through a relay (its direct entry has no allowed IPs).
     relayed: bool,
+    /// Smoothed round trip over the overlay, and pings missed since the
+    /// last answer.
+    srtt: Option<Duration>,
+    misses: u8,
 }
 
 impl Probe {
     fn new(now: Instant) -> Self {
-        Probe { since: now, rx: 0, rx_at: None, candidate: 0, switched: now, reach: Reach::Unknown, relayed: false }
+        Probe { since: now, rx: 0, rx_at: None, candidate: 0, switched: now, reach: Reach::Unknown, relayed: false, srtt: None, misses: 0 }
+    }
+
+    /// Take this round's ping: smooth the round trip like TCP's SRTT (an
+    /// eighth of each new sample), forget it after a few misses.
+    fn rtt_sample(&mut self, sample: Option<Duration>) {
+        match sample {
+            Some(d) => {
+                self.misses = 0;
+                self.srtt = Some(match self.srtt {
+                    Some(s) => (s * 7 + d) / 8,
+                    None => d,
+                });
+            }
+            None => {
+                self.misses = self.misses.saturating_add(1);
+                if self.misses >= RTT_MISSES {
+                    self.srtt = None;
+                }
+            }
+        }
     }
 }
 
@@ -152,6 +184,7 @@ pub struct Overlay {
     peers_file: PathBuf,
     state: tokio::sync::Mutex<State>,
     snapshot: std::sync::Mutex<Snapshot>,
+    echo: Option<super::rtt::Echo>,
 }
 
 fn parse_cidr(cidr: &str) -> Option<(Ipv4Addr, u8)> {
@@ -332,6 +365,13 @@ impl Overlay {
         ))
         .await
         .context("failed to set up the WireGuard interface (is the wireguard kernel module available?)")?;
+        let echo = match super::rtt::Echo::bind(net, (cluster, prefix)).await {
+            Ok(e) => Some(e),
+            Err(e) => {
+                eprintln!("node-agent: no round-trip times between nodes: {e:#}");
+                None
+            }
+        };
         let overlay = Self {
             key,
             port,
@@ -340,6 +380,7 @@ impl Overlay {
             peers_file: node_dir.join("wireguard-peers.json"),
             state: tokio::sync::Mutex::default(),
             snapshot: std::sync::Mutex::default(),
+            echo,
         };
         let saved: Vec<NodePeer> = std::fs::read(&overlay.peers_file).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
         // The whole list once (peers of an earlier run go), then in place.
@@ -457,6 +498,10 @@ impl Overlay {
         let mut reports = Reports::new();
         let mut snapshot = Snapshot::default();
         let routed = to_peers(&peers, |_| None);
+        // Pings go the way pods' traffic goes, relayed or not. This ends
+        // the last round: its round trips go into this tick's reports.
+        let pings: Vec<(String, Ipv4Addr)> = peers.iter().filter_map(|p| Some((p.name.clone(), parse_cidr(&p.pod_cidr)?.0))).collect();
+        let rtt = self.echo.as_ref().map(|e| e.round(&pings));
         let mut targets = Vec::new();
         for p in &peers {
             let Ok(key) = PublicKey::parse(&p.public_key) else { continue };
@@ -474,6 +519,9 @@ impl Overlay {
                 probe.relayed = relayed;
                 probe.since = now;
                 probe.rx_at = None;
+                // Round trips of the other path say nothing of this one.
+                probe.srtt = None;
+                probe.misses = 0;
             }
             if let Some(s) = &status {
                 if s.rx_bytes > probe.rx {
@@ -489,7 +537,14 @@ impl Overlay {
                 probe.switched = now;
             }
             let endpoint = status.as_ref().and_then(|s| s.endpoint).filter(|_| probe.reach == Reach::Direct).map(|e| e.to_string());
-            reports.insert(p.name.clone(), PeerReport { state: probe.reach, endpoint });
+            let sample = rtt.as_ref().and_then(|r| r.get(&p.name).copied());
+            if rtt.is_some() {
+                probe.rtt_sample(sample);
+            }
+            // Measured on the direct entry only: through a relay it is the
+            // relayed path, which is not what the server weighs.
+            let rtt_ms = probe.srtt.filter(|_| !relayed).map(super::relay::rtt_bucket);
+            reports.insert(p.name.clone(), PeerReport { state: probe.reach, endpoint, rtt_ms });
             snapshot.peers.push(PeerSnapshot {
                 name: p.name.clone(),
                 reach: probe.reach,
@@ -497,6 +552,8 @@ impl Overlay {
                 rx_bytes: status.as_ref().map(|s| s.rx_bytes).unwrap_or(0),
                 tx_bytes: status.as_ref().map(|s| s.tx_bytes).unwrap_or(0),
                 handshake_age,
+                rtt: sample,
+                pings_lost: self.echo.as_ref().map(|e| e.lost(&p.name)),
             });
         }
         self.sync(&mut state).await?;
@@ -543,7 +600,14 @@ fn metric_samples(node: &str, s: &Snapshot) -> Vec<(crate::obs::tsdb::Labels, f6
             out.push((labels("litek8s_overlay_peer_direct", &peer), if p.reach == Reach::Direct { 1.0 } else { 0.0 }));
         }
         let via = p.via.as_deref().unwrap_or("");
-        out.push((labels("litek8s_overlay_peer_relayed", &[("peer", p.name.as_str()), ("via", via)]), if p.via.is_some() { 1.0 } else { 0.0 }));
+        let peer_via = [("peer", p.name.as_str()), ("via", via)];
+        out.push((labels("litek8s_overlay_peer_relayed", &peer_via), if p.via.is_some() { 1.0 } else { 0.0 }));
+        if let Some(rtt) = p.rtt {
+            out.push((labels("litek8s_overlay_peer_rtt_seconds", &peer_via), rtt.as_secs_f64()));
+        }
+        if let Some(lost) = p.pings_lost {
+            out.push((labels("litek8s_overlay_peer_pings_lost_total", &peer), lost as f64));
+        }
     }
     if let Some(bytes) = s.relayed_bytes {
         out.push((labels("litek8s_overlay_relayed_bytes_total", &[]), bytes as f64));
@@ -661,6 +725,25 @@ mod tests {
     }
 
     #[test]
+    fn round_trips_are_smoothed_and_forgotten_after_misses() {
+        let ms = Duration::from_millis;
+        let mut p = Probe::new(Instant::now());
+        p.rtt_sample(Some(ms(80)));
+        assert_eq!(p.srtt, Some(ms(80)));
+        p.rtt_sample(Some(ms(16)));
+        assert_eq!(p.srtt, Some(ms(72)));
+        p.rtt_sample(None);
+        p.rtt_sample(None);
+        assert_eq!(p.srtt, Some(ms(72)), "a lost ping or two keep it");
+        p.rtt_sample(Some(ms(72)));
+        assert_eq!(p.misses, 0);
+        for _ in 0..RTT_MISSES {
+            p.rtt_sample(None);
+        }
+        assert_eq!(p.srtt, None);
+    }
+
+    #[test]
     fn relay_rules_and_counter() {
         let on = relay_rules("10.42.0.0/16", true);
         assert!(on.contains("-A LITEK8S-OVERLAY -i litek8s-wg -o litek8s-wg -s 10.42.0.0/16 -d 10.42.0.0/16 -j ACCEPT\n"));
@@ -675,8 +758,8 @@ mod tests {
     fn metrics_per_peer_and_relayed_bytes() {
         let s = Snapshot {
             peers: vec![
-                PeerSnapshot { name: "a".into(), reach: Reach::Direct, via: None, rx_bytes: 10, tx_bytes: 20, handshake_age: Some(3) },
-                PeerSnapshot { name: "b".into(), reach: Reach::Unreachable, via: Some("s".into()), rx_bytes: 0, tx_bytes: 0, handshake_age: None },
+                PeerSnapshot { name: "a".into(), reach: Reach::Direct, via: None, rx_bytes: 10, tx_bytes: 20, handshake_age: Some(3), rtt: Some(Duration::from_millis(25)), pings_lost: Some(0) },
+                PeerSnapshot { name: "b".into(), reach: Reach::Unreachable, via: Some("s".into()), rx_bytes: 0, tx_bytes: 0, handshake_age: None, rtt: None, pings_lost: Some(3) },
             ],
             relayed_bytes: Some(4096),
         };
@@ -689,5 +772,10 @@ mod tests {
         assert_eq!(find("litek8s_overlay_peer_relayed", Some("b")), Some(1.0));
         assert_eq!(find("litek8s_overlay_peer_last_handshake_age_seconds", Some("b")), None);
         assert_eq!(find("litek8s_overlay_relayed_bytes_total", None), Some(4096.0));
+        assert_eq!(find("litek8s_overlay_peer_rtt_seconds", Some("a")), Some(0.025));
+        assert_eq!(find("litek8s_overlay_peer_rtt_seconds", Some("b")), None);
+        assert_eq!(find("litek8s_overlay_peer_pings_lost_total", Some("b")), Some(3.0));
+        let rtt_a = m.iter().find(|(l, _)| l.iter().any(|(k, v)| k == "__name__" && v == "litek8s_overlay_peer_rtt_seconds")).unwrap();
+        assert!(rtt_a.0.iter().any(|(k, v)| k == "via" && v.is_empty()));
     }
 }

@@ -26,7 +26,7 @@ impl PodRuntime for FakeRuntime {
     async fn machine(&self) -> Result<MachineInfo> {
         Ok(MachineInfo { cpus: 2, memory: 4 << 30, arch: "amd64".into(), os: "linux".into(), ..Default::default() })
     }
-    async fn pull_image(&self, _: &str, _: bool) -> Result<()> {
+    async fn pull_image(&self, _: &str, _: bool, _: Option<(String, String)>) -> Result<()> {
         Ok(())
     }
     async fn ensure_volume(&self, _: &str, _: HashMap<String, String>) -> Result<bool> {

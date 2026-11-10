@@ -26,8 +26,15 @@
 //! unreachable, never otherwise; both sides must see the path working again
 //! to go back to direct. The relay of a pair is the same seen from both
 //! sides (traffic and replies through one relay, or WireGuard drops the
-//! replies), chosen by rendezvous hashing among the relays both sides
-//! reach, so pairs spread over relays and stay put when one is added.
+//! replies). Agents report the round trip to each peer they reach directly
+//! (smoothed, in coarse steps so the reports do not change every tick);
+//! the relay is the one both sides reach with the lowest round trip
+//! a → relay → b. A pair keeps its relay until another is clearly faster
+//! ([`KEEP_FACTOR`], [`KEEP_SLACK_MS`]), so it does not flap between two
+//! close ones. Without round trips (agents of earlier versions, or not
+//! measured yet) the relay is chosen by rendezvous hashing among the relays
+//! both sides reach, so pairs spread over relays and stay put when one is
+//! added.
 //!
 //! The endpoints peers see a node at (its address behind NAT, as WireGuard
 //! learned it from its packets) are kept in the reports too and offered to
@@ -51,6 +58,10 @@ pub const LABEL_RELAY: &str = "litek8s.dev/relay";
 const CONTROL_PLANE_LABEL: &str = crate::kube::join::CONTROL_PLANE_LABEL;
 /// Extra endpoints offered per node.
 const MAX_OBSERVED: usize = 3;
+/// A pair keeps its relay while that path's round trip is at most this
+/// many times the best one's, plus [`KEEP_SLACK_MS`].
+pub const KEEP_FACTOR: f64 = 1.25;
+pub const KEEP_SLACK_MS: f64 = 2.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -69,6 +80,22 @@ pub struct PeerReport {
     /// Where the peer's packets come from (host:port), when direct.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint: Option<String>,
+    /// Smoothed round trip to the peer over its direct entry, in
+    /// milliseconds rounded by [`rtt_bucket`].
+    #[serde(default, rename = "rttMs", skip_serializing_if = "Option::is_none")]
+    pub rtt_ms: Option<u32>,
+}
+
+/// A round trip in whole milliseconds, in steps of about a quarter (1, 2,
+/// 3, 4, 5, 6, 8, 10, 13, 16, 20, 25, 32, 40, 50, 63, 79, 100, ...): what
+/// relay choice needs, and few enough values that a node's report changes
+/// only when its latency does.
+pub fn rtt_bucket(d: std::time::Duration) -> u32 {
+    let ms = d.as_secs_f64() * 1000.0;
+    if ms <= 1.0 {
+        return 1;
+    }
+    (10f64.powf((ms.log10() * 10.0).round() / 10.0)).round().max(1.0) as u32
 }
 
 pub type Reports = BTreeMap<String, PeerReport>;
@@ -110,6 +137,8 @@ pub struct MeshNode {
     /// The endpoint it announces (host:port).
     pub endpoint: String,
     pub reports: Reports,
+    /// Its routes as last computed (to keep a pair's relay).
+    pub routes: BTreeMap<String, Route>,
 }
 
 fn annotation<'a>(node: &'a Value, key: &str) -> Option<&'a str> {
@@ -151,12 +180,20 @@ impl MeshNode {
             server,
             endpoint,
             reports: reports_of(node),
+            routes: routes_of(node),
         })
     }
 
     fn reports(&self, peer: &str) -> Option<Reach> {
         self.reports.get(peer).map(|r| r.state)
     }
+}
+
+/// Round trip between two nodes in ms: the mean of what each reports of
+/// the other.
+fn link_ms(a: &MeshNode, b: &MeshNode) -> Option<f64> {
+    let rtts: Vec<f64> = [a.reports.get(&b.name), b.reports.get(&a.name)].into_iter().flatten().filter_map(|r| r.rtt_ms).map(f64::from).collect();
+    (!rtts.is_empty()).then(|| rtts.iter().sum::<f64>() / rtts.len() as f64)
 }
 
 /// Whether two nodes talk directly: neither side finds the other
@@ -178,13 +215,28 @@ fn fnv(parts: &[&str]) -> u64 {
 }
 
 /// The relay of a pair with no direct path: a relay node that both reach,
-/// the same one whichever side asks.
+/// the same one whichever side asks. The fastest measured path a → relay →
+/// b, unless the pair's current relay is close enough; by hash when none
+/// is measured.
 pub fn relay_for<'a>(nodes: &'a [MeshNode], a: &MeshNode, b: &MeshNode) -> Option<&'a MeshNode> {
-    let (lo, hi) = if a.name <= b.name { (&a.name, &b.name) } else { (&b.name, &a.name) };
-    nodes
-        .iter()
-        .filter(|r| r.relay && r.name != a.name && r.name != b.name && pair_ok(a, r) && pair_ok(r, b))
-        .max_by_key(|r| (fnv(&[lo, hi, &r.name]), std::cmp::Reverse(r.name.clone())))
+    let (lo, hi) = if a.name <= b.name { (a, b) } else { (b, a) };
+    let hash = |r: &MeshNode| (fnv(&[&lo.name, &hi.name, &r.name]), std::cmp::Reverse(r.name.clone()));
+    let eligible: Vec<&MeshNode> = nodes.iter().filter(|r| r.relay && r.name != a.name && r.name != b.name && pair_ok(a, r) && pair_ok(r, b)).collect();
+    let cost = |r: &MeshNode| Some(link_ms(a, r)? + link_ms(r, b)?);
+    let measured: Vec<(&MeshNode, f64)> = eligible.iter().filter_map(|r| Some((*r, cost(r)?))).collect();
+    // Lowest cost, then the hash order (the same from both sides).
+    let Some(&(best, best_cost)) = measured.iter().min_by(|x, y| x.1.total_cmp(&y.1).then_with(|| hash(y.0).cmp(&hash(x.0)))) else {
+        return eligible.into_iter().max_by_key(|r| hash(r));
+    };
+    // The relay the pair has now, as the lower-named side's routes say.
+    let current = match lo.routes.get(&hi.name) {
+        Some(Route::Via(r)) => measured.iter().find(|(m, _)| m.name == *r),
+        _ => None,
+    };
+    match current {
+        Some(&(r, c)) if c <= best_cost * KEEP_FACTOR + KEEP_SLACK_MS => Some(r),
+        _ => Some(best),
+    }
 }
 
 /// How `me` reaches every other node.
@@ -213,7 +265,7 @@ pub fn observed_endpoints(nodes: &[MeshNode], of: &str) -> Vec<String> {
     let Some(node) = nodes.iter().find(|n| n.name == of) else { return Vec::new() };
     let mut seen: BTreeMap<&str, usize> = BTreeMap::new();
     for n in nodes.iter().filter(|n| n.name != of) {
-        if let Some(PeerReport { state: Reach::Direct, endpoint: Some(ep) }) = n.reports.get(of) {
+        if let Some(PeerReport { state: Reach::Direct, endpoint: Some(ep), .. }) = n.reports.get(of) {
             if *ep != node.endpoint {
                 *seen.entry(ep).or_default() += 1;
             }
@@ -247,7 +299,16 @@ mod tests {
             relay,
             server: relay,
             endpoint: format!("{name}:51820"),
-            reports: reports.iter().map(|(p, s)| (p.to_string(), PeerReport { state: *s, endpoint: None })).collect(),
+            reports: reports.iter().map(|(p, s)| (p.to_string(), PeerReport { state: *s, endpoint: None, rtt_ms: None })).collect(),
+            routes: BTreeMap::new(),
+        }
+    }
+
+    /// `a` and `b` report each other at `ms`.
+    fn rtt(nodes: &mut [MeshNode], a: &str, b: &str, ms: u32) {
+        for (x, y) in [(a, b), (b, a)] {
+            let n = nodes.iter_mut().find(|n| n.name == x).unwrap();
+            n.reports.entry(y.to_string()).or_insert(PeerReport { state: Direct, endpoint: None, rtt_ms: None }).rtt_ms = Some(ms);
         }
     }
 
@@ -303,7 +364,7 @@ mod tests {
     fn back_to_direct_when_both_sides_see_the_path() {
         let mut nodes = vec![node("s", true, &[]), node("a", false, &[("b", Unreachable)]), node("b", false, &[("a", Direct)])];
         assert_eq!(routes_for(&nodes, "a")["b"], Route::Via("s".into()));
-        nodes[1].reports.insert("b".into(), PeerReport { state: Direct, endpoint: None });
+        nodes[1].reports.insert("b".into(), PeerReport { state: Direct, endpoint: None, rtt_ms: None });
         assert_eq!(routes_for(&nodes, "a")["b"], Route::Direct);
         assert_eq!(routes_for(&nodes, "b")["a"], Route::Direct);
     }
@@ -347,9 +408,98 @@ mod tests {
     }
 
     #[test]
+    fn round_trips_in_coarse_steps() {
+        let ms = |m: f64| rtt_bucket(std::time::Duration::from_secs_f64(m / 1000.0));
+        assert_eq!(ms(0.15), 1);
+        assert_eq!(ms(1.0), 1);
+        assert_eq!(ms(20.0), 20);
+        assert_eq!(ms(21.0), 20);
+        assert_eq!(ms(23.0), 25);
+        assert_eq!(ms(100.0), 100);
+        assert_eq!(ms(180.0), 200);
+        let steps: std::collections::BTreeSet<u32> = (1..=1000).map(|m| ms(m as f64)).collect();
+        assert_eq!(steps.len(), 28, "{steps:?}");
+    }
+
+    /// Two homes behind NAT, two cloud relays.
+    fn homes_and_relays() -> Vec<MeshNode> {
+        vec![
+            node("eu", true, &[]),
+            node("us", true, &[]),
+            node("a", false, &[("b", Unreachable)]),
+            node("b", false, &[("a", Unreachable)]),
+        ]
+    }
+
+    #[test]
+    fn the_fastest_relay_wins_from_both_sides() {
+        let mut nodes = homes_and_relays();
+        let hashed = match routes_for(&nodes, "a")["b"].clone() {
+            Route::Via(r) => r,
+            r => panic!("{r:?}"),
+        };
+        let other = if hashed == "eu" { "us" } else { "eu" };
+        // The relay the hash would not pick is faster: it wins.
+        for (relay, ms) in [(hashed.as_str(), 90), (other, 20)] {
+            rtt(&mut nodes, "a", relay, ms);
+            rtt(&mut nodes, relay, "b", ms);
+        }
+        assert_eq!(routes_for(&nodes, "a")["b"], Route::Via(other.to_string()));
+        assert_eq!(routes_for(&nodes, "b")["a"], Route::Via(other.to_string()));
+        // Measured beats unmeasured, whatever the hash says.
+        let mut nodes = homes_and_relays();
+        rtt(&mut nodes, "a", other, 200);
+        rtt(&mut nodes, other, "b", 200);
+        assert_eq!(routes_for(&nodes, "a")["b"], Route::Via(other.to_string()));
+    }
+
+    #[test]
+    fn a_pair_keeps_its_relay_unless_another_is_clearly_faster() {
+        let mut nodes = homes_and_relays();
+        rtt(&mut nodes, "a", "eu", 20);
+        rtt(&mut nodes, "eu", "b", 20);
+        rtt(&mut nodes, "a", "us", 16);
+        rtt(&mut nodes, "us", "b", 16);
+        // a's routes say eu (40 ms); us is 32: within 25% + 2 ms, keep eu.
+        nodes[2].routes.insert("b".into(), Route::Via("eu".into()));
+        assert_eq!(routes_for(&nodes, "a")["b"], Route::Via("eu".into()));
+        assert_eq!(routes_for(&nodes, "b")["a"], Route::Via("eu".into()));
+        // Only the lower-named side's routes count (both sides agree).
+        nodes[3].routes.insert("a".into(), Route::Via("us".into()));
+        assert_eq!(routes_for(&nodes, "b")["a"], Route::Via("eu".into()));
+        // us at 10 + 10: clearly faster, the pair moves.
+        rtt(&mut nodes, "a", "us", 10);
+        rtt(&mut nodes, "us", "b", 10);
+        assert_eq!(routes_for(&nodes, "a")["b"], Route::Via("us".into()));
+        // A current relay that no longer qualifies is left at once.
+        nodes[2].routes.insert("b".into(), Route::Via("eu".into()));
+        nodes[2].reports.insert("eu".into(), PeerReport { state: Unreachable, endpoint: None, rtt_ms: None });
+        assert_eq!(routes_for(&nodes, "a")["b"], Route::Via("us".into()));
+    }
+
+    #[test]
+    fn a_link_is_the_mean_of_both_sides() {
+        let mut nodes = homes_and_relays();
+        rtt(&mut nodes, "a", "eu", 10);
+        nodes[0].reports.get_mut("a").unwrap().rtt_ms = Some(30);
+        assert_eq!(link_ms(&nodes[2], &nodes[0]), Some(20.0));
+        nodes[0].reports.get_mut("a").unwrap().rtt_ms = None;
+        assert_eq!(link_ms(&nodes[0], &nodes[2]), Some(10.0));
+        assert_eq!(link_ms(&nodes[1], &nodes[2]), None);
+    }
+
+    #[test]
+    fn reports_without_round_trips_still_parse() {
+        let old: Reports = serde_json::from_str(r#"{"a":{"state":"direct","endpoint":"1.2.3.4:51820"}}"#).unwrap();
+        assert_eq!(old["a"].rtt_ms, None);
+        let new = serde_json::to_string(&PeerReport { state: Direct, endpoint: None, rtt_ms: Some(25) }).unwrap();
+        assert_eq!(new, r#"{"state":"direct","rttMs":25}"#);
+    }
+
+    #[test]
     fn observed_endpoints_skip_the_announced_one() {
         let mut nodes = vec![node("s", true, &[]), node("a", false, &[]), node("b", false, &[])];
-        let seen = |ep: &str| PeerReport { state: Direct, endpoint: Some(ep.into()) };
+        let seen = |ep: &str| PeerReport { state: Direct, endpoint: Some(ep.into()), rtt_ms: None };
         nodes[0].reports.insert("a".into(), seen("203.0.113.7:40001"));
         nodes[2].reports.insert("a".into(), seen("a:51820"));
         nodes[2].reports.insert("s".into(), seen("198.51.100.1:51820"));
@@ -357,13 +507,13 @@ mod tests {
         assert_eq!(observed_endpoints(&nodes, "s"), vec!["198.51.100.1:51820".to_string()]);
         assert!(observed_endpoints(&nodes, "b").is_empty());
         // Unreachable reports offer nothing.
-        nodes[0].reports.insert("b".into(), PeerReport { state: Unreachable, endpoint: Some("x:1".into()) });
+        nodes[0].reports.insert("b".into(), PeerReport { state: Unreachable, endpoint: Some("x:1".into()), rtt_ms: None });
         assert!(observed_endpoints(&nodes, "b").is_empty());
     }
 
     #[test]
     fn merging_keeps_known_states_over_unknown() {
-        let r = |s| PeerReport { state: s, endpoint: None };
+        let r = |s| PeerReport { state: s, endpoint: None, rtt_ms: None };
         let previous: Reports = [("a".to_string(), r(Unreachable)), ("gone".to_string(), r(Direct))].into();
         let now: Reports = [("a".to_string(), r(Unknown)), ("b".to_string(), r(Unknown)), ("c".to_string(), r(Direct))].into();
         let merged = merge_reports(&previous, &now);

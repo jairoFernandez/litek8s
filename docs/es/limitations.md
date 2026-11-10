@@ -39,9 +39,9 @@ Lista honesta; hay más en [skills/litek8s/references/differences.md](../../skil
   nodo) siempre se permite, y los pods con `NET_ADMIN` pueden falsificar
   direcciones de origen en el bridge de su nodo
   ([networking.md](](../networking.md#networkpolicies))).
-- Los `imagePullSecrets` de los pods no se usan: los nodos descargan con las
-  credenciales de su configuración de registries ([registries.md](../registries.md)),
-  y la API de Docker todavía no puede hacer `docker push`.
+- La API de Docker todavía no puede hacer `docker push`. Una imagen descargada
+  con los `imagePullSecrets` de un pod queda luego en el nodo para todos los
+  pods, como con el default del kubelet (sin `KubeletEnsureSecretPulledImages`).
 - Las métricas cubren contenedores, nodos y estado del cluster; los endpoints
   `/metrics` de las aplicaciones no se recolectan (apunta un Prometheus a ellos).
 - La VM de macOS nunca le devuelve a macOS la memoria que ya tocó (un límite de

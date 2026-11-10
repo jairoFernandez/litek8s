@@ -7,14 +7,28 @@ Kubernetes conformance suite, the `[Conformance]` specs of the upstream
 
 ## Score
 
-Kubernetes **v1.33.13** conformance suite, 419 specs, on 2026-10-18:
+Kubernetes **v1.33.13** conformance suite, 419 specs:
 
 | | passed | wall clock |
 |---|---|---|
-| k3s v1.33.4 (k3d, reference) | 416/419 | 39 min |
-| **litek8s, macOS (Docker runtime)**, last complete run (r7) | **413/419** | 29 min |
-| litek8s, macOS, final code, parallel pass only (r8) | 385/390 | 20 min |
-| litek8s, Linux (crun runtime), the specs macOS cannot run | 9/9 | 1 min |
+| **litek8s, Linux (crun runtime)**, 2026-11-09 (r11) | **419/419** | 21 min |
+| k3s v1.33.4 (k3d, reference), 2026-10-18 | 416/419 | 39 min |
+| litek8s, macOS (Docker runtime), last complete run (r7), 2026-10-18 | 413/419 | 29 min |
+| litek8s, macOS, parallel pass only (r8), 2026-10-18 | 385/390 | 20 min |
+
+r9–r11 ran on Linux, the shipping configuration: a rootless two-node
+`litek8s dev` cluster (crun, WireGuard overlay between the nodes) on one
+x86_64 workstation, kubectl v1.33.13. r9 (411/419) failed seven EmptyDir
+specs, because a `medium: Memory` emptyDir on crun was a directory on
+disk instead of a tmpfs, and the `kubectl describe` spec, because the
+runner used the host's kubectl v1.37, whose output no longer has the line
+the spec looks for (`compat/conformance.sh` now downloads the suite's
+kubectl). r10 (418/419) had them fixed and failed one InitContainer spec,
+the first of the run, on a node that still had to pull its image: an init
+container waiting for its pull showed `ContainerCreating` instead of the
+kubelet's `PodInitializing`. r11 passed everything.
+
+The macOS runs below are older:
 
 r7 failed six specs: the five below, which macOS cannot run, and
 `Watchers should observe add, update, and delete watch notifications`, a
@@ -69,6 +83,9 @@ shared the same Docker VM; they look like load, not gaps.
 | r6 | 412/419 | 27 min |
 | r7 | 413/419 | 29 min |
 | r8 | 385/390 parallel (serial cut short) | 20 min |
+| r9 (Linux) | 411/419 | 21 min |
+| r10 (Linux) | 418/419 | 20 min |
+| r11 (Linux) | 419/419 | 21 min |
 
 r1 stopped at `BeforeSuite`: the node list with
 `fieldSelector=spec.unschedulable=false` came back empty (an absent field
@@ -140,9 +157,12 @@ Results: `results/conformance-20261018-232802-litek8s-crd2/`,
   node label.
 - **Reference.** The k3d cluster of `compat/baseline-k3d.sh` (one server,
   one agent), same runner.
-- **Linux.** The same build in a privileged Ubuntu 24.04 container on an
-  x86_64 Linux workstation, `--runtime crun`, a single node, focus
-  `DNS .*\[Conformance\]|HostPort .*\[Conformance\]`.
+- **Linux (r9–r11).** A release build's `litek8s dev up --nodes 2` with
+  its own `LITEK8S_HOME` on an x86_64 Linux workstation (rootless: the
+  sandbox and its cells are user namespaces; crun runtime, WireGuard
+  between the two nodes), the whole suite. Before that, the specs macOS
+  cannot run were checked in a privileged Ubuntu 24.04 container
+  (`--runtime crun`, one node; 9/9).
 
 ```bash
 cargo build --release

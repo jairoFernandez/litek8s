@@ -47,6 +47,12 @@ pub fn pod_on_create(pod: &mut Value, service_account: Option<&Value>, suffix: &
         .to_string();
     spec.insert("serviceAccountName".into(), json!(sa));
     spec.insert("serviceAccount".into(), json!(sa));
+    // ServiceAccount admission: a pod without pull Secrets gets its
+    // ServiceAccount's.
+    let has_pull_secrets = spec.get("imagePullSecrets").and_then(Value::as_array).is_some_and(|l| !l.is_empty());
+    if let Some(list) = service_account.and_then(|sa| sa.get("imagePullSecrets")).and_then(Value::as_array).filter(|l| !l.is_empty() && !has_pull_secrets) {
+        spec.insert("imagePullSecrets".into(), json!(list));
+    }
 
     let tolerations = spec
         .entry("tolerations")
@@ -396,4 +402,23 @@ pub fn event_to_core(v1: &Value) -> Value {
         out["involvedObject"] = json!({});
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pods_get_their_service_accounts_pull_secrets_unless_they_have_some() {
+        let sa = json!({"metadata": {"name": "builder"}, "imagePullSecrets": [{"name": "ghcr"}]});
+        let mut pod = json!({"spec": {"serviceAccountName": "builder", "containers": [{"name": "c", "image": "x"}]}});
+        pod_on_create(&mut pod, Some(&sa), "abcde", (300, 300));
+        assert_eq!(pod["spec"]["imagePullSecrets"], json!([{"name": "ghcr"}]));
+        let mut own = json!({"spec": {"imagePullSecrets": [{"name": "mine"}], "containers": [{"name": "c", "image": "x"}]}});
+        pod_on_create(&mut own, Some(&sa), "abcde", (300, 300));
+        assert_eq!(own["spec"]["imagePullSecrets"], json!([{"name": "mine"}]));
+        let mut none = json!({"spec": {"containers": [{"name": "c", "image": "x"}]}});
+        pod_on_create(&mut none, None, "abcde", (300, 300));
+        assert!(none["spec"].get("imagePullSecrets").is_none());
+    }
 }
