@@ -19,6 +19,14 @@ allow reasonable time for a fix before disclosing.
 
 Only the latest release gets fixes while litek8s is 0.x.
 
+## Verifying releases
+
+Release archives carry signed GitHub artifact attestations (SLSA build
+provenance and a CycloneDX SBOM) from v0.2.23 on:
+`gh attestation verify <archive> --repo jairoFernandez/litek8s`, or
+`LITEK8S_VERIFY=1` with install.sh. See
+[docs/install.md](docs/install.md#verify-a-release).
+
 ## Known security limitations
 
 These are design gaps of the current version, not vulnerabilities to

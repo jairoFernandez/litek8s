@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **Signed releases with an SBOM**: every release archive (and
+  `SHA256SUMS`) gets a GitHub artifact attestation with its SLSA build
+  provenance, signed with Sigstore, and a CycloneDX SBOM of the Rust crates
+  in the binary (attested on each archive and attached as
+  `litek8s-<version>.cdx.json`). `gh attestation verify <archive> --repo
+  jairoFernandez/litek8s` checks one; `LITEK8S_VERIFY=1` makes install.sh
+  check it and fail otherwise. See
+  [docs/install.md](docs/install.md#verify-a-release).
+
 ## 0.2.22
 
 - **419/419 on the official Kubernetes v1.33 conformance suite** on

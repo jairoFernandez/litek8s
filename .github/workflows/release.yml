@@ -11,6 +11,14 @@ name: release
 #                                       entitlement, plus the dev VM's guest
 #                                       (share/litek8s/vm), whose /init is the
 #                                       linux-aarch64 binary of the same run
+#   litek8s-<tag>.cdx.json              CycloneDX SBOM of the Rust crates the
+#                                       binary is built from (Cargo.lock)
+#
+# Each archive (and SHA256SUMS) also gets a GitHub artifact attestation:
+# SLSA build provenance (which workflow, commit and runner built it) and the
+# SBOM, signed with Sigstore. Check one with
+#   gh attestation verify <archive> --repo jairoFernandez/litek8s
+# or LITEK8S_VERIFY=1 with install.sh.
 #
 # Layout and install: dev/release/package.sh, install.sh.
 
@@ -166,12 +174,46 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
+  # Runs in the dry run too, so a broken SBOM shows up before tagging.
+  sbom:
+    needs: version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-cyclonedx
+
+      # Normal dependencies only (no dev or build-only crates): what ends up
+      # in the binary, for the release's Linux and macOS targets.
+      - name: SBOM (CycloneDX, from Cargo.lock)
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cargo cyclonedx --format json --spec-version 1.5 --no-build-deps \
+            --override-filename "litek8s-$VERSION.cdx"
+          mkdir -p dist
+          mv "litek8s-$VERSION.cdx.json" dist/
+          jq -e '.components | length > 50' "dist/litek8s-$VERSION.cdx.json" >/dev/null
+          jq -r '"\(.metadata.component.name) \(.metadata.component.version): \(.components | length) components"' "dist/litek8s-$VERSION.cdx.json"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-sbom
+          path: dist/*.cdx.json
+          if-no-files-found: error
+
   release:
-    needs: [version, linux, macos]
+    needs: [version, linux, macos, sbom]
     if: github.ref_type == 'tag'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      # Artifact attestations: a Sigstore certificate from the job's OIDC
+      # token, stored with the repository's attestations.
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
 
@@ -186,6 +228,19 @@ jobs:
         run: |
           sha256sum -- *.tar.gz > SHA256SUMS
           cat SHA256SUMS
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+
+      - name: Attest the SBOM
+        uses: actions/attest-sbom@v2
+        with:
+          subject-path: dist/*.tar.gz
+          sbom-path: dist/litek8s-${{ needs.version.outputs.version }}.cdx.json
 
       - name: Create the draft release
         env:

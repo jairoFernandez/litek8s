@@ -27,6 +27,10 @@
 #   LITEK8S_REPO         owner/name on GitHub (default: jairoFernandez/litek8s)
 #   LITEK8S_DOWNLOAD_URL where the archives and SHA256SUMS are (default: the
 #                        release's download URL on GitHub; for mirrors and tests)
+#   LITEK8S_VERIFY=1     also check the archive's signed build provenance
+#                        (`gh attestation verify`: built by this repository's
+#                        release workflow from a tag). Needs the GitHub CLI,
+#                        logged in; releases from v0.2.23 on.
 set -eu
 
 REPO="${LITEK8S_REPO:-jairoFernandez/litek8s}"
@@ -134,6 +138,15 @@ else
   die "needs sha256sum or shasum to verify the download"
 fi
 [ "$expected" = "$actual" ] || die "checksum mismatch for $archive (expected $expected, got $actual)"
+
+if [ "${LITEK8S_VERIFY:-}" = 1 ]; then
+  command -v gh >/dev/null 2>&1 || die "LITEK8S_VERIFY=1 needs the GitHub CLI (gh), logged in"
+  say "Verifying the build provenance of $archive"
+  gh attestation verify "$tmp/$archive" --repo "$REPO" \
+    --signer-workflow "$REPO/.github/workflows/release.yml" --source-ref "refs/tags/$version" >/dev/null ||
+    die "$archive has no valid build provenance from $REPO's release workflow at $version"
+  say "Built by $REPO's release workflow from $version"
+fi
 
 tar -xzf "$tmp/$archive" -C "$tmp"
 src="$tmp/litek8s-$version-$target"

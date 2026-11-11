@@ -19,6 +19,28 @@ VM's guest kernel and root image to `~/.local/share/litek8s/vm`). Options:
 download an archive from the [releases page](https://github.com/jairoFernandez/litek8s/releases)
 and check it against `SHA256SUMS`.
 
+### Verify a release
+
+Every release archive carries a signed
+[artifact attestation](https://docs.github.com/actions/security-for-github-actions/using-artifact-attestations):
+SLSA build provenance (the workflow, commit and tag that built it, signed
+with Sigstore) and a CycloneDX SBOM of the Rust crates in the binary, also
+attached to the release as `litek8s-<version>.cdx.json`. With the
+[GitHub CLI](https://cli.github.com) logged in:
+
+```bash
+gh attestation verify litek8s-v0.2.23-linux-x86_64.tar.gz --repo jairoFernandez/litek8s
+```
+
+or let the install script do it (it fails if the check does):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jairoFernandez/litek8s/main/install.sh | LITEK8S_VERIFY=1 sh
+```
+
+`--predicate-type https://cyclonedx.org/bom` checks the SBOM attestation
+instead of the provenance. Releases before v0.2.23 have checksums only.
+
 On Linux, dev clusters run rootless and need `crun`, `uidmap`, `passt`
 (or `slirp4netns`), `iproute2` and `iptables`: `litek8s dev setup` checks
 everything and says what is missing ([dev.md](dev.md#what-it-needs)), and
