@@ -12,7 +12,7 @@ flowchart TB
         direction LR
         pi["Raspberry Pi"] ~~~ old["old laptop"] ~~~ ec2["cheap cloud VM"]
     end
-    nodes -->|"join token · HTTPS"| s
+    nodes -->|"agent token · HTTPS"| s
     wg["pods talk across nodes over a WireGuard mesh<br/>10.42.0.0/16, one /24 per node<br/>relayed by the server across NATs"]
     nodes -.- wg
 ```
@@ -26,7 +26,7 @@ curl -fsSL https://raw.githubusercontent.com/jairoFernandez/litek8s/main/install
 
 # every other machine: the command the server printed
 curl -fsSL https://raw.githubusercontent.com/jairoFernandez/litek8s/main/install.sh | sh -s -- \
-  agent --join https://192.168.1.10:6443 --token K10<hash>::<secret>
+  agent --join https://192.168.1.10:6443 --token K10<hash>::node:<secret>
 ```
 
 This installs `/usr/local/bin/litek8s` (and `crun`/`iptables` from the
@@ -45,7 +45,7 @@ in a file ([clusters.md](clusters.md)):
 
 ```bash
 litek8s install server --ssh pi@192.168.1.10      # adds the kubeconfig context
-litek8s install agent --ssh me@old-laptop --join https://192.168.1.10:6443 --token K10<hash>::<secret>
+litek8s install agent --ssh me@old-laptop --join https://192.168.1.10:6443 --token K10<hash>::node:<secret>
 
 cat > cluster.yaml <<'EOF'
 apiVersion: litek8s.dev/v1
@@ -64,7 +64,7 @@ Without systemd, run the same processes yourself:
 
 ```bash
 litek8s apiserver --listen 0.0.0.0:6443 --data-dir /var/lib/litek8s/apiserver --node-ip 192.168.1.10
-litek8s agent --join https://192.168.1.10:6443 --token K10<hash>::<secret> --node-ip 192.168.1.21
+litek8s agent --join https://192.168.1.10:6443 --token K10<hash>::node:<secret> --node-ip 192.168.1.21
 ```
 
 Every node gets a `/24` of `10.42.0.0/16`; Services and DNS work

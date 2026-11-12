@@ -7,7 +7,8 @@ Honest list; more in [skills/litek8s/references/differences.md](../skills/litek8
   clients and enforces RBAC by default (`--authorization-mode RBAC`): service
   account tokens, client certificates signed by the cluster's client CA (CN
   user, O groups; the kubeconfig it writes is `system:admin` in
-  `system:masters`), and the join token (an administrator's credential).
+  `system:masters`), the join token (an administrator's credential, for servers) and the agent
+  token (nodes only).
   Anonymous requests reach only `/healthz`, `/livez`, `/readyz`, `/version`
   and the OIDC discovery documents; everything else gets 401.
   `--authorization-mode RBAC-audit` decides, logs (`RBAC-audit: DENY ...`,

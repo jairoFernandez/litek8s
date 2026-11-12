@@ -27,7 +27,15 @@ administrador del cluster, con o sin token. Los clusters de desarrollo
 - **Pods**: el token de su service account (se verifican la firma, la cuenta,
   el pod al que está ligado y su audiencia, como en TokenReview). Un token para
   otra audiencia (uno emitido para Vault) se rechaza.
-- **Nodos y peers de HA**: el join token, una credencial de `system:masters`.
+- **Nodos**: el token de agente (`<data-dir>/agent-token`, `K10<hash de la CA>::node:<secreto>`)
+  une un nodo y abre su conexión de agente; no es una credencial de
+  administrador. Como bearer token solo autentica a un nodo que ya se unió,
+  junto con su nombre y su contraseña de nodo (`x-litek8s-node`,
+  `x-litek8s-node-password`): `system:node:<nombre>` en `system:nodes`, que
+  puede leer los Nodes (ClusterRole `system:litek8s:node`).
+- **Peers de HA**: el join token (`<data-dir>/join-token`), una credencial de
+  `system:masters`. También une nodos, como antes; para eso mejor el token de
+  agente.
 - **Impersonation**: cabeceras `Impersonate-User` / `-Group`, permitidas con el
   verbo `impersonate` (`kubectl --as`).
 - **Anónimo**: solo `/healthz`, `/livez`, `/readyz`, `/version`, `/cacerts` y

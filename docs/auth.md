@@ -27,7 +27,14 @@ unchanged: they stay open (`AlwaysAllow`) on 127.0.0.1.
 - **Pods**: their service account token (signature, account, bound pod and
   audience checked, as TokenReview does). A token for another audience (one
   minted for Vault) is refused.
-- **Nodes and HA peers**: the join token, a `system:masters` credential.
+- **Nodes**: the agent token (`<data-dir>/agent-token`, `K10<CA hash>::node:<secret>`)
+  joins a node and opens its agent connection; it is no admin credential.
+  As a bearer token it authenticates only a node that already joined,
+  together with the node's name and password (`x-litek8s-node`,
+  `x-litek8s-node-password`): `system:node:<name>` in `system:nodes`, which
+  may read Nodes (ClusterRole `system:litek8s:node`).
+- **HA peers**: the join token (`<data-dir>/join-token`), a `system:masters`
+  credential. It also joins nodes, as before; prefer the agent token there.
 - **Impersonation**: `Impersonate-User` / `-Group` headers, allowed with the
   `impersonate` verb (`kubectl --as`).
 - **Anonymous**: only `/healthz`, `/livez`, `/readyz`, `/version`, `/cacerts`

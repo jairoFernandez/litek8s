@@ -901,7 +901,7 @@ pub async fn install_cmd(role: Role, mut args: Vec<String>, flags: SshFlags, ski
     let context = flags.context.clone().unwrap_or_else(|| if result.node.is_empty() { remote.probe.hostname.clone() } else { result.node.clone() });
     let path = write_context(&context, &url, &result)?;
     println!("\nkubeconfig context {context} ({url}) is in {} and is the current one:\n  kubectl get nodes", path.display());
-    if let (Some(join), Some(token)) = (&result.url, &result.token) {
+    if let (Some(join), Some(token)) = (&result.url, result.agent_token.as_ref().or(result.token.as_ref())) {
         println!("\nJoin another machine as a node:\n  litek8s install agent --ssh <user@host> --join {join} --token {token}");
     }
     Ok(())

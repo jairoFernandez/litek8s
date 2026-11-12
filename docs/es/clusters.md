@@ -108,7 +108,9 @@ litek8s cluster delete -f cluster.yaml --yes [--purge]
    `--cluster-init` y los demás `--server <first> --token <its token>`
    ([docs/ha.md](../ha.md));
 3. agrega el contexto de kubeconfig `<metadata.name>`;
-4. instala los agents, todos a la vez, con `--join <first server>` y su token;
+4. instala los agents, todos a la vez, con `--join <first server>` y su token
+   de agente (que solo une nodos; los servidores anteriores a 0.2.24 no
+   tienen, y entonces es el join token);
 5. define las labels y los taints de cada Node a través de la API, y anota el
    Node con el cluster, su rol y su destino SSH (`cluster.litek8s.dev/*`);
 6. informa qué cambió, o `cluster home is up to date: nothing changed`.

@@ -486,6 +486,7 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
         // The whole token (with the CA hash); reading it back yields the secret.
         let path = dir.join("join-token");
         std::fs::write(&path, &token).with_context(|| format!("failed to write {}", path.display()))?;
+        write_private(&dir.join("agent-token"), &state.agent_token())?;
     }
     let node_ip = config.node_ip.map(|ip| ip.to_string()).unwrap_or_else(super::agent::local_ip);
     if let Some(path) = &config.kubeconfig_out {
@@ -664,7 +665,7 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
         }
     }
     let advertise = config.advertise_address.clone().unwrap_or_else(|| node_ip.clone());
-    eprintln!("apiserver: join nodes with: litek8s agent --join https://{advertise}:{} --token {token}", addr.port());
+    eprintln!("apiserver: join nodes with: litek8s agent --join https://{advertise}:{} --token {}", addr.port(), state.agent_token());
     if let (Some(agent), Some(settings)) = (&agent, config.docker.take()) {
         match agent.runtime().image_store() {
             Some(images) => match crate::docker::start(settings, images).await {
@@ -940,6 +941,18 @@ pub(crate) fn write_admin_kubeconfig(path: &Path, tls: &tls::ServerTls, addr: So
     let config = tls.admin_kubeconfig(&format!("https://{host}:{}", addr.port()), name)?;
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, config).with_context(|| format!("failed to write {}", tmp.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    }
+    std::fs::rename(&tmp, path).with_context(|| format!("failed to write {}", path.display()))
+}
+
+/// Write `data` to `path`, readable by its owner only.
+fn write_private(path: &Path, data: &str) -> Result<()> {
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, data).with_context(|| format!("failed to write {}", tmp.display()))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -4489,6 +4502,11 @@ impl ApiState {
     /// A join token for this server.
     pub fn join_token(&self) -> String {
         join::Token::format(self.tls.as_ref().map(|t| t.ca_pem()), &self.join_secret)
+    }
+
+    /// The agent token: joins nodes, not servers, and is no admin credential.
+    pub fn agent_token(&self) -> String {
+        join::Token::format_agent(self.tls.as_ref().map(|t| t.ca_pem()), &self.join_secret)
     }
 
     /// `/metrics`

@@ -1,5 +1,19 @@
 # Changelog
 
+## Unreleased
+
+- **An agent token that joins nodes and nothing else**: next to the join
+  token, a server keeps an agent token in `<data-dir>/agent-token`
+  (`K10<CA hash>::node:<secret>`, like k3s's `--agent-token`), derived from
+  the join secret so every HA server has the same one. It joins nodes and
+  opens their agent connection, but cannot add a server to the control plane,
+  and as a bearer token it is no `system:masters` credential: it
+  authenticates only a node that already joined, with its name and node
+  password, as `system:node:<name>` (which may read Nodes). The server's
+  startup line, `install server`, `install --ssh` and `cluster apply` hand
+  it to agents; the join token is printed for servers only. Agents installed
+  with the join token keep working. See [docs/auth.md](docs/auth.md).
+
 ## 0.2.23
 
 - **GPUs and other devices from CDI specs**: on crun nodes the agent reads
