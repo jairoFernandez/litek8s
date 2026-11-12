@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.23
 
 - **GPUs and other devices from CDI specs**: on crun nodes the agent reads
   the Container Device Interface specs in `/etc/cdi` and `/var/run/cdi`
