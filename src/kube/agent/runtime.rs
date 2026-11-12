@@ -177,6 +177,9 @@ pub struct ContainerSpec {
     pub share_process_namespace: bool,
     /// `spec.hostPID`: use the node's PID namespace.
     pub host_pid: bool,
+    /// CDI devices for the container, fully qualified (`nvidia.com/gpu=0`);
+    /// crun only.
+    pub cdi_devices: Vec<String>,
 }
 
 /// Capacity and identity of the machine the containers run on (for a
@@ -725,6 +728,9 @@ impl PodRuntime for DockerPods {
     }
 
     async fn run_container(&self, sandbox: &str, spec: &ContainerSpec) -> Result<String> {
+        if !spec.cdi_devices.is_empty() {
+            bail!("CDI devices ({}) need the crun runtime", spec.cdi_devices.join(", "));
+        }
         let ns = format!("container:{sandbox}");
         let mut mounts: Vec<Mount> = spec.mounts.iter().map(docker_mount).collect();
         // The image's VOLUMEs: Docker would make anonymous volumes, named by

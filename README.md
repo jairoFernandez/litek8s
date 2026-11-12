@@ -90,6 +90,9 @@ kubectl get nodes     # your kubectl, Helm and Argo CD work unchanged
 - **Run one LLM across all your machines.** A model too big for any one of
   them runs on several with llama.cpp's RPC backend, as a DaemonSet behind
   one OpenAI-compatible endpoint. → [One LLM across machines](https://litek8s.dev/docs/llm-cluster/)
+- **Give pods your GPUs.** A node's CDI specs (`nvidia-ctk cdi generate`)
+  turn into `nvidia.com/gpu` (or `amd.com/gpu`...) resources pods ask for in
+  their limits: no device plugin, no operator. → [GPUs](https://litek8s.dev/docs/gpus/)
 - **Stay up when a server dies.** Three API servers share the store through
   Raft, no etcd; any one can fail without losing a write.
   → [HA control plane](https://litek8s.dev/docs/ha/)

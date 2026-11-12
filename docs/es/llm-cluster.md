@@ -111,7 +111,9 @@ cambiar el modelo después, edita el ConfigMap y reinicia el servidor:
 - **GPUs.** Un nodo con GPU corre un build de `rpc-server` para GPU (los
   tarballs CUDA/Vulkan/ROCm de llama.cpp y las imágenes
   `server-cuda`/`server-vulkan`); el worker ofrece entonces la GPU en lugar de
-  la CPU. No se probó aquí.
+  la CPU. El pod recibe la GPU pidiendo `nvidia.com/gpu: 1` (o `amd.com/gpu`)
+  en sus limits, desde los specs CDI del nodo ([gpus.md](gpus.md)). No se
+  probó aquí.
 
 ## Mediciones
 

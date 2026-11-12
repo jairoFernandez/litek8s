@@ -15,6 +15,7 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+use super::cdi;
 use super::podcert;
 use super::probe::{self, ProbeKind, ProbeResult, ProbeTarget};
 use super::protocol::Message;
@@ -1384,6 +1385,7 @@ impl<R: PodRuntime> Worker<R> {
                 supplemental_groups.push(g as u32);
             }
         }
+        let cdi_devices = self.cdi_devices(init, i)?;
         let mut labels = self.labels();
         labels.insert(LABEL_CONTAINER.into(), c.name.clone());
         labels.insert(LABEL_ATTEMPT.into(), c.attempts.to_string());
@@ -1423,7 +1425,28 @@ impl<R: PodRuntime> Worker<R> {
             sysctls: HashMap::new(),
             share_process_namespace: self.pod.pointer("/spec/shareProcessNamespace").and_then(Value::as_bool) == Some(true),
             host_pid: self.pod.pointer("/spec/hostPID").and_then(Value::as_bool) == Some(true),
+            cdi_devices,
         })
+    }
+
+    /// The CDI devices (GPUs...) the container gets for the node's CDI
+    /// resources in its limits: its share of what the pod holds.
+    fn cdi_devices(&self, init: bool, i: usize) -> Result<Vec<String>, String> {
+        let devices = &self.agent.config().devices;
+        let provides = |r: &str| devices.provides(r);
+        let wants = |cs: &[Container]| -> Vec<_> { cs.iter().map(|c| cdi::container_requests(&c.spec, &provides)).collect() };
+        let (init_wants, main_wants) = (wants(&self.init), wants(&self.main));
+        let mine = if init { &init_wants[i] } else { &main_wants[i] };
+        if mine.is_empty() {
+            return Ok(Vec::new());
+        }
+        let live = |uid: &str| self.agent.has_worker(uid);
+        let mut held = std::collections::BTreeMap::new();
+        for (kind, n) in cdi::pod_totals(&init_wants, &main_wants) {
+            let names = devices.allocate(&self.uid, &kind, n, &live).map_err(|e| format!("{e:#}"))?;
+            held.insert(kind, names);
+        }
+        Ok(cdi::container_devices(&held, &main_wants, init, i, mine))
     }
 
     fn phase(&self) -> &'static str {
@@ -1616,6 +1639,11 @@ impl<R: PodRuntime> Worker<R> {
 
     async fn report(&mut self) {
         let status = self.status();
+        // A finished pod runs nothing again, and the scheduler no longer
+        // counts its requests: its devices are free for the next one.
+        if matches!(status["phase"].as_str(), Some("Succeeded" | "Failed")) {
+            self.agent.config().devices.release(&self.uid);
+        }
         if self.last_sent.as_ref() == Some(&status) {
             return;
         }

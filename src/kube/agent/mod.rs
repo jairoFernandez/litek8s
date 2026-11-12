@@ -19,6 +19,7 @@
 //! connection (after a laptop slept, or a NAT forgot it) is replaced quickly.
 
 pub(crate) mod crun;
+pub mod cdi;
 pub mod hub;
 mod kubelet;
 pub mod netpol;
@@ -97,6 +98,8 @@ pub struct AgentConfig {
     pub node: Value,
     /// This node's address (`status.hostIP`, hostNetwork pods' IP).
     pub node_ip: String,
+    /// CDI devices (GPUs...) pods can ask for as extended resources.
+    pub devices: Arc<cdi::Devices>,
 }
 
 /// Where pods reach the API server, as announced by the server.
@@ -316,6 +319,11 @@ impl<R: PodRuntime> Agent<R> {
         &self.rt
     }
 
+    /// Whether a worker runs the pod with this uid.
+    pub(crate) fn has_worker(&self, uid: &str) -> bool {
+        self.workers.lock().unwrap().contains_key(uid)
+    }
+
     pub(crate) fn config(&self) -> &AgentConfig {
         &self.config
     }
@@ -410,6 +418,7 @@ impl<R: PodRuntime> Agent<R> {
         tokio::spawn(async move {
             pod::run(agent.clone(), pod_obj, tx, rx).await;
             agent.workers.lock().unwrap().remove(&uid);
+            agent.config.devices.release(&uid);
             agent.views.lock().unwrap().remove(&uid);
             agent.claims.lock().unwrap().remove(&uid);
         });
@@ -1047,6 +1056,19 @@ pub async fn node_agent_with(
     let node_name = node_name.unwrap_or_else(default_node_name);
     let node_ip = network.node_ip.clone();
     let mut node = describe_node(&rt, &node_name, &node_ip, &network.pod_cidr).await?;
+    // CDI devices need crun, which applies their edits to the OCI spec.
+    let devices = if use_crun {
+        let dirs = cdi::spec_dirs();
+        let devices = cdi::Devices::new(&cdi::Registry::load(&dirs), root_dir.join("cdi-allocations.json"));
+        for (kind, n) in devices.capacity() {
+            eprintln!("node-agent: {n} {kind} device(s) from CDI specs");
+            node["status"]["capacity"][&kind] = json!(n.to_string());
+            node["status"]["allocatable"][&kind] = json!(n.to_string());
+        }
+        devices
+    } else {
+        cdi::Devices::none()
+    };
     if let Some(o) = &overlay {
         node["metadata"]["annotations"][overlay::ANNOTATION_PUBLIC_KEY] = json!(o.public_key());
         let host = network.external_ip.as_deref().unwrap_or(&node_ip);
@@ -1068,7 +1090,7 @@ pub async fn node_agent_with(
     };
     let _ = std::fs::write(root_dir.join("join.json"), serde_json::to_vec(&saved)?);
     eprintln!("node-agent: running pods with {}", node.pointer("/status/nodeInfo/containerRuntimeVersion").and_then(Value::as_str).unwrap_or("?"));
-    let agent = Agent::with_overlay(rt, AgentConfig { node_name, root_dir, node, node_ip }, overlay);
+    let agent = Agent::with_overlay(rt, AgentConfig { node_name, root_dir, node, node_ip, devices: Arc::new(devices) }, overlay);
     agent.proxy.publish_lb.store(network.loadbalancer_ports, Ordering::Relaxed);
     tokio::spawn(kubelet::serve(agent.clone(), kubelet::PORT));
     Ok(agent)

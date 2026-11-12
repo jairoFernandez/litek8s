@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **GPUs and other devices from CDI specs**: on crun nodes the agent reads
+  the Container Device Interface specs in `/etc/cdi` and `/var/run/cdi`
+  (`nvidia-ctk cdi generate`, `amd-ctk`...) and advertises each kind as an
+  extended resource, one unit per device (`nvidia.com/gpu: 2`). A container
+  asking for it in its limits gets that many devices of its own, with their
+  CDI edits (device nodes allowed in its device cgroup, driver mounts,
+  environment, OCI hooks) applied to its `config.json`; which pod holds
+  which device survives agent restarts (`cdi-allocations.json`). No device
+  plugin or operator. `LITEK8S_CDI_SPEC_DIRS` changes the directories. See
+  [docs/gpus.md](docs/gpus.md).
 - **Signed releases with an SBOM**: every release archive (and
   `SHA256SUMS`) gets a GitHub artifact attestation with its SLSA build
   provenance, signed with Sigstore, and a CycloneDX SBOM of the Rust crates
