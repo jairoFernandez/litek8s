@@ -160,7 +160,7 @@ async fn pod_gets_its_certificate_and_trust_bundle() {
     let root = tempfile::tempdir().unwrap();
     let agent = Agent::new(
         FakeRuntime::default(),
-        AgentConfig { node_name: "n1".into(), root_dir: root.path().to_path_buf(), node: json!({"metadata": {"name": "n1"}}), node_ip: "10.0.0.5".into() },
+        AgentConfig { node_name: "n1".into(), root_dir: root.path().to_path_buf(), node: json!({"metadata": {"name": "n1"}}), node_ip: "10.0.0.5".into(), devices: Default::default() },
     );
     let rt = agent.runtime().clone();
     tokio::spawn(super::run_local(api.clone(), agent, 6443));

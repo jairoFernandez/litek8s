@@ -32,6 +32,7 @@ pub const DOCS: &[Doc] = &[
     Doc { path: "observability.md", description: "Built-in metrics, PromQL subset, log search, alerts", text: include_str!("../../docs/observability.md") },
     Doc { path: "ha.md", description: "HA control plane with Raft", text: include_str!("../../docs/ha.md") },
     Doc { path: "networking.md", description: "The pod overlay across nodes: NAT, relays, routes, overlay metrics", text: include_str!("../../docs/networking.md") },
+    Doc { path: "gpus.md", description: "GPUs and other devices from CDI specs as extended resources (nvidia.com/gpu)", text: include_str!("../../docs/gpus.md") },
     Doc { path: "registries.md", description: "Private registries and mirrors for image pulls (registries.yaml)", text: include_str!("../../docs/registries.md") },
     Doc { path: "crds.md", description: "CRDs: schemas, CEL, server-side apply", text: include_str!("../../docs/crds.md") },
     Doc { path: "ui.md", description: "litek8s ui, the terminal UI", text: include_str!("../../docs/ui.md") },

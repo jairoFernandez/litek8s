@@ -586,7 +586,14 @@ impl CrunPods {
             mounts: self.resolve_mounts(spec)?,
             cgroups_path: cgroup.clone(),
         };
-        let config = spec::config(&params)?;
+        let mut config = spec::config(&params)?;
+        if !spec.cdi_devices.is_empty() {
+            // Read now, not at startup: the vendor tool may have regenerated
+            // the specs (a driver upgrade) since.
+            super::cdi::Registry::load(&super::cdi::spec_dirs())
+                .apply(&mut config, &spec.cdi_devices)
+                .with_context(|| format!("CDI devices {}", spec.cdi_devices.join(", ")))?;
+        }
         std::fs::write(dir.join("config.json"), serde_json::to_vec(&config)?)?;
         Ok(ContainerMeta {
             id: id.to_string(),

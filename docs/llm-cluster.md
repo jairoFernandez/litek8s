@@ -107,7 +107,9 @@ restart deploy/llama-server`. Remove everything with
   request's details).
 - **GPUs.** A node with a GPU runs a GPU build of `rpc-server` (llama.cpp's
   CUDA/Vulkan/ROCm tarballs and `server-cuda`/`server-vulkan` images); the
-  worker then offers the GPU instead of the CPU. Not tested here.
+  worker then offers the GPU instead of the CPU. The pod gets the GPU by
+  asking for `nvidia.com/gpu: 1` (or `amd.com/gpu`) in its limits, from the
+  node's CDI specs ([gpus.md](gpus.md)). Not tested here.
 
 ## Measured
 
