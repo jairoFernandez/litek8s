@@ -80,10 +80,11 @@ same process, so pods run on this machine (`--no-node` to only serve).
 Plain HTTP serves kubectl; pods reach the same port over TLS. There is no
 authentication for API clients, so keep the port on a trusted network.
 
-More nodes join with the command the server prints at startup (the token is
-also kept in <data-dir>/join-token):
+More nodes join with the command the server prints at startup (its agent
+token, kept in <data-dir>/agent-token, joins nodes only; the join token in
+<data-dir>/join-token also adds servers and is a cluster admin credential):
   litek8s apiserver --data-dir /var/lib/litek8s/apiserver --listen 0.0.0.0:6443 --node-ip 192.168.1.10
-  litek8s agent --join https://192.168.1.10:6443 --token K10...::...
+  litek8s agent --join https://192.168.1.10:6443 --token K10...::node:...
 
 Pods of all nodes share one network (each node gets a /24 of --cluster-cidr)
 over a WireGuard mesh (UDP --wireguard-port, kernel WireGuard). A node whose
@@ -176,12 +177,13 @@ Keyboard only by default; ? lists the keys. Fits 80x24. See docs/ui.md.";
 
 const NODE_AGENT_AFTER_HELP: &str = "\
 Examples:
-  litek8s agent --join https://192.168.1.10:6443 --token K10<hash>::<secret>
+  litek8s agent --join https://192.168.1.10:6443 --token K10<hash>::node:<secret>
   litek8s agent --join https://apiserver:6443 --token $(cat token) --node-name pi-4 --node-ip 192.168.1.21
   litek8s agent --join https://home.example:6443 --token ... --node-grace-period 15m   # a laptop that sleeps
 
 The token comes from the API server (printed at startup, kept in
-<data-dir>/join-token); it pins the cluster CA, so the agent checks it is
+<data-dir>/agent-token; the join token in <data-dir>/join-token works too);
+it pins the cluster CA, so the agent checks it is
 talking to the right server. The agent keeps one connection to the API
 server: pods bound to this node are pushed over it, status and heartbeats go
 back on it, and kubectl logs/exec are relayed through it. It reconnects on

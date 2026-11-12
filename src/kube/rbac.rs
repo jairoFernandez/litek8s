@@ -770,10 +770,16 @@ pub fn bootstrap_objects() -> Vec<(&'static str, Value)> {
         ("clusterroles", role("system:service-account-issuer-discovery", json!({}), json!([
             {"nonResourceURLs": ["/.well-known/openid-configuration", "/.well-known/openid-configuration/", "/openid/v1/jwks", "/openid/v1/jwks/"], "verbs": ["get"]},
         ]))),
+        // What a node's own identity (the agent token) may read: the Nodes,
+        // as upstream's Node authorizer lets a kubelet.
+        ("clusterroles", role("system:litek8s:node", json!({}), json!([
+            {"apiGroups": [""], "resources": ["nodes"], "verbs": ["get", "list", "watch"]},
+        ]))),
         ("clusterroles", role("system:monitoring", json!({}), json!([
             {"nonResourceURLs": ["/healthz", "/healthz/*", "/livez", "/livez/*", "/metrics", "/metrics/slis", "/readyz", "/readyz/*"], "verbs": ["get"]},
         ]))),
         ("clusterrolebindings", binding("cluster-admin", "cluster-admin", json!([group(MASTERS)]))),
+        ("clusterrolebindings", binding("system:litek8s:node", "system:litek8s:node", json!([group("system:nodes")]))),
         ("clusterrolebindings", binding("system:discovery", "system:discovery", json!([group(AUTHENTICATED)]))),
         ("clusterrolebindings", binding("system:basic-user", "system:basic-user", json!([group(AUTHENTICATED)]))),
         ("clusterrolebindings", binding("system:public-info-viewer", "system:public-info-viewer", json!([group(AUTHENTICATED), group(UNAUTHENTICATED)]))),

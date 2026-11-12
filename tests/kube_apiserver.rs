@@ -668,6 +668,37 @@ async fn sa_token(addr: &str, admin: &str, ns: &str, sa: &str, audiences: &[&str
 }
 
 #[tokio::test]
+async fn agent_tokens_join_nodes_but_are_no_admin_credential() -> Result<()> {
+    let (addr, admin, state) = start_authorized(litek8s::kube::rbac::Mode::Rbac).await?;
+    let agent = bearer(&state.agent_token());
+    let password = "0123456789abcdef0123";
+    // Alone, the agent token reads nothing.
+    assert_eq!(call_as(&addr, "GET", "/api/v1/secrets", &[("Authorization", agent.as_str())], None).await?.0, 401);
+    // It joins a node.
+    let join = [("Authorization", agent.as_str()), ("x-litek8s-node-password", password)];
+    let (code, joined) = call_as(&addr, "POST", "/apis/agent.litek8s.dev/v1/join", &join, Some(json!({"node": "n1"}))).await?;
+    assert_eq!(code, 200, "{joined}");
+    assert!(joined["podCidr"].as_str().is_some_and(|c| c.ends_with("/24")), "{joined}");
+    // Joined (the join registers its Node), the node is system:node:n1: it
+    // reads Nodes, not Secrets.
+    let admin_h = bearer(&admin);
+    let node = [("Authorization", agent.as_str()), ("x-litek8s-node-password", password), ("x-litek8s-node", "n1")];
+    let (code, n1) = call_as(&addr, "GET", "/api/v1/nodes/n1", &node, None).await?;
+    assert_eq!((code, n1["metadata"]["name"].as_str()), (200, Some("n1")), "{n1}");
+    let (code, denied) = call_as(&addr, "GET", "/api/v1/namespaces/kube-system/secrets", &node, None).await?;
+    assert_eq!(code, 403, "{denied}");
+    assert!(denied["message"].as_str().is_some_and(|m| m.contains("system:node:n1")), "{denied}");
+    let wrong = [("Authorization", agent.as_str()), ("x-litek8s-node-password", "another-password-0000"), ("x-litek8s-node", "n1")];
+    assert_eq!(call_as(&addr, "GET", "/api/v1/nodes/n1", &wrong, None).await?.0, 401);
+    // Another machine with the agent token cannot take the node's name.
+    let other = [("Authorization", agent.as_str()), ("x-litek8s-node-password", "another-password-0000")];
+    assert_eq!(call_as(&addr, "POST", "/apis/agent.litek8s.dev/v1/join", &other, Some(json!({"node": "n1"}))).await?.0, 403);
+    // The join token keeps working for everything.
+    assert_eq!(call_as(&addr, "GET", "/api/v1/secrets", &[("Authorization", admin_h.as_str())], None).await?.0, 200);
+    Ok(())
+}
+
+#[tokio::test]
 async fn rbac_authenticates_and_authorizes_requests() -> Result<()> {
     let (addr, admin, _state) = start_authorized(litek8s::kube::rbac::Mode::Rbac).await?;
     let admin_h = bearer(&admin);

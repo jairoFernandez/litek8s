@@ -18,12 +18,13 @@ INSTALL=https://raw.githubusercontent.com/jairoFernandez/litek8s/main/install.sh
 # Servers reach each other on the API port and the Raft port (API port + 1).
 curl -fsSL $INSTALL | sh -s -- server --cluster-init
 
-# Two more join it with the token the first prints (also in
-# /var/lib/litek8s/apiserver/join-token).
+# Dos más se unen con el join token que imprime el primero (también en
+# /var/lib/litek8s/apiserver/join-token; una credencial de administrador).
 curl -fsSL $INSTALL | sh -s -- server --server https://192.168.1.10:6443 --token K10...::...
 
-# Agents join any server and learn the others.
-curl -fsSL $INSTALL | sh -s -- agent --join https://192.168.1.10:6443 --token K10...::...
+# Los agentes se unen a cualquier servidor y conocen los demás, con el token
+# de agente (/var/lib/litek8s/apiserver/agent-token: une nodos, nada más).
+curl -fsSL $INSTALL | sh -s -- agent --join https://192.168.1.10:6443 --token K10...::node:...
 
 litek8s server list --server http://192.168.1.10:6443
 litek8s server remove lk3 --server https://192.168.1.10:6443 --token K10...::...
@@ -180,8 +181,10 @@ kube-apiserver).
   en segundo plano, de modo que su conexión se reutiliza en lugar de volver a
   abrirse. Un servidor que se une obtiene la CA (verificada contra el hash del
   token), el certificado de servicio y la clave de service account del
-  servidor al que se une. Como en k3s por defecto, el token de agent es el
-  token de servidor: quien lo tenga puede unir cualquiera de los dos.
+  servidor al que se une. Los servidores se unen con el join token
+  (`<data-dir>/join-token`), una credencial de administrador del cluster; los
+  nodos, con el token de agente (`<data-dir>/agent-token`, el mismo en todos
+  los servidores), que une nodos y nada más, como `--agent-token` en k3s.
 - **Temporizadores.** Heartbeats cada 300 ms; un follower convoca una elección
   después del lease del líder (3 s) más un tiempo aleatorio de 1.5–3 s sin
   recibir uno, así que un líder muerto se reemplaza en unos 5 s (bench/HA.md:

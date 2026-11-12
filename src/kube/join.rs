@@ -17,6 +17,14 @@
 //! Each node keeps a random node password; the server stores its hash in a
 //! Secret on first join, so another machine with the token cannot take over
 //! an existing node's name (it has to be deleted first, as in k3s).
+//!
+//! Next to the join token the server prints an agent token (k3s's
+//! `--agent-token`), `K10<CA hash>::node:<agent secret>`, the agent secret
+//! derived from the join secret (so every HA server agrees on it). It joins
+//! nodes and nothing else: it cannot add a server to the control plane, and
+//! as a bearer token it authenticates only a node that already joined
+//! (`system:node:<name>`, with the node name and password headers), not
+//! `system:masters` as the join token does.
 
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
@@ -34,6 +42,9 @@ use super::server::{ApiError, ApiState};
 const TOKEN_PREFIX: &str = "K10";
 /// Header carrying the node password on join and connect.
 pub const PASSWORD_HEADER: &str = "x-litek8s-node-password";
+/// Header naming the node whose password [`PASSWORD_HEADER`] carries, on
+/// API requests made with the agent token.
+pub const NODE_HEADER: &str = "x-litek8s-node";
 const PASSWORD_SUFFIX: &str = ".node-password.litek8s";
 pub const SERVICE_CIDR: &str = "10.43.0.0/16";
 
@@ -68,8 +79,9 @@ impl Token {
             return Ok(Self { ca_hash: None, secret: raw.to_string() });
         };
         let (hash, secret) = rest.split_once("::").unwrap_or_default();
-        // k3s tokens carry `server:<password>`; the password is the secret.
-        let secret = secret.strip_prefix("server:").unwrap_or(secret);
+        // k3s tokens carry `server:<password>` (agent tokens `node:`); the
+        // password is the secret.
+        let secret = secret.strip_prefix("server:").or_else(|| secret.strip_prefix("node:")).unwrap_or(secret);
         if secret.is_empty() {
             bail!("join token has no secret after `::`");
         }
@@ -82,6 +94,38 @@ impl Token {
     pub fn format(ca_pem: Option<&str>, secret: &str) -> String {
         format!("{TOKEN_PREFIX}{}::{secret}", ca_pem.map(sha256_hex).unwrap_or_default())
     }
+
+    /// The agent token of the cluster whose join secret is `join_secret`.
+    pub fn format_agent(ca_pem: Option<&str>, join_secret: &str) -> String {
+        format!("{TOKEN_PREFIX}{}::node:{}", ca_pem.map(sha256_hex).unwrap_or_default(), agent_secret(join_secret))
+    }
+}
+
+/// The secret of agent tokens: one-way from the join secret, so holding an
+/// agent token does not give the join token.
+pub fn agent_secret(join_secret: &str) -> String {
+    sha256_hex(&format!("litek8s agent token\n{join_secret}"))[..32].to_string()
+}
+
+/// Which of the cluster's secrets a presented token carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenKind {
+    /// The join token: servers, nodes, `system:masters`.
+    Join,
+    /// The agent token: joining nodes only.
+    Agent,
+}
+
+/// What `presented` (a token, or its bare secret) is to `api`'s cluster.
+pub(crate) fn token_kind(api: &ApiState, presented: &str) -> Option<TokenKind> {
+    let secret = Token::parse(presented).map(|t| t.secret).unwrap_or_default();
+    if secret.is_empty() {
+        return None;
+    }
+    if constant_time_eq(secret.as_bytes(), api.join_secret().as_bytes()) {
+        return Some(TokenKind::Join);
+    }
+    constant_time_eq(secret.as_bytes(), agent_secret(api.join_secret()).as_bytes()).then_some(TokenKind::Agent)
 }
 
 pub fn sha256_hex(data: &str) -> String {
@@ -140,9 +184,7 @@ fn bearer(req_auth: &str) -> &str {
 /// Check a join/connect request's credentials for `node`.
 pub(crate) fn authorize(api: &ApiState, authorization: &str, node: &str, password: &str) -> Result<(), ApiError> {
     use hyper::StatusCode;
-    let presented = bearer(authorization);
-    let presented = Token::parse(presented).map(|t| t.secret).unwrap_or_default();
-    if !constant_time_eq(presented.as_bytes(), api.join_secret().as_bytes()) {
+    if token_kind(api, bearer(authorization)).is_none() {
         return Err(ApiError::new(StatusCode::UNAUTHORIZED, "Unauthorized", "invalid join token"));
     }
     if !valid_node_name(node) {
@@ -161,6 +203,16 @@ fn valid_node_name(name: &str) -> bool {
         && name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
         && !name.starts_with(['-', '.'])
         && !name.ends_with(['-', '.'])
+}
+
+/// Whether `password` is the one `node` joined with (and the Node exists).
+pub(crate) fn node_password_matches(api: &ApiState, node: &str, password: &str) -> bool {
+    if !valid_node_name(node) || password.len() < 16 || api.get_object("", "nodes", "", node).is_none() {
+        return false;
+    }
+    let hash = base64::engine::general_purpose::STANDARD.encode(Sha256::digest(password.as_bytes()));
+    api.get_object("", "secrets", "kube-system", &format!("{node}{PASSWORD_SUFFIX}"))
+        .is_some_and(|secret| constant_time_eq(util::s(&secret, "/data/hash").as_bytes(), hash.as_bytes()))
 }
 
 /// The first join of a node records its password; later ones must match,
@@ -597,7 +649,7 @@ impl Client {
     }
 
     fn credentials(&self) -> Vec<(&'static str, String)> {
-        vec![("authorization", format!("Bearer {}", self.token.secret)), (PASSWORD_HEADER, self.password.clone())]
+        vec![("authorization", format!("Bearer {}", self.token.secret)), (PASSWORD_HEADER, self.password.clone()), (NODE_HEADER, self.node.clone())]
     }
 
     /// Register with the server and learn the pod CIDR. Falls back to the
@@ -753,6 +805,12 @@ mod tests {
         assert_eq!(parsed, Token { ca_hash: Some(sha256_hex("pem")), secret: "s3cret".into() });
         assert_eq!(Token::parse("plain").unwrap(), Token { ca_hash: None, secret: "plain".into() });
         assert_eq!(Token::parse("K10::server:pw").unwrap().secret, "pw");
+        assert_eq!(Token::parse("K10::node:pw").unwrap().secret, "pw");
+        let agent = Token::format_agent(Some("pem"), "s3cret");
+        assert_eq!(agent, format!("K10{}::node:{}", sha256_hex("pem"), agent_secret("s3cret")));
+        assert_eq!(Token::parse(&agent).unwrap().secret, agent_secret("s3cret"));
+        assert_ne!(agent_secret("s3cret"), agent_secret("other"));
+        assert!(!agent_secret("s3cret").contains("s3cret"));
         assert!(Token::parse("K10abc::x").is_err());
         assert!(Token::parse("").is_err());
     }
@@ -782,6 +840,22 @@ mod tests {
         api.delete_named("", "nodes", "", "n1").unwrap();
         authorize(&api, &auth, "n1", "another-password-0000").unwrap();
         assert!(authorize(&api, &auth, "Bad_Name", "0123456789abcdef0123").is_err());
+    }
+
+    #[test]
+    fn agent_tokens_join_nodes() {
+        let api = ApiState::open(None, "127.0.0.1:0".into(), false).unwrap();
+        let agent = format!("Bearer {}", api.agent_token());
+        assert_eq!(token_kind(&api, &api.join_token()), Some(TokenKind::Join));
+        assert_eq!(token_kind(&api, &api.agent_token()), Some(TokenKind::Agent));
+        assert_eq!(token_kind(&api, "K10::node:wrong"), None);
+        authorize(&api, &agent, "n1", "0123456789abcdef0123").unwrap();
+        // A node's password is its identity only once the Node exists.
+        assert!(!node_password_matches(&api, "n1", "0123456789abcdef0123"));
+        api.create_object("", "nodes", None, json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "n1"}})).unwrap();
+        assert!(node_password_matches(&api, "n1", "0123456789abcdef0123"));
+        assert!(!node_password_matches(&api, "n1", "another-password-0000"));
+        assert!(!node_password_matches(&api, "n2", "0123456789abcdef0123"));
     }
 
     #[test]

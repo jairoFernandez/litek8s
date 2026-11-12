@@ -17,12 +17,13 @@ INSTALL=https://raw.githubusercontent.com/jairoFernandez/litek8s/main/install.sh
 # Servers reach each other on the API port and the Raft port (API port + 1).
 curl -fsSL $INSTALL | sh -s -- server --cluster-init
 
-# Two more join it with the token the first prints (also in
-# /var/lib/litek8s/apiserver/join-token).
+# Two more join it with the join token the first prints (also in
+# /var/lib/litek8s/apiserver/join-token; a cluster admin credential).
 curl -fsSL $INSTALL | sh -s -- server --server https://192.168.1.10:6443 --token K10...::...
 
-# Agents join any server and learn the others.
-curl -fsSL $INSTALL | sh -s -- agent --join https://192.168.1.10:6443 --token K10...::...
+# Agents join any server and learn the others, with the agent token
+# (/var/lib/litek8s/apiserver/agent-token: it joins nodes, nothing else).
+curl -fsSL $INSTALL | sh -s -- agent --join https://192.168.1.10:6443 --token K10...::node:...
 
 litek8s server list --server http://192.168.1.10:6443
 litek8s server remove lk3 --server https://192.168.1.10:6443 --token K10...::...
@@ -166,9 +167,10 @@ lease endpoint reconciler does).
   openraft stopped waiting for still completes in the background so its
   connection is reused rather than dialed again. A joining server
   fetches the CA (checked against the token's hash), the serving certificate
-  and the service account key from the server it joins. As in k3s by
-  default, the agent token is the server token: anyone holding it can join
-  either.
+  and the service account key from the server it joins. Servers join with
+  the join token (`<data-dir>/join-token`), a cluster admin credential;
+  nodes with the agent token (`<data-dir>/agent-token`, the same on every
+  server), which joins nodes and nothing else, as k3s's `--agent-token`.
 - **Timers.** Heartbeats every 300 ms; a follower calls an election after
   the leader lease (3 s) plus a random 1.5–3 s without one, so a dead leader
   is replaced in about 5 s (bench/HA.md: 4.7–5.9 s of write unavailability

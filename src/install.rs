@@ -174,7 +174,7 @@ pub fn plan(role: Role, user_args: &[String], fallback_token: Option<String>, no
                 bail!("`litek8s install agent` needs --join https://<server>:6443 and --token <token> (both printed by `litek8s install server`)");
             }
             if token.is_none() {
-                bail!("`litek8s install agent` needs --token <token> (printed by `litek8s install server`, kept in {DATA_DIR}/join-token on the server)");
+                bail!("`litek8s install agent` needs --token <token> (printed by `litek8s install server`, kept in {DATA_DIR}/agent-token on the server)");
             }
             default("--node-dir", NODE_DIR);
             default("--runtime", "crun");
@@ -584,9 +584,13 @@ pub struct InstallResult {
     /// Server: the URL nodes and servers join.
     #[serde(default)]
     pub url: Option<String>,
-    /// Server: the join token.
+    /// Server: the join token (servers; also nodes, from servers before the
+    /// agent token).
     #[serde(default)]
     pub token: Option<String>,
+    /// Server: the agent token, which joins nodes only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_token: Option<String>,
     /// Server: the cluster CA (PEM), checked against the token.
     #[serde(default)]
     pub ca: Option<String>,
@@ -619,6 +623,7 @@ async fn print_result(role: Role, svc: &ServiceArgs, changed: bool) {
         }
         result.url = Some(join_url(svc));
         result.token = token;
+        result.agent_token = read_token(svc, "agent-token");
         if let Some((cert, key)) = svc.kubeconfig.as_ref().and_then(|k| std::fs::read_to_string(k).ok()).and_then(|d| kubeconfig_client_cert(&d)) {
             result.client_cert = Some(cert);
             result.client_key = Some(key);
@@ -627,8 +632,12 @@ async fn print_result(role: Role, svc: &ServiceArgs, changed: bool) {
     println!("{RESULT_MARKER} {}", serde_json::to_string(&result).unwrap_or_default());
 }
 
+fn read_token(svc: &ServiceArgs, file: &str) -> Option<String> {
+    svc.data_dir.as_ref().and_then(|d| std::fs::read_to_string(d.join(file)).ok()).map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
+}
+
 fn print_server_summary(svc: &ServiceArgs) {
-    let token = svc.data_dir.as_ref().and_then(|d| std::fs::read_to_string(d.join("join-token")).ok()).map(|t| t.trim().to_string());
+    let token = read_token(svc, "join-token");
     println!("litek8s server is ready");
     if let Some(k) = &svc.kubeconfig {
         println!("\nkubeconfig (root only): {}\n  sudo kubectl --kubeconfig {} get nodes", k.display(), k.display());
@@ -640,10 +649,12 @@ fn print_server_summary(svc: &ServiceArgs) {
     );
     let Some(token) = token else { return };
     let url = join_url(svc);
-    println!("\nJoin another machine as a node:\n  curl -fsSL {INSTALL_SCRIPT} | sudo sh -s -- agent --join {url} --token {token}");
-    println!("or, where litek8s is installed:\n  sudo litek8s install agent --join {url} --token {token}");
+    // The agent token joins nodes and nothing else; the join token stays for servers.
+    let agent = read_token(svc, "agent-token").unwrap_or_else(|| token.clone());
+    println!("\nJoin another machine as a node (the agent token, in {DATA_DIR}/agent-token):\n  curl -fsSL {INSTALL_SCRIPT} | sudo sh -s -- agent --join {url} --token {agent}");
+    println!("or, where litek8s is installed:\n  sudo litek8s install agent --join {url} --token {agent}");
     if svc.ha {
-        println!("\nAdd a server to the control plane (3 or 5 in all):\n  curl -fsSL {INSTALL_SCRIPT} | sudo sh -s -- server --server {url} --token {token}");
+        println!("\nAdd a server to the control plane (3 or 5 in all; the join token, in {DATA_DIR}/join-token, a cluster admin credential):\n  curl -fsSL {INSTALL_SCRIPT} | sudo sh -s -- server --server {url} --token {token}");
     }
 }
 

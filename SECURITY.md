@@ -45,8 +45,12 @@ report (but ideas for closing them are welcome):
   `<data-dir>/client-ca.key` and `sa.key`, like the join token.
 - The Docker API socket (`~/.litek8s/docker.sock`) gives whoever can open it
   the same power as the Docker socket: it is created for your user only.
-- Node join and HA peers authenticate with the join token (which also pins
-  the cluster CA); anyone holding it can join a node, and as a bearer token
+- HA peers authenticate with the join token (which also pins the cluster
+  CA): anyone holding it can join a server or a node, and as a bearer token
   it is a `system:masters` credential. Treat `<data-dir>/join-token` like a
-  password.
+  password. Nodes join with the agent token (`<data-dir>/agent-token`)
+  instead, which joins nodes and nothing else: anyone holding it can still
+  add a node (and run the pods scheduled there), but not a server, and it
+  reads nothing in the API but the Nodes, as a joined node. Node names are
+  bound to the first machine that joined with them (its node password).
 - The macOS release binary is ad-hoc signed, not notarized.

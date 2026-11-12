@@ -7,7 +7,8 @@
 //! - `Authorization: Bearer`: a service account token this cluster signed
 //!   (account, bound pod and audience checked as TokenReview does), or the
 //!   cluster's join token (`system:masters`: whoever holds it can join a
-//!   server and read every key anyway);
+//!   server and read every key anyway), or its agent token with a joined
+//!   node's name and password (`system:node:<name>` in `system:nodes`);
 //! - a TLS client certificate signed by the client CA (CN user, O groups);
 //! - else anonymous, which only reaches the public paths ([`is_public`]).
 //!
@@ -30,6 +31,8 @@ pub const FORWARDED_USER_HEADER: &str = "x-litek8s-forwarded-user";
 pub const FORWARDED_AUTH_HEADER: &str = "x-litek8s-forwarded-auth";
 /// Who presents the join token.
 pub const CLUSTER_TOKEN_USER: &str = "system:litek8s:cluster-token";
+/// The group of nodes (the join token's, and a node's own identity).
+pub const NODES: &str = "system:nodes";
 
 /// What the connection says about the client (its certificate).
 #[derive(Debug, Clone, Default)]
@@ -111,11 +114,20 @@ pub fn authenticate(state: &ApiState, headers: &HeaderMap, conn: &Conn) -> Resul
         if token.matches('.').count() == 2 {
             return state.authenticate_service_account(token).map(Some);
         }
-        let secret = super::join::Token::parse(token).map(|t| t.secret).unwrap_or_default();
-        if !secret.is_empty() && constant_time_eq(secret.as_bytes(), state.join_secret().as_bytes()) {
-            return Ok(Some(UserInfo { username: CLUSTER_TOKEN_USER.into(), groups: vec![rbac::MASTERS.into(), "system:nodes".into()], ..Default::default() }.authenticated()));
-        }
-        return Err("invalid bearer token".into());
+        return match super::join::token_kind(state, token) {
+            Some(super::join::TokenKind::Join) => {
+                Ok(Some(UserInfo { username: CLUSTER_TOKEN_USER.into(), groups: vec![rbac::MASTERS.into(), NODES.into()], ..Default::default() }.authenticated()))
+            }
+            Some(super::join::TokenKind::Agent) => {
+                let node = header(super::join::NODE_HEADER);
+                if super::join::node_password_matches(state, node, header(super::join::PASSWORD_HEADER)) {
+                    Ok(Some(UserInfo { username: format!("system:node:{node}"), groups: vec![NODES.into()], ..Default::default() }.authenticated()))
+                } else {
+                    Err("the agent token authenticates only a joined node (its name and node password)".into())
+                }
+            }
+            None => Err("invalid bearer token".into()),
+        };
     }
     if !auth.is_empty() {
         return Err("unsupported authorization scheme (bearer tokens and client certificates only)".into());

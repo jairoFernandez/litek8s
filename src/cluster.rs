@@ -677,10 +677,13 @@ pub async fn apply(file: &ClusterFile, o: &ApplyOptions) -> Result<()> {
     // The servers, one after the other: the first makes the token.
     let mut join: Option<String> = file.join_url.clone();
     let mut token: Option<String> = None;
+    let mut agent_token: Option<String> = None;
     for i in 0..file.servers.len() {
         let r = install(i, join.clone(), token.clone()).await.with_context(|| format!("server {}", label(&hosts[i])))?;
         if i == 0 {
             token = r.token.clone();
+            // Agents join with the agent token (a server before 0.2.24 has none).
+            agent_token = r.agent_token.clone().or_else(|| token.clone());
             if join.is_none() {
                 join = r.url.clone();
             }
@@ -703,7 +706,7 @@ pub async fn apply(file: &ClusterFile, o: &ApplyOptions) -> Result<()> {
     }
     // The agents, all at once.
     let agents: Vec<usize> = (file.servers.len()..hosts.len()).collect();
-    let installs = futures_util::future::join_all(agents.iter().map(|&i| install(i, join.clone(), token.clone()))).await;
+    let installs = futures_util::future::join_all(agents.iter().map(|&i| install(i, join.clone(), agent_token.clone()))).await;
     let mut failures = Vec::new();
     for (&i, r) in agents.iter().zip(installs) {
         match r {
