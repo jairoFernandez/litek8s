@@ -5,7 +5,7 @@
 Please do **not** open a public issue for security problems. Report them
 privately to:
 
-- **Email:** TODO-security-contact@example.com  <!-- TODO(maintainer): replace with a real address -->
+- **Email:** jairof@ideascol.com
 - or GitHub's private vulnerability reporting: the repository's
   **Security** tab → **Report a vulnerability** (once enabled in the
   repository settings).
