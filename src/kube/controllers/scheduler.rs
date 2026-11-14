@@ -797,7 +797,9 @@ mod tests {
         schedule(&api, "default", "mem").unwrap();
         assert_eq!(scheduled_message(&api, "mem"), "0/1 nodes are available: Insufficient memory.");
 
-        add_pod(&api, "init", json!({"initContainers": [container("800m", "1Mi")], "containers": [container("100m", "1Mi")]}));
+        let mut init = container("800m", "1Mi");
+        init["name"] = json!("init");
+        add_pod(&api, "init", json!({"initContainers": [init], "containers": [container("100m", "1Mi")]}));
         schedule(&api, "default", "init").unwrap();
         assert_eq!(scheduled_message(&api, "init"), "0/1 nodes are available: Insufficient cpu.");
 

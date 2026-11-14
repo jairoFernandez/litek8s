@@ -469,7 +469,10 @@ pub fn is_dns1123_label(s: &str) -> Vec<String> {
     if s.len() > 63 {
         errs.push("must be no more than 63 characters".to_string());
     }
-    if !dns1123_label_ok(s) {
+    if !dns1123_label_ok(s) && is_dns1123_subdomain(s).is_empty() {
+        // A valid subdomain within the length limit: it is the dots.
+        errs.push("must not contain dots".to_string());
+    } else if !dns1123_label_ok(s) {
         errs.push(format!("a lowercase RFC 1123 label must consist of lower case alphanumeric characters or '-', and must start and end with an alphanumeric character (e.g. 'my-name',  or '123-abc', regex used for validation is '{DNS1123_LABEL_FMT}')"));
     }
     errs
@@ -500,7 +503,7 @@ pub fn is_dns1035_label(s: &str) -> Vec<String> {
 }
 
 /// `NameIs...(name, prefix=true)`: a trailing dash is allowed.
-fn mask_trailing_dash(s: &str) -> String {
+pub fn mask_trailing_dash(s: &str) -> String {
     if s.len() > 1 && s.ends_with('-') { format!("{}a", &s[..s.len() - 1]) } else { s.to_string() }
 }
 
