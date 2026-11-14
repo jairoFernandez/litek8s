@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.24
 
 - **Rollouts that stop progressing fail**: the Deployment controller keeps
   the `Progressing` condition as upstream does (`NewReplicaSetCreated`,
