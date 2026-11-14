@@ -200,6 +200,9 @@ pub struct ApiState {
     pub(crate) obs: std::sync::OnceLock<Arc<crate::obs::server::Obs>>,
     /// `--authorization-mode` and the audit log's bookkeeping.
     pub(crate) authz: super::authn::Authz,
+    /// This state, for the admission of its own writes (`admit_internal`),
+    /// which calls webhooks with an `Arc`. Set by [`ApiState::adopt`].
+    me: std::sync::OnceLock<std::sync::Weak<ApiState>>,
     /// The RBAC objects, compiled.
     pub(crate) rbac: super::rbac::Cache,
 }
@@ -259,6 +262,7 @@ impl ApiState {
             crd_cache: Default::default(),
             obs: std::sync::OnceLock::new(),
             authz: Default::default(),
+            me: Default::default(),
             rbac: Default::default(),
         };
         Ok(state)
@@ -484,6 +488,7 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
     state.authz.tokens = super::token_auth::TokenAuth::load(&config.token_auth)?;
     state.agents_welcome.send_replace(false);
     let state = Arc::new(state);
+    state.adopt();
     let token = state.join_token();
     if let Some(dir) = &config.data_dir {
         // The whole token (with the CA hash); reading it back yields the secret.
@@ -1844,6 +1849,7 @@ async fn resource_request(
                 sub: Some(sub),
                 old: None,
                 dry_run: false,
+                user: req.user.as_ref(),
             };
             admission::admit(state, &attrs, opts).await?;
             super::pod_streams::exec(state, ns.unwrap_or_default(), name, req, sub == "attach").await
@@ -2368,6 +2374,7 @@ impl ApiState {
             sub: None,
             old: None,
             dry_run: req.dry_run(),
+            user: req.user.as_ref(),
         };
         let mut obj = admission::admit(self, &attrs, obj).await?;
         self.check_rbac_escalation(rt, ns, &obj, req)?;
@@ -2435,6 +2442,7 @@ impl ApiState {
             sub,
             old: Some(&old),
             dry_run: req.dry_run(),
+            user: req.user.as_ref(),
         };
         let mut new = admission::admit(self, &attrs, new).await?;
         self.check_rbac_escalation(rt, ns, &new, req)?;
@@ -2491,6 +2499,7 @@ impl ApiState {
                         sub: None,
                         old: None,
                         dry_run: req.dry_run(),
+                        user: req.user.as_ref(),
                     };
                     let mut obj = admission::admit(self, &attrs, obj).await?;
                     self.check_rbac_escalation(rt, ns, &obj, req)?;
@@ -2550,6 +2559,7 @@ impl ApiState {
                 sub,
                 old: Some(&old),
                 dry_run: req.dry_run(),
+                user: req.user.as_ref(),
             };
             let mut new = admission::admit(self, &attrs, new).await?;
             self.check_rbac_escalation(rt, ns, &new, req)?;
@@ -2603,6 +2613,7 @@ impl ApiState {
             sub: None,
             old: Some(&old),
             dry_run: req.dry_run(),
+            user: req.user.as_ref(),
         };
         admission::admit(self, &attrs, old.clone()).await?;
         if req.dry_run() || opts.get("dryRun").and_then(Value::as_array).is_some_and(|a| !a.is_empty()) {
@@ -4419,6 +4430,35 @@ impl ApiState {
         self.registry.find_kind(group, kind)
     }
 
+    /// Let this state's own writes call admission webhooks (they need an
+    /// `Arc` of it).
+    pub(crate) fn adopt(self: &Arc<Self>) {
+        let _ = self.me.set(Arc::downgrade(self));
+    }
+
+    /// Admission of a write this server makes itself (controllers,
+    /// bootstrap objects), as kube-controller-manager's writes go through
+    /// the API: the ValidatingAdmissionPolicies and webhooks that match.
+    /// Webhooks are awaited on this thread (`block_in_place`), so a
+    /// controller waits for them as it would for an API call.
+    #[allow(clippy::too_many_arguments)]
+    fn admit_internal(&self, rt: &ResourceType, operation: &'static str, ns: &str, name: &str, sub: Option<&str>, old: Option<&Value>, obj: Value) -> Result<Value, ApiError> {
+        let user = super::rbac::UserInfo { username: INTERNAL_USER.into(), ..Default::default() }.authenticated();
+        let attrs = admission::Attributes { rt, operation, namespace: ns, name, sub, old, dry_run: false, user: Some(&user) };
+        if !admission::webhooks_configured(self) {
+            admission::validating_policies(self, &attrs, &obj)?;
+            return Ok(obj);
+        }
+        let me = self.me.get().and_then(std::sync::Weak::upgrade);
+        let handle = tokio::runtime::Handle::try_current().ok().filter(|h| h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread);
+        let (Some(me), Some(handle)) = (me, handle) else {
+            // Only tests run the server this way.
+            admission::validating_policies(self, &attrs, &obj)?;
+            return Ok(obj);
+        };
+        tokio::task::block_in_place(|| handle.block_on(admission::admit(&me, &attrs, obj)))
+    }
+
     fn internal_rt(&self, group: &str, plural: &str) -> Result<ResourceType, ApiError> {
         self.resource(group, plural).ok_or_else(ApiError::not_found_path)
     }
@@ -4432,6 +4472,15 @@ impl ApiState {
         let rt = self.internal_rt(group, plural)?;
         let generated = name_of(&obj).is_empty();
         self.prepare_create(&rt, ns, &mut obj, true)?;
+        let name = name_of(&obj);
+        let mut obj = self.admit_internal(&rt, "CREATE", ns.unwrap_or_default(), &name, None, None, obj)?;
+        if is_pods(&rt) {
+            for field in ["initContainers", "containers"] {
+                if let Some(list) = obj.pointer_mut(&format!("/spec/{field}")) {
+                    defaults::containers(list);
+                }
+            }
+        }
         self.track_fields_as(&rt, None, &mut obj, None, CONTROLLER_MANAGER, None);
         for _ in 0..5 {
             let name = name_of(&obj);
@@ -4471,7 +4520,8 @@ impl ApiState {
             .get(&key)
             .ok_or_else(|| ApiError::from_store(StoreError::NotFound, &rt, &name))?;
         let expected = resource_version(&obj);
-        let mut new = self.prepare_update(&rt, &old, obj, sub, &name)?;
+        let new = self.prepare_update(&rt, &old, obj, sub, &name)?;
+        let mut new = self.admit_internal(&rt, "UPDATE", ns.as_deref().unwrap_or_default(), &name, sub, Some(&old), new)?;
         self.track_fields_as(&rt, Some(&old), &mut new, None, CONTROLLER_MANAGER, sub);
         self.commit_update(&rt, key, new, expected)
             .map_err(|e| ApiError::from_store(e, &rt, &name))
@@ -4486,6 +4536,7 @@ impl ApiState {
             .store
             .get(&key)
             .ok_or_else(|| ApiError::from_store(StoreError::NotFound, &rt, name))?;
+        self.admit_internal(&rt, "DELETE", ns, name, None, Some(&old), old.clone())?;
         self.delete_object(&rt, &key, old, None)
             .map_err(|e| ApiError::from_store(e, &rt, name))
     }
@@ -4558,6 +4609,8 @@ impl ApiError {
 /// Equal apart from the resourceVersion.
 /// The field manager of writes the in-process controllers make.
 const CONTROLLER_MANAGER: &str = "kube-controller-manager";
+/// Who the server's own writes are, to admission (kube-controller-manager's user).
+const INTERNAL_USER: &str = "system:kube-controller-manager";
 
 /// Store managedFields on an object (none if empty).
 fn set_managed_fields(obj: &mut Value, entries: Vec<super::managed::Entry>) {

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Admission webhooks see the controllers' writes**: pods a ReplicaSet,
+  Job, StatefulSet or DaemonSet creates, and every other object the
+  server writes itself, go through mutating and validating webhooks and
+  ValidatingAdmissionPolicies as kube-controller-manager's do, as user
+  `system:kube-controller-manager`. Sidecar injectors (Istio, Linkerd,
+  Vault Agent) now inject into a Deployment's pods, and Kyverno or
+  Gatekeeper policies on pods hold for them. A ReplicaSet whose pods a
+  webhook refuses or cannot reach records `FailedCreate` events
+  (`Error creating: ...`) and its `ReplicaFailure` condition, and retries.
+  Webhooks also get the request's real `userInfo` (they always saw
+  `system:admin`).
+
 - **Your users from OIDC, static tokens or a token webhook**: `litek8s
   apiserver` (and `install server`, which passes its flags on) takes
   kube-apiserver's authenticator flags. `--oidc-issuer-url` and

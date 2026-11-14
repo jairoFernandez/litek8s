@@ -41,8 +41,10 @@ Linux (crun; 413/419 on macOS with the Docker runtime); the compatibility corpus
   there: `--authentication-config` (several OIDC issuers), the Node authorizer, client
   certificate revocation, front-proxy identity for aggregated APIs.
 - **Admission**: ValidatingAdmissionPolicy rules and webhook
-  `matchConditions` are enforced (CEL). Writes made by the in-process
-  controllers do not go through admission webhooks.
+  `matchConditions` are enforced (CEL). Writes the server makes itself
+  (the controllers' pods, ReplicaSets, Jobs, ...) go through webhooks and
+  policies too, as `system:kube-controller-manager`; webhooks get the
+  request's real `userInfo`.
 - **Events**: the kubelet's container events are recorded (Pulled,
   Created, Started, `Unhealthy` per probe failure, `Killing` before a
   liveness or startup restart, `BackOff` per crash-loop restart, `Failed`
