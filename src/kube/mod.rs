@@ -38,6 +38,7 @@ pub(crate) mod spdy;
 pub mod store;
 pub mod table;
 pub mod tls;
+pub mod token_auth;
 pub mod validation;
 mod ws;
 pub mod x509;

@@ -36,6 +36,37 @@ administrador del cluster, con o sin token. Los clusters de desarrollo
 - **Peers de HA**: el join token (`<data-dir>/join-token`), una credencial de
   `system:masters`. También une nodos, como antes; para eso mejor el token de
   agente.
+- **Tus usuarios, desde fuera** (los flags de kube-apiserver; RBAC los
+  enlaza como a cualquier otro usuario o grupo):
+  - `--token-auth-file tokens.csv`: tokens bearer estáticos, uno por línea
+    como `token,usuario,uid,"grupo1,grupo2"`, leídos al arrancar.
+  - `--oidc-issuer-url https://... --oidc-client-id ID`: ID tokens de un
+    proveedor OpenID Connect (Dex, Keycloak, Google, Entra ID, ...). El
+    documento de descubrimiento y las claves del emisor se piden por HTTPS la
+    primera vez que hacen falta y otra vez cuando un token nombra una clave
+    que no se ha visto; se comprueban la firma (`--oidc-signing-algs`, RS256
+    por defecto; RS/PS 256-512, ES256, ES384 y EdDSA), el emisor, la audiencia
+    (el client ID), `exp` y `nbf`. El usuario es `--oidc-username-claim` (`sub`
+    por defecto) tras `--oidc-username-prefix` (por defecto `<emisor>#`,
+    ninguno para `email`, cuyo `email_verified` no puede ser false; `-` para
+    ninguno); los grupos salen de `--oidc-groups-claim` tras
+    `--oidc-groups-prefix`; `--oidc-required-claim clave=valor` (repetible) y
+    `--oidc-ca-file`. Los usuarios que empiezan por `system:` se rechazan.
+    kubectl obtiene los tokens con un plugin de credenciales como
+    [kubelogin](https://github.com/int128/kubelogin).
+  - `--authentication-token-webhook-config-file webhook.yaml`: un kubeconfig
+    cuyo cluster es un servicio que autentica otros tokens bearer. Recibe un
+    `TokenReview` (`authentication.k8s.io/v1`) por cada token que el servidor
+    no reconoce; las respuestas se guardan
+    `--authentication-token-webhook-cache-ttl` (2m por defecto) y los
+    rechazos 10 s. El usuario del kubeconfig es cómo el servidor se
+    autentica ante él (certificado de cliente, `token` o `tokenFile`).
+
+  Los tokens bearer se prueban en el orden de kube-apiserver: tokens
+  estáticos, luego los tokens de service account de este cluster u OIDC
+  (según el emisor del token), los tokens de join y de agente, y por último
+  el webhook. La API `TokenReview` en sí sigue comprobando solo tokens de
+  service account.
 - **Impersonation**: cabeceras `Impersonate-User` / `-Group`, permitidas con el
   verbo `impersonate` (`kubectl --as`).
 - **Anónimo**: solo `/healthz`, `/livez`, `/readyz`, `/version`, `/cacerts` y
@@ -163,7 +194,8 @@ account).
 
 ## Todavía no
 
-Autenticadores OIDC, de token estático y webhook; los autorizadores Node y
+La configuración estructurada de autenticación (`--authentication-config`:
+varios emisores OIDC, mapeos de claims con CEL); los autorizadores Node y
 ABAC; revocación de certificados; identidad front-proxy para API servers
 agregados (la autorización propia de metrics-server ve peticiones anónimas).
 Ver [limitations.md](../limitations.md).

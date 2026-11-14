@@ -7,8 +7,10 @@ Lista honesta; hay más en [skills/litek8s/references/differences.md](../../skil
   clientes y aplica RBAC por defecto (`--authorization-mode RBAC`): tokens de
   service account, certificados de cliente firmados por la CA de clientes del
   cluster (CN usuario, O grupos; el kubeconfig que escribe es `system:admin` en
-  `system:masters`) el join token (una credencial de administrador, para servidores) y el token
-  de agente (solo nodos).
+  `system:masters`), el join token (una credencial de administrador, para servidores) y el token
+  de agente (solo nodos); tus usuarios desde tokens estáticos
+  (`--token-auth-file`), un emisor OIDC (`--oidc-*`) o un webhook de tokens,
+  con los flags de kube-apiserver ([auth.md](auth.md#quién-es-quién)).
   Las peticiones anónimas solo llegan a `/healthz`, `/livez`, `/readyz`,
   `/version` y los documentos de descubrimiento OIDC; todo lo demás recibe 401.
   `--authorization-mode RBAC-audit` decide, registra (`RBAC-audit: DENY ...`,
@@ -16,8 +18,9 @@ Lista honesta; hay más en [skills/litek8s/references/differences.md](../../skil
   y permite, para encontrar el RBAC que les falta a los charts de un cluster
   antes de aplicarlo; `AlwaysAllow` es el comportamiento anterior. Los clusters
   de desarrollo (`litek8s dev`) siguen en AlwaysAllow en `127.0.0.1`. Lo que
-  falta frente a upstream: autenticadores OIDC, de token estático y webhook; los
-  autorizadores Node y ABAC (los agents de los nodos hablan con el servidor por
+  falta frente a upstream: la configuración estructurada de autenticación
+  (varios emisores OIDC, mapeos de claims con CEL) y TokenReview para tokens
+  que no son de service account; los autorizadores Node y ABAC (los agents de los nodos hablan con el servidor por
   su propia conexión autenticada); revocación de certificados de cliente (los
   certificados valen por diez años; para anular uno, rota la CA de clientes
   reemplazando `<data-dir>/sa.key`, lo que también invalida todos los tokens de
@@ -33,15 +36,16 @@ Lista honesta; hay más en [skills/litek8s/references/differences.md](../../skil
 - Proyecto de una sola persona, con semanas de vida: las APIs, los flags y los
   formatos en disco pueden cambiar entre versiones 0.x sin migración.
 - No todo el comportamiento del kubelet: los eventos de probes fallidas dicen
-  qué se revisó, no la salida de la probe; las escrituras de los controladores
-  internos no pasan por los webhooks de admisión; los límites de costo de CEL
+  qué se revisó, no la salida de la probe; los límites de costo de CEL
   de las reglas de CRDs no se aplican en ejecución (sí la estimación al crearlas).
-- Las NetworkPolicies se aplican solo en nodos con crun (Linux); el runtime de
-  Docker (servidores macOS) las guarda sin efecto. El tráfico de un nodo hacia
-  sus propios pods (probes, relays de NodePort y LoadBalancer, que corren en el
-  nodo) siempre se permite, y los pods con `NET_ADMIN` pueden falsificar
-  direcciones de origen en el bridge de su nodo
-  ([networking.md](](../networking.md#networkpolicies))).
+- Las NetworkPolicies se aplican igual en nodos con crun y con Docker; un
+  Docker cuyo host no puede filtrar el tráfico del bridge (sin `br_netfilter`,
+  un Docker rootless sin un helper privilegiado en la red del host) no deja
+  arrancar los pods aislados. El tráfico de un nodo hacia sus propios pods
+  (probes, relays de NodePort y LoadBalancer, que corren en el nodo o, con
+  Docker, dentro del pod) siempre se permite, y los pods con `NET_ADMIN`
+  pueden falsificar direcciones de origen en el bridge de su nodo
+  ([networking.md](../networking.md#networkpolicies)).
 - La API de Docker todavía no puede hacer `docker push`. Una imagen descargada
   con los `imagePullSecrets` de un pod queda luego en el nodo para todos los
   pods, como con el default del kubelet (sin `KubeletEnsureSecretPulledImages`).

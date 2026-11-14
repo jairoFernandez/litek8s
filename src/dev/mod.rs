@@ -1592,6 +1592,7 @@ async fn inner_apiserver(o: InnerOptions) -> Result<()> {
         // A dev cluster is the user's own: its kubeconfig has no
         // credentials, and every client is an administrator.
         authorization_mode: crate::kube::rbac::Mode::AlwaysAllow,
+        token_auth: Default::default(),
     })
     .await
 }

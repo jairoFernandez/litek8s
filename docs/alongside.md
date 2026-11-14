@@ -84,5 +84,5 @@ plugins such as `gke-gcloud-auth-plugin`, `aws eks get-token` or
 ## What's different from upstream
 
 litek8s is an early preview with a few gaps compared with upstream
-Kubernetes, among them simpler authentication and RBAC (no OIDC, no Node
+Kubernetes, among them simpler authentication and RBAC (one OIDC issuer at most, no Node
 authorizer): see [Limitations](limitations.md).
