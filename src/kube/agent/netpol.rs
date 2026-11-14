@@ -1,4 +1,4 @@
-//! NetworkPolicy enforcement on a node (crun runtime).
+//! NetworkPolicy enforcement on a node (crun and Docker runtimes).
 //!
 //! The API server computes, per pod of this node, whether it is isolated
 //! and what is allowed ([`PodRules`], see `crate::kube::netpol`), and pushes
@@ -21,6 +21,18 @@
 //! (conntrack ESTABLISHED/RELATED) always pass. Traffic from the node to
 //! its pods (probes, NodePort relays) goes through OUTPUT and is allowed.
 //!
+//! With the Docker runtime ([`Target::Docker`]) the same chains go into
+//! Docker's host network namespace (the Linux VM of Docker Desktop or
+//! OrbStack), loaded by the privileged helper container that also holds
+//! the service NAT rules: the dispatcher of each node (several agents may
+//! share one Docker) is hooked first into `FORWARD` (pods of the Docker
+//! bridge talking to each other through `br_netfilter`, and to anything
+//! outside, after the service DNAT) and `INPUT` (pods talking to the VM
+//! itself). A Docker host that cannot filter bridged traffic is an error:
+//! isolated pods do not start rather than run unprotected. Probes,
+//! port-forwards and NodePort relays run inside the pod's network
+//! namespace there, so they are never filtered.
+//!
 //! Ordering: a pod's rules arrive before the pod, and the pod worker
 //! registers the sandbox address with [`NetPol::register`], which loads the
 //! chains before any container starts. The kernel keeps the chains while
@@ -30,18 +42,53 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::net::Ipv4Addr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
+use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
-/// What the agent announces when it enforces policies (crun).
+/// What the agent announces when it enforces policies.
 pub(crate) const FEATURE: &str = "network-policy";
 pub(crate) const CHAIN: &str = "LITEK8S-NETPOL";
 const INGRESS_PREFIX: &str = "LITEK8S-NPI-";
 const EGRESS_PREFIX: &str = "LITEK8S-NPE-";
+
+/// Runs `sh -c <script>` with the given stdin where the rules go, returning
+/// its stdout; fails when the script does.
+pub type Shell = Arc<dyn Fn(String, Option<String>) -> BoxFuture<'static, Result<String>> + Send + Sync>;
+
+/// Where a node's pod traffic is filtered.
+pub enum Target {
+    /// This machine's iptables (crun): the `litek8s0` bridge.
+    Node,
+    /// Docker's host network namespace, reached through `shell`.
+    Docker { node: String, shell: Shell },
+}
+
+/// The chain names of one node.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Names {
+    dispatcher: String,
+    ingress: String,
+    egress: String,
+}
+
+impl Names {
+    fn node() -> Self {
+        Self { dispatcher: CHAIN.into(), ingress: INGRESS_PREFIX.into(), egress: EGRESS_PREFIX.into() }
+    }
+
+    /// Per node, as one Docker may run the pods of several agents (and
+    /// unlike the crun names, so the two never clean up each other's).
+    fn docker(node: &str) -> Self {
+        let h: String = Sha256::digest(node.as_bytes()).iter().take(3).map(|b| format!("{b:02x}")).collect();
+        Self { dispatcher: format!("{CHAIN}-{h}"), ingress: format!("LK8S-I{h}-"), egress: format!("LK8S-E{h}-") }
+    }
+}
 
 /// The rules of one pod: `None` in a direction is "not isolated".
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,16 +168,17 @@ fn render_chain(out: &mut String, chain: &str, allows: &[Allow], peer_flag: &str
 /// The `iptables-restore --noflush` input for the isolated pods of this
 /// node (address → rules), the cluster DNS addresses, and the per-pod
 /// chains currently in the kernel (those no longer wanted are deleted).
-pub(crate) fn render(pods: &BTreeMap<Ipv4Addr, PodRules>, dns: &[Ipv4Addr], existing: &[String]) -> String {
-    let mut decl = format!("*filter\n:{CHAIN} - [0:0]\n");
+pub(crate) fn render(names: &Names, pods: &BTreeMap<Ipv4Addr, PodRules>, dns: &[Ipv4Addr], existing: &[String]) -> String {
+    let dispatcher = &names.dispatcher;
+    let mut decl = format!("*filter\n:{dispatcher} - [0:0]\n");
     let mut rules = String::new();
     let mut wanted = Vec::new();
     for (ip, r) in pods {
-        for (prefix, allows, flag, dir) in [(INGRESS_PREFIX, &r.ingress, "-s", "-d"), (EGRESS_PREFIX, &r.egress, "-d", "-s")] {
+        for (prefix, allows, flag, dir) in [(&names.ingress, &r.ingress, "-s", "-d"), (&names.egress, &r.egress, "-d", "-s")] {
             let Some(allows) = allows else { continue };
             let chain = chain_name(prefix, *ip);
             let _ = writeln!(decl, ":{chain} - [0:0]");
-            let _ = writeln!(rules, "-A {CHAIN} {dir} {ip}/32 -j {chain}");
+            let _ = writeln!(rules, "-A {dispatcher} {dir} {ip}/32 -j {chain}");
             render_chain(&mut rules, &chain, allows, flag, dns);
             wanted.push(chain);
         }
@@ -151,11 +199,11 @@ fn without_sctp(rules: &str) -> String {
 }
 
 /// The per-pod chains in `iptables-save -t filter` output.
-pub(crate) fn existing_chains(save: &str) -> Vec<String> {
+pub(crate) fn existing_chains(names: &Names, save: &str) -> Vec<String> {
     save.lines()
         .filter_map(|l| l.strip_prefix(':'))
         .filter_map(|l| l.split_whitespace().next())
-        .filter(|c| c.starts_with(INGRESS_PREFIX) || c.starts_with(EGRESS_PREFIX))
+        .filter(|c| c.starts_with(&names.ingress) || c.starts_with(&names.egress))
         .map(str::to_string)
         .collect()
 }
@@ -166,6 +214,36 @@ pub(crate) const CREATE_CHAIN: &str = "iptables -t filter -N LITEK8S-NETPOL 2>/d
 
 /// The INPUT jump (pods talking to the node itself), added once.
 const INPUT_HOOK: &str = "iptables -t filter -C INPUT -i litek8s0 -j LITEK8S-NETPOL 2>/dev/null || iptables -t filter -I INPUT 1 -i litek8s0 -j LITEK8S-NETPOL";
+
+const BRIDGE_SYSCTL: &str = "/proc/sys/net/bridge/bridge-nf-call-iptables";
+
+/// Docker's host: the filter table and whether bridged traffic reaches
+/// iptables (turned on when it can be), first line `bridge-nf=<0|1|>`.
+fn docker_probe() -> String {
+    format!(
+        "f={BRIDGE_SYSCTL}; [ -e $f ] || modprobe br_netfilter 2>/dev/null; \
+         [ \"$(cat $f 2>/dev/null)\" = 1 ] || echo 1 > $f 2>/dev/null; \
+         echo \"bridge-nf=$(cat $f 2>/dev/null)\"; iptables-save -t filter"
+    )
+}
+
+/// Docker's host: the dispatcher, hooked first into FORWARD and INPUT
+/// (checked on every load: Docker restarting rebuilds FORWARD), then the
+/// rules from stdin.
+fn docker_load(names: &Names) -> String {
+    format!(
+        "iptables -t filter -N {d} 2>/dev/null; for c in FORWARD INPUT; do \
+         iptables -t filter -C $c -j {d} 2>/dev/null || iptables -t filter -I $c 1 -j {d} || exit 1; done; \
+         exec iptables-restore --noflush",
+        d = names.dispatcher
+    )
+}
+
+/// The `bridge-nf=` line of [`docker_probe`]'s output: whether bridged
+/// traffic is filtered.
+fn bridge_filtered(probe: &str) -> bool {
+    probe.lines().next().and_then(|l| l.strip_prefix("bridge-nf=")).is_some_and(|v| v.trim() == "1")
+}
 
 #[derive(Default)]
 struct State {
@@ -180,15 +258,31 @@ struct State {
     warned_bridge: bool,
 }
 
-#[derive(Default)]
 pub(crate) struct NetPol {
     state: Mutex<State>,
     /// Serializes loads, so they are applied in order.
     apply_lock: tokio::sync::Mutex<()>,
     changed: Notify,
+    names: Names,
+    /// `None`: this machine's iptables.
+    docker: Option<Shell>,
+}
+
+impl Default for NetPol {
+    fn default() -> Self {
+        Self::new(Target::Node)
+    }
 }
 
 impl NetPol {
+    pub(crate) fn new(target: Target) -> Self {
+        let (names, docker) = match target {
+            Target::Node => (Names::node(), None),
+            Target::Docker { node, shell } => (Names::docker(&node), Some(shell)),
+        };
+        Self { state: Mutex::default(), apply_lock: tokio::sync::Mutex::new(()), changed: Notify::new(), names, docker }
+    }
+
     /// Changes from the server: `full` replaces every pod's rules; `None`
     /// removes a pod's (no longer isolated).
     pub(crate) fn update(&self, pods: BTreeMap<String, Option<PodRules>>, full: bool) {
@@ -254,16 +348,19 @@ impl NetPol {
             let any = !pods.is_empty();
             (pods, st.dns.clone(), any)
         };
+        if let Some(shell) = self.docker.clone() {
+            return self.apply_docker(&shell, &pods, &dns).await;
+        }
         if any {
             self.ensure_bridge_filtering();
         }
         let save = output("iptables-save", &["-t", "filter"]).await.unwrap_or_default();
-        let existing = existing_chains(&save);
+        let existing = existing_chains(&self.names, &save);
         if !any && existing.is_empty() && !save.contains(&format!("-A {CHAIN} ")) {
             return Ok(());
         }
         run("sh", &["-c", CREATE_CHAIN], None).await?;
-        let rules = render(&pods, &dns, &existing);
+        let rules = render(&self.names, &pods, &dns, &existing);
         if let Err(e) = run("iptables-restore", &["--noflush"], Some(&rules)).await {
             // A kernel without xt_sctp: those rules allow nothing rather
             // than keep every pod of the node from starting.
@@ -274,6 +371,29 @@ impl NetPol {
             run("iptables-restore", &["--noflush"], Some(&without_sctp(&rules))).await?;
         }
         run("sh", &["-c", INPUT_HOOK], None).await
+    }
+
+    /// [`NetPol::apply`] in Docker's host network namespace.
+    async fn apply_docker(&self, shell: &Shell, pods: &BTreeMap<Ipv4Addr, PodRules>, dns: &[Ipv4Addr]) -> Result<()> {
+        let save = shell(docker_probe(), None).await.context("Docker's host network namespace")?;
+        let existing = existing_chains(&self.names, &save);
+        let any = !pods.is_empty();
+        if !any && existing.is_empty() && !save.contains(&format!("-A {} ", self.names.dispatcher)) {
+            return Ok(());
+        }
+        if any && !bridge_filtered(&save) {
+            // Pods on the Docker bridge would reach each other unfiltered.
+            bail!("Docker's host does not pass bridged traffic through iptables (br_netfilter, sysctl net.bridge.bridge-nf-call-iptables=1)");
+        }
+        let rules = render(&self.names, pods, dns, &existing);
+        if let Err(e) = shell(docker_load(&self.names), Some(rules.clone())).await {
+            if !rules.contains("-p sctp") {
+                return Err(e);
+            }
+            eprintln!("node-agent: network policies: SCTP rules left out ({e:#})");
+            shell(docker_load(&self.names), Some(without_sctp(&rules))).await?;
+        }
+        Ok(())
     }
 
     /// Traffic between pods on one bridge only reaches iptables with
@@ -369,7 +489,7 @@ mod tests {
                 ]),
             },
         );
-        let out = render(&pods, &["192.168.1.10".parse().unwrap()], &["LITEK8S-NPI-0a2a0063".into(), "LITEK8S-NPI-0a2a0005".into()]);
+        let out = render(&Names::node(), &pods, &["192.168.1.10".parse().unwrap()], &["LITEK8S-NPI-0a2a0063".into(), "LITEK8S-NPI-0a2a0005".into()]);
         let expected = "*filter
 :LITEK8S-NETPOL - [0:0]
 :LITEK8S-NPI-0a2a0005 - [0:0]
@@ -396,7 +516,7 @@ COMMIT
 ";
         assert_eq!(out, expected);
         // Nothing isolated: the dispatcher is emptied and old chains go.
-        let out = render(&BTreeMap::new(), &[], &["LITEK8S-NPE-0a2a0006".into()]);
+        let out = render(&Names::node(), &BTreeMap::new(), &[], &["LITEK8S-NPE-0a2a0006".into()]);
         assert_eq!(out, "*filter\n:LITEK8S-NETPOL - [0:0]\n:LITEK8S-NPE-0a2a0006 - [0:0]\n-X LITEK8S-NPE-0a2a0006\nCOMMIT\n");
     }
 
@@ -411,7 +531,67 @@ COMMIT
     #[test]
     fn finds_existing_pod_chains() {
         let save = "*filter\n:INPUT ACCEPT [0:0]\n:LITEK8S-FORWARD - [0:0]\n:LITEK8S-NETPOL - [0:0]\n:LITEK8S-NPI-0a2a0005 - [0:0]\n:LITEK8S-NPE-0a2a0006 - [0:0]\nCOMMIT\n";
-        assert_eq!(existing_chains(save), vec!["LITEK8S-NPI-0a2a0005", "LITEK8S-NPE-0a2a0006"]);
+        assert_eq!(existing_chains(&Names::node(), save), vec!["LITEK8S-NPI-0a2a0005", "LITEK8S-NPE-0a2a0006"]);
+    }
+
+    #[test]
+    fn docker_chains_are_per_node() {
+        let a = Names::docker("n1");
+        let b = Names::docker("n2");
+        assert_ne!(a, b);
+        assert!(a.dispatcher.starts_with("LITEK8S-NETPOL-") && a.dispatcher.len() <= 28);
+        let ip: Ipv4Addr = "10.42.255.254".parse().unwrap();
+        let chain = chain_name(&a.ingress, ip);
+        assert!(chain.len() <= 28, "{chain}");
+        let mut pods = BTreeMap::new();
+        pods.insert(ip, PodRules { ingress: Some(vec![]), egress: None });
+        let out = render(&a, &pods, &[], &[]);
+        assert!(out.contains(&format!("-A {} -d 10.42.255.254/32 -j {chain}\n", a.dispatcher)), "{out}");
+        assert!(!out.contains(":LITEK8S-NETPOL - "), "{out}");
+        // Each node finds only its own chains: another node's and crun's stay.
+        let save = format!(":{chain} - [0:0]\n:{} - [0:0]\n:LITEK8S-NPI-0a2a0005 - [0:0]\n", chain_name(&b.egress, ip));
+        assert_eq!(existing_chains(&a, &save), vec![chain.clone()]);
+        assert_eq!(existing_chains(&Names::node(), &save), vec!["LITEK8S-NPI-0a2a0005"]);
+    }
+
+    #[test]
+    fn docker_scripts() {
+        let n = Names::docker("n1");
+        let load = docker_load(&n);
+        assert!(load.contains(&format!("iptables -t filter -C $c -j {d} 2>/dev/null || iptables -t filter -I $c 1 -j {d}", d = n.dispatcher)));
+        assert!(load.ends_with("exec iptables-restore --noflush"));
+        assert!(docker_probe().ends_with("iptables-save -t filter"));
+        assert!(bridge_filtered("bridge-nf=1\n*filter\n"));
+        assert!(!bridge_filtered("bridge-nf=0\n*filter\n"));
+        assert!(!bridge_filtered("bridge-nf=\n*filter\n"));
+        assert!(!bridge_filtered(""));
+    }
+
+    #[tokio::test]
+    async fn docker_target_loads_through_the_shell() {
+        type Calls = Arc<Mutex<Vec<(String, Option<String>)>>>;
+        let calls: Calls = Arc::default();
+        let filtered = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let (c, f) = (calls.clone(), filtered.clone());
+        let shell: Shell = Arc::new(move |script, stdin| {
+            c.lock().unwrap().push((script, stdin));
+            let on = f.load(std::sync::atomic::Ordering::Relaxed);
+            Box::pin(async move { Ok(format!("bridge-nf={}\n*filter\nCOMMIT\n", if on { 1 } else { 0 })) })
+        });
+        let np = NetPol::new(Target::Docker { node: "n1".into(), shell });
+        // Nothing isolated and nothing loaded before: only the probe.
+        np.update(BTreeMap::new(), true);
+        np.apply().await.unwrap();
+        assert_eq!(calls.lock().unwrap().len(), 1);
+        np.update(BTreeMap::from([("u1".to_string(), Some(PodRules { ingress: Some(vec![]), egress: None }))]), false);
+        np.register("u1", "10.42.0.5").await.unwrap();
+        let (script, rules) = calls.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(script, docker_load(&np.names));
+        assert!(rules.unwrap().contains("-d 10.42.0.5/32"));
+        // A Docker host that cannot filter bridged traffic: an error, not open pods.
+        filtered.store(false, std::sync::atomic::Ordering::Relaxed);
+        let err = np.register("u1", "10.42.0.5").await.unwrap_err();
+        assert!(format!("{err:#}").contains("br_netfilter"), "{err:#}");
     }
 
     #[test]

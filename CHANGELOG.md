@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Admission webhooks see the controllers' writes**: pods a ReplicaSet,
+  Job, StatefulSet or DaemonSet creates, and every other object the
+  server writes itself, go through mutating and validating webhooks and
+  ValidatingAdmissionPolicies as kube-controller-manager's do, as user
+  `system:kube-controller-manager`. Sidecar injectors (Istio, Linkerd,
+  Vault Agent) now inject into a Deployment's pods, and Kyverno or
+  Gatekeeper policies on pods hold for them. A ReplicaSet whose pods a
+  webhook refuses or cannot reach records `FailedCreate` events
+  (`Error creating: ...`) and its `ReplicaFailure` condition, and retries.
+  Webhooks also get the request's real `userInfo` (they always saw
+  `system:admin`).
+
 - **Your users from OIDC, static tokens or a token webhook**: `litek8s
   apiserver` (and `install server`, which passes its flags on) takes
   kube-apiserver's authenticator flags. `--oidc-issuer-url` and
@@ -16,6 +28,20 @@
   these users and groups like any other; kubectl gets OIDC tokens from a
   plugin such as kubelogin. The release notes no longer say the API has no
   client authentication (it has had it since 0.2.12).
+
+- **NetworkPolicies on the Docker runtime**: macOS servers (Docker Desktop,
+  OrbStack) and other Docker nodes enforce NetworkPolicies as crun nodes
+  do (ingress and egress, pod and namespace selectors, ipBlock with
+  except, named ports and endPort, default deny, the cluster DNS as a
+  peer). The rules the server computes are the same; the agent loads them
+  into Docker's host network namespace through the privileged
+  `litek8s-service-proxy` helper, one dispatcher per node hooked first into
+  `FORWARD` and `INPUT`, before a selected pod's containers start. A Docker
+  host that cannot filter bridged traffic (no `br_netfilter`, rootless
+  Docker) keeps isolated pods in `ContainerCreating` with the reason
+  instead of running them unprotected. Probes, port-forwards and NodePort
+  relays run inside the pod there and are never filtered. See
+  [docs/networking.md](docs/networking.md#networkpolicies).
 
 ## 0.2.24
 

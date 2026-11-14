@@ -176,7 +176,7 @@ pub struct Agent<R: PodRuntime> {
     /// The address `host-gateway` stands for in pods (found once).
     gateway_ip: tokio::sync::OnceCell<Option<String>>,
     proxy: Arc<proxy::Proxy>,
-    /// NetworkPolicy enforcement, when the runtime can (crun).
+    /// NetworkPolicy enforcement, when the runtime can.
     netpol: Option<Arc<netpol::NetPol>>,
     overlay: Option<Arc<overlay::Overlay>>,
     /// The server takes `OverlayStatus` reports on this connection.
@@ -202,7 +202,7 @@ impl<R: PodRuntime> Agent<R> {
 
     pub fn with_overlay(rt: R, config: AgentConfig, overlay: Option<overlay::Overlay>) -> Arc<Self> {
         let (link, _) = watch::channel(None);
-        let netpol = rt.enforces_network_policy().then(|| Arc::new(netpol::NetPol::default()));
+        let netpol = rt.network_policy(&config.node_name).map(|t| Arc::new(netpol::NetPol::new(t)));
         let agent = Arc::new(Self {
             rt: Arc::new(rt),
             config,

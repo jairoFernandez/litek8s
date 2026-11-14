@@ -36,15 +36,16 @@ Lista honesta; hay más en [skills/litek8s/references/differences.md](../../skil
 - Proyecto de una sola persona, con semanas de vida: las APIs, los flags y los
   formatos en disco pueden cambiar entre versiones 0.x sin migración.
 - No todo el comportamiento del kubelet: los eventos de probes fallidas dicen
-  qué se revisó, no la salida de la probe; las escrituras de los controladores
-  internos no pasan por los webhooks de admisión; los límites de costo de CEL
+  qué se revisó, no la salida de la probe; los límites de costo de CEL
   de las reglas de CRDs no se aplican en ejecución (sí la estimación al crearlas).
-- Las NetworkPolicies se aplican solo en nodos con crun (Linux); el runtime de
-  Docker (servidores macOS) las guarda sin efecto. El tráfico de un nodo hacia
-  sus propios pods (probes, relays de NodePort y LoadBalancer, que corren en el
-  nodo) siempre se permite, y los pods con `NET_ADMIN` pueden falsificar
-  direcciones de origen en el bridge de su nodo
-  ([networking.md](](../networking.md#networkpolicies))).
+- Las NetworkPolicies se aplican igual en nodos con crun y con Docker; un
+  Docker cuyo host no puede filtrar el tráfico del bridge (sin `br_netfilter`,
+  un Docker rootless sin un helper privilegiado en la red del host) no deja
+  arrancar los pods aislados. El tráfico de un nodo hacia sus propios pods
+  (probes, relays de NodePort y LoadBalancer, que corren en el nodo o, con
+  Docker, dentro del pod) siempre se permite, y los pods con `NET_ADMIN`
+  pueden falsificar direcciones de origen en el bridge de su nodo
+  ([networking.md](../networking.md#networkpolicies)).
 - La API de Docker todavía no puede hacer `docker push`. Una imagen descargada
   con los `imagePullSecrets` de un pod queda luego en el nodo para todos los
   pods, como con el default del kubelet (sin `KubeletEnsureSecretPulledImages`).
