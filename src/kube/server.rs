@@ -3094,7 +3094,14 @@ impl ApiState {
         }
         self.default_by_kind(rt, &mut new, Some(old))?;
         self.enforce_crd_schema(rt, &mut new, Some(old))?;
-        let errs = super::validation::validate(&rt.group, &rt.kind, &new, Some(old));
+        let mut errs = super::validation::validate(&rt.group, &rt.kind, &new, Some(old));
+        if !errs.is_empty() {
+            // Ratcheting: what the stored object already got wrong (stored
+            // before a check existed) does not block its updates, its
+            // controller's status writes among them.
+            let before = super::validation::validate(&rt.group, &rt.kind, old, None);
+            errs.retain(|e| !before.contains(e));
+        }
         if !errs.is_empty() {
             return Err(ApiError::invalid_fields(rt, url_name, &errs));
         }
@@ -4845,6 +4852,26 @@ mod tests {
         forged["users"][0]["user"]["client-key-data"] = b64.encode(other.1).into();
         let forged = crate::ui::kube_endpoint_for(&forged, "litek8s", dir.path()).unwrap();
         assert!(forged.json(Method::GET, "/api/v1/namespaces/kube-system/secrets", None).await.is_err());
+    }
+
+    #[test]
+    fn objects_stored_before_a_check_existed_can_still_be_updated() {
+        let api = ApiState::open(None, "127.0.0.1:0".into(), false).unwrap();
+        // A Job with restartPolicy Always, as one stored before Jobs were checked.
+        let job = json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "old", "namespace": "default", "uid": "u1", "resourceVersion": "1"},
+                         "spec": {"template": {"spec": {"restartPolicy": "Always", "containers": [{"name": "c", "image": "busybox"}]}}}});
+        let stored = api.store().create(ObjectKey::new("batch", "jobs", "default", "old"), job).unwrap();
+        let mut status = stored.clone();
+        status["status"] = json!({"active": 1});
+        let stored = api.update_status("batch", "jobs", status).unwrap();
+        let mut labeled = stored.clone();
+        labeled["metadata"]["labels"] = json!({"team": "a"});
+        let stored = api.update_object("batch", "jobs", labeled).unwrap();
+        // A new problem is still refused.
+        let mut broken = stored;
+        broken["spec"]["template"]["spec"]["containers"][0]["image"] = json!("");
+        let e = api.update_object("batch", "jobs", broken).unwrap_err();
+        assert!(e.message.contains("image: Required value"), "{}", e.message);
     }
 
     #[test]

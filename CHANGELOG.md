@@ -11,8 +11,9 @@
   an image, valid container ports and protocols), Jobs and CronJobs
   (`restartPolicy` `OnFailure` or `Never`, no longer defaulted to
   `Always`) and Service ports and types, with kube-apiserver's field error
-  messages (`Kind.group "name" is invalid: ...`). Objects already stored are
-  not touched; only creates and updates are checked.
+  messages (`Kind.group "name" is invalid: ...`). Updates ratchet: what an
+  object stored earlier already gets wrong does not block its updates or
+  its controller's status writes, only new problems are refused.
 
 - **Admission webhooks see the controllers' writes**: pods a ReplicaSet,
   Job, StatefulSet or DaemonSet creates, and every other object the
