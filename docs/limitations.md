@@ -46,9 +46,12 @@ Honest list; more in [skills/litek8s/references/differences.md](../skills/litek8
   inside the pod) is always allowed, and pods with `NET_ADMIN` can forge
   source addresses on their node's bridge
   ([networking.md](networking.md#networkpolicies)).
-- The Docker API cannot `docker push` yet. An image pulled with a pod's
-  `imagePullSecrets` is then on the node for every pod, as with the
-  kubelet's default (no `KubeletEnsureSecretPulledImages`).
+- An image pulled with a pod's `imagePullSecrets` is then on the node for
+  every pod, as with the kubelet's default (no
+  `KubeletEnsureSecretPulledImages`).
+- `docker push` sends the one platform a tag holds (no indexes), and a
+  pulled image whose original blobs are out of reach is pushed with a new
+  image ID ([docker.md](docker.md#pushing-images)).
 - Metrics cover containers, nodes and cluster state; application
   `/metrics` endpoints are not scraped (point a Prometheus at them).
 - The macOS VM never returns memory to macOS once touched (a
