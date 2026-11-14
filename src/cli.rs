@@ -307,6 +307,63 @@ struct Cli {
     command: Command,
 }
 
+/// `litek8s apiserver`'s authenticators besides its own tokens and client
+/// certificates, with kube-apiserver's flag names (docs/auth.md).
+#[derive(Debug, clap::Args)]
+struct AuthnArgs {
+    #[arg(long, value_name = "FILE", help = "Bearer tokens from a CSV file: token,user,uid,\"group1,group2\" per line; read at start")]
+    token_auth_file: Option<PathBuf>,
+    #[arg(long, value_name = "URL", requires = "oidc_client_id", help = "Accept ID tokens of this OpenID Connect issuer (https; its discovery document and keys are fetched from it)")]
+    oidc_issuer_url: Option<String>,
+    #[arg(long, value_name = "ID", requires = "oidc_issuer_url", help = "The client ID ID tokens must be issued for (their aud)")]
+    oidc_client_id: Option<String>,
+    #[arg(long, default_value = "sub", requires = "oidc_issuer_url", help = "The claim that names the user")]
+    oidc_username_claim: String,
+    #[arg(long, requires = "oidc_issuer_url", help = "Prefix of OIDC usernames (default: '<issuer>#' unless the claim is email; '-' for none)")]
+    oidc_username_prefix: Option<String>,
+    #[arg(long, requires = "oidc_issuer_url", help = "The claim with the user's groups (a string or an array of strings)")]
+    oidc_groups_claim: Option<String>,
+    #[arg(long, default_value = "", requires = "oidc_issuer_url", help = "Prefix of OIDC groups")]
+    oidc_groups_prefix: String,
+    #[arg(long, value_name = "FILE", requires = "oidc_issuer_url", help = "CA bundle (PEM) of the issuer's certificate (default: the system roots)")]
+    oidc_ca_file: Option<PathBuf>,
+    #[arg(long, value_name = "KEY=VALUE", requires = "oidc_issuer_url", help = "A claim ID tokens must have with this value (repeatable)")]
+    oidc_required_claim: Vec<String>,
+    #[arg(long, value_delimiter = ',', default_value = "RS256", requires = "oidc_issuer_url", help = "Accepted signing algorithms (RS256, RS384, RS512, PS256, PS384, PS512, ES256, ES384, EdDSA)")]
+    oidc_signing_algs: Vec<String>,
+    #[arg(long, value_name = "FILE", help = "A kubeconfig naming a service that authenticates other bearer tokens: it gets a TokenReview (authentication.k8s.io/v1)")]
+    authentication_token_webhook_config_file: Option<PathBuf>,
+    #[arg(long, default_value = "2m", value_parser = parse_duration, help = "How long the token webhook's answers are cached")]
+    authentication_token_webhook_cache_ttl: Duration,
+}
+
+impl AuthnArgs {
+    fn config(self) -> Result<crate::kube::token_auth::TokenAuthConfig> {
+        let oidc = match (self.oidc_issuer_url, self.oidc_client_id) {
+            (Some(issuer), Some(client)) => {
+                let mut c = crate::kube::token_auth::OidcConfig::new(&issuer, &client);
+                c.username_claim = self.oidc_username_claim;
+                c.username_prefix = self.oidc_username_prefix;
+                c.groups_claim = self.oidc_groups_claim;
+                c.groups_prefix = self.oidc_groups_prefix;
+                c.ca_file = self.oidc_ca_file;
+                c.signing_algs = self.oidc_signing_algs.into_iter().map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect();
+                for kv in self.oidc_required_claim {
+                    let (k, v) = kv.split_once('=').with_context(|| format!("--oidc-required-claim {kv:?}: want KEY=VALUE"))?;
+                    c.required_claims.push((k.to_string(), v.to_string()));
+                }
+                Some(c)
+            }
+            _ => None,
+        };
+        let webhook = self.authentication_token_webhook_config_file.map(|config_file| crate::kube::token_auth::WebhookConfig {
+            config_file,
+            cache_ttl: self.authentication_token_webhook_cache_ttl,
+        });
+        Ok(crate::kube::token_auth::TokenAuthConfig { token_file: self.token_auth_file, oidc, webhook })
+    }
+}
+
 /// `litek8s apiserver`'s observability flags (docs/observability.md).
 #[derive(Debug, clap::Args)]
 struct ObsArgs {
@@ -348,6 +405,8 @@ impl ObsArgs {
     }
 }
 
+// Parsed once per process: the size of `apiserver`'s flags does not matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Subcommand)]
 enum Command {
     #[command(
@@ -414,6 +473,8 @@ enum Command {
         raft_port: Option<u16>,
         #[arg(long, value_enum, default_value = "RBAC", help = "RBAC: clients authenticate (service account tokens, client certificates; anonymous only on /healthz, /version and the like) and RBAC decides; RBAC-audit: the same, but denials are only logged; AlwaysAllow: no authentication, every client is an administrator")]
         authorization_mode: crate::kube::rbac::Mode,
+        #[command(flatten)]
+        authn: AuthnArgs,
         #[command(flatten)]
         obs: ObsArgs,
     },
@@ -801,6 +862,7 @@ pub async fn run() -> Result<()> {
             server,
             raft_port,
             authorization_mode,
+            authn,
             obs,
         } => {
             crate::registries::init(registry_config.as_deref())?;
@@ -856,6 +918,7 @@ pub async fn run() -> Result<()> {
                 prometheus_listen: obs.prometheus_listen,
                 obs: obs.config()?,
                 authorization_mode,
+                token_auth: authn.config()?,
             })
             .await
         }

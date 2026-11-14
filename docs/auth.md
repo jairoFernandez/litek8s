@@ -35,6 +35,36 @@ unchanged: they stay open (`AlwaysAllow`) on 127.0.0.1.
   may read Nodes (ClusterRole `system:litek8s:node`).
 - **HA peers**: the join token (`<data-dir>/join-token`), a `system:masters`
   credential. It also joins nodes, as before; prefer the agent token there.
+- **Your users, from elsewhere** (kube-apiserver's flags; RBAC binds them
+  like any other user or group):
+  - `--token-auth-file tokens.csv`: static bearer tokens, one
+    `token,user,uid,"group1,group2"` per line, read at start.
+  - `--oidc-issuer-url https://... --oidc-client-id ID`: ID tokens of an
+    OpenID Connect provider (Dex, Keycloak, Google, Entra ID, ...). The
+    issuer's discovery document and keys are fetched over HTTPS when first
+    needed and again when a token names a key not seen yet; signature
+    (`--oidc-signing-algs`, default RS256; RS/PS 256-512, ES256, ES384 and
+    EdDSA), issuer, audience (the client ID), `exp` and `nbf` are checked.
+    The user is `--oidc-username-claim` (default `sub`) behind
+    `--oidc-username-prefix` (default `<issuer>#`, none for `email`, whose
+    `email_verified` must not be false; `-` for no prefix); groups come from
+    `--oidc-groups-claim` behind `--oidc-groups-prefix`;
+    `--oidc-required-claim key=value` (repeatable) and `--oidc-ca-file`.
+    Usernames starting with `system:` are refused. kubectl gets the tokens
+    from a credential plugin such as
+    [kubelogin](https://github.com/int128/kubelogin).
+  - `--authentication-token-webhook-config-file webhook.yaml`: a kubeconfig
+    whose cluster is a service that authenticates other bearer tokens. It
+    gets a `TokenReview` (`authentication.k8s.io/v1`) for every token the
+    server does not recognize itself; answers are cached for
+    `--authentication-token-webhook-cache-ttl` (default 2m), rejections for
+    10 s. The kubeconfig's user is how the server authenticates to it
+    (client certificate, `token` or `tokenFile`).
+
+  Bearer tokens are tried in kube-apiserver's order: static tokens, then
+  this cluster's service account tokens or OIDC (by the token's issuer),
+  the join and agent tokens, then the webhook. The `TokenReview` API itself
+  still checks service account tokens only.
 - **Impersonation**: `Impersonate-User` / `-Group` headers, allowed with the
   `impersonate` verb (`kubectl --as`).
 - **Anonymous**: only `/healthz`, `/livez`, `/readyz`, `/version`, `/cacerts`
@@ -157,7 +187,8 @@ There is no revocation: to cut every certificate off, replace
 
 ## Not there yet
 
-OIDC, static token and webhook authenticators; the Node and ABAC authorizers;
+The structured authentication configuration (`--authentication-config`:
+several OIDC issuers, CEL claim mappings); the Node and ABAC authorizers;
 certificate revocation; front-proxy identity for aggregated API servers
 (metrics-server's own authorization sees anonymous requests). See
 [limitations.md](limitations.md).

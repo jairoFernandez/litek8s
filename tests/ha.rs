@@ -73,6 +73,7 @@ impl Server {
             raft_port: None,
             raft_listener: Some(raft_listener),
             authorization_mode: litek8s::kube::rbac::Mode::AlwaysAllow,
+            token_auth: Default::default(),
         };
         let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
         let label = name.to_string();

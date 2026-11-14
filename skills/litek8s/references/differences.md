@@ -22,7 +22,10 @@ Linux (crun; 413/419 on macOS with the Docker runtime); the compatibility corpus
   server`, `cluster apply`) default to `--authorization-mode RBAC`: service
   account tokens, client certificates from the cluster's client CA (CN
   user, O groups; the written kubeconfig is `system:admin` in
-  `system:masters`) and the join token (admin) authenticate; anonymous
+  `system:masters`), the join token (admin), static tokens
+  (`--token-auth-file`), an OIDC issuer (`--oidc-issuer-url`,
+  `--oidc-client-id`, ...) and a token webhook
+  (`--authentication-token-webhook-config-file`) authenticate; anonymous
   requests reach only `/healthz`, `/livez`, `/readyz`, `/version` and the
   OIDC documents (401 elsewhere). Role/ClusterRole/bindings are enforced
   (verbs, groups, resources, subresources such as `pods/exec`,
@@ -35,7 +38,7 @@ Linux (crun; 413/419 on macOS with the Docker runtime); the compatibility corpus
   and allows anyway; `AlwaysAllow` is the old no-auth mode. **Dev clusters
   stay AlwaysAllow** (127.0.0.1 only). Charts that relied on every pod being
   admin need their RBAC: check the server log in RBAC-audit first. Not
-  there: OIDC/static/webhook authenticators, the Node authorizer, client
+  there: `--authentication-config` (several OIDC issuers), the Node authorizer, client
   certificate revocation, front-proxy identity for aggregated APIs.
 - **Admission**: ValidatingAdmissionPolicy rules and webhook
   `matchConditions` are enforced (CEL). Writes made by the in-process

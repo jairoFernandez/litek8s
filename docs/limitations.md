@@ -8,15 +8,19 @@ Honest list; more in [skills/litek8s/references/differences.md](../skills/litek8
   account tokens, client certificates signed by the cluster's client CA (CN
   user, O groups; the kubeconfig it writes is `system:admin` in
   `system:masters`), the join token (an administrator's credential, for servers) and the agent
-  token (nodes only).
+  token (nodes only); your users from static tokens (`--token-auth-file`),
+  an OIDC issuer (`--oidc-*`) or a token webhook, with kube-apiserver's
+  flags ([auth.md](auth.md#who-is-who)).
   Anonymous requests reach only `/healthz`, `/livez`, `/readyz`, `/version`
   and the OIDC discovery documents; everything else gets 401.
   `--authorization-mode RBAC-audit` decides, logs (`RBAC-audit: DENY ...`,
   and each user's first use of a verb and resource as `ALLOW`) and allows,
   to find the RBAC a cluster's charts lack before enforcing;
   `AlwaysAllow` is the old behavior. Dev clusters (`litek8s dev`) stay
-  AlwaysAllow on `127.0.0.1`. Missing next to upstream: OIDC, static token
-  and webhook authenticators; the Node and ABAC authorizers (the nodes'
+  AlwaysAllow on `127.0.0.1`. Missing next to upstream: the structured
+  authentication configuration (several OIDC issuers, CEL claim mappings)
+  and TokenReview for tokens other than service accounts'; the Node and
+  ABAC authorizers (the nodes'
   agents talk to the server over their own authenticated connection);
   client certificate revocation (certificates are valid for ten years; to
   cut one off, rotate the client CA by replacing `<data-dir>/sa.key`, which

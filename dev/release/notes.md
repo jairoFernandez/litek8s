@@ -1,4 +1,4 @@
-litek8s {{VERSION}}: a lightweight Kubernetes in one binary (the real API) for local development, home labs and the edge. Early preview: see the README's Limitations, especially that the API has no client authentication yet.
+litek8s {{VERSION}}: a lightweight Kubernetes in one binary (the real API) for local development, home labs and the edge. Early preview: see the README's Limitations.
 
 ## Install
 

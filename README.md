@@ -140,7 +140,7 @@ in [Numbers](https://litek8s.dev/docs/numbers/).
 
 litek8s is an early preview (v0.x), built and tested by one person.
 
-- **Authentication and RBAC are simpler than upstream's** (no OIDC, no
+- **Authentication and RBAC are simpler than upstream's** (one OIDC issuer at most, no
   Node authorizer, no certificate revocation). Servers enforce RBAC
   (`--authorization-mode RBAC-audit` only logs); dev clusters listen on
   `127.0.0.1` only and every client there is admin.

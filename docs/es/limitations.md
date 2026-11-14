@@ -7,8 +7,10 @@ Lista honesta; hay más en [skills/litek8s/references/differences.md](../../skil
   clientes y aplica RBAC por defecto (`--authorization-mode RBAC`): tokens de
   service account, certificados de cliente firmados por la CA de clientes del
   cluster (CN usuario, O grupos; el kubeconfig que escribe es `system:admin` en
-  `system:masters`) el join token (una credencial de administrador, para servidores) y el token
-  de agente (solo nodos).
+  `system:masters`), el join token (una credencial de administrador, para servidores) y el token
+  de agente (solo nodos); tus usuarios desde tokens estáticos
+  (`--token-auth-file`), un emisor OIDC (`--oidc-*`) o un webhook de tokens,
+  con los flags de kube-apiserver ([auth.md](auth.md#quién-es-quién)).
   Las peticiones anónimas solo llegan a `/healthz`, `/livez`, `/readyz`,
   `/version` y los documentos de descubrimiento OIDC; todo lo demás recibe 401.
   `--authorization-mode RBAC-audit` decide, registra (`RBAC-audit: DENY ...`,
@@ -16,8 +18,9 @@ Lista honesta; hay más en [skills/litek8s/references/differences.md](../../skil
   y permite, para encontrar el RBAC que les falta a los charts de un cluster
   antes de aplicarlo; `AlwaysAllow` es el comportamiento anterior. Los clusters
   de desarrollo (`litek8s dev`) siguen en AlwaysAllow en `127.0.0.1`. Lo que
-  falta frente a upstream: autenticadores OIDC, de token estático y webhook; los
-  autorizadores Node y ABAC (los agents de los nodos hablan con el servidor por
+  falta frente a upstream: la configuración estructurada de autenticación
+  (varios emisores OIDC, mapeos de claims con CEL) y TokenReview para tokens
+  que no son de service account; los autorizadores Node y ABAC (los agents de los nodos hablan con el servidor por
   su propia conexión autenticada); revocación de certificados de cliente (los
   certificados valen por diez años; para anular uno, rota la CA de clientes
   reemplazando `<data-dir>/sa.key`, lo que también invalida todos los tokens de
