@@ -7,6 +7,13 @@
 //! first. Rollback (`kubectl rollout undo`) needs nothing special: the
 //! template is set back to an old ReplicaSet's, which is then adopted as the
 //! new one under the next revision.
+//!
+//! The `Progressing` condition follows upstream: it moves (lastUpdateTime)
+//! whenever the rollout makes progress, and turns False with reason
+//! `ProgressDeadlineExceeded` once it has not for `progressDeadlineSeconds`;
+//! a timer re-checks at the deadline. A paused Deployment has no deadline.
+
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -16,6 +23,10 @@ use crate::kube::server::{ApiError, ApiState};
 
 const HASH_LABEL: &str = "pod-template-hash";
 const REVISION: &str = "deployment.kubernetes.io/revision";
+const PROGRESSING: &str = "Progressing";
+const NEW_RS_AVAILABLE: &str = "NewReplicaSetAvailable";
+const TIMED_OUT: &str = "ProgressDeadlineExceeded";
+const PAUSED: &str = "DeploymentPaused";
 
 fn revision(rs: &Value) -> i64 {
     rs.pointer("/metadata/annotations")
@@ -71,6 +82,7 @@ pub(crate) fn reconcile(api: &ApiState, ns: &str, name: &str) -> Result<Requeue,
         .max()
         .unwrap_or(0);
 
+    let mut found = if paused { Found::Paused } else { Found::Existing };
     let mut new_rs = match new_index {
         Some(idx) => {
             let rs = all.remove(idx);
@@ -82,7 +94,7 @@ pub(crate) fn reconcile(api: &ApiState, ns: &str, name: &str) -> Result<Requeue,
             }
         }
         None if paused => {
-            return write_status(api, &deploy, None, &all, replicas, max_unavailable);
+            return write_status(api, &deploy, None, &all, replicas, max_unavailable, Found::Paused);
         }
         None => {
             let old_total: i64 = all.iter().map(spec_replicas).sum();
@@ -93,6 +105,7 @@ pub(crate) fn reconcile(api: &ApiState, ns: &str, name: &str) -> Result<Requeue,
             } else {
                 (replicas + max_surge - old_total).clamp(0, replicas)
             };
+            found = Found::Created;
             create_replicaset(api, &deploy, &template, initial, max_old_revision + 1, replicas + max_surge)?
         }
     };
@@ -112,7 +125,16 @@ pub(crate) fn reconcile(api: &ApiState, ns: &str, name: &str) -> Result<Requeue,
 
     let revision_str = revision(&new_rs).to_string();
     let deploy = util::ensure_annotation(api, "apps", "deployments", &deploy, REVISION, &revision_str)?;
-    write_status(api, &deploy, Some(&new_rs), &old, replicas, max_unavailable)
+    write_status(api, &deploy, Some(&new_rs), &old, replicas, max_unavailable, found)
+}
+
+/// How this reconcile came by the new ReplicaSet.
+#[derive(Clone, Copy, PartialEq)]
+enum Found {
+    Existing,
+    Created,
+    /// Paused: no rollout, so no progress to judge.
+    Paused,
 }
 
 /// The ReplicaSets the Deployment controls, after adopting orphans its
@@ -374,6 +396,7 @@ fn write_status(
     old: &[Value],
     replicas: i64,
     max_unavailable: i64,
+    found: Found,
 ) -> Result<Requeue, ApiError> {
     let all: Vec<&Value> = old.iter().chain(new_rs).collect();
     let sum = |field: &str| all.iter().map(|rs| status_int(rs, field)).sum::<i64>();
@@ -387,27 +410,13 @@ fn write_status(
     } else {
         util::set_condition(&mut conditions, "Available", "False", "MinimumReplicasUnavailable", "Deployment does not have minimum availability.");
     }
-    if let Some(rs) = new_rs {
-        let rs_name = util::name(rs);
-        let complete = updated == replicas && available >= replicas && total == replicas;
-        if complete {
-            util::set_condition(
-                &mut conditions,
-                "Progressing",
-                "True",
-                "NewReplicaSetAvailable",
-                &format!("ReplicaSet \"{rs_name}\" has successfully progressed."),
-            );
-        } else {
-            util::set_condition(
-                &mut conditions,
-                "Progressing",
-                "True",
-                "ReplicaSetUpdated",
-                &format!("ReplicaSet \"{rs_name}\" is progressing."),
-            );
-        }
-    }
+    let requeue = progressing(
+        deploy,
+        &mut conditions,
+        new_rs.map(util::name).as_deref(),
+        found,
+        Counts { total, updated, ready, available, replicas },
+    );
     // Available first, as Kubernetes orders them.
     conditions.sort_by_key(|c| if c["type"] == "Available" { 0 } else { 1 });
     let status = json!({
@@ -420,5 +429,277 @@ fn write_status(
         "conditions": conditions,
     });
     util::write_status(api, "apps", "deployments", deploy, status)?;
-    Ok(None)
+    Ok(requeue)
+}
+
+/// The replica counts of a Deployment's new status.
+#[derive(Clone, Copy)]
+struct Counts {
+    total: i64,
+    updated: i64,
+    ready: i64,
+    available: i64,
+    replicas: i64,
+}
+
+/// Set the `Progressing` condition as upstream's syncRolloutStatus does and
+/// say when to look again for the progress deadline.
+fn progressing(deploy: &Value, conditions: &mut Vec<Value>, rs_name: Option<&str>, found: Found, now: Counts) -> Requeue {
+    let deadline = i(deploy, "/spec/progressDeadlineSeconds").filter(|d| *d < i32::MAX as i64);
+    let Some(deadline) = deadline else {
+        conditions.retain(|c| c["type"] != PROGRESSING);
+        return None;
+    };
+    let reason_of = |conditions: &[Value]| {
+        conditions.iter().find(|c| c["type"] == PROGRESSING).map(|c| s(c, "/reason").to_string())
+    };
+    if found == Found::Paused {
+        if reason_of(conditions).as_deref() != Some(PAUSED) {
+            set_progressing(conditions, "Unknown", PAUSED, "Deployment is paused", false);
+        }
+        return None;
+    }
+    let Some(rs_name) = rs_name else { return None };
+    match reason_of(conditions).as_deref() {
+        Some(PAUSED) => set_progressing(conditions, "Unknown", "DeploymentResumed", "Deployment is resumed", false),
+        _ if found == Found::Created => {
+            set_progressing(conditions, "True", "NewReplicaSetCreated", &format!("Created new replica set \"{rs_name}\""), false);
+        }
+        None => set_progressing(conditions, "True", "FoundNewReplicaSet", &format!("Found new replica set \"{rs_name}\""), false),
+        _ => {}
+    }
+
+    // (observedGeneration is always the current generation here.)
+    let complete = now.updated == now.replicas && now.total == now.replicas && now.available >= now.replicas;
+    let current = reason_of(conditions);
+    let already_complete = now.total == now.updated && current.as_deref() == Some(NEW_RS_AVAILABLE);
+    if !already_complete {
+        let was = |field: &str| i(deploy, &format!("/status/{field}")).unwrap_or(0);
+        let made_progress = now.updated > was("updatedReplicas")
+            || now.total - now.updated < was("replicas") - was("updatedReplicas")
+            || now.ready > was("readyReplicas")
+            || now.available > was("availableReplicas");
+        if complete {
+            set_progressing(conditions, "True", NEW_RS_AVAILABLE, &format!("ReplicaSet \"{rs_name}\" has successfully progressed."), false);
+        } else if made_progress {
+            set_progressing(conditions, "True", "ReplicaSetUpdated", &format!("ReplicaSet \"{rs_name}\" is progressing."), true);
+        } else if timed_out(conditions, deadline) == Some(Duration::ZERO) {
+            set_progressing(conditions, "False", TIMED_OUT, &format!("ReplicaSet \"{rs_name}\" has timed out progressing."), false);
+        }
+    }
+    if complete {
+        return None;
+    }
+    // Upstream rounds up and adds a second, so the re-check sees the deadline passed.
+    timed_out(conditions, deadline).filter(|left| !left.is_zero()).map(|left| Duration::from_secs(left.as_secs() + 1))
+}
+
+/// How long until the `Progressing` condition times out: zero once it has
+/// (or did), None when it cannot (none, or complete).
+fn timed_out(conditions: &[Value], deadline: i64) -> Option<Duration> {
+    let c = conditions.iter().find(|c| c["type"] == PROGRESSING)?;
+    match s(c, "/reason") {
+        NEW_RS_AVAILABLE => None,
+        TIMED_OUT => Some(Duration::ZERO),
+        _ => {
+            let from = util::parse_time(s(c, "/lastUpdateTime"))?;
+            let left = from + chrono::Duration::seconds(deadline) - util::now();
+            Some(if left.num_milliseconds() < 0 { Duration::ZERO } else { left.to_std().unwrap_or_default() })
+        }
+    }
+}
+
+/// upstream's SetDeploymentCondition: nothing changes when status and
+/// reason are the same, unless `moved` (progress was made: lastUpdateTime
+/// moves on); lastTransitionTime only changes with the status.
+fn set_progressing(conditions: &mut Vec<Value>, status: &str, reason: &str, message: &str, moved: bool) {
+    let now = util::rfc3339(util::now());
+    let current = conditions.iter().position(|c| c["type"] == PROGRESSING);
+    let mut transition = now.clone();
+    if let Some(idx) = current {
+        let c = &conditions[idx];
+        if s(c, "/status") == status && s(c, "/reason") == reason && !moved {
+            return;
+        }
+        if s(c, "/status") == status {
+            transition = s(c, "/lastTransitionTime").to_string();
+        }
+        conditions.remove(idx);
+    }
+    conditions.push(json!({
+        "type": PROGRESSING,
+        "status": status,
+        "reason": reason,
+        "message": message,
+        "lastUpdateTime": now,
+        "lastTransitionTime": transition,
+    }));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn api() -> ApiState {
+        ApiState::open(None, "127.0.0.1:0".into(), false).unwrap()
+    }
+
+    fn create(api: &ApiState, spec: Value) {
+        let mut spec = spec;
+        spec["selector"] = json!({"matchLabels": {"app": "web"}});
+        spec["template"] = json!({"metadata": {"labels": {"app": "web"}}, "spec": {"containers": [{"name": "web", "image": "registry.invalid/none:1"}]}});
+        let d = json!({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": "web"}, "spec": spec});
+        api.create_object("apps", "deployments", Some("default"), d).unwrap();
+    }
+
+    fn deploy(api: &ApiState) -> Value {
+        api.get_object("apps", "deployments", "default", "web").unwrap()
+    }
+
+    fn sync(api: &ApiState) -> Requeue {
+        reconcile(api, "default", "web").unwrap()
+    }
+
+    fn progressing_of(api: &ApiState) -> Value {
+        util::condition(&deploy(api), PROGRESSING).cloned().expect("Progressing condition")
+    }
+
+    fn new_rs(api: &ApiState) -> Value {
+        api.store().list("apps", "replicasets", Some("default")).0.into_iter().next().expect("ReplicaSet")
+    }
+
+    /// What the ReplicaSet controller would report for its pods.
+    fn rs_status(api: &ApiState, replicas: i64, ready: i64) {
+        let status = json!({"replicas": replicas, "readyReplicas": ready, "availableReplicas": ready});
+        util::write_status(api, "apps", "replicasets", &new_rs(api), status).unwrap();
+    }
+
+    /// Move the condition's lastUpdateTime back, as if no progress had been
+    /// made for that long.
+    fn age_progressing(api: &ApiState, seconds: i64) {
+        let mut d = deploy(api);
+        let then = util::rfc3339(util::now() - chrono::Duration::seconds(seconds));
+        for c in d["status"]["conditions"].as_array_mut().unwrap() {
+            if c["type"] == PROGRESSING {
+                c["lastUpdateTime"] = json!(then);
+                c["lastTransitionTime"] = json!(then);
+            }
+        }
+        api.update_status("apps", "deployments", d).unwrap();
+    }
+
+    #[test]
+    fn new_rollout_sets_progressing_and_a_timer_at_the_deadline() {
+        let api = api();
+        create(&api, json!({"replicas": 2, "progressDeadlineSeconds": 30}));
+        let requeue = sync(&api).expect("deadline timer");
+        assert!(requeue > Duration::from_secs(29) && requeue <= Duration::from_secs(31), "{requeue:?}");
+        let c = progressing_of(&api);
+        assert_eq!((s(&c, "/status"), s(&c, "/reason")), ("True", "NewReplicaSetCreated"));
+        assert_eq!(s(&c, "/message"), format!("Created new replica set \"{}\"", util::name(&new_rs(&api))));
+        // Nothing moved: the condition stays as it is.
+        sync(&api).expect("deadline timer");
+        assert_eq!(progressing_of(&api), c);
+    }
+
+    #[test]
+    fn no_progress_for_the_deadline_times_out() {
+        let api = api();
+        create(&api, json!({"replicas": 1, "progressDeadlineSeconds": 10}));
+        sync(&api);
+        rs_status(&api, 1, 0);
+        sync(&api);
+        age_progressing(&api, 11);
+        assert_eq!(sync(&api), None, "no timer once timed out");
+        let c = progressing_of(&api);
+        let rs = util::name(&new_rs(&api));
+        assert_eq!((s(&c, "/status"), s(&c, "/reason")), ("False", "ProgressDeadlineExceeded"));
+        assert_eq!(s(&c, "/message"), format!("ReplicaSet \"{rs}\" has timed out progressing."));
+        assert!(util::parse_time(s(&c, "/lastTransitionTime")).unwrap() > util::now() - chrono::Duration::seconds(5));
+
+        // Pods becoming ready later is progress again.
+        rs_status(&api, 1, 1);
+        assert_eq!(sync(&api), None);
+        let c = progressing_of(&api);
+        assert_eq!((s(&c, "/status"), s(&c, "/reason")), ("True", "NewReplicaSetAvailable"));
+    }
+
+    #[test]
+    fn progress_moves_the_deadline() {
+        let api = api();
+        create(&api, json!({"replicas": 3, "progressDeadlineSeconds": 10}));
+        sync(&api);
+        rs_status(&api, 3, 0);
+        sync(&api);
+        age_progressing(&api, 8);
+        let before = progressing_of(&api);
+        rs_status(&api, 3, 1);
+        let requeue = sync(&api).expect("deadline timer");
+        assert!(requeue > Duration::from_secs(9), "{requeue:?}");
+        let c = progressing_of(&api);
+        assert_eq!((s(&c, "/status"), s(&c, "/reason")), ("True", "ReplicaSetUpdated"));
+        assert!(s(&c, "/lastUpdateTime") > s(&before, "/lastUpdateTime"));
+        assert_eq!(s(&c, "/lastTransitionTime"), s(&before, "/lastTransitionTime"), "still True");
+        // Aged again without progress: times out.
+        age_progressing(&api, 11);
+        sync(&api);
+        assert_eq!(s(&progressing_of(&api), "/reason"), "ProgressDeadlineExceeded");
+    }
+
+    #[test]
+    fn a_finished_rollout_has_no_deadline() {
+        let api = api();
+        create(&api, json!({"replicas": 1, "progressDeadlineSeconds": 10}));
+        sync(&api);
+        rs_status(&api, 1, 1);
+        assert_eq!(sync(&api), None);
+        age_progressing(&api, 60);
+        assert_eq!(sync(&api), None);
+        assert_eq!(s(&progressing_of(&api), "/reason"), "NewReplicaSetAvailable");
+    }
+
+    #[test]
+    fn paused_deployments_do_not_time_out() {
+        let api = api();
+        create(&api, json!({"replicas": 1, "progressDeadlineSeconds": 10}));
+        sync(&api);
+        let mut d = deploy(&api);
+        d["spec"]["paused"] = json!(true);
+        api.update_object("apps", "deployments", d).unwrap();
+        assert_eq!(sync(&api), None);
+        let c = progressing_of(&api);
+        assert_eq!((s(&c, "/status"), s(&c, "/reason")), ("Unknown", "DeploymentPaused"));
+        age_progressing(&api, 60);
+        assert_eq!(sync(&api), None);
+        assert_eq!(s(&progressing_of(&api), "/reason"), "DeploymentPaused");
+
+        // Resuming starts the deadline afresh.
+        let mut d = deploy(&api);
+        d["spec"]["paused"] = json!(false);
+        api.update_object("apps", "deployments", d).unwrap();
+        let requeue = sync(&api).expect("deadline timer");
+        assert!(requeue > Duration::from_secs(9), "{requeue:?}");
+        let c = progressing_of(&api);
+        assert_eq!((s(&c, "/status"), s(&c, "/reason")), ("Unknown", "DeploymentResumed"));
+    }
+
+    #[test]
+    fn existing_replicaset_without_condition_is_found() {
+        let api = api();
+        create(&api, json!({"replicas": 1, "progressDeadlineSeconds": 10}));
+        sync(&api);
+        let mut d = deploy(&api);
+        d["status"]["conditions"] = json!([]);
+        api.update_status("apps", "deployments", d).unwrap();
+        sync(&api);
+        assert_eq!(s(&progressing_of(&api), "/reason"), "FoundNewReplicaSet");
+    }
+
+    #[test]
+    fn no_deadline_no_condition() {
+        let api = api();
+        create(&api, json!({"replicas": 1, "progressDeadlineSeconds": i32::MAX}));
+        assert_eq!(sync(&api), None);
+        assert!(util::condition(&deploy(&api), PROGRESSING).is_none());
+    }
 }
