@@ -35,11 +35,13 @@ Honest list; more in [skills/litek8s/references/differences.md](../skills/litek8
   not the probe's output; writes made by the in-process controllers do not
   go through admission webhooks; runtime CEL cost limits of CRD rules are
   not enforced (the estimate at creation is).
-- NetworkPolicies are enforced on crun nodes (Linux) only; the Docker
-  runtime (macOS servers) stores them without effect. Traffic from a node to
-  its own pods (probes, NodePort and LoadBalancer relays, which run on the
-  node) is always allowed, and pods with `NET_ADMIN` can forge source
-  addresses on their node's bridge
+- NetworkPolicies are enforced on crun and Docker nodes alike; a Docker
+  whose host cannot filter bridged traffic (no `br_netfilter`, a rootless
+  Docker without a privileged host-network helper) keeps isolated pods
+  from starting instead. Traffic from a node to its own pods (probes,
+  NodePort and LoadBalancer relays, which run on the node or, with Docker,
+  inside the pod) is always allowed, and pods with `NET_ADMIN` can forge
+  source addresses on their node's bridge
   ([networking.md](networking.md#networkpolicies)).
 - The Docker API cannot `docker push` yet. An image pulled with a pod's
   `imagePullSecrets` is then on the node for every pod, as with the

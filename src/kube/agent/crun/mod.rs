@@ -704,8 +704,8 @@ impl PodRuntime for CrunPods {
         true
     }
 
-    fn enforces_network_policy(&self) -> bool {
-        true
+    fn network_policy(&self, _node: &str) -> Option<crate::kube::agent::netpol::Target> {
+        Some(crate::kube::agent::netpol::Target::Node)
     }
 
     async fn machine(&self) -> Result<MachineInfo> {

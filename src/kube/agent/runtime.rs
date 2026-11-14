@@ -276,10 +276,11 @@ pub trait PodRuntime: Send + Sync + 'static {
     fn reaches_pods_directly(&self) -> bool {
         false
     }
-    /// Whether pod traffic goes through the node's iptables, so
-    /// NetworkPolicies are enforced (`netpol.rs`): crun.
-    fn enforces_network_policy(&self) -> bool {
-        false
+    /// Where the NetworkPolicies of node `node` are enforced (`netpol.rs`);
+    /// `None`: they are not.
+    fn network_policy(&self, node: &str) -> Option<super::netpol::Target> {
+        let _ = node;
+        None
     }
     /// Whether the runtime writes each pod's `/etc/hosts` and
     /// `/etc/resolv.conf` itself; otherwise the agent writes kubelet-style
@@ -452,6 +453,26 @@ impl DockerPods {
         Ok(created.id)
     }
 
+    /// `sh -c script` in Docker's host network namespace (the helper
+    /// container), with `stdin`; its stdout.
+    async fn host_shell(&self, script: &str, stdin: Option<&str>) -> Result<String> {
+        let id = self.ensure_proxy_helper().await?;
+        let mut session = self.exec(&id, vec!["sh".into(), "-c".into(), script.to_string()], false, stdin.is_some()).await?;
+        if let Some(input) = stdin {
+            session.input.write_all(input.as_bytes()).await?;
+            session.input.shutdown().await?;
+        }
+        let (mut out, mut errors) = (String::new(), String::new());
+        while let Some(Ok((channel, bytes))) = session.output.next().await {
+            let text = String::from_utf8_lossy(&bytes);
+            if channel == 2 { errors.push_str(&text) } else { out.push_str(&text) }
+        }
+        match self.exec_exit_code(&session.id).await? {
+            Some(0) | None => Ok(out),
+            Some(code) => bail!("exited with {code}: {}", errors.trim()),
+        }
+    }
+
     async fn image_present(&self, image: &str) -> bool {
         self.docker.inspect_image(image).await.is_ok()
     }
@@ -497,6 +518,27 @@ pub(crate) async fn apply_rules_on_host(rules: &str) -> Result<()> {
         bail!("iptables-restore failed: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
     Ok(())
+}
+
+/// `sh -c script` on this host, with `stdin`; its stdout.
+async fn local_shell(script: &str, stdin: Option<&str>) -> Result<String> {
+    use tokio::process::Command;
+    let mut child = Command::new("sh")
+        .arg("-c")
+        .arg(script)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .context("failed to run sh")?;
+    if let (Some(mut input), Some(text)) = (child.stdin.take(), stdin) {
+        input.write_all(text.as_bytes()).await?;
+    }
+    let out = child.wait_with_output().await?;
+    if !out.status.success() {
+        bail!("{}", String::from_utf8_lossy(&out.stderr).trim());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 fn docker_mount(m: &MountSpec) -> Mount {
@@ -984,7 +1026,6 @@ impl PodRuntime for DockerPods {
         if host_iptables() {
             return apply_rules_on_host(rules).await;
         }
-        let id = self.ensure_proxy_helper().await?;
         // Re-check the PREROUTING/OUTPUT jumps every time: Docker (or its VM)
         // restarting rebuilds those chains without them.
         let script = format!(
@@ -993,17 +1034,21 @@ impl PodRuntime for DockerPods {
              exec iptables-restore --noflush",
             chain = super::proxy::CHAIN
         );
-        let mut session = self.exec(&id, vec!["sh".into(), "-c".into(), script], false, true).await?;
-        session.input.write_all(rules.as_bytes()).await?;
-        session.input.shutdown().await?;
-        let mut errors = String::new();
-        while let Some(Ok((_, bytes))) = session.output.next().await {
-            errors.push_str(&String::from_utf8_lossy(&bytes));
-        }
-        match self.exec_exit_code(&session.id).await? {
-            Some(0) | None => Ok(()),
-            Some(code) => bail!("iptables-restore exited with {code}: {}", errors.trim()),
-        }
+        self.host_shell(&script, Some(rules)).await.map(drop)
+    }
+
+    fn network_policy(&self, node: &str) -> Option<super::netpol::Target> {
+        let rt = self.clone();
+        let shell: super::netpol::Shell = Arc::new(move |script: String, stdin: Option<String>| {
+            let rt = rt.clone();
+            Box::pin(async move {
+                if host_iptables() {
+                    return local_shell(&script, stdin.as_deref()).await;
+                }
+                rt.host_shell(&script, stdin.as_deref()).await
+            })
+        });
+        Some(super::netpol::Target::Docker { node: node.to_string(), shell })
     }
 
     async fn host_gateway_ip(&self) -> Result<String> {
@@ -1198,8 +1243,8 @@ impl PodRuntime for NodeRuntime {
     fn reaches_pods_directly(&self) -> bool {
         each!(self, rt => rt.reaches_pods_directly())
     }
-    fn enforces_network_policy(&self) -> bool {
-        each!(self, rt => rt.enforces_network_policy())
+    fn network_policy(&self, node: &str) -> Option<super::netpol::Target> {
+        each!(self, rt => rt.network_policy(node))
     }
     fn writes_pod_files(&self) -> bool {
         each!(self, rt => rt.writes_pod_files())
