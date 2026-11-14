@@ -1120,7 +1120,7 @@ impl ApiError {
         let mut e = Self::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             "Invalid",
-            format!("{} \"{name}\" is invalid: {}", qualified(rt), message.into()),
+            format!("{} \"{name}\" is invalid: {}", qualified_kind(rt), message.into()),
         );
         e.details = Some(json!({"name": name, "group": rt.group, "kind": rt.kind}));
         e
@@ -1212,6 +1212,12 @@ fn qualified(rt: &ResourceType) -> String {
     } else {
         format!("{}.{}", rt.plural, rt.group)
     }
+}
+
+/// `Kind.group` (`Kind` for the core group), as upstream names the object in
+/// Invalid errors.
+fn qualified_kind(rt: &ResourceType) -> String {
+    if rt.group.is_empty() { rt.kind.clone() } else { format!("{}.{}", rt.kind, rt.group) }
 }
 
 pub(crate) fn full(bytes: impl Into<Bytes>) -> Body {
@@ -3619,11 +3625,11 @@ impl ApiState {
             }
             ("batch", "Job") => {
                 defaults::job(obj, old);
-                defaults::pod_template(obj, "/spec/template");
+                defaults::job_pod_template(obj, "/spec/template");
             }
             ("batch", "CronJob") => {
                 defaults::cronjob(obj);
-                defaults::pod_template(obj, "/spec/jobTemplate/spec/template");
+                defaults::job_pod_template(obj, "/spec/jobTemplate/spec/template");
             }
             ("apps", "DaemonSet") => {
                 defaults::daemonset(obj);

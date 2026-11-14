@@ -278,3 +278,155 @@ t_serviceaccount_default() {
     use_ns
     wait_for 20 k -n "$NS" get serviceaccount default
 }
+
+# Create the manifest on stdin in $NS; it must be rejected as Invalid with
+# every given message.
+expect_invalid() {
+    local manifest out msg
+    manifest=$(cat)
+    if out=$(printf '%s\n' "$manifest" | k -n "$NS" create -f - 2>&1); then
+        echo "invalid object was accepted: $out" >&2
+        return 1
+    fi
+    expect_contains "$out" "is invalid" || return 1
+    for msg in "$@"; do
+        expect_contains "$out" "$msg" || return 1
+    done
+}
+
+case_def invalid_names L1 30 "object names follow the kind's DNS rule"
+t_invalid_names() {
+    use_ns
+    expect_invalid 'metadata.name: Invalid value: "Bad_Name": a lowercase RFC 1123 subdomain must consist of lower case alphanumeric characters' <<'EOF2'
+apiVersion: v1
+kind: ConfigMap
+metadata: {name: Bad_Name}
+EOF2
+    expect_invalid 'metadata.name: Invalid value: "1web": a DNS-1035 label must consist of lower case alphanumeric characters' <<'EOF2'
+apiVersion: v1
+kind: Service
+metadata: {name: 1web}
+spec: {ports: [{port: 80}]}
+EOF2
+    expect_invalid 'metadata.name: Invalid value: "a.b": must not contain dots' <<'EOF2'
+apiVersion: v1
+kind: Namespace
+metadata: {name: a.b}
+EOF2
+}
+
+case_def invalid_labels L1 30 "label keys and values are validated"
+t_invalid_labels() {
+    use_ns
+    expect_invalid 'metadata.labels: Invalid value: "bad key": name part must consist of alphanumeric characters' \
+        'metadata.labels: Invalid value: "-x": a valid label must be an empty string or consist of alphanumeric characters' <<'EOF2'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: labels
+  labels: {"bad key": ok, good: "-x"}
+EOF2
+    expect_invalid 'metadata.annotations: Invalid value: "a/b/c": a qualified name must consist of' <<'EOF2'
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: annotations
+  annotations: {"a/b/c": x}
+EOF2
+}
+
+case_def invalid_workload_selector L1 30 "workloads need a selector matching their template"
+t_invalid_workload_selector() {
+    use_ns
+    expect_invalid 'spec.selector: Required value' \
+        'spec.template.metadata.labels: Invalid value: map[string]string{"app":"web"}: `selector` does not match template `labels`' <<'EOF2'
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: web}
+spec:
+  template:
+    metadata: {labels: {app: web}}
+    spec: {containers: [{name: web, image: nginx}]}
+EOF2
+    expect_invalid '`selector` does not match template `labels`' <<'EOF2'
+apiVersion: apps/v1
+kind: StatefulSet
+metadata: {name: db}
+spec:
+  selector: {matchLabels: {app: db}}
+  template:
+    metadata: {labels: {app: other}}
+    spec: {containers: [{name: db, image: nginx}]}
+EOF2
+    expect_invalid 'spec.template.spec.restartPolicy: Unsupported value: "Never": supported values: "Always"' <<'EOF2'
+apiVersion: apps/v1
+kind: DaemonSet
+metadata: {name: agent}
+spec:
+  selector: {matchLabels: {app: agent}}
+  template:
+    metadata: {labels: {app: agent}}
+    spec: {restartPolicy: Never, containers: [{name: agent, image: nginx}]}
+EOF2
+}
+
+case_def invalid_pod_containers L1 30 "pods need containers with unique names and valid ports"
+t_invalid_pod_containers() {
+    use_ns
+    expect_invalid 'spec.containers: Required value' <<'EOF2'
+apiVersion: v1
+kind: Pod
+metadata: {name: empty}
+spec: {containers: []}
+EOF2
+    expect_invalid 'spec.containers[1].name: Duplicate value: "a"' \
+        'spec.containers[0].ports[0].containerPort: Invalid value: 70000: must be between 1 and 65535, inclusive' \
+        'spec.containers[1].image: Required value' <<'EOF2'
+apiVersion: v1
+kind: Pod
+metadata: {name: dup}
+spec:
+  containers:
+    - {name: a, image: nginx, ports: [{containerPort: 70000}]}
+    - {name: a}
+EOF2
+}
+
+case_def invalid_service_ports L1 30 "service ports must be in range with a known protocol"
+t_invalid_service_ports() {
+    use_ns
+    expect_invalid 'spec.ports[0].port: Invalid value: 70000: must be between 1 and 65535, inclusive' <<'EOF2'
+apiVersion: v1
+kind: Service
+metadata: {name: big}
+spec: {ports: [{port: 70000, targetPort: 80}]}
+EOF2
+    expect_invalid 'spec.ports[0].protocol: Unsupported value: "HTTP": supported values: "SCTP", "TCP", "UDP"' \
+        'spec.ports[1].name: Required value' <<'EOF2'
+apiVersion: v1
+kind: Service
+metadata: {name: proto}
+spec: {ports: [{name: a, port: 80, protocol: HTTP}, {port: 81}]}
+EOF2
+}
+
+case_def invalid_job_restart L1 30 "job pods must restart OnFailure or Never"
+t_invalid_job_restart() {
+    use_ns
+    expect_invalid 'spec.template.spec.restartPolicy: Unsupported value: "Always": supported values: "OnFailure", "Never"' <<'EOF2'
+apiVersion: batch/v1
+kind: Job
+metadata: {name: always}
+spec:
+  template:
+    spec: {restartPolicy: Always, containers: [{name: a, image: busybox}]}
+EOF2
+    expect_invalid 'spec.template.spec.restartPolicy: Required value: valid values: "OnFailure", "Never"' <<'EOF2'
+apiVersion: batch/v1
+kind: Job
+metadata: {name: unset}
+spec:
+  template:
+    spec: {containers: [{name: a, image: busybox}]}
+EOF2
+}

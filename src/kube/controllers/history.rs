@@ -183,7 +183,7 @@ mod tests {
         let (api, owner) = setup(None);
         let other = api
             .create_object("apps", "statefulsets", Some("default"),
-                json!({"apiVersion": "apps/v1", "kind": "StatefulSet", "metadata": {"name": "db"}, "spec": {"selector": {"matchLabels": {"app": "db"}}, "template": template("v1")}}))
+                json!({"apiVersion": "apps/v1", "kind": "StatefulSet", "metadata": {"name": "db"}, "spec": {"selector": {"matchLabels": {"app": "web"}}, "template": template("v1")}}))
             .unwrap();
         sync_image(&api, &other, "v1", &[]);
         sync_image(&api, &other, "v2", &[]);
