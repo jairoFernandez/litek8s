@@ -133,6 +133,8 @@ pub struct ApiServerConfig {
     /// AlwaysAllow (no credentials needed), RBAC, or RBAC-audit (decide,
     /// log, allow).
     pub authorization_mode: super::rbac::Mode,
+    /// `--token-auth-file`, `--oidc-*`, the token webhook.
+    pub token_auth: super::token_auth::TokenAuthConfig,
 }
 
 /// Loads an image archive into the local node (`litek8s dev load`).
@@ -479,6 +481,7 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
         .filter(|n| state.disk_root.as_ref().is_none_or(|root| !n.starts_with(root)));
     state.lifecycle = config.lifecycle.clone();
     state.authz = super::authn::Authz::new(config.authorization_mode);
+    state.authz.tokens = super::token_auth::TokenAuth::load(&config.token_auth)?;
     state.agents_welcome.send_replace(false);
     let state = Arc::new(state);
     let token = state.join_token();
@@ -498,7 +501,11 @@ pub async fn serve(mut config: ApiServerConfig) -> Result<()> {
     }
     match config.authorization_mode {
         super::rbac::Mode::AlwaysAllow => eprintln!("apiserver: listening on http://{addr} and https (authorization mode AlwaysAllow: no authentication, every client is an administrator)"),
-        mode => eprintln!("apiserver: listening on https://{addr} (authorization mode {}: service account tokens and client certificates)", mode.as_str()),
+        mode => {
+            let mut authn = vec!["service account tokens".to_string(), "client certificates".to_string()];
+            authn.extend(state.authz.tokens.describe());
+            eprintln!("apiserver: listening on https://{addr} (authorization mode {}: {})", mode.as_str(), authn.join(", "));
+        }
     }
     let node_name = config.node_name.clone().unwrap_or_else(super::agent::default_node_name);
     let mut main_listener = Some(listener);
@@ -1301,7 +1308,7 @@ async fn handle(state: Arc<ApiState>, mut req: Request<Incoming>, conn: &super::
         return super::ha::serve(&state, req).await;
     }
     let query = parse_query(req.uri().query());
-    let user = match super::authn::check(&state, req.method(), req.uri().path(), &query, req.headers(), conn) {
+    let user = match super::authn::check(&state, req.method(), req.uri().path(), &query, req.headers(), conn).await {
         Ok(user) => user,
         Err(e) => {
             if state.log_requests {

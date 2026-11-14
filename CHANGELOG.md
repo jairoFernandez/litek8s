@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- **Your users from OIDC, static tokens or a token webhook**: `litek8s
+  apiserver` (and `install server`, which passes its flags on) takes
+  kube-apiserver's authenticator flags. `--oidc-issuer-url` and
+  `--oidc-client-id` accept ID tokens of an OpenID Connect provider (Dex,
+  Keycloak, Google, Entra ID; keys from its discovery document, RS/PS/ES
+  and EdDSA signatures, `--oidc-username-claim`/`-prefix`,
+  `--oidc-groups-claim`/`-prefix`, `--oidc-required-claim`,
+  `--oidc-ca-file`), `--token-auth-file` reads static tokens from a CSV,
+  and `--authentication-token-webhook-config-file` sends every token the
+  server does not know to a TokenReview service, its answers cached
+  (`--authentication-token-webhook-cache-ttl`, default 2m). RBAC binds
+  these users and groups like any other; kubectl gets OIDC tokens from a
+  plugin such as kubelogin. The release notes no longer say the API has no
+  client authentication (it has had it since 0.2.12).
+
 ## 0.2.24
 
 - **Rollouts that stop progressing fail**: the Deployment controller keeps

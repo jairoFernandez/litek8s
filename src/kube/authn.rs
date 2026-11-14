@@ -4,11 +4,14 @@
 //! Who a request comes from, in order:
 //! - a request another HA server forwarded, with the user it authenticated
 //!   (trusted only with the cluster secret alongside);
-//! - `Authorization: Bearer`: a service account token this cluster signed
-//!   (account, bound pod and audience checked as TokenReview does), or the
-//!   cluster's join token (`system:masters`: whoever holds it can join a
-//!   server and read every key anyway), or its agent token with a joined
-//!   node's name and password (`system:node:<name>` in `system:nodes`);
+//! - `Authorization: Bearer`: a static token (`--token-auth-file`), a
+//!   service account token this cluster signed (account, bound pod and
+//!   audience checked as TokenReview does) or an OIDC ID token (by its
+//!   issuer), the cluster's join token (`system:masters`: whoever holds it
+//!   can join a server and read every key anyway), or its agent token with
+//!   a joined node's name and password (`system:node:<name>` in
+//!   `system:nodes`); what none of them knows goes to the token webhook
+//!   when one is configured (`token_auth`);
 //! - a TLS client certificate signed by the client CA (CN user, O groups);
 //! - else anonymous, which only reaches the public paths ([`is_public`]).
 //!
@@ -54,6 +57,8 @@ impl Conn {
 #[derive(Default)]
 pub struct Authz {
     pub mode: Mode,
+    /// Static tokens, OIDC and the token webhook.
+    pub tokens: super::token_auth::TokenAuth,
     /// What was already logged (RBAC-audit allows, RBAC denials), so the
     /// log names each user × verb × resource once.
     seen: Mutex<HashSet<String>>,
@@ -61,7 +66,7 @@ pub struct Authz {
 
 impl Authz {
     pub fn new(mode: Mode) -> Self {
-        Self { mode, seen: Mutex::default() }
+        Self { mode, tokens: Default::default(), seen: Mutex::default() }
     }
 
     fn first_time(&self, key: String) -> bool {
@@ -94,7 +99,7 @@ fn unauthorized() -> ApiError {
 
 /// Who presents `headers` on `conn`: `Ok(None)` without credentials,
 /// `Err` with invalid ones.
-pub fn authenticate(state: &ApiState, headers: &HeaderMap, conn: &Conn) -> Result<Option<UserInfo>, String> {
+pub async fn authenticate(state: &ApiState, headers: &HeaderMap, conn: &Conn) -> Result<Option<UserInfo>, String> {
     let header = |name: &str| headers.get(name).and_then(|v| v.to_str().ok()).unwrap_or_default();
     if let Some(cluster) = state.ha() {
         let presented = header(FORWARDED_AUTH_HEADER);
@@ -111,8 +116,19 @@ pub fn authenticate(state: &ApiState, headers: &HeaderMap, conn: &Conn) -> Resul
     let auth = header("authorization");
     if let Some(token) = auth.strip_prefix("Bearer ").or_else(|| auth.strip_prefix("bearer ")) {
         let token = token.trim();
+        let tokens = &state.authz.tokens;
+        if let Some(user) = tokens.static_user(token) {
+            return Ok(Some(user));
+        }
         if token.matches('.').count() == 2 {
-            return state.authenticate_service_account(token).map(Some);
+            if let Some(oidc) = tokens.oidc_for(token) {
+                return oidc.authenticate(token).await.map(Some);
+            }
+            return match (state.authenticate_service_account(token), tokens.webhook()) {
+                (Ok(user), _) => Ok(Some(user)),
+                (Err(_), Some(webhook)) => webhook.authenticate(token).await.map(Some),
+                (Err(e), None) => Err(e),
+            };
         }
         return match super::join::token_kind(state, token) {
             Some(super::join::TokenKind::Join) => {
@@ -126,7 +142,10 @@ pub fn authenticate(state: &ApiState, headers: &HeaderMap, conn: &Conn) -> Resul
                     Err("the agent token authenticates only a joined node (its name and node password)".into())
                 }
             }
-            None => Err("invalid bearer token".into()),
+            None => match tokens.webhook() {
+                Some(webhook) => webhook.authenticate(token).await.map(Some),
+                None => Err("invalid bearer token".into()),
+            },
         };
     }
     if !auth.is_empty() {
@@ -137,10 +156,10 @@ pub fn authenticate(state: &ApiState, headers: &HeaderMap, conn: &Conn) -> Resul
 
 /// Authenticate and authorize a request. `Ok(user)`: go ahead, as `user`
 /// (`None`: no credentials under AlwaysAllow, the old unrestricted mode).
-pub(crate) fn check(state: &Arc<ApiState>, method: &Method, path: &str, query: &HashMap<String, String>, headers: &HeaderMap, conn: &Conn) -> Result<Option<UserInfo>, ApiError> {
+pub(crate) async fn check(state: &Arc<ApiState>, method: &Method, path: &str, query: &HashMap<String, String>, headers: &HeaderMap, conn: &Conn) -> Result<Option<UserInfo>, ApiError> {
     let mode = state.authz.mode;
     let public = is_public(method, path);
-    let user = match authenticate(state, headers, conn) {
+    let user = match authenticate(state, headers, conn).await {
         Ok(user) => user,
         Err(reason) => match mode {
             Mode::Rbac if !public => {
