@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Invalid objects are refused as upstream refuses them**: names by kind
+  (RFC 1123 subdomains, DNS-1123 labels for Namespaces, DNS-1035 labels for
+  Services, generateName prefixes), label and annotation keys and values
+  (256 KiB of annotations at most), workload selectors (required, not
+  empty, matching the template's labels; `restartPolicy: Always` in their
+  pods), pod specs (at least one container, unique valid container names,
+  an image, valid container ports and protocols), Jobs and CronJobs
+  (`restartPolicy` `OnFailure` or `Never`, no longer defaulted to
+  `Always`) and Service ports and types, with kube-apiserver's field error
+  messages (`Kind.group "name" is invalid: ...`). Objects already stored are
+  not touched; only creates and updates are checked.
+
 - **Admission webhooks see the controllers' writes**: pods a ReplicaSet,
   Job, StatefulSet or DaemonSet creates, and every other object the
   server writes itself, go through mutating and validating webhooks and
