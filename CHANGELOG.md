@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- **`docker push`**: the Docker API pushes images to OCI distribution
+  registries with the progress Docker streams (`Preparing`, `Pushing` with
+  a bar, `Pushed`, `Layer already exists`, `Mounted from`, the digest
+  line). The image store keeps layers unpacked, so a layer goes up as the
+  blob the registry already has, the blob it was pulled as (mounted within
+  the same registry, or fetched again from where it came from), or a gzip
+  tar made at push time whose digest is remembered for the next push. Built
+  images keep their image ID; pulled images keep their manifest digest when
+  their registry is reachable. Credentials come from `docker login`
+  (`X-Registry-Auth`) or the registry configuration, with token and Basic
+  auth; `localhost` registries are plain HTTP. Pulls now keep a manifest
+  as the registry sent it, so pushing it on leaves the digest unchanged
+  ([docker.md](docs/docker.md#pushing-images)).
+
 ## 0.2.24
 
 - **Rollouts that stop progressing fail**: the Deployment controller keeps

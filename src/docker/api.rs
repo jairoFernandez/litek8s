@@ -367,7 +367,7 @@ async fn dispatch(engine: &Arc<Engine>, method: Method, s: &[&str], req: Request
             tag_image(engine, &rest.join("/"), q.get("repo").cloned().unwrap_or_default(), q.get("tag").cloned())?;
             Ok(base(201).body(empty()).unwrap())
         }
-        (Method::POST, ["images", rest @ .., "push"]) if !rest.is_empty() => Err(ApiError::new(501, "litek8s cannot push images yet")),
+        (Method::POST, ["images", rest @ .., "push"]) if !rest.is_empty() => push(engine, &rest.join("/"), &q, &req),
         (Method::DELETE, ["images", rest @ ..]) if !rest.is_empty() => Ok(json_resp(200, &remove_image(engine, &rest.join("/"), qbool(&q, "force"))?)),
         (Method::GET, ["distribution", rest @ .., "json"]) if !rest.is_empty() => distribution(engine, &rest.join("/"), &req).await,
 
@@ -1268,6 +1268,72 @@ fn pull(engine: &Arc<Engine>, q: &HashMap<String, String>, req: &Request<Incomin
                     msg
                 };
                 let _ = tx.send(json!({"errorDetail": {"message": msg}, "error": msg}));
+            }
+        }
+    });
+    let s = futures_util::stream::unfold(rx, |mut rx| async move { rx.recv().await.map(|v| (Bytes::from(format!("{v}\r\n")), rx)) });
+    Ok(stream_resp("application/json", s))
+}
+
+/// `docker push`: one tag (`tag`, or the name's), or every tag of the
+/// repository; progress streamed the way Docker does.
+fn push(engine: &Arc<Engine>, name: &str, q: &HashMap<String, String>, req: &Request<Incoming>) -> ApiResult<Response<Body>> {
+    let invalid = || ApiError::bad_request(format!("invalid reference format: {name}"));
+    let reference = cimage::Reference::parse(name).map_err(|_| invalid())?;
+    if reference.digest.is_some() {
+        return Err(ApiError::bad_request(format!("cannot push a digest reference: {name}")));
+    }
+    let repo = format!("{}/{}", reference.registry, reference.repository);
+    let tag = q
+        .get("tag")
+        .filter(|t| !t.is_empty())
+        .cloned()
+        .or_else(|| name.rsplit_once(':').filter(|(_, t)| !t.contains('/')).map(|(_, t)| t.to_string()));
+    let present: Vec<String> = engine.images.entries().into_iter().map(|(k, _)| k).collect();
+    let keys: Vec<String> = match tag {
+        Some(t) => vec![format!("{repo}:{t}")].into_iter().filter(|k| present.contains(k)).collect(),
+        None => present.into_iter().filter(|k| k.strip_prefix(repo.as_str()).and_then(|r| r.strip_prefix(':')).is_some_and(|t| !t.contains(['@', '/']))).collect(),
+    };
+    if keys.is_empty() {
+        let shown = images::short_name(&repo).unwrap_or(repo.clone());
+        let shown = match q.get("tag").filter(|t| !t.is_empty()) {
+            Some(t) => format!("{shown}:{t}"),
+            None => shown,
+        };
+        return Err(ApiError::not_found(format!("An image does not exist locally with the tag: {shown}")));
+    }
+    let auth = registry_auth(req).map(|(username, password)| match username.as_str() {
+        "<token>" => crate::registries::Credentials::IdentityToken(password),
+        _ => crate::registries::Credentials::Basic { username, password },
+    });
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let progress_tx = tx.clone();
+    let opts = cimage::PushOptions {
+        auth,
+        progress: Some(Arc::new(move |id: &str, msg: &str, of: Option<(u64, u64)>| {
+            let v = match (id.is_empty(), of) {
+                (true, _) => json!({"status": msg}),
+                (false, Some((current, total))) => json!({"status": msg, "progressDetail": {"current": current, "total": total}, "id": id}),
+                (false, None) => json!({"status": msg, "progressDetail": {}, "id": id}),
+            };
+            let _ = progress_tx.send(v);
+        })),
+        ..Default::default()
+    };
+    let engine = engine.clone();
+    tokio::spawn(async move {
+        for key in keys {
+            match engine.images.push(&key, &opts).await {
+                Ok(p) => {
+                    let _ = tx.send(json!({"progressDetail": {}, "aux": {"Tag": p.tag, "Digest": p.digest, "Size": p.size}}));
+                    let short = images::short_name(&key).unwrap_or(key.clone());
+                    engine.emit("image", "push", &short, BTreeMap::from([("name".to_string(), short.clone())]));
+                }
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    let _ = tx.send(json!({"errorDetail": {"message": msg}, "error": msg}));
+                    return;
+                }
             }
         }
     });

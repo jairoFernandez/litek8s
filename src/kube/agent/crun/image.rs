@@ -17,6 +17,8 @@
 //!                      compressed: they are verified while downloading and
 //!                      deleted once unpacked)
 //! l/<diff id[..16]>/   one unpacked layer
+//! l/<diff id[..16]>.push  the gzip blob `docker push` made of it (digest,
+//!                      size; the blob itself is not kept)
 //! refs.json            image reference -> manifest, config, layers
 //! ```
 
@@ -37,6 +39,9 @@ use tokio::io::AsyncWriteExt;
 
 use super::spec::ImageConfig;
 use crate::registries::{Credentials, Endpoint, Registries};
+
+mod push;
+pub(crate) use push::PushOptions;
 
 const MANIFEST_TYPES: &str = "application/vnd.oci.image.index.v1+json, \
 application/vnd.docker.distribution.manifest.list.v2+json, \
@@ -505,7 +510,7 @@ impl ImageStore {
                 }
             }
         }
-        let (mut session, (top, manifest_digest, manifest)) = Session::resolve_any(&reference, opts).await?;
+        let (mut session, (top, manifest_digest, manifest, manifest_bytes)) = Session::resolve_any(&reference, opts).await?;
         progress("", &format!("Pulling from {}", reference.repository.trim_start_matches("library/")));
         let config_desc = &manifest["config"];
         let config_digest = config_desc["digest"].as_str().context("manifest has no config")?.to_string();
@@ -553,11 +558,8 @@ impl ImageStore {
         for r in results {
             r.with_context(|| format!("failed to pull image \"{image}\""))?;
         }
-        let manifest_bytes = serde_json::to_vec(&manifest)?;
-        let path = self.blob_path(&manifest_digest);
-        if !path.exists() {
-            std::fs::write(&path, &manifest_bytes)?;
-        }
+        // As the registry sent it: `docker push` sends it on unchanged.
+        self.put_blob(&manifest_bytes, &manifest_digest)?;
         progress("", &format!("Digest: {top}"));
         let entry = IndexEntry {
             top,
@@ -773,7 +775,7 @@ impl ImageStore {
         }
         for entry in std::fs::read_dir(self.root.join("l"))?.flatten() {
             let path = entry.path();
-            if path.extension().is_some_and(|e| e == "size") {
+            if path.extension().is_some_and(|e| e == "size" || e == "push") {
                 if !layers.contains(&path.with_extension("")) {
                     let _ = std::fs::remove_file(&path);
                 }
@@ -1287,6 +1289,61 @@ pub(crate) async fn send(method: hyper::Method, url: &str, headers: &[(&str, Str
 
 /// A request with `body`, TLS as `registries` says for the host.
 async fn send_with(registries: &Registries, method: hyper::Method, url: &str, headers: &[(&str, String)], body: Bytes) -> Result<hyper::Response<hyper::body::Incoming>> {
+    send_payload(registries, method, url, headers, &if body.is_empty() { Payload::Empty } else { Payload::Bytes(body) }).await
+}
+
+/// A request body that can be sent again (after a challenge, a redirect).
+#[derive(Clone)]
+enum Payload {
+    Empty,
+    Bytes(Bytes),
+    /// A file, streamed; `progress` gets the bytes sent so far.
+    File { path: PathBuf, len: u64, progress: Option<Arc<dyn Fn(u64) + Send + Sync>> },
+}
+
+type ReqBody = http_body_util::combinators::UnsyncBoxBody<Bytes, Box<dyn std::error::Error + Send + Sync>>;
+
+impl Payload {
+    async fn body(&self) -> Result<ReqBody> {
+        use http_body_util::BodyExt as _;
+        Ok(match self {
+            // No body, no content-length (signed CDN URLs, picky servers).
+            Payload::Empty => http_body_util::Empty::<Bytes>::new().map_err(|e| match e {}).boxed_unsync(),
+            Payload::Bytes(b) => http_body_util::Full::new(b.clone()).map_err(|e| match e {}).boxed_unsync(),
+            Payload::File { path, progress, .. } => {
+                use tokio::io::AsyncReadExt;
+                let file = tokio::fs::File::open(path).await.with_context(|| format!("failed to open {}", path.display()))?;
+                let chunks = futures_util::stream::unfold(Some((file, 0u64, progress.clone())), |state| async move {
+                    let (mut file, sent, progress) = state?;
+                    let mut buf = vec![0u8; 256 << 10];
+                    match file.read(&mut buf).await {
+                        Ok(0) => None,
+                        Ok(n) => {
+                            buf.truncate(n);
+                            let sent = sent + n as u64;
+                            if let Some(p) = &progress {
+                                p(sent);
+                            }
+                            Some((Ok(hyper::body::Frame::data(Bytes::from(buf))), Some((file, sent, progress))))
+                        }
+                        Err(e) => Some((Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>), None)),
+                    }
+                });
+                http_body_util::StreamBody::new(chunks).boxed_unsync()
+            }
+        })
+    }
+
+    /// How long the registry may take to answer: uploads get time to send.
+    fn timeout(&self) -> Duration {
+        match self {
+            Payload::File { len, .. } => Duration::from_secs(60 + len / (256 << 10)),
+            _ => Duration::from_secs(60),
+        }
+    }
+}
+
+async fn send_payload(registries: &Registries, method: hyper::Method, url: &str, headers: &[(&str, String)], payload: &Payload) -> Result<hyper::Response<hyper::body::Incoming>> {
     let u = parse_url(url)?;
     let io = open(&u, registries).await?;
     let (mut sender, conn) = hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(io)).await?;
@@ -1302,10 +1359,11 @@ async fn send_with(registries: &Registries, method: hyper::Method, url: &str, he
     for (k, v) in headers {
         req = req.header(*k, v);
     }
-    // No body, no content-length (signed CDN URLs, picky servers).
-    let body = if body.is_empty() { http_body_util::Either::Left(http_body_util::Empty::<Bytes>::new()) } else { http_body_util::Either::Right(http_body_util::Full::new(body)) };
-    let req = req.body(body)?;
-    tokio::time::timeout(Duration::from_secs(60), sender.send_request(req))
+    if let Payload::File { len, .. } = payload {
+        req = req.header(hyper::header::CONTENT_LENGTH, *len);
+    }
+    let req = req.body(payload.body().await?)?;
+    tokio::time::timeout(payload.timeout(), sender.send_request(req))
         .await
         .context("registry did not answer")?
         .map_err(Into::into)
@@ -1411,6 +1469,7 @@ fn url_form(pairs: &[(&str, &str)]) -> String {
     pairs.iter().map(|(k, v)| format!("{}={}", enc(k), enc(v))).collect::<Vec<_>>().join("&")
 }
 
+#[derive(Clone)]
 struct Session {
     reference: Reference,
     /// The mirror or registry this session talks to.
@@ -1423,11 +1482,14 @@ struct Session {
     basic: bool,
     /// `(architecture, variant)` to pick from an index; the host's if unset.
     platform: Option<(String, Option<String>)>,
+    /// Token scopes to ask for (a push: `pull,push` here, `pull` where
+    /// blobs are mounted from), besides the challenge's.
+    scopes: Vec<String>,
 }
 
 impl Session {
     fn new(reference: &Reference, endpoint: Endpoint, registries: Arc<Registries>, creds: Option<Credentials>) -> Self {
-        Self { reference: reference.clone(), endpoint, registries, token: None, creds, basic: false, platform: None }
+        Self { reference: reference.clone(), endpoint, registries, token: None, creds, basic: false, platform: None, scopes: Vec::new() }
     }
 
     /// A session per endpoint to try, in order: the registry's mirrors,
@@ -1450,7 +1512,7 @@ impl Session {
     }
 
     /// The first endpoint that resolves the manifest, and what it resolved.
-    async fn resolve_any(reference: &Reference, opts: &PullOptions) -> Result<(Self, (String, String, Value))> {
+    async fn resolve_any(reference: &Reference, opts: &PullOptions) -> Result<(Self, (String, String, Value, Bytes))> {
         let mut errors = Vec::new();
         for mut s in Self::all(reference, opts) {
             match s.resolve_manifest().await {
@@ -1479,22 +1541,26 @@ impl Session {
     /// A request to the registry, authenticating (anonymously) when it asks,
     /// following redirects (blobs live on a CDN; the token stays home).
     async fn get(&mut self, method: hyper::Method, url: &str, accept: Option<&str>) -> Result<hyper::Response<hyper::body::Incoming>> {
+        let headers: Vec<(&str, String)> = accept.map(|a| ("accept", a.to_string())).into_iter().collect();
+        self.request(method, url, &headers, &Payload::Empty).await
+    }
+
+    /// [`Self::get`] with any headers and a body (sent again after an
+    /// authentication challenge).
+    async fn request(&mut self, method: hyper::Method, url: &str, extra: &[(&str, String)], payload: &Payload) -> Result<hyper::Response<hyper::body::Incoming>> {
         let home = parse_url(url)?.host;
         let mut url = url.to_string();
         let mut authed = false;
         let mut throttled = 0u32;
         for _ in 0..16 {
-            let mut headers = Vec::new();
-            if let Some(a) = accept {
-                headers.push(("accept", a.to_string()));
-            }
+            let mut headers: Vec<(&str, String)> = extra.to_vec();
             let same_host = parse_url(&url)?.host == home;
             if let (Some(t), true) = (&self.token, same_host) {
                 headers.push(("authorization", format!("Bearer {t}")));
             } else if let (Some(b), true, true) = (self.basic_header(), self.basic, same_host) {
                 headers.push(("authorization", b));
             }
-            let resp = send_with(&self.registries, method.clone(), &url, &headers, Bytes::new()).await?;
+            let resp = send_payload(&self.registries, method.clone(), &url, &headers, payload).await?;
             let status = resp.status();
             // Rate limits on anonymous pulls (ECR Public answers 429 to a
             // burst of manifest and blob requests): wait and retry here
@@ -1557,7 +1623,13 @@ impl Session {
 
     async fn fetch_token(&self, params: &HashMap<String, String>) -> Result<String> {
         let realm = params.get("realm").context("auth challenge without a realm")?;
-        let scope = params.get("scope").cloned().unwrap_or_else(|| format!("repository:{}:pull", self.endpoint.repository));
+        let mut scopes = self.scopes.clone();
+        match params.get("scope") {
+            Some(s) if !scopes.contains(s) => scopes.push(s.clone()),
+            None if scopes.is_empty() => scopes.push(format!("repository:{}:pull", self.endpoint.repository)),
+            _ => {}
+        }
+        let scope = scopes.join(" ");
         let resp = if let Some(Credentials::IdentityToken(refresh)) = &self.creds {
             // OAuth2 refresh token grant, as Docker and containerd do.
             let mut form = url_form(&[("grant_type", "refresh_token"), ("refresh_token", refresh), ("client_id", "litek8s"), ("scope", &scope)]);
@@ -1572,7 +1644,9 @@ impl Session {
             if let Some(s) = params.get("service") {
                 query.push(format!("service={s}"));
             }
-            query.push(format!("scope={scope}"));
+            for s in &scopes {
+                query.push(format!("scope={s}"));
+            }
             let url = format!("{realm}{}{}", if realm.contains('?') { "&" } else { "?" }, query.join("&"));
             let headers: Vec<(&str, String)> = self.basic_header().map(|b| ("authorization", b)).into_iter().collect();
             send_with(&self.registries, hyper::Method::GET, &url, &headers, Bytes::new()).await?
@@ -1589,7 +1663,7 @@ impl Session {
             .context("token response without a token")
     }
 
-    async fn fetch_manifest(&mut self, r: &str) -> Result<(String, Value)> {
+    async fn fetch_manifest(&mut self, r: &str) -> Result<(String, Value, Bytes)> {
         let url = self.url("manifests", r);
         let resp = self.get(hyper::Method::GET, &url, Some(MANIFEST_TYPES)).await?;
         let status = resp.status();
@@ -1604,13 +1678,14 @@ impl Session {
         if r.starts_with("sha256:") && digest != r {
             bail!("manifest digest mismatch: expected {r}, got {digest}");
         }
-        Ok((digest, serde_json::from_slice(&body).context("invalid manifest")?))
+        Ok((digest, serde_json::from_slice(&body).context("invalid manifest")?, body))
     }
 
-    /// (digest the reference resolved to, image manifest digest, manifest)
-    async fn resolve_manifest(&mut self) -> Result<(String, String, Value)> {
+    /// (digest the reference resolved to, image manifest digest, manifest,
+    /// its bytes)
+    async fn resolve_manifest(&mut self) -> Result<(String, String, Value, Bytes)> {
         let r = self.reference.manifest_ref().to_string();
-        let (top, manifest) = self.fetch_manifest(&r).await?;
+        let (top, manifest, bytes) = self.fetch_manifest(&r).await?;
         if manifest.get("manifests").is_some() {
             let host = host_platform();
             let (arch, variant) = match &self.platform {
@@ -1621,13 +1696,13 @@ impl Session {
                 .and_then(|m| m["digest"].as_str())
                 .with_context(|| format!("no linux/{arch} image for {}", self.reference.canonical()))?
                 .to_string();
-            let (digest, image) = self.fetch_manifest(&chosen).await?;
-            return Ok((top, digest, image));
+            let (digest, image, bytes) = self.fetch_manifest(&chosen).await?;
+            return Ok((top, digest, image, bytes));
         }
         if manifest.get("schemaVersion").and_then(Value::as_i64) == Some(1) {
             bail!("{}: schema 1 manifests are not supported", self.reference.canonical());
         }
-        Ok((top.clone(), top, manifest))
+        Ok((top.clone(), top, manifest, bytes))
     }
 
     /// The digest a tag points at now, without downloading the manifest.
