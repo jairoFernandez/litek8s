@@ -9,6 +9,19 @@
   `progressDeadlineSeconds` (default 600; paused Deployments never time
   out). `kubectl rollout status` then fails with `exceeded its progress
   deadline` instead of waiting, and Argo CD shows the app Degraded.
+- **Tools in sbin are found with any PATH**: on Linux, litek8s appends the
+  standard system directories (`/usr/local/sbin`, `/usr/sbin`, `/sbin`...)
+  its PATH lacks before starting anything, so `iptables` and `ip` run where
+  the preflight checks found them; a Debian user's PATH has no sbin, and
+  `dev up` failed there with `failed to run iptables`
+  ([#38](https://github.com/jairoFernandez/litek8s/issues/38)).
+- **A rootless dev environment that fails to start says so at once**: when
+  the cells' setup failed, the sandbox's PID 1 could not finish exiting
+  (the network namespace holder was a zombie nobody reaped), so `dev up`
+  waited a minute and ended with `the dev environment closed the
+  connection`, leaving the supervisor and pasta behind. The sandbox now reaps
+  every child, and `dev up` fails within a second with the environment's
+  log.
 - **An agent token that joins nodes and nothing else**: next to the join
   token, a server keeps an agent token in `<data-dir>/agent-token`
   (`K10<CA hash>::node:<secret>`, like k3s's `--agent-token`), derived from

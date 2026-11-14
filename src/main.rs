@@ -3,6 +3,13 @@ fn main() -> anyhow::Result<()> {
     // stages run from this binary too; they must start before (and without)
     // the async runtime.
     let args: Vec<String> = std::env::args().collect();
+    // iptables, ip, modprobe... live in sbin, which a user's PATH lacks on
+    // Debian; preflight finds them there, so the processes we start must too.
+    #[cfg(target_os = "linux")]
+    if let Some(path) = with_system_dirs(&std::env::var_os("PATH").unwrap_or_default()) {
+        // SAFETY: no other thread exists yet.
+        unsafe { std::env::set_var("PATH", path) };
+    }
     match args.get(1).map(String::as_str) {
         Some("crun-shim") => litek8s::kube::agent::crun_shim(&args[2..]),
         Some("crun-pause") => litek8s::kube::agent::crun_pause(&args[2..]),
@@ -33,4 +40,35 @@ fn main() -> anyhow::Result<()> {
         tokio::runtime::Builder::new_multi_thread().enable_all().build()?
     };
     runtime.block_on(litek8s::cli::run())
+}
+
+/// `path` with the standard system directories it lacks appended; None if
+/// it has them all.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn with_system_dirs(path: &std::ffi::OsStr) -> Option<std::ffi::OsString> {
+    let mut dirs: Vec<std::path::PathBuf> = std::env::split_paths(path).filter(|d| !d.as_os_str().is_empty()).collect();
+    let before = dirs.len();
+    for d in ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"] {
+        if !dirs.iter().any(|p| p == std::path::Path::new(d)) {
+            dirs.push(d.into());
+        }
+    }
+    if dirs.len() == before {
+        return None;
+    }
+    std::env::join_paths(dirs).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::with_system_dirs;
+    use std::ffi::OsStr;
+
+    #[test]
+    fn path_gets_the_sbin_dirs_it_lacks() {
+        let p = with_system_dirs(OsStr::new("/home/u/bin:/usr/local/bin:/usr/bin:/bin")).unwrap();
+        assert_eq!(p, "/home/u/bin:/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin");
+        assert_eq!(with_system_dirs(OsStr::new("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")), None);
+        assert_eq!(with_system_dirs(OsStr::new("")).unwrap(), "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+    }
 }

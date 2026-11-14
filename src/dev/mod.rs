@@ -439,7 +439,9 @@ async fn up(cluster: &cluster::Cluster, nodes: Option<u32>, opts: UpOptions) -> 
     }
     cluster.save_meta(&home, &meta)?;
     let registries = registries_for_nodes(&crate::config::paths().dev_registries)?;
-    let reply = env::request(&home, &env::Request::Start { name: cluster.name.clone(), port: opts.port, nodes: meta.nodes, registries }, Duration::from_secs(90)).await?;
+    let reply = env::request(&home, &env::Request::Start { name: cluster.name.clone(), port: opts.port, nodes: meta.nodes, registries }, Duration::from_secs(90))
+        .await
+        .map_err(|e| anyhow::anyhow!("{context} failed to start: {e:#}\n{}", logs_tail(&home, cluster, 20)))?;
     drop(lock);
     if let Some(e) = reply.error {
         bail!("{context} failed to start: {e}\n{}", logs_tail(&home, cluster, 20));
