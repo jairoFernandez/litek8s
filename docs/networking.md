@@ -202,9 +202,9 @@ Service on 443 then answers on the other nodes only.
 
 ## NetworkPolicies
 
-Nodes running pods on crun enforce NetworkPolicies with iptables; nothing
-else is needed (no CNI plugin, no policy controller). The Docker runtime
-(macOS servers) does not.
+Nodes enforce NetworkPolicies with iptables, on crun and on the Docker
+runtime (macOS servers on Docker Desktop or OrbStack); nothing else is
+needed (no CNI plugin, no policy controller).
 
 The API server does the selecting: for every pod it works out whether a
 policy selects it (ingress, egress or both, from `policyTypes` or their
@@ -233,6 +233,27 @@ On each node, one chain per isolated pod address, behind `LITEK8S-NETPOL`:
 - `INPUT -i litek8s0` jumps to it: pods talking to the node itself, which
   is where the cluster DNS and the API server answer on the node they run on.
 
+With the Docker runtime the same chains go into Docker's host network
+namespace (the Linux VM of Docker Desktop or OrbStack, or the host itself
+with a local Docker), loaded by the privileged `litek8s-service-proxy`
+helper container that already holds the Service NAT rules (on a Linux host
+where the agent is root, by the agent itself). Each node has its own
+dispatcher, `LITEK8S-NETPOL-<hash of the node name>`, and pod chains
+`LK8S-I<hash>-…`/`LK8S-E<hash>-…`, since one Docker may run the pods of
+several agents; the dispatcher is hooked first into `FORWARD` (pods on the
+`litek8s-pods` bridge talking to each other, and to anything outside, after
+the Service DNAT) and `INPUT` (pods talking to the VM), and the hooks are
+checked on every load, as Docker restarting rebuilds `FORWARD`. Bridged
+traffic reaches iptables through `br_netfilter` (Docker Desktop and
+OrbStack have it on; the helper turns it on when it can). When the Docker
+host cannot filter (no `br_netfilter`, no privileged host-network helper,
+as with rootless Docker or Podman), loading a pod's rules fails: an
+isolated pod does not start, with the reason in its status and the agent's
+log, and changes for running pods are retried and logged until they load;
+nothing runs unprotected without a word. Probes, port-forwards and
+NodePort relays run inside the pod's own network namespace there (Docker
+may be in a VM the node cannot route to), so they are never filtered.
+
 A packet to an isolated pod goes through its ingress chain, a packet from
 one through its egress chain (between two pods of one node, both): allowed
 peers and ports return, anything else is dropped. Replies (conntrack
@@ -260,7 +281,8 @@ What it does not do:
 - Traffic from the node to its own pods is always allowed: kubelet probes,
   and NodePort and LoadBalancer ports, which litek8s relays from a listener
   on the node (so the pod sees the node as the client, and a policy cannot
-  tell clients of a NodePort apart).
+  tell clients of a NodePort apart; with Docker the relay connects from
+  inside the pod).
 - hostNetwork pods are neither selected nor peers (as upstream leaves it
   open).
 - Peer sets follow pods with a short delay: a new pod is admitted by others
@@ -274,10 +296,14 @@ What it does not do:
 
 The chains are removed with the pod's address (the agent rewrites them
 when pods go) and by `litek8s uninstall` with every other `LITEK8S-*`
-chain. Rule computation and rendering have unit tests
+chain; with Docker, an emptied dispatcher and its hooks stay in Docker's
+host, like the Service NAT chain, until it restarts. Rule computation and rendering have unit tests
 (`src/kube/netpol.rs`, `src/kube/agent/netpol.rs`, the push order in
 `src/kube/agent/hub.rs`), and compat tier L3 has four policy cases
 (`compat/cases/L3-networkpolicy.sh`).
+
+Docker runtime (2026-11-14, `apiserver --runtime docker` on OrbStack
+29.8, macOS arm64): L3 11/11, the four policy cases included.
 
 Last run (2026-10-29, `bench/cluster.sh up 2`: two Ubuntu 24.04 arm64 VMs
 under qemu/HVF, crun): L3 11/11 and M1's non-outage cases with
