@@ -86,7 +86,7 @@ the litek8s-only `compose_budget` case is skipped):
 |---|---|
 | `docker run` | `-d`, `--rm`, `-it` (pty, resize, detach keys), `-i` stdin, `-p`/`-P`, `-v`/`--mount` (bind, volume, tmpfs), `-e`/`--env-file`, `-w`, `-u`, `--name`, `--network`, `--network-alias`, `--entrypoint`, `--restart`, `--health-*`, `--add-host` (incl. `host-gateway`), `--platform`, `--cap-add/--cap-drop`, `--privileged`, `--read-only`, `--shm-size`, `--ulimit`, `--sysctl`, `--memory`, `--cpus`, `--pid`/`--network container:` |
 | containers | `ps`, `logs` (`-f`, `--tail`, `--since`, `-t`), `exec` (`-it`, `-u`, `-e`, `-w`), `stop`/`start`/`restart`/`kill`/`pause`, `rm`, `inspect`, `rename`, `wait`, `cp` (both ways, also before start), `top`, `stats`, `port`, `prune`, `events` |
-| images | `pull` (progress, `--platform`; `docker login` credentials are passed on; CAs, mirrors and credentials for every pull: [registries.md](registries.md)), `images`, `tag`, `rmi`, `inspect`, `history`, `save`, `load`, `prune` |
+| images | `pull` (progress, `--platform`; `docker login` credentials are passed on; CAs, mirrors and credentials for every pull: [registries.md](registries.md)), `push` ([below](#pushing-images)), `images`, `tag`, `rmi`, `inspect`, `history`, `save`, `load`, `prune` |
 | build | `docker build` with the classic API: Dockerfile cache, multi-stage, `--target`, `--build-arg`, `.dockerignore`, `-f` outside the context; plus the BuildKit Dockerfile syntax (`RUN --mount=type=cache\|bind\|tmpfs`, `COPY --chmod`/`--link`, heredocs, `TARGETARCH` etc.) |
 | networks | `network create/ls/inspect/rm/connect/disconnect/prune`; one bridge per network, names, aliases and short IDs resolve on user-defined networks, networks are isolated from each other; `host.docker.internal` reaches the host |
 | volumes | named and anonymous volumes (filled from the image on first use, like Docker), `local` driver bind options (`o=bind,device=`), `volume ls/inspect/rm/prune` |
@@ -261,9 +261,37 @@ never on other interfaces: `docker ps` shows `127.0.0.1:8080->80/tcp`.
 the container's address inside the sandbox/VM). Rootless Linux cannot bind
 host ports below 1024.
 
+## Pushing images
+
+`docker push` (and `docker push -a`, `docker compose push`) sends an image
+to any OCI distribution registry with the credentials `docker login` gave
+the CLI, or else the registry configuration's
+([registries.md](registries.md): TLS settings and `configs.<host>.auth`;
+an `http://` endpoint of the registry itself under `mirrors` makes it plain
+HTTP). `localhost` and `127.0.0.1` registries speak plain HTTP, as with
+Docker, and on macOS reach the Mac's loopback (a registry run with
+`docker run -p 5000:5000 registry:2` works). Token (Bearer) and Basic auth
+are both handled; the token asks for `pull,push`.
+
+The image store keeps layers unpacked, not as the compressed blobs they
+came in, so each layer goes up as one of: a blob the registry already has
+(a HEAD, `Layer already exists`), the blob it was pulled as, mounted from
+another repository of the same registry (`Mounted from ...`) or fetched
+again from the registry it came from, or a gzip tar of the layer made at
+push time. The digest of a blob made that way is kept next to the layer,
+so pushing the image again only checks that the registry has it.
+
+An image built with `docker build` keeps its image ID through a push and
+pull. A pulled image keeps it too, manifest digest included, when its
+registry is reachable. If it is not, its layers are tarred again here; tar
+writers differ, so those tars rarely have the original diff IDs, and the
+pushed config names the new ones (the image ID changes, the content does
+not; `docker save` does the same). A tag holds one platform, so a push
+sends that platform's manifest, never a multi-platform index.
+
 ## Not supported (yet)
 
-`docker push`, `commit`, `export`/`import`, `diff`, `docker swarm` and
+`commit`, `export`/`import`, `diff`, `docker swarm` and
 services, plugins and other volume or network drivers (`overlay`,
 `macvlan`, `ipvlan`), IPv6 on container networks, `--init`, `--device`,
 GPU, published UDP ports, the BuildKit API itself (`/grpc`, `/session`:
