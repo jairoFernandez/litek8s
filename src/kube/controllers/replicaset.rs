@@ -51,8 +51,11 @@ fn reconcile_in(api: &ApiState, group: &str, plural: &str, ns: &str, name: &str)
             pod["metadata"]["generateName"] = json!(format!("{name}-"));
             match api.create_object("", "pods", Some(ns), pod) {
                 Ok(_) => {}
-                // Quota or admission said no: report it and retry later.
-                Err(e) if e.is_forbidden() => {
+                // Quota or admission said no (or a webhook could not be
+                // reached): report it and retry later.
+                Err(e) if !e.is_conflict() => {
+                    let component = if group.is_empty() { "replication-controller" } else { "replicaset-controller" };
+                    util::record_event_counted(api, &rs, "Warning", "FailedCreate", &format!("Error creating: {}", e.message), component);
                     failure = Some(e.message.clone());
                     requeue = Some(Duration::from_secs(5));
                     break;

@@ -6,7 +6,9 @@
 //! scope), namespace and object selectors, `failurePolicy`, `timeoutSeconds`,
 //! service and URL client configs, JSONPatch responses. `matchConditions`
 //! (CEL) are not evaluated: a webhook whose rules match is called.
-//! Requests made by the in-process controllers skip webhooks for now.
+//! Writes the server makes itself (controllers creating pods, ...) go
+//! through admission too, as `system:kube-controller-manager`
+//! (`ApiState::admit_internal`).
 //!
 //! A Service-backed webhook is called at a ready endpoint's pod address.
 //! When the API server cannot reach that address (a pod on another node, or
@@ -43,6 +45,15 @@ pub(crate) struct Attributes<'a> {
     pub sub: Option<&'a str>,
     pub old: Option<&'a Value>,
     pub dry_run: bool,
+    /// Who makes the request (`None`: no credentials, AlwaysAllow).
+    pub user: Option<&'a super::rbac::UserInfo>,
+}
+
+/// Whether any mutating or validating webhook is registered.
+pub(crate) fn webhooks_configured(api: &ApiState) -> bool {
+    ["mutatingwebhookconfigurations", "validatingwebhookconfigurations"]
+        .iter()
+        .any(|plural| !api.store().keys_of_resource("admissionregistration.k8s.io", plural).is_empty())
 }
 
 fn strings(v: Option<&Value>) -> Vec<&str> {
@@ -80,6 +91,15 @@ fn rule_matches(rule: &Value, a: &Attributes) -> bool {
     }
 }
 
+/// The request's `userInfo`.
+fn user_info(a: &Attributes<'_>) -> Value {
+    match a.user {
+        Some(u) => serde_json::to_value(u).unwrap_or_default(),
+        // AlwaysAllow without credentials: the administrator.
+        None => json!({"username": "system:admin", "groups": ["system:masters", "system:authenticated"]}),
+    }
+}
+
 /// The CEL variables of an admission request.
 fn cel_env(a: &Attributes<'_>, obj: &Value) -> cel::Env {
     let mut env = cel::Env::default();
@@ -94,7 +114,7 @@ fn cel_env(a: &Attributes<'_>, obj: &Value) -> cel::Env {
             "kind": {"group": a.rt.group, "version": a.rt.version, "kind": a.rt.kind},
             "resource": {"group": a.rt.group, "version": a.rt.version, "resource": a.rt.plural},
             "subResource": a.sub.unwrap_or_default(),
-            "userInfo": {"username": "system:admin", "groups": ["system:masters", "system:authenticated"]},
+            "userInfo": user_info(a),
             "dryRun": a.dry_run,
         })),
     );
@@ -229,7 +249,7 @@ pub(crate) async fn admit(api: &Arc<ApiState>, a: &Attributes<'_>, mut obj: Valu
 /// ValidatingAdmissionPolicies: every binding whose policy matches the
 /// request evaluates the policy's CEL validations; a failed one with the
 /// `Deny` action rejects the request.
-fn validating_policies(api: &ApiState, a: &Attributes<'_>, obj: &Value) -> Result<(), ApiError> {
+pub(crate) fn validating_policies(api: &ApiState, a: &Attributes<'_>, obj: &Value) -> Result<(), ApiError> {
     const GROUP: &str = "admissionregistration.k8s.io";
     let (bindings, _) = api.store().list(GROUP, "validatingadmissionpolicybindings", None);
     if bindings.is_empty() {
@@ -284,7 +304,7 @@ fn validating_policies(api: &ApiState, a: &Attributes<'_>, obj: &Value) -> Resul
                 "kind": {"group": a.rt.group, "version": a.rt.version, "kind": a.rt.kind},
                 "resource": {"group": a.rt.group, "version": a.rt.version, "resource": a.rt.plural},
                 "subResource": a.sub.unwrap_or_default(),
-                "userInfo": {"username": "system:admin", "groups": ["system:masters", "system:authenticated"]},
+                "userInfo": user_info(a),
                 "dryRun": a.dry_run,
             })),
         );
@@ -390,7 +410,7 @@ async fn call(api: &ApiState, hook: &Value, a: &Attributes<'_>, obj: &Value) -> 
         "name": a.name,
         "namespace": a.namespace,
         "operation": a.operation,
-        "userInfo": {"username": "system:admin", "groups": ["system:masters", "system:authenticated"]},
+        "userInfo": user_info(a),
         "object": if a.operation == "DELETE" { Value::Null } else { obj.clone() },
         "oldObject": a.old.cloned().unwrap_or(Value::Null),
         "dryRun": a.dry_run,
@@ -703,7 +723,7 @@ mod tests {
     #[test]
     fn rules_match_groups_resources_and_scope() {
         let rt = rt();
-        let a = Attributes { rt: &rt, operation: "CREATE", namespace: "x", name: "n", sub: None, old: None, dry_run: false };
+        let a = Attributes { rt: &rt, operation: "CREATE", namespace: "x", name: "n", sub: None, old: None, dry_run: false, user: None };
         let rule = json!({"operations": ["CREATE", "UPDATE"], "apiGroups": ["cert-manager.io"], "apiVersions": ["v1"], "resources": ["*/*"]});
         assert!(rule_matches(&rule, &a));
         let rule = json!({"operations": ["DELETE"], "apiGroups": ["*"], "apiVersions": ["*"], "resources": ["*"]});
@@ -730,7 +750,7 @@ mod tests {
     }
 
     fn attrs<'a>(rt: &'a ResourceType, operation: &'static str) -> Attributes<'a> {
-        Attributes { rt, operation, namespace: "default", name: "p", sub: None, old: None, dry_run: false }
+        Attributes { rt, operation, namespace: "default", name: "p", sub: None, old: None, dry_run: false, user: None }
     }
 
     fn pod() -> Value {
@@ -839,7 +859,7 @@ mod tests {
     #[test]
     fn rules_match_wildcards_subresources_versions_and_scope() {
         let rt = rt();
-        let a = Attributes { rt: &rt, operation: "UPDATE", namespace: "x", name: "n", sub: None, old: None, dry_run: false };
+        let a = Attributes { rt: &rt, operation: "UPDATE", namespace: "x", name: "n", sub: None, old: None, dry_run: false, user: None };
         let rule = |resources: Value| json!({"operations": ["*"], "apiGroups": ["*"], "apiVersions": ["*"], "resources": resources});
         assert!(rule_matches(&rule(json!(["*"])), &a));
         assert!(!rule_matches(&rule(json!(["certificaterequests/*"])), &a));
@@ -856,7 +876,7 @@ mod tests {
         assert!(!rule_matches(&rule(json!(["orders/*"])), &status));
 
         let cluster = ResourceType { namespaced: false, ..rt.clone() };
-        let c = Attributes { rt: &cluster, operation: "CREATE", namespace: "", name: "n", sub: None, old: None, dry_run: false };
+        let c = Attributes { rt: &cluster, operation: "CREATE", namespace: "", name: "n", sub: None, old: None, dry_run: false, user: None };
         assert!(rule_matches(&json!({"operations": ["CREATE"], "apiGroups": ["*"], "apiVersions": ["*"], "resources": ["*"], "scope": "Cluster"}), &c));
         assert!(!rule_matches(&json!({"operations": ["CREATE"], "apiGroups": ["*"], "apiVersions": ["*"], "resources": ["*"], "scope": "Namespaced"}), &c));
     }
@@ -1590,5 +1610,85 @@ mod tests {
         let pods = api.resource("", "pods").unwrap();
         let err = admit(&api, &attrs(&pods, "CREATE"), pod()).await.unwrap_err();
         assert_eq!(err.message, "ValidatingAdmissionPolicy 'p' with binding 'b' denied request: team x is full");
+    }
+
+    fn deployment_pod(name: &str) -> Value {
+        json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": name, "namespace": "default", "labels": {"app": "a"}},
+               "spec": {"containers": [{"name": "c", "image": "busybox"}]}})
+    }
+
+    // A multi-threaded runtime, as the server runs: webhooks are awaited
+    // with block_in_place.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn the_servers_own_writes_go_through_webhooks() {
+        let api = api();
+        api.adopt();
+        let s = server(
+            Duration::ZERO,
+            Box::new(|path: &str, body: &Value| {
+                if path.starts_with("/inject") {
+                    let op = json!([{"op": "add", "path": "/spec/containers/-", "value": {"name": "sidecar", "image": "proxy"}}]);
+                    return review(body, json!({"allowed": true, "patchType": "JSONPatch", "patch": b64_patch(op)}));
+                }
+                let name = body.pointer("/request/name").and_then(Value::as_str).unwrap_or_default();
+                if name == "forbidden" {
+                    return review(body, json!({"allowed": false, "status": {"message": "no", "code": 403}}));
+                }
+                review(body, json!({"allowed": true}))
+            }),
+        )
+        .await;
+        webhook_config(&api, true, "inject", json!([url_hook("inject.example.com", &s, "/inject", json!({}))]));
+        webhook_config(&api, false, "check", json!([url_hook("check.example.com", &s, "/check", json!({"rules": [{"operations": ["*"], "apiGroups": [""], "apiVersions": ["v1"], "resources": ["pods"]}]}))]));
+
+        // Run the way the controllers do: synchronously, in a task.
+        let created = {
+            let api = api.clone();
+            tokio::spawn(async move { api.create_object("", "pods", Some("default"), deployment_pod("web-1")) }).await.unwrap().unwrap()
+        };
+        let containers: Vec<&str> = created["spec"]["containers"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
+        assert_eq!(containers, ["c", "sidecar"]);
+        // Defaulted like the user's pods after mutation.
+        assert_eq!(created["spec"]["containers"][1]["imagePullPolicy"], "Always");
+        let seen = s.seen.lock().unwrap().clone();
+        let req = &seen.iter().find(|(p, _)| p.starts_with("/inject")).unwrap().1["request"];
+        assert_eq!(req["operation"], "CREATE");
+        assert_eq!(req["userInfo"]["username"], "system:kube-controller-manager");
+
+        let denied = {
+            let api = api.clone();
+            tokio::spawn(async move { api.create_object("", "pods", Some("default"), deployment_pod("forbidden")) }).await.unwrap()
+        };
+        let e = denied.unwrap_err();
+        assert_eq!(e.code, StatusCode::FORBIDDEN);
+        assert!(e.message.contains("admission webhook \"check.example.com\" denied the request: no"), "{}", e.message);
+        assert!(api.get_object("", "pods", "default", "forbidden").is_none());
+
+        // Updates and deletes too.
+        let before = s.seen.lock().unwrap().len();
+        let api2 = api.clone();
+        tokio::spawn(async move {
+            let mut pod = api2.get_object("", "pods", "default", "web-1").unwrap();
+            pod["metadata"]["labels"]["v"] = json!("2");
+            api2.update_object("", "pods", pod).unwrap();
+            api2.delete_named("", "pods", "default", "web-1").unwrap();
+        })
+        .await
+        .unwrap();
+        let seen = s.seen.lock().unwrap().clone();
+        let ops: Vec<&str> = seen[before..].iter().filter(|(p, _)| p.starts_with("/check")).map(|(_, b)| b["request"]["operation"].as_str().unwrap()).collect();
+        assert_eq!(ops, ["UPDATE", "DELETE"]);
+    }
+
+    #[test]
+    fn the_servers_own_writes_meet_validating_policies() {
+        let api = api();
+        policy(&api, "no-a", json!({"matchConstraints": pod_constraints(), "validations": [{"expression": "object.metadata.labels.app != 'a'", "message": "app a is reserved"}]}));
+        binding(&api, "no-a", json!({"policyName": "no-a", "validationActions": ["Deny"]}));
+        let e = api.create_object("", "pods", Some("default"), deployment_pod("web-1")).unwrap_err();
+        assert!(e.message.contains("app a is reserved"), "{}", e.message);
+        let mut ok = deployment_pod("web-2");
+        ok["metadata"]["labels"]["app"] = json!("b");
+        api.create_object("", "pods", Some("default"), ok).unwrap();
     }
 }

@@ -106,6 +106,7 @@ pub(crate) struct Manager {
 
 /// Run the controllers until the store goes away.
 pub async fn run(api: Arc<ApiState>) {
+    api.adopt();
     let mut manager = Manager {
         api,
         queue: BTreeSet::new(),
