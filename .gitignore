@@ -24,3 +24,9 @@ web/dist/
 
 # Local Terraform state from the removed `litek8s infra` scaffold: never commit it
 infra/
+
+# Local, not part of the project
+.claude/launch.json
+.claude/worktrees/
+launch-drafts.md
+assets/

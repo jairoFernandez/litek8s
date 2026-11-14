@@ -209,11 +209,19 @@ fn wait_forwarding(child: libc::pid_t) -> ! {
         }
         libc::sigprocmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
         loop {
-            let mut status = 0;
-            let r = libc::waitpid(child, &mut status, libc::WNOHANG);
-            if r == child {
-                let code = if libc::WIFEXITED(status) { libc::WEXITSTATUS(status) } else { 128 + libc::WTERMSIG(status) };
-                std::process::exit(code);
+            // Reap every child, not only `child`: the netns holder is in the
+            // sandbox's PID namespace too, and its PID 1 cannot finish
+            // exiting while the holder is an unreaped zombie of ours.
+            loop {
+                let mut status = 0;
+                let r = libc::waitpid(-1, &mut status, libc::WNOHANG);
+                if r == child {
+                    let code = if libc::WIFEXITED(status) { libc::WEXITSTATUS(status) } else { 128 + libc::WTERMSIG(status) };
+                    std::process::exit(code);
+                }
+                if r <= 0 {
+                    break;
+                }
             }
             let mut info: libc::siginfo_t = std::mem::zeroed();
             let sig = libc::sigwaitinfo(&set, &mut info);
