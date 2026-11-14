@@ -43,6 +43,20 @@
   plugin such as kubelogin. The release notes no longer say the API has no
   client authentication (it has had it since 0.2.12).
 
+- **NetworkPolicies on the Docker runtime**: macOS servers (Docker Desktop,
+  OrbStack) and other Docker nodes enforce NetworkPolicies as crun nodes
+  do (ingress and egress, pod and namespace selectors, ipBlock with
+  except, named ports and endPort, default deny, the cluster DNS as a
+  peer). The rules the server computes are the same; the agent loads them
+  into Docker's host network namespace through the privileged
+  `litek8s-service-proxy` helper, one dispatcher per node hooked first into
+  `FORWARD` and `INPUT`, before a selected pod's containers start. A Docker
+  host that cannot filter bridged traffic (no `br_netfilter`, rootless
+  Docker) keeps isolated pods in `ContainerCreating` with the reason
+  instead of running them unprotected. Probes, port-forwards and NodePort
+  relays run inside the pod there and are never filtered. See
+  [docs/networking.md](docs/networking.md#networkpolicies).
+
 ## 0.2.24
 
 - **Rollouts that stop progressing fail**: the Deployment controller keeps
