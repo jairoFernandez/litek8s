@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.25
 
 - **Invalid objects are refused as upstream refuses them**: names by kind
   (RFC 1123 subdomains, DNS-1123 labels for Namespaces, DNS-1035 labels for
