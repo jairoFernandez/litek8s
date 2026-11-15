@@ -213,15 +213,21 @@ export const es: Dict = {
     title: 'La lista honesta',
     lead: 'Vista previa temprana, hecha y probada por una persona: espera asperezas.',
     items: [
-      { title: 'La autenticación y RBAC son más simples que en upstream.', text: 'Los servidores autentican clientes y aplican RBAC desde la 0.2.12, pero no hay login OIDC ni webhook ni revocación de certificados. Los clusters de desarrollo siguen abiertos en 127.0.0.1; en un servidor, igual mantén el puerto 6443 (y el de Raft, 6444) fuera de redes no confiables.', strong: true },
+      { title: 'La autenticación y RBAC son más simples que en upstream.', text: 'Los servidores aceptan certificados de cliente, tokens de service account, OIDC, tokens estáticos y un webhook de tokens, y aplican RBAC, pero con un solo emisor OIDC (sin --authentication-config) y sin revocación de certificados. Los clusters de desarrollo siguen abiertos en 127.0.0.1; en un servidor, igual mantén el puerto 6443 (y el de Raft, 6444) fuera de redes no confiables.', strong: true },
       { title: 'Tiene semanas.', text: 'Las APIs, flags y formatos en disco pueden cambiar entre versiones 0.x sin migración.' },
-      { title: 'Algunos bordes difieren de upstream.', text: 'Los eventos de probes fallidas dicen qué se revisó, no la salida de la probe; las escrituras de los controladores internos no pasan por los webhooks de admisión; la API de Docker todavía no puede hacer push de imágenes.' },
+      { title: 'Algunos bordes difieren de upstream.', text: 'Los eventos de probes fallidas dicen qué se revisó, no la salida de la probe; docker push sube una plataforma, nunca un índice multiplataforma; no se aplican los límites de coste en ejecución de las reglas CEL de los CRDs.' },
       { title: 'Las métricas llegan hasta la plataforma.', text: 'Cubren contenedores, nodos y estado del cluster; los endpoints /metrics de las aplicaciones no se scrapean.' },
       { title: 'La VM de macOS conserva la memoria que tocó.', text: 'Un límite de Virtualization.framework; litek8s mantiene pequeño el guest a cambio.' },
       { title: 'Los servidores macOS son para desarrollo.', text: 'Usan Docker para los pods; corre servidores y nodos reales en Linux.' },
     ],
     more: 'Más en la referencia de diferencias',
     moreHref: blob('skills/litek8s/references/differences.md'),
+  },
+  latest: {
+    eyebrow: 'Del blog',
+    title: 'Últimos artículos',
+    more: 'Todos los artículos',
+    moreHref: '/es/blog/',
   },
   cta: {
     title: ['Arranca un cluster', 'en un segundo.'],

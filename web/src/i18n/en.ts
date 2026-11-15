@@ -409,15 +409,21 @@ export const en = {
     title: 'The honest list',
     lead: 'Early preview, built and tested by one person: expect rough edges.',
     items: [
-      { title: 'Authentication and RBAC are simpler than upstream.', text: 'Servers authenticate clients and enforce RBAC since 0.2.12, but there is no OIDC or webhook login and no certificate revocation. Dev clusters stay open on 127.0.0.1; on a server, keep port 6443 (and the Raft port, 6444) off untrusted networks anyway.', strong: true },
+      { title: 'Authentication and RBAC are simpler than upstream.', text: 'Servers take client certificates, service account tokens, OIDC, static tokens and a token webhook, and enforce RBAC, but only one OIDC issuer (no --authentication-config) and no certificate revocation. Dev clusters stay open on 127.0.0.1; on a server, keep port 6443 (and the Raft port, 6444) off untrusted networks anyway.', strong: true },
       { title: 'Weeks old.', text: 'APIs, flags and on-disk formats may change between 0.x releases without migration.' },
-      { title: 'A few edges differ from upstream.', text: 'Probe failure events say what was checked, not the probe’s output; writes by the in-process controllers skip admission webhooks; the Docker API cannot push images yet.' },
+      { title: 'A few edges differ from upstream.', text: 'Probe failure events say what was checked, not the probe’s output; docker push sends one platform, never a multi-platform index; runtime CEL cost limits of CRD rules are not enforced.' },
       { title: 'Metrics stop at the platform.', text: 'Containers, nodes and cluster state are covered; application /metrics endpoints are not scraped.' },
       { title: 'The macOS VM keeps memory it touched.', text: 'A Virtualization.framework limit; litek8s keeps the guest small instead.' },
       { title: 'macOS servers are for development.', text: 'They use Docker for pods; run real servers and nodes on Linux.' },
     ],
     more: 'More in the differences reference',
     moreHref: blob('skills/litek8s/references/differences.md'),
+  },
+  latest: {
+    eyebrow: 'From the blog',
+    title: 'Latest posts',
+    more: 'All posts',
+    moreHref: '/blog/',
   },
   cta: {
     title: ['Start a cluster', 'in about a second.'],
