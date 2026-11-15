@@ -209,8 +209,8 @@ export const en = {
       },
       {
         label: 'Kubernetes v1.33 conformance',
-        note: '419 specs',
-        value: 413,
+        note: '419 specs, Linux',
+        value: 419,
         of: 419,
         ref: 'k3s: 416/419',
         href: blob('compat/CONFORMANCE.md'),
@@ -218,7 +218,7 @@ export const en = {
       },
     ],
     footnote:
-      'On macOS a dev cluster runs in a small Linux VM, and Activity Monitor shows the whole VM: about 240 MiB fresh, ~380 MiB after pulling and running 5 nginx pods, as macOS keeps every page the guest has touched until the VM stops. The 6 conformance failures: 5 are macOS-only (TCP DNS on port 53, a hostPort binding) and pass on Linux; 1 was a watch fixed since. A 3-server HA control plane stays linearizable under leader kills and partitions, and a 3-node cluster ran 21 h under churn with no leak.',
+      'On macOS a dev cluster runs in a small Linux VM, and Activity Monitor shows the whole VM: about 240 MiB fresh, ~380 MiB after pulling and running 5 nginx pods, as macOS keeps every page the guest has touched until the VM stops. Conformance is from Linux with crun; the last full macOS run passed 413/419 (5 specs need TCP DNS on port 53 or a hostPort binding, 1 was a watch fixed since). A 3-server HA control plane stays linearizable under leader kills and partitions, and a 3-node cluster ran 21 h under churn with no leak.',
     footLinks: [
       { label: 'Memory on macOS', href: '/docs/dev/#memory-on-macos' },
       { label: 'bench/HA.md', href: blob('bench/HA.md') },
