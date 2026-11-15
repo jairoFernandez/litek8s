@@ -13,7 +13,7 @@ enlazados tienen la configuración, los datos crudos y las salvedades.
 | Job de GitHub Actions, e2e de un chart de Helm (setup, instalación, prueba, upgrade) | **21 s**, cluster listo en 2.6 s | kind (helm/kind-action): 79 s, 44.7 s | [docs/ci.md](../ci.md#cifras) |
 | Métricas, logs y alertas, memoria agregada | **+1.8 MiB** | kube-prometheus-stack + Loki: 1,371 MiB | [bench/RESULTS.md](](../../bench/RESULTS.md#observability-built-in-vs-kube-prometheus-stack--loki-2026-10-20-x86_64kvm)) |
 | Corpus de compatibilidad (kubectl, CRDs, workloads, redes, 47 charts de Helm) | **119/119** | k3s: 119/119 | [compat/RESULTS.md](](../../compat/RESULTS.md#without-docker-2026-10-19-119-cases)) |
-| Conformidad con Kubernetes v1.33 (419 specs) | **413/419** | k3s: 416/419 | [compat/CONFORMANCE.md](../../compat/CONFORMANCE.md) |
+| Conformidad con Kubernetes v1.33 (419 specs), Linux | **419/419** | k3s: 416/419 | [compat/CONFORMANCE.md](../../compat/CONFORMANCE.md) |
 
 En macOS un cluster de desarrollo corre en una VM Linux, y el Monitor de
 Actividad muestra la VM completa: 238 MiB recién creada, ~380 MiB después de
@@ -21,8 +21,10 @@ descargar y correr 5 pods de nginx (de eso, el cluster en sí son 30 y 79 MiB).
 macOS le sigue cobrando a la VM cada página que su guest haya tocado hasta que
 la VM se detiene ([docs/dev.md](../dev.md#memoria-en-macos)).
 
-Los 6 fallos de conformidad: 5 son exclusivos de macOS (DNS por TCP en el puerto
-53, un binding de hostPort) y pasan en Linux; 1 era un watch que ya se corrigió.
+La cifra de conformidad es de Linux con crun, la configuración que se distribuye.
+La última corrida completa en macOS pasó 413/419: 5 specs necesitan lo que macOS
+no puede hacer (DNS por TCP en el puerto 53, un binding de hostPort), y 1 era un
+watch que ya se corrigió.
 Un control plane HA de 3 servidores se mantiene linealizable cuando se matan
 líderes y hay particiones ([bench/HA.md](../../bench/HA.md)); un cluster de 3
 nodos corrió 21 h bajo churn sin fugas ([bench/SOAK.md](../../bench/SOAK.md)).
