@@ -12,62 +12,49 @@ use super::util;
 use crate::kube::server::ApiState;
 use crate::kube::store::{ObjectKey, resource_version};
 
-fn owner_uids(obj: &Value) -> Vec<String> {
-    obj.pointer("/metadata/ownerReferences")
-        .and_then(Value::as_array)
-        .map(|refs| {
-            refs.iter()
-                .filter_map(|r| r.get("uid").and_then(Value::as_str).map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+/// The cluster scope and every namespace.
+fn all_namespaces(api: &ApiState) -> HashSet<String> {
+    let mut namespaces: HashSet<String> = api.store().keys_of_resource("", "namespaces").into_iter().map(|k| k.name).collect();
+    namespaces.insert(String::new());
+    namespaces
 }
 
 /// Process a batch of deletions, keyed by the namespace they happened in.
 pub(crate) fn collect(api: &ApiState, deleted: &BTreeMap<String, HashSet<String>>) {
     let all_deleted: HashSet<&str> = deleted.values().flatten().map(String::as_str).collect();
-    let mut namespaces: Vec<String> = deleted.keys().cloned().collect();
-    if deleted.contains_key("") {
-        // A cluster-scoped owner went away: dependents may live anywhere.
-        namespaces.extend(api.store().keys_of_resource("", "namespaces").into_iter().map(|k| k.name));
-    }
-    for ns in &namespaces {
-        sweep(api, ns, |uid| !all_deleted.contains(uid));
-    }
+    // A cluster-scoped owner went away: dependents may live anywhere.
+    let namespaces = if deleted.contains_key("") { all_namespaces(api) } else { deleted.keys().cloned().collect() };
+    sweep(api, &namespaces, |uid| !all_deleted.contains(uid));
 }
 
-/// Startup and resync: delete objects whose owners no longer exist at all.
-pub(crate) fn collect_orphans(api: &ApiState) {
-    let mut live: HashSet<String> = HashSet::new();
-    let mut namespaces = vec![String::new()];
-    for key in api.store().keys_of_resource("", "namespaces") {
-        namespaces.push(key.name);
-    }
-    let mut objects = Vec::new();
-    for ns in &namespaces {
-        for (key, obj) in api.store().objects_in_namespace(ns) {
-            live.insert(util::uid(&obj));
-            objects.push((key, obj));
+/// Startup and resync, in one pass over the objects' metadata: delete
+/// objects whose owners no longer exist at all, and return the ones waiting
+/// for foreground or orphan finalization (namespace, `group|resource|name`).
+pub(crate) fn resync_scan(api: &ApiState) -> Vec<(String, String)> {
+    let infos = api.store().owner_infos(&all_namespaces(api));
+    let live: HashSet<&str> = infos.iter().map(|(_, i)| i.uid.as_str()).collect();
+    let mut pending = Vec::new();
+    for (key, info) in &infos {
+        if info.deleting && info.finalizers.iter().any(|f| f == FOREGROUND || f == ORPHAN) {
+            pending.push((key.namespace.clone(), format!("{}|{}|{}", key.group, key.resource, key.name)));
+        }
+        if !info.owners.is_empty() && info.owners.iter().all(|u| !live.contains(u.as_str())) {
+            delete_key(api, key);
         }
     }
-    for (key, obj) in objects {
-        let owners = owner_uids(&obj);
-        if !owners.is_empty() && owners.iter().all(|u| !live.contains(u)) {
-            delete(api, &key, &obj);
-        }
-    }
+    pending
 }
 
-/// Look at every object in `ns` that has owners; `alive(uid)` says whether an
-/// owner still counts.
-fn sweep(api: &ApiState, ns: &str, alive: impl Fn(&str) -> bool) {
-    for (key, mut obj) in api.store().objects_in_namespace(ns) {
-        let owners = owner_uids(&obj);
-        if owners.is_empty() || owners.iter().all(|u| alive(u)) {
+/// Look at every object in `namespaces` that has owners; `alive(uid)` says
+/// whether an owner still counts. Only the objects it changes are read whole.
+fn sweep(api: &ApiState, namespaces: &HashSet<String>, alive: impl Fn(&str) -> bool) {
+    for (key, info) in api.store().owner_infos(namespaces) {
+        if info.owners.is_empty() || info.owners.iter().all(|u| alive(u)) {
             continue;
         }
-        if owners.iter().any(|u| alive(u)) {
+        if info.owners.iter().any(|u| alive(u)) {
             // Some owners remain: drop only the dangling references.
+            let Some(mut obj) = api.store().get(&key) else { continue };
             if let Some(refs) = obj.pointer_mut("/metadata/ownerReferences").and_then(Value::as_array_mut) {
                 refs.retain(|r| r.get("uid").and_then(Value::as_str).is_some_and(&alive));
             }
@@ -75,13 +62,12 @@ fn sweep(api: &ApiState, ns: &str, alive: impl Fn(&str) -> bool) {
             let _ = api.store().update(key, obj, rv);
             continue;
         }
-        delete(api, &key, &obj);
+        delete_key(api, &key);
     }
 }
 
-fn delete(api: &ApiState, key: &ObjectKey, obj: &Value) {
-    let ns = obj.pointer("/metadata/namespace").and_then(Value::as_str).unwrap_or_default();
-    let _ = api.delete_named(&key.group, &key.resource, ns, &key.name);
+fn delete_key(api: &ApiState, key: &ObjectKey) {
+    let _ = api.delete_named(&key.group, &key.resource, &key.namespace, &key.name);
 }
 
 const FOREGROUND: &str = "foregroundDeletion";
@@ -162,7 +148,7 @@ pub(crate) fn foreground(api: &ApiState, ns: &str, encoded: &str) -> Result<supe
                 blocking += 1;
             }
             if !util::is_deleting(&obj) {
-                delete(api, &key, &obj);
+                delete_key(api, &key);
             }
         }
     }
@@ -178,26 +164,6 @@ pub(crate) fn foreground(api: &ApiState, ns: &str, encoded: &str) -> Result<supe
         Err(e) if e.is_not_found() => Ok(None),
         Err(e) => Err(e),
     }
-}
-
-/// Objects left part way through a foreground or orphan deletion (by a
-/// restart): `(namespace, "group|resource|name")` for [`foreground`].
-pub(crate) fn pending_finalization(api: &ApiState) -> Vec<(String, String)> {
-    let mut namespaces = vec![String::new()];
-    namespaces.extend(api.store().keys_of_resource("", "namespaces").into_iter().map(|k| k.name));
-    let mut out = Vec::new();
-    for ns in &namespaces {
-        for (key, obj) in api.store().objects_in_namespace(ns) {
-            let pending = obj
-                .pointer("/metadata/finalizers")
-                .and_then(Value::as_array)
-                .is_some_and(|f| f.iter().any(|x| x == FOREGROUND || x == ORPHAN));
-            if pending && util::is_deleting(&obj) {
-                out.push((ns.clone(), format!("{}|{}|{}", key.group, key.resource, key.name)));
-            }
-        }
-    }
-    out
 }
 
 /// Whether the owner an ownerReference names exists and is not being deleted.

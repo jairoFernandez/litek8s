@@ -11,7 +11,7 @@
 //! compacted to one record per object on startup and when it grows large;
 //! nothing is rewritten in place, which matters on SD cards and slow disks.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -163,6 +163,21 @@ struct Wal {
     bytes: u64,
     /// Size right after the last compaction.
     base_bytes: u64,
+    /// A compaction writing its snapshot on another thread.
+    compacting: Option<Compaction>,
+}
+
+/// A WAL compaction in progress. The snapshot is written and synced without
+/// the store's lock (on a big store that took tens of milliseconds, during
+/// which every request waited); appends keep going to the old file, which
+/// stays complete until the snapshot replaces it, and are also kept here to
+/// be appended to the snapshot when it is done.
+struct Compaction {
+    writer: std::thread::JoinHandle<std::io::Result<u64>>,
+    /// Lines appended since the snapshot was taken.
+    tail: Vec<u8>,
+    tail_records: usize,
+    snapshot_records: usize,
 }
 
 /// Sizes the store keeps, for `/metrics`.
@@ -205,6 +220,64 @@ struct Inner {
     /// The live change feed. Replaced (ending every subscription) when a
     /// snapshot replaces the whole state.
     events: broadcast::Sender<Arc<WatchEvent>>,
+}
+
+/// The metadata garbage collection reads: see [`Store::owner_infos`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct OwnerInfo {
+    pub uid: String,
+    /// The uids of its ownerReferences.
+    pub owners: Vec<String>,
+    pub finalizers: Vec<String>,
+    /// It has a deletionTimestamp.
+    pub deleting: bool,
+}
+
+impl OwnerInfo {
+    fn parse(json: &[u8]) -> Self {
+        #[derive(Deserialize)]
+        struct Object {
+            #[serde(default)]
+            metadata: Option<Meta>,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Meta {
+            uid: Option<String>,
+            owner_references: Option<Vec<Reference>>,
+            finalizers: Option<Vec<String>>,
+            deletion_timestamp: Option<serde::de::IgnoredAny>,
+        }
+        #[derive(Deserialize)]
+        struct Reference {
+            uid: Option<String>,
+        }
+        match serde_json::from_slice::<Object>(json) {
+            Ok(Object { metadata: Some(m) }) => Self {
+                uid: m.uid.unwrap_or_default(),
+                owners: m.owner_references.unwrap_or_default().into_iter().filter_map(|r| r.uid).collect(),
+                finalizers: m.finalizers.unwrap_or_default(),
+                deleting: m.deletion_timestamp.is_some(),
+            },
+            Ok(Object { metadata: None }) => Self::default(),
+            // A shape the narrow types do not take: read it the long way.
+            Err(_) => {
+                let obj: Value = serde_json::from_slice(json).unwrap_or(Value::Null);
+                let strings = |path: &str, field: Option<&str>| -> Vec<String> {
+                    obj.pointer(path)
+                        .and_then(Value::as_array)
+                        .map(|a| a.iter().filter_map(|x| field.map_or(Some(x), |f| x.get(f))).filter_map(Value::as_str).map(str::to_string).collect())
+                        .unwrap_or_default()
+                };
+                Self {
+                    uid: obj.pointer("/metadata/uid").and_then(Value::as_str).unwrap_or_default().to_string(),
+                    owners: strings("/metadata/ownerReferences", Some("uid")),
+                    finalizers: strings("/metadata/finalizers", None),
+                    deleting: obj.pointer("/metadata/deletionTimestamp").is_some_and(|v| !v.is_null()),
+                }
+            }
+        }
+    }
 }
 
 pub struct Store {
@@ -399,6 +472,17 @@ impl Store {
         found.into_iter().map(|(k, j)| (k, serde_json::from_slice(&j).unwrap_or(Value::Null))).collect()
     }
 
+    /// What garbage collection reads of every object in `namespaces`:
+    /// copied out under the lock, parsed outside it, and only the fields it
+    /// needs, so a resync over 100,000 objects does not build them all.
+    pub fn owner_infos(&self, namespaces: &HashSet<String>) -> Vec<(ObjectKey, OwnerInfo)> {
+        let found: Vec<(ObjectKey, Arc<[u8]>)> = {
+            let inner = self.inner.lock().unwrap();
+            inner.objects.iter().filter(|(k, _)| namespaces.contains(&k.namespace)).map(|(k, v)| (k.clone(), v.json.clone())).collect()
+        };
+        found.into_iter().map(|(k, j)| (k, OwnerInfo::parse(&j))).collect()
+    }
+
     pub fn keys_of_resource(&self, group: &str, resource: &str) -> Vec<ObjectKey> {
         let inner = self.inner.lock().unwrap();
         inner
@@ -586,13 +670,25 @@ impl Store {
             }
             wal.records += 1;
             wal.bytes += line.len() as u64 + 1;
-            if wal.records > object_count + WAL_COMPACT_SLACK || wal.bytes > wal.base_bytes + WAL_COMPACT_BYTES.max(wal.base_bytes * 2) {
-                let path = wal.path.clone();
-                match write_compacted(&path, &inner.objects, snapshot_rv) {
-                    Ok(fresh) => {
-                        inner.wal = Some(fresh);
-                        inner.compactions += 1;
-                    }
+            if let Some(compaction) = wal.compacting.as_mut() {
+                compaction.tail.extend_from_slice(&line);
+                compaction.tail.push(b'\n');
+                compaction.tail_records += 1;
+                if compaction.writer.is_finished() && wal.finish_compaction() {
+                    inner.compactions += 1;
+                }
+            } else if wal.records > object_count + WAL_COMPACT_SLACK || wal.bytes > wal.base_bytes + WAL_COMPACT_BYTES.max(wal.base_bytes * 2) {
+                // Under the lock only the snapshot's entries are taken (keys
+                // and shared pointers to the stored bytes).
+                let entries: Vec<(ObjectKey, u64, Arc<[u8]>)> =
+                    inner.objects.iter().map(|(k, v)| (k.clone(), v.rv, v.json.clone())).collect();
+                let tmp = wal.path.with_extension("wal.tmp");
+                let snapshot_records = entries.len();
+                let spawned = std::thread::Builder::new().name("wal-compact".into()).spawn(move || {
+                    write_snapshot(&tmp, entries.iter().map(|(k, rv, json)| (k, *rv, &json[..])), snapshot_rv)
+                });
+                match spawned {
+                    Ok(writer) => wal.compacting = Some(Compaction { writer, tail: Vec::new(), tail_records: 0, snapshot_records }),
                     Err(error) => eprintln!("apiserver: WAL compaction failed: {error}"),
                 }
             }
@@ -657,23 +753,8 @@ pub(crate) fn parse_wal_line(line: &str) -> Option<(ObjectKey, u64, Option<Value
 /// and return an appender positioned at its end.
 fn write_compacted(path: &Path, objects: &BTreeMap<ObjectKey, Stored>, rv: u64) -> Result<Wal> {
     let tmp = path.with_extension("wal.tmp");
-    {
-        let mut out = BufWriter::new(
-            File::create(&tmp).with_context(|| format!("failed to create {}", tmp.display()))?,
-        );
-        for (key, obj) in objects {
-            let record_rv = if obj.rv > 0 { obj.rv } else { rv };
-            out.write_all(&wal_line(record_rv, key, Some(&obj.json)))?;
-            out.write_all(b"\n")?;
-        }
-        // Keep the counter even when the newest change was a delete.
-        if objects.values().map(|o| o.rv).max() != Some(rv) && rv > 0 {
-            out.write_all(&wal_line(rv, &ObjectKey::new("", "", "", ""), None))?;
-            out.write_all(b"\n")?;
-        }
-        out.flush()?;
-        out.get_ref().sync_all()?;
-    }
+    write_snapshot(&tmp, objects.iter().map(|(k, o)| (k, o.rv, &o.json[..])), rv)
+        .with_context(|| format!("failed to write {}", tmp.display()))?;
     std::fs::rename(&tmp, path)
         .with_context(|| format!("failed to replace {}", path.display()))?;
     let file = OpenOptions::new().append(true).open(path)?;
@@ -684,7 +765,70 @@ fn write_compacted(path: &Path, objects: &BTreeMap<ObjectKey, Stored>, rv: u64) 
         records: objects.len(),
         bytes,
         base_bytes: bytes,
+        compacting: None,
     })
+}
+
+/// Write the objects as of `rv` to `tmp` and sync it. Returns its size.
+fn write_snapshot<'a>(tmp: &Path, objects: impl Iterator<Item = (&'a ObjectKey, u64, &'a [u8])>, rv: u64) -> std::io::Result<u64> {
+    let mut out = BufWriter::new(File::create(tmp)?);
+    let mut newest = None;
+    for (key, obj_rv, json) in objects {
+        let record_rv = if obj_rv > 0 { obj_rv } else { rv };
+        newest = newest.max(Some(obj_rv));
+        out.write_all(&wal_line(record_rv, key, Some(json)))?;
+        out.write_all(b"\n")?;
+    }
+    // Keep the counter even when the newest change was a delete.
+    if newest != Some(rv) && rv > 0 {
+        out.write_all(&wal_line(rv, &ObjectKey::new("", "", "", ""), None))?;
+        out.write_all(b"\n")?;
+    }
+    out.flush()?;
+    out.get_ref().sync_all()?;
+    out.get_ref().metadata().map(|m| m.len())
+}
+
+impl Store {
+    /// Wait for a background WAL compaction and swap it in.
+    #[cfg(test)]
+    fn settle_compaction(&self) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.wal.as_mut().is_some_and(Wal::finish_compaction) {
+            inner.compactions += 1;
+        }
+    }
+}
+
+impl Wal {
+    /// Swap in the snapshot of a compaction whose writer is done: append
+    /// the lines written meanwhile and rename it over the WAL. On failure
+    /// the old WAL, still complete, stays. Returns whether it was swapped.
+    fn finish_compaction(&mut self) -> bool {
+        let Some(compaction) = self.compacting.take() else { return false };
+        let tmp = self.path.with_extension("wal.tmp");
+        let swapped = (|| -> Result<(u64, File)> {
+            let snapshot_bytes = compaction.writer.join().map_err(|_| anyhow::anyhow!("the compaction thread panicked"))??;
+            let mut file = OpenOptions::new().append(true).open(&tmp)?;
+            file.write_all(&compaction.tail)?;
+            std::fs::rename(&tmp, &self.path).with_context(|| format!("failed to replace {}", self.path.display()))?;
+            Ok((snapshot_bytes, file))
+        })();
+        match swapped {
+            Ok((snapshot_bytes, file)) => {
+                self.records = compaction.snapshot_records + compaction.tail_records;
+                self.bytes = snapshot_bytes + compaction.tail.len() as u64;
+                self.base_bytes = snapshot_bytes;
+                self.writer = BufWriter::new(file);
+                true
+            }
+            Err(error) => {
+                eprintln!("apiserver: WAL compaction failed: {error:#}");
+                let _ = std::fs::remove_file(&tmp);
+                false
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -756,9 +900,65 @@ mod tests {
         for _ in 0..100 {
             store.update(key("big"), obj.clone(), None).unwrap();
         }
+        store.settle_compaction();
         let st = store.stats();
         assert!(st.compactions >= 1, "{st:?}");
         assert!(st.wal_bytes < 80 << 20, "{st:?}");
+    }
+
+    #[test]
+    fn writes_during_a_compaction_survive_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut obj = cm("big");
+        obj["data"] = json!({"blob": "z".repeat(1 << 20)});
+        {
+            let store = Store::open(Some(dir.path())).unwrap();
+            store.create(key("big"), obj.clone()).unwrap();
+            // Past the size threshold: a compaction starts in the background.
+            while store.inner.lock().unwrap().wal.as_ref().unwrap().compacting.is_none() {
+                store.update(key("big"), obj.clone(), None).unwrap();
+            }
+            // Written while it runs: they must reach the compacted WAL.
+            store.create(key("during"), cm("during")).unwrap();
+            store.create(key("gone"), cm("gone")).unwrap();
+            store.delete(&key("gone"), None).unwrap();
+            store.settle_compaction();
+            assert_eq!(store.stats().compactions, 1);
+            store.create(key("after"), cm("after")).unwrap();
+        }
+        let store = Store::open(Some(dir.path())).unwrap();
+        assert!(store.get(&key("big")).is_some());
+        assert!(store.get(&key("during")).is_some());
+        assert!(store.get(&key("gone")).is_none());
+        assert!(store.get(&key("after")).is_some());
+        assert_eq!(resource_version(&store.get(&key("after")).unwrap()), Some(store.current_rv()));
+    }
+
+    #[test]
+    fn owner_infos_read_only_what_gc_needs() {
+        let store = Store::open(None).unwrap();
+        let mut owned = cm("owned");
+        owned["metadata"]["uid"] = json!("u1");
+        owned["metadata"]["ownerReferences"] = json!([{"uid": "o1", "kind": "X"}, {"kind": "no uid"}]);
+        owned["metadata"]["finalizers"] = json!(["foregroundDeletion"]);
+        owned["metadata"]["deletionTimestamp"] = json!("2026-01-01T00:00:00Z");
+        store.create(key("owned"), owned).unwrap();
+        let mut odd = cm("odd");
+        odd["metadata"]["finalizers"] = Value::Null;
+        odd["metadata"]["ownerReferences"] = json!([{"uid": 7}, {"uid": "o2"}]);
+        store.create(key("odd"), odd).unwrap();
+        let mut other = cm("other");
+        other["metadata"]["namespace"] = json!("elsewhere");
+        store.create(ObjectKey::new("", "configmaps", "elsewhere", "other"), other).unwrap();
+
+        let infos: BTreeMap<String, OwnerInfo> =
+            store.owner_infos(&HashSet::from(["default".to_string()])).into_iter().map(|(k, i)| (k.name, i)).collect();
+        assert_eq!(infos.len(), 2);
+        assert_eq!(
+            infos["owned"],
+            OwnerInfo { uid: "u1".into(), owners: vec!["o1".into()], finalizers: vec!["foregroundDeletion".into()], deleting: true }
+        );
+        assert_eq!(infos["odd"], OwnerInfo { owners: vec!["o2".into()], ..Default::default() });
     }
 
     #[test]

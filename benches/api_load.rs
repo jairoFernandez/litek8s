@@ -106,6 +106,9 @@ struct Outcome {
     p50_ms: f64,
     p90_ms: f64,
     p99_ms: f64,
+    /// Older baselines have none.
+    #[serde(default)]
+    p999_ms: f64,
     max_ms: f64,
     count: u64,
     errors: u64,
@@ -128,6 +131,7 @@ fn summarize(mut lat_us: Vec<u64>, elapsed: Duration, errors: u64) -> Outcome {
         p50_ms: pct(0.50),
         p90_ms: pct(0.90),
         p99_ms: pct(0.99),
+        p999_ms: pct(0.999),
         max_ms: lat_us.last().map_or(0.0, |&v| v as f64 / 1000.0),
         count: lat_us.len() as u64,
         errors,
@@ -148,6 +152,7 @@ fn median(runs: Vec<Outcome>) -> Outcome {
         p50_ms: mid(|o| o.p50_ms),
         p90_ms: mid(|o| o.p90_ms),
         p99_ms: mid(|o| o.p99_ms),
+        p999_ms: mid(|o| o.p999_ms),
         max_ms: runs.iter().map(|o| o.max_ms).fold(0.0, f64::max),
         count: runs.iter().map(|o| o.count).sum(),
         errors: runs.iter().map(|o| o.errors).sum(),
@@ -293,6 +298,49 @@ async fn schedule(addr: &str, replicas: usize) -> Result<Outcome> {
     })
 }
 
+/// How long a new Deployment waits for its controller while `conc` clients
+/// create ConfigMaps as fast as they can: create → its ReplicaSet exists.
+/// Run after `create`, on the store that grew: controllers that fall behind
+/// the change feed and resync over a big store stop reacting for seconds.
+async fn rollout_under_load(addr: &str, conc: usize, secs: f64, run: usize) -> Result<Duration> {
+    let load_addr = addr.to_string();
+    let load = tokio::spawn(async move { throughput(
+        &load_addr,
+        conc,
+        secs,
+        Arc::new(|w, i| Op {
+            method: Method::POST,
+            path: "/api/v1/namespaces/bench-create/configmaps".into(),
+            content_type: JSON,
+            accept: JSON,
+            body: Bytes::from(configmap(&format!("c-{}", NEXT.fetch_add(1, Ordering::Relaxed)), (w + i as usize) % 10).to_string()),
+            expect: 201,
+        }),
+    ).await });
+    tokio::time::sleep(Duration::from_secs_f64(secs / 3.0)).await;
+    let mut tx = connect(addr).await?;
+    let name = format!("rollout-{run}");
+    let deploy = json!({"apiVersion": "apps/v1", "kind": "Deployment",
+        "metadata": {"name": name},
+        "spec": {"replicas": 1, "selector": {"matchLabels": {"app": name}},
+                 "template": {"metadata": {"labels": {"app": name}},
+                              "spec": {"containers": [{"name": "c", "image": "nginx:alpine"}]}}}});
+    let start = Instant::now();
+    must(&mut tx, Method::POST, "/apis/apps/v1/namespaces/bench-sched/deployments", JSON, deploy).await?;
+    let waited = loop {
+        let rs = must(&mut tx, Method::GET, &format!("/apis/apps/v1/namespaces/bench-sched/replicasets?labelSelector=app%3D{name}"), JSON, Value::Null).await?;
+        if rs["items"].as_array().is_some_and(|i| !i.is_empty()) {
+            break start.elapsed();
+        }
+        if start.elapsed() > Duration::from_secs(60) {
+            bail!("no ReplicaSet for {name} after 60 s");
+        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    };
+    load.await??;
+    Ok(waited)
+}
+
 struct Report {
     results: Vec<(String, Outcome)>,
 }
@@ -417,6 +465,18 @@ async fn main() -> Result<()> {
         }
         report.results.push((name.into(), median(outs)));
     }
+    if wanted("rollout_under_load") {
+        eprintln!("  rollout_under_load…");
+        let mut waits = Vec::new();
+        for run in 0..runs {
+            waits.push(rollout_under_load(&addr, conc, secs, run).await?.as_secs_f64() * 1000.0);
+        }
+        waits.sort_by(f64::total_cmp);
+        report.results.push((
+            "rollout_under_load".into(),
+            Outcome { p50_ms: waits[waits.len() / 2], max_ms: waits[waits.len() - 1], count: waits.len() as u64, ..Default::default() },
+        ));
+    }
     if wanted("watch") {
         eprintln!("  watch…");
         let mut outs = Vec::new();
@@ -436,7 +496,7 @@ fn print_and_compare(report: &Report, save: bool, tolerance: f64) -> Result<()> 
         .unwrap_or_default();
 
     println!();
-    println!("{:<15} {:>11} {:>9} {:>9} {:>9} {:>9} {:>7}  vs baseline", "scenario", "ops/s", "p50 ms", "p90 ms", "p99 ms", "max ms", "errors");
+    println!("{:<18} {:>9} {:>9} {:>9} {:>9} {:>9} {:>9} {:>7}  vs baseline", "scenario", "ops/s", "p50 ms", "p90 ms", "p99 ms", "p99.9 ms", "max ms", "errors");
     let mut regressions = Vec::new();
     for (name, o) in &report.results {
         if o.errors > 0 {
@@ -445,7 +505,11 @@ fn print_and_compare(report: &Report, save: bool, tolerance: f64) -> Result<()> 
         let delta = baseline.get(name).map(|b| {
             let thr = (o.ops_per_sec - b.ops_per_sec) / b.ops_per_sec.max(1e-9);
             // Its ops/s is only how fast 500 sequential creates went: judged by latency.
-            let judge_throughput = name != "watch_latency";
+            let judge_throughput = name != "watch_latency" && name != "rollout_under_load";
+            // One wait per run: judged by its median, with room for noise.
+            if name == "rollout_under_load" && b.p50_ms > 0.0 && o.p50_ms > b.p50_ms * (1.0 + 2.0 * tolerance) && o.p50_ms - b.p50_ms > 50.0 {
+                regressions.push(format!("{name}: waited {:.0} → {:.0} ms", b.p50_ms, o.p50_ms));
+            }
             if judge_throughput && thr < -tolerance {
                 regressions.push(format!("{name}: ops/s {:.0} → {:.0} ({:+.0}%)", b.ops_per_sec, o.ops_per_sec, thr * 100.0));
             }
@@ -453,12 +517,16 @@ fn print_and_compare(report: &Report, save: bool, tolerance: f64) -> Result<()> 
             if b.p99_ms > 0.0 && o.p99_ms > b.p99_ms * (1.0 + 2.0 * tolerance) && o.p99_ms - b.p99_ms > 0.5 {
                 regressions.push(format!("{name}: p99 {:.2} → {:.2} ms", b.p99_ms, o.p99_ms));
             }
-            format!("{:+.1}% ops/s", thr * 100.0)
+            if judge_throughput { format!("{:+.1}% ops/s", thr * 100.0) } else { "–".into() }
         });
-        let extra = o.total_ms.map(|t| format!("  (all bound in {t:.0} ms, created in {:.0} ms)", o.p50_ms)).unwrap_or_default();
+        let extra = match (name.as_str(), o.total_ms) {
+            (_, Some(t)) => format!("  (all bound in {t:.0} ms, created in {:.0} ms)", o.p50_ms),
+            ("rollout_under_load", _) => format!("  (ReplicaSet after {:.0} ms, median of {}; worst {:.0} ms)", o.p50_ms, o.count, o.max_ms),
+            _ => String::new(),
+        };
         println!(
-            "{:<15} {:>11.0} {:>9.2} {:>9.2} {:>9.2} {:>9.2} {:>7}  {}{}",
-            name, o.ops_per_sec, o.p50_ms, o.p90_ms, o.p99_ms, o.max_ms, o.errors,
+            "{:<18} {:>9.0} {:>9.2} {:>9.2} {:>9.2} {:>9.2} {:>9.2} {:>7}  {}{}",
+            name, o.ops_per_sec, o.p50_ms, o.p90_ms, o.p99_ms, o.p999_ms, o.max_ms, o.errors,
             delta.unwrap_or_else(|| "–".into()), extra
         );
     }
