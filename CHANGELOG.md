@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+- **Controllers keep reacting under a burst of writes**: the controllers
+  read the store's change feed, which buffers 256 events; one that fell
+  behind threw everything away and resynced, reading every object of the
+  store twice (garbage collection's orphans and pending finalizers), on a
+  runtime worker. With ~100,000 objects a resync took 0.3–1.9 s, so it fell
+  behind again before it finished: under sustained writes a new Deployment
+  waited ~4.7 s for its ReplicaSet. Controllers now catch up from the
+  store's history as watches do, and a resync's garbage collection reads
+  only uid, ownerReferences and finalizers, in one pass, on a blocking
+  thread. On a laptop, 32 clients creating ConfigMaps on a store of
+  ~100,000 objects: a Deployment's ReplicaSet appears after 75–174 ms
+  instead of 4.7–4.9 s; full resyncs per benchmark run 285–328 → 41–46.
+  Garbage collection after a deletion reads only that metadata too.
+- **WAL compaction no longer stops the API server**: rewriting the WAL
+  wrote and synced every object while holding the store's lock (84 ms with
+  101,744 objects, 6 ms with 1,000, every ~20,000 writes), so every request
+  waited. The snapshot is now written on its own thread; the lock is held
+  to take the entries (pointers to the stored bytes) and to swap the files
+  in. The slowest create in the benchmark: 83–139 ms → 26–30 ms.
+- `cargo bench --bench api_load` reports p99.9 and has a
+  `rollout_under_load` scenario: while 32 clients create ConfigMaps, how
+  long a new Deployment waits for its ReplicaSet.
+
 ## 0.2.25
 
 - **Invalid objects are refused as upstream refuses them**: names by kind

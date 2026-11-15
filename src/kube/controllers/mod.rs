@@ -102,6 +102,12 @@ pub(crate) struct Manager {
     /// reconcile it runs asks for the next), so periodic reconciles started
     /// by many events do not multiply.
     pending: HashMap<WorkKey, Instant>,
+    /// The resync's garbage collection pass, on a blocking thread: over a
+    /// big store it takes long enough that the loop would fall behind the
+    /// change feed again (and hold a runtime worker) if it ran inline.
+    gc_scan: Option<tokio::task::JoinHandle<Vec<(String, String)>>>,
+    /// Another resync came while it ran: scan again when it is done.
+    gc_rescan: bool,
 }
 
 /// Run the controllers until the store goes away.
@@ -115,38 +121,69 @@ pub async fn run(api: Arc<ApiState>) {
         unschedulable: BTreeSet::new(),
         health: HashMap::new(),
         pending: HashMap::new(),
+        gc_scan: None,
+        gc_rescan: false,
     };
     loop {
+        // Read before subscribing: an event between the two is seen twice at
+        // worst, and observing is idempotent.
+        let mut last_rv = manager.api.store().current_rv();
         let mut live = match manager.api.store().subscribe(None) {
             Ok(sub) => sub.live,
             Err(_) => return,
         };
         manager.resync();
-        loop {
+        'feed: loop {
             manager.process();
             let next_timer = manager.timers.keys().next().copied();
+            let mut scanned = None;
             let received = tokio::select! {
                 r = live.recv() => Some(r),
                 _ = sleep_until(next_timer) => None,
+                pending = gc_scan_done(&mut manager.gc_scan) => {
+                    scanned = Some(pending);
+                    None
+                }
             };
+            if let Some(pending) = scanned {
+                manager.gc_scanned(pending);
+            }
+            let mut lagged = false;
             match received {
-                Some(Ok(event)) => manager.observe(&event),
-                Some(Err(RecvError::Lagged(_))) => break,
+                Some(Ok(event)) => manager.observe_at(&event, &mut last_rv),
+                Some(Err(RecvError::Lagged(_))) => lagged = true,
                 Some(Err(RecvError::Closed)) => return,
                 None => {}
             }
             // Batch whatever else is already queued before reconciling.
-            loop {
+            while !lagged {
                 match live.try_recv() {
-                    Ok(event) => manager.observe(&event),
+                    Ok(event) => manager.observe_at(&event, &mut last_rv),
                     Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Lagged(_)) => break,
+                    Err(TryRecvError::Lagged(_)) => lagged = true,
                     Err(TryRecvError::Closed) => return,
+                }
+            }
+            // Fell behind the live feed (a burst of writes): catch up from
+            // the store's history, as watches do. Only when the history no
+            // longer reaches back does it take a full resync.
+            if lagged {
+                let Ok(caught_up) = manager.api.store().subscribe(Some(last_rv)) else { break 'feed };
+                live = caught_up.live;
+                for event in &caught_up.backlog {
+                    manager.observe_at(event, &mut last_rv);
                 }
             }
         }
         // Fell behind the change feed: start over from a full resync.
         eprintln!("controllers: fell behind the change feed, resyncing");
+    }
+}
+
+async fn gc_scan_done(scan: &mut Option<tokio::task::JoinHandle<Vec<(String, String)>>>) -> Vec<(String, String)> {
+    match scan {
+        Some(scan) => scan.await.unwrap_or_default(),
+        None => std::future::pending().await,
     }
 }
 
@@ -238,10 +275,36 @@ impl Manager {
                 self.enqueue(Kind::Schedule, &ns, &name);
             }
         }
-        for (ns, encoded) in gc::pending_finalization(&self.api) {
+        self.start_gc_scan();
+    }
+
+    fn start_gc_scan(&mut self) {
+        if self.gc_scan.is_some() {
+            self.gc_rescan = true;
+            return;
+        }
+        let api = self.api.clone();
+        self.gc_scan = Some(tokio::task::spawn_blocking(move || gc::resync_scan(&api)));
+    }
+
+    fn gc_scanned(&mut self, pending: Vec<(String, String)>) {
+        self.gc_scan = None;
+        for (ns, encoded) in pending {
             self.enqueue(Kind::Foreground, &ns, &encoded);
         }
-        gc::collect_orphans(&self.api);
+        if std::mem::take(&mut self.gc_rescan) {
+            self.start_gc_scan();
+        }
+    }
+
+    /// [`observe`](Self::observe) a feed event once: skip what `last_rv`
+    /// already covers (the history replays from it), and advance it.
+    fn observe_at(&mut self, event: &WatchEvent, last_rv: &mut u64) {
+        if event.rv <= *last_rv {
+            return;
+        }
+        *last_rv = event.rv;
+        self.observe(event);
     }
 
     /// Map one change to the reconciles it calls for.

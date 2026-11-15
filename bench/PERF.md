@@ -6,14 +6,16 @@ measure **speed** on the local machine, no VM and no Docker:
 | bench | what | run |
 |---|---|---|
 | `benches/micro.rs` | criterion micro-benchmarks: store create/get/update/list, WAL write and replay, watch fan-out, merge/strategic patch, JSON | `cargo bench --bench micro` |
-| `benches/api_load.rs` | in-process `apiserver` (WAL on disk, controllers on) under concurrent HTTP/1.1 keep-alive clients: ops/s and p50/p90/p99 per scenario | `cargo bench --bench api_load` |
+| `benches/api_load.rs` | in-process `apiserver` (WAL on disk, controllers on) under concurrent HTTP/1.1 keep-alive clients: ops/s and p50/p90/p99/p99.9 per scenario | `cargo bench --bench api_load` |
 
 ## api_load
 
 Scenarios: `create`, `get`, `patch` (merge patch), `list_selector` (labelSelector, 100 of
 1000), `list_all` (1000 ConfigMaps), `list_table` (what `kubectl get` asks for),
 `watch_latency` (create → watch event), `schedule` (Deployment of 100 replicas → every
-Pod created and bound to one of 5 Nodes).
+Pod created and bound to one of 5 Nodes), `rollout_under_load` (while 32 clients create
+ConfigMaps, a new Deployment → its ReplicaSet exists; after `create`, on the store it grew:
+how long controllers stop reacting under a burst of writes; judged by its median wait).
 
 ```bash
 cargo bench --bench api_load                      # compare with bench/perf-baseline.json, exit 1 on regression
