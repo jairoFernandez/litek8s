@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.26
 
 - **Controllers keep reacting under a burst of writes**: the controllers
   read the store's change feed, which buffers 256 events; one that fell
