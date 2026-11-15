@@ -1,0 +1,36 @@
+---
+// The landing page's three newest blog posts in its language.
+import Icon from './Icon.astro';
+import { posts, postUrl, dateFmt, type Lang } from '../../lib/blog';
+import { coverOf } from '../../lib/cover';
+import type { Dict } from '../../i18n/en';
+
+interface Props { t: Dict['latest']; lang: Lang }
+const { t, lang } = Astro.props;
+const latest = (await posts(lang)).slice(0, 3);
+---
+<section id="blog" class="section" style="padding-top:0">
+  <div class="wrap">
+    <div class="section-head" data-reveal>
+      <span class="eyebrow">{t.eyebrow}</span>
+      <h2 class="h2">{t.title}</h2>
+    </div>
+    <div class="latest-grid">
+      {latest.map((p, i) => {
+        const image = coverOf(p);
+        return (
+          <a class="card latest spot" href={postUrl(p)} data-reveal style={`--d:${i}`}>
+            {image && <img src={image.src} alt="" width={image.width} height={image.height} loading="lazy" decoding="async" />}
+            <time datetime={p.data.date.toISOString()}>{dateFmt(p.data.date, lang)}</time>
+            <h3>{p.data.title}</h3>
+            <p>{p.data.description}</p>
+          </a>
+        );
+      })}
+    </div>
+    <a class="limits-more" href={t.moreHref} data-reveal>{t.more}<Icon name="arrow" class="arrow" /></a>
+  </div>
+</section>
+<style>
+  .limits-more :global(svg) { width: 16px; height: 16px; }
+</style>

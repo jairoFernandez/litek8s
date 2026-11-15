@@ -9,6 +9,7 @@ import Terminal from './Terminal.astro';
 import Numbers from './Numbers.astro';
 import Features from './Features.astro';
 import How from './How.astro';
+import Latest from './Latest.astro';
 import type { Dict } from '../../i18n/en';
 
 interface Props { t: Dict }
@@ -260,6 +261,8 @@ const other = t.nav.lang;
           <a class="limits-more" href={t.limits.moreHref} data-reveal>{t.limits.more}<Icon name="arrow-up-right" class="arrow" /></a>
         </div>
       </section>
+
+      <Latest t={t.latest} lang={t.lang as 'en' | 'es'} />
 
       <section class="cta">
         <div class="bg-grid" aria-hidden="true"></div>
