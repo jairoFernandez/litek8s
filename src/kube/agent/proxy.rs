@@ -119,9 +119,14 @@ impl Proxy {
             .collect()
     }
 
-    /// The NAT table for the current Services.
+    /// The NAT table for the current Services, and the filter table that
+    /// rejects connections to a ClusterIP port without ready endpoints (as
+    /// kube-proxy does): without it the SYN goes nowhere and the client
+    /// waits for its TCP timeout (about two minutes on Linux), an app that
+    /// starts before its database included.
     fn rules(&self) -> String {
         let mut out = format!("*nat\n:{CHAIN} - [0:0]\n");
+        let mut reject = String::new();
         for ((ns, name), (svc, eps)) in self.services.lock().unwrap().iter() {
             // Pods reach the API server at its own address (what
             // kubernetes.default.svc resolves to) on the Service's port
@@ -149,6 +154,9 @@ impl Proxy {
                 let Some(svc_port) = port.get("port").and_then(Value::as_u64) else { continue };
                 let backends = backends(port, eps.as_ref());
                 let n = backends.len();
+                if n == 0 {
+                    let _ = writeln!(reject, "-A {CHAIN} -d {ip}/32 -p {protocol} -m {protocol} --dport {svc_port} -j REJECT");
+                }
                 // sessionAffinity ClientIP: a client sticks to the backend it
                 // was first sent to (xt_recent, as kube-proxy does).
                 let affinity = affinity_seconds(svc);
@@ -180,6 +188,7 @@ impl Proxy {
             }
         }
         out.push_str("COMMIT\n");
+        let _ = write!(out, "*filter\n:{CHAIN} - [0:0]\n{reject}COMMIT\n");
         out
     }
 
@@ -280,7 +289,7 @@ pub(crate) async fn run<R: PodRuntime>(proxy: Arc<Proxy>, rt: Arc<R>) {
         tokio::time::sleep(Duration::from_millis(100)).await;
         let rules = proxy.rules();
         // Nothing to route yet: do not set anything up on the node.
-        if applied.is_empty() && !rules.contains(" -j DNAT ") {
+        if applied.is_empty() && !rules.contains(" -j DNAT ") && !rules.contains(" -j REJECT") {
             sync_node_ports(&proxy);
             continue;
         }
@@ -510,11 +519,30 @@ mod tests {
         assert!(rules.contains("-d 10.43.0.20/32 -p tcp -m tcp --dport 80 -m statistic --mode random --probability 0.50000 -j DNAT --to-destination 192.168.1.2:8080"));
         assert!(rules.contains("-j DNAT --to-destination 192.168.1.3:8080\n"));
         assert!(rules.ends_with("COMMIT\n"));
+        assert!(!rules.contains("REJECT"), "{rules}");
         assert_eq!(proxy.wanted_node_ports(), vec![30080]);
         assert!(proxy.wanted_lb_ports().is_empty(), "a NodePort Service has no LoadBalancer port");
         assert_eq!(proxy.node_port_backends(30080).len(), 2);
         proxy.update("ns".into(), "web".into(), None, None);
         assert!(!proxy.rules().contains("DNAT"));
+    }
+
+    #[test]
+    fn rejects_cluster_ip_ports_without_ready_endpoints() {
+        let proxy = Proxy::default();
+        let svc = json!({"spec": {"clusterIP": "10.43.0.11", "ports": [{"port": 5432, "protocol": "TCP"}, {"name": "dns", "port": 53, "protocol": "UDP"}]}});
+        proxy.update("ns".into(), "db".into(), Some(svc.clone()), None);
+        let rules = proxy.rules();
+        assert!(rules.contains("*filter\n:LITEK8S-SERVICES - [0:0]\n-A LITEK8S-SERVICES -d 10.43.0.11/32 -p tcp -m tcp --dport 5432 -j REJECT\n"), "{rules}");
+        assert!(rules.contains("-A LITEK8S-SERVICES -d 10.43.0.11/32 -p udp -m udp --dport 53 -j REJECT\n"), "{rules}");
+        assert!(!rules.contains("DNAT"));
+        // Ready: routed, no longer rejected.
+        let eps = json!({"subsets": [{"addresses": [{"ip": "10.42.0.7"}], "ports": [{"port": 5432}, {"name": "dns", "port": 53, "protocol": "UDP"}]}]});
+        proxy.update("ns".into(), "db".into(), Some(svc), Some(eps));
+        let rules = proxy.rules();
+        assert!(rules.contains("--dport 5432 -j DNAT --to-destination 10.42.0.7:5432"), "{rules}");
+        assert!(!rules.contains("REJECT"), "{rules}");
+        assert!(rules.ends_with("*filter\n:LITEK8S-SERVICES - [0:0]\nCOMMIT\n"), "the filter chain is emptied: {rules}");
     }
 
     #[test]

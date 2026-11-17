@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **A connection to a Service without ready endpoints is refused at
+  once**: the node's service proxy wrote no rule for a ClusterIP port
+  with no endpoints, so the SYN went nowhere and the client waited for its
+  TCP timeout (about two minutes on Linux). An app that started before its
+  database (a NestJS API with Postgres in one `kubectl apply`) took 138 s
+  to roll out instead of 12 s. The proxy now rejects those ports in the
+  filter table, as kube-proxy does (`LITEK8S-SERVICES`, jumped to from
+  FORWARD and OUTPUT), so clients get `connection refused` and retry.
+
 ## 0.2.26
 
 - **Controllers keep reacting under a burst of writes**: the controllers

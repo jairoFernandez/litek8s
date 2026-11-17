@@ -440,13 +440,7 @@ impl DockerPods {
             .await
             .context("failed to create the service proxy helper")?;
         self.docker.start_container(&created.id, None::<StartContainerOptions<String>>).await?;
-        // Hook the chain into PREROUTING (pod traffic) and OUTPUT (host
-        // network pods), once.
-        let setup = format!(
-            "iptables -t nat -N {chain} 2>/dev/null; for c in PREROUTING OUTPUT; do \
-             iptables -t nat -C $c -j {chain} 2>/dev/null || iptables -t nat -I $c 1 -j {chain}; done",
-            chain = super::proxy::CHAIN
-        );
+        let setup = service_chains_setup(super::proxy::CHAIN);
         let session = self.exec(&created.id, vec!["sh".into(), "-c".into(), setup], false, false).await?;
         let mut out = session.output;
         while out.next().await.is_some() {}
@@ -496,13 +490,22 @@ fn host_iptables() -> bool {
     })
 }
 
+/// Creates the service proxy's chains and jumps to them when missing: nat
+/// from PREROUTING and OUTPUT (ClusterIP DNAT), filter from FORWARD (pods)
+/// and OUTPUT (the node) for the REJECT of ports without endpoints.
+fn service_chains_setup(chain: &str) -> String {
+    format!(
+        "iptables -t nat -N {chain} 2>/dev/null; for c in PREROUTING OUTPUT; do \
+         iptables -t nat -C $c -j {chain} 2>/dev/null || iptables -t nat -I $c 1 -j {chain}; done; \
+         iptables -t filter -N {chain} 2>/dev/null; for c in FORWARD OUTPUT; do \
+         iptables -t filter -C $c -j {chain} 2>/dev/null || iptables -t filter -I $c 1 -j {chain}; done"
+    )
+}
+
 pub(crate) async fn apply_rules_on_host(rules: &str) -> Result<()> {
     use tokio::process::Command;
     let chain = super::proxy::CHAIN;
-    let setup = format!(
-        "iptables -t nat -N {chain} 2>/dev/null; for c in PREROUTING OUTPUT; do \
-         iptables -t nat -C $c -j {chain} 2>/dev/null || iptables -t nat -I $c 1 -j {chain}; done"
-    );
+    let setup = service_chains_setup(chain);
     Command::new("sh").arg("-c").arg(setup).status().await.context("failed to run iptables")?;
     let mut child = Command::new("iptables-restore")
         .arg("--noflush")
@@ -1028,12 +1031,7 @@ impl PodRuntime for DockerPods {
         }
         // Re-check the PREROUTING/OUTPUT jumps every time: Docker (or its VM)
         // restarting rebuilds those chains without them.
-        let script = format!(
-            "iptables -t nat -N {chain} 2>/dev/null; for c in PREROUTING OUTPUT; do \
-             iptables -t nat -C $c -j {chain} 2>/dev/null || iptables -t nat -I $c 1 -j {chain}; done; \
-             exec iptables-restore --noflush",
-            chain = super::proxy::CHAIN
-        );
+        let script = format!("{}; exec iptables-restore --noflush", service_chains_setup(super::proxy::CHAIN));
         self.host_shell(&script, Some(rules)).await.map(drop)
     }
 
