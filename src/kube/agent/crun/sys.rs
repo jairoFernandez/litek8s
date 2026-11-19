@@ -176,6 +176,10 @@ mod linux {
             }
             for (key, value) in &sysctls {
                 let path = format!("/proc/sys/{}", key.replace('.', "/"));
+                // A kernel without IPv6 has none to configure.
+                if key.starts_with("net.ipv6.") && !Path::new("/proc/sys/net/ipv6").exists() {
+                    continue;
+                }
                 std::fs::write(&path, value).with_context(|| format!("failed to set sysctl {key}"))?;
             }
             if let Some(batch) = ip_batch {

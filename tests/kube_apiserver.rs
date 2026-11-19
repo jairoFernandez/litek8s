@@ -1008,3 +1008,73 @@ async fn lists_select_and_paginate_stored_objects() -> Result<()> {
     assert_eq!(ns["kind"], "NamespaceList");
     Ok(())
 }
+
+#[tokio::test]
+async fn pod_security_and_untrusted_namespaces() -> Result<()> {
+    let addr = start().await?;
+    let pod = |name: &str, spec: Value| json!({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": name}, "spec": spec});
+    let privileged = json!({"hostNetwork": true, "hostPID": true, "containers": [{"name": "c", "image": "busybox", "securityContext": {"privileged": true}}]});
+    let bare = json!({"containers": [{"name": "c", "image": "busybox"}]});
+
+    // Without labels nothing is refused, as before.
+    assert_eq!(post(&addr, "/api/v1/namespaces/default/pods", pod("root", privileged.clone())).await?.0, 201);
+
+    // The standard label, enforced with upstream's message.
+    let (status, _) = post(&addr, "/api/v1/namespaces", json!({"metadata": {"name": "base", "labels": {"pod-security.kubernetes.io/enforce": "baseline"}}})).await?;
+    assert_eq!(status, 201);
+    let (status, body) = post(&addr, "/api/v1/namespaces/base/pods", pod("root", privileged.clone())).await?;
+    assert_eq!(status, 403, "{body}");
+    let message = body["message"].as_str().unwrap_or_default();
+    assert!(message.starts_with("pods \"root\" is forbidden: violates PodSecurity \"baseline:latest\": host namespaces (hostNetwork=true, hostPID=true), privileged ("), "{message}");
+    assert_eq!(post(&addr, "/api/v1/namespaces/base/pods", pod("plain", bare.clone())).await?.0, 201);
+    let (status, body) = post(&addr, "/api/v1/namespaces", json!({"metadata": {"name": "typo", "labels": {"pod-security.kubernetes.io/enforce": "strict"}}})).await?;
+    assert_eq!(status, 422, "{body}");
+
+    // An untrusted namespace: the hostile pod is refused, the bare one is
+    // made safe without its author saying anything.
+    let (status, _) = post(&addr, "/api/v1/namespaces", json!({"metadata": {"name": "runs", "labels": {"litek8s.dev/isolation": "untrusted"}, "annotations": {"litek8s.dev/pids-limit": "128"}}})).await?;
+    assert_eq!(status, 201);
+    let (status, body) = post(&addr, "/api/v1/namespaces/runs/pods", pod("root", privileged)).await?;
+    assert_eq!(status, 403, "{body}");
+    assert!(body["message"].as_str().unwrap_or_default().contains("violates PodSecurity \"restricted:latest\""), "{body}");
+    let host_path = json!({"containers": [{"name": "c", "image": "busybox"}], "volumes": [{"name": "host", "hostPath": {"path": "/"}}]});
+    let (status, body) = post(&addr, "/api/v1/namespaces/runs/pods", pod("disk", host_path)).await?;
+    assert_eq!(status, 403, "{body}");
+    assert!(body["message"].as_str().unwrap_or_default().contains("hostPath volumes (volume \"host\")"), "{body}");
+
+    let (status, made) = post(&addr, "/api/v1/namespaces/runs/pods", pod("turn", bare)).await?;
+    assert_eq!(status, 201, "{made}");
+    assert_eq!(made["metadata"]["annotations"]["litek8s.dev/isolation"], "untrusted");
+    assert_eq!(made["metadata"]["annotations"]["litek8s.dev/pids-limit"], "128");
+    assert_eq!(made["spec"]["automountServiceAccountToken"], false);
+    assert_eq!(made["spec"]["enableServiceLinks"], false);
+    assert_eq!(made["spec"]["securityContext"]["runAsNonRoot"], true);
+    assert_eq!(made["spec"]["securityContext"]["seccompProfile"]["type"], "RuntimeDefault");
+    assert_eq!(made["spec"]["securityContext"]["appArmorProfile"]["type"], "RuntimeDefault");
+    let c = &made["spec"]["containers"][0];
+    assert_eq!(c["securityContext"]["allowPrivilegeEscalation"], false);
+    assert_eq!(c["securityContext"]["capabilities"]["drop"], json!(["ALL"]));
+    assert_eq!(c["resources"]["limits"], json!({"cpu": "1", "memory": "512Mi"}));
+    // No ServiceAccount token volume.
+    assert!(made["spec"]["volumes"].as_array().is_none_or(|v| v.is_empty()), "{}", made["spec"]["volumes"]);
+    assert!(c["volumeMounts"].as_array().is_none_or(|v| v.is_empty()), "{c}");
+
+    // The annotations are the server's: an update cannot lift the limit.
+    let patch = r#"{"metadata":{"annotations":{"litek8s.dev/pids-limit":"100000","litek8s.dev/isolation":null,"mine":"1"}}}"#;
+    let (status, patched) = call(&addr, "PATCH", "/api/v1/namespaces/runs/pods/turn", "application/merge-patch+json", patch).await?;
+    assert_eq!(status, 200, "{patched}");
+    assert_eq!(patched["metadata"]["annotations"]["litek8s.dev/pids-limit"], "128");
+    assert_eq!(patched["metadata"]["annotations"]["litek8s.dev/isolation"], "untrusted");
+    assert_eq!(patched["metadata"]["annotations"]["mine"], "1");
+    // Nor claim the annotation where the namespace does not say so.
+    let mut claimed = pod("claim", json!({"containers": [{"name": "c", "image": "busybox"}]}));
+    claimed["metadata"]["annotations"] = json!({"litek8s.dev/isolation": "untrusted"});
+    let (_, made) = post(&addr, "/api/v1/namespaces/default/pods", claimed).await?;
+    assert!(made["metadata"]["annotations"].get("litek8s.dev/isolation").is_none(), "{made}");
+
+    // A debug container is held to the same level.
+    let ec = json!({"metadata": {"name": "turn"}, "spec": {"ephemeralContainers": [{"name": "dbg", "image": "busybox", "securityContext": {"privileged": true}}]}});
+    let (status, body) = call(&addr, "PATCH", "/api/v1/namespaces/runs/pods/turn/ephemeralcontainers", "application/strategic-merge-patch+json", &ec.to_string()).await?;
+    assert_eq!(status, 403, "{body}");
+    Ok(())
+}

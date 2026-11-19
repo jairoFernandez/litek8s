@@ -23,6 +23,7 @@ pub mod netpol;
 pub mod openapi;
 mod openapi_pb;
 pub mod patch;
+pub mod podsecurity;
 mod pod_streams;
 pub mod protobuf;
 mod proto_pointers;

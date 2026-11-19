@@ -1419,6 +1419,23 @@ impl<R: PodRuntime> Worker<R> {
                 .map(|m| m as i64),
             no_new_privileges: security.get("allowPrivilegeEscalation").and_then(Value::as_bool) == Some(false),
             seccomp_unconfined: seccomp_type.as_deref() == Some("Unconfined"),
+            seccomp_strict: self.untrusted(),
+            apparmor_profile: {
+                let profile = |sc: &Value| sc.get("appArmorProfile").filter(|p| p.is_object()).cloned();
+                profile(&security).or_else(|| profile(&pod_security)).and_then(|p| match p.get("type").and_then(Value::as_str) {
+                    Some("RuntimeDefault") => Some(super::runtime::APPARMOR_DEFAULT.to_string()),
+                    Some("Localhost") => p.get("localhostProfile").and_then(Value::as_str).filter(|n| !n.is_empty()).map(str::to_string),
+                    _ => None,
+                })
+            },
+            run_as_non_root: security.get("runAsNonRoot").or_else(|| pod_security.get("runAsNonRoot")).and_then(Value::as_bool) == Some(true),
+            pids_limit: self
+                .pod
+                .pointer("/metadata/annotations")
+                .and_then(|a| a.get(crate::kube::podsecurity::PIDS_LIMIT))
+                .and_then(Value::as_str)
+                .and_then(|v| v.trim().parse::<i64>().ok())
+                .filter(|n| *n > 0),
             supplemental_groups,
             // Namespaced sysctls belong to the sandbox's network namespace,
             // which joined containers cannot set; they are skipped.
@@ -1427,6 +1444,12 @@ impl<R: PodRuntime> Worker<R> {
             host_pid: self.pod.pointer("/spec/hostPID").and_then(Value::as_bool) == Some(true),
             cdi_devices,
         })
+    }
+
+    /// The pod is of an untrusted namespace (the API server's annotation).
+    fn untrusted(&self) -> bool {
+        use crate::kube::podsecurity::{ISOLATION, UNTRUSTED};
+        self.pod.pointer("/metadata/annotations").and_then(|a| a.get(ISOLATION)).and_then(Value::as_str) == Some(UNTRUSTED)
     }
 
     /// The CDI devices (GPUs...) the container gets for the node's CDI

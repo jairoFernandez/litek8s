@@ -486,6 +486,7 @@ impl<R: PodRuntime> Agent<R> {
         features.push(protocol::POD_EVENTS_FEATURE.into());
         if self.netpol.is_some() {
             features.push(netpol::FEATURE.into());
+            features.push(netpol::GUARD_FEATURE.into());
         }
         tx.send(Frame::Control(Message::Hello { node: self.config.node.clone(), features }))
             .await
@@ -886,6 +887,38 @@ async fn port_forward_stream<R: PodRuntime>(
 // Starting agents
 
 /// Describe this machine as a Node object.
+/// This machine's IPv4 addresses on every interface but loopback: what the
+/// pods of untrusted namespaces, here and on the other nodes, never reach
+/// (`crate::kube::netpol`). The public and the VPN addresses are among
+/// them, which nobody has to list.
+pub fn local_addresses() -> Vec<String> {
+    let mut out = std::collections::BTreeSet::new();
+    #[cfg(unix)]
+    {
+        let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+        // SAFETY: getifaddrs fills `list` with a linked list that stays
+        // valid until freeifaddrs; only AF_INET entries are read, as the
+        // sockaddr_in they are.
+        unsafe {
+            if libc::getifaddrs(&mut list) == 0 {
+                let mut cur = list;
+                while !cur.is_null() {
+                    let addr = (*cur).ifa_addr;
+                    if !addr.is_null() && (*addr).sa_family as i32 == libc::AF_INET {
+                        let ip = std::net::Ipv4Addr::from(u32::from_be((*(addr as *const libc::sockaddr_in)).sin_addr.s_addr));
+                        if !ip.is_loopback() {
+                            out.insert(ip);
+                        }
+                    }
+                    cur = (*cur).ifa_next;
+                }
+                libc::freeifaddrs(list);
+            }
+        }
+    }
+    out.into_iter().map(|ip| ip.to_string()).collect()
+}
+
 pub async fn describe_node<R: PodRuntime>(rt: &R, node_name: &str, node_ip: &str, pod_cidr: &str) -> Result<Value> {
     let runtime::MachineInfo { cpus, memory, arch, kernel, os, runtime_version } = rt.machine().await?;
     let mem_ki = memory / 1024;
@@ -906,7 +939,7 @@ pub async fn describe_node<R: PodRuntime>(rt: &R, node_name: &str, node_ip: &str
                 "beta.kubernetes.io/arch": arch,
                 "node.kubernetes.io/instance-type": "litek8s",
             },
-            "annotations": {"node.alpha.kubernetes.io/ttl": "0"},
+            "annotations": {"node.alpha.kubernetes.io/ttl": "0", crate::kube::netpol::NODE_ADDRESSES: local_addresses().join(",")},
         },
         "spec": {"podCIDR": pod_cidr, "podCIDRs": [pod_cidr]},
         "status": {

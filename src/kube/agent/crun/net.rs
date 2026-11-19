@@ -131,11 +131,13 @@ impl Ipam {
 /// --noflush` (declaring a chain flushes it, so reloading is idempotent).
 /// Traffic to other pods of the cluster (over the overlay) keeps its pod
 /// source address; everything else leaving the node is masqueraded.
-/// Forwarded pod traffic goes through the NetworkPolicy chain first
-/// (`crate::kube::agent::netpol`; it must exist, see `CREATE_CHAIN` there).
-pub(crate) fn base_rules(subnet: &Subnet, cluster: &Subnet) -> String {
+/// `legacy_netpol`: an older agent's NetworkPolicy chains are still in the
+/// filter table (`crate::kube::agent::netpol` moves them to mangle on its
+/// first load); until then forwarded pod traffic keeps going through them.
+pub(crate) fn base_rules(subnet: &Subnet, cluster: &Subnet, legacy_netpol: bool) -> String {
     let cidr = subnet.cidr();
     let cluster = cluster.cidr();
+    let legacy = if legacy_netpol { format!("-A LITEK8S-FORWARD -j {}\n", crate::kube::agent::netpol::CHAIN) } else { String::new() };
     format!(
         "*nat\n\
 :LITEK8S-POSTROUTING - [0:0]\n\
@@ -144,11 +146,10 @@ pub(crate) fn base_rules(subnet: &Subnet, cluster: &Subnet) -> String {
 COMMIT\n\
 *filter\n\
 :LITEK8S-FORWARD - [0:0]\n\
--A LITEK8S-FORWARD -j {netpol}\n\
+{legacy}\
 -A LITEK8S-FORWARD -i {BRIDGE} -j ACCEPT\n\
 -A LITEK8S-FORWARD -o {BRIDGE} -j ACCEPT\n\
-COMMIT\n",
-        netpol = crate::kube::agent::netpol::CHAIN
+COMMIT\n"
     )
 }
 
@@ -180,10 +181,17 @@ iptables -t nat -A $c -m addrtype --dst-type LOCAL -j LITEK8S-HOSTPORTS; done";
 /// containerd's defaults (and Docker's for the first) for a pod's own
 /// network namespace, those the pod does not set itself: any port and ICMP
 /// echo sockets without privileges, so a non-root process can listen on
-/// :443 as it can on other Kubernetes nodes.
+/// :443 as it can on other Kubernetes nodes; and no IPv6 on its interface.
 pub(crate) fn default_pod_sysctls(own: &[(String, String)]) -> Vec<(String, String)> {
     let gid_map = std::fs::read_to_string("/proc/self/gid_map").unwrap_or_default();
-    let defaults = [("net.ipv4.ip_unprivileged_port_start".to_string(), "0".to_string()), ("net.ipv4.ping_group_range".to_string(), ping_group_range(&gid_map))];
+    let defaults = [
+        ("net.ipv4.ip_unprivileged_port_start".to_string(), "0".to_string()),
+        ("net.ipv4.ping_group_range".to_string(), ping_group_range(&gid_map)),
+        // The pod network and its policies are IPv4: eth0 (created after
+        // this is set; loopback keeps ::1) gets no link-local address, so
+        // nothing reaches the pod over IPv6 around its NetworkPolicies.
+        ("net.ipv6.conf.default.disable_ipv6".to_string(), "1".to_string()),
+    ];
     defaults.into_iter().filter(|(k, _)| !own.iter().any(|(o, _)| o == k)).collect()
 }
 
@@ -240,9 +248,10 @@ mod tests {
     #[test]
     fn pods_get_unprivileged_ports_and_ping() {
         let got = default_pod_sysctls(&[("net.ipv4.ip_unprivileged_port_start".into(), "1024".into())]);
-        assert_eq!(got.len(), 1);
+        assert_eq!(got.len(), 2);
         assert_eq!(got[0].0, "net.ipv4.ping_group_range");
-        assert_eq!(default_pod_sysctls(&[]).len(), 2);
+        assert_eq!(got[1], ("net.ipv6.conf.default.disable_ipv6".to_string(), "1".to_string()));
+        assert_eq!(default_pod_sysctls(&[]).len(), 3);
         // The initial namespace, and a rootless sandbox that maps 65536 groups.
         assert_eq!(ping_group_range("         0          0 4294967295\n"), "0 2147483647");
         assert_eq!(ping_group_range("         0       1000      65536\n"), "0 65535");
@@ -295,10 +304,12 @@ mod tests {
     fn rules_render() {
         let s = Subnet::parse("10.42.0.0/24").unwrap();
         let cluster = Subnet::parse("10.42.0.0/16").unwrap();
-        assert!(base_rules(&s, &cluster).contains("-A LITEK8S-POSTROUTING -s 10.42.0.0/24 ! -d 10.42.0.0/16 ! -o litek8s0 -j MASQUERADE\n"));
-        // Policies first, and their chain is not declared (that would flush it).
-        assert!(base_rules(&s, &cluster).contains(":LITEK8S-FORWARD - [0:0]\n-A LITEK8S-FORWARD -j LITEK8S-NETPOL\n-A LITEK8S-FORWARD -i litek8s0 -j ACCEPT\n"));
-        assert!(!base_rules(&s, &cluster).contains(":LITEK8S-NETPOL"));
+        assert!(base_rules(&s, &cluster, false).contains("-A LITEK8S-POSTROUTING -s 10.42.0.0/24 ! -d 10.42.0.0/16 ! -o litek8s0 -j MASQUERADE\n"));
+        // Policies live in the mangle table; an older agent's chain in this
+        // one keeps its jump (and is not declared: that would flush it).
+        assert!(base_rules(&s, &cluster, false).contains(":LITEK8S-FORWARD - [0:0]\n-A LITEK8S-FORWARD -i litek8s0 -j ACCEPT\n"));
+        assert!(base_rules(&s, &cluster, true).contains(":LITEK8S-FORWARD - [0:0]\n-A LITEK8S-FORWARD -j LITEK8S-NETPOL\n-A LITEK8S-FORWARD -i litek8s0 -j ACCEPT\n"));
+        assert!(!base_rules(&s, &cluster, true).contains(":LITEK8S-NETPOL"));
         let r = hostport_rules(&[(8080, "TCP".into(), "10.42.0.5".into(), 80, String::new()), (53, "UDP".into(), "10.42.0.6".into(), 53, "192.168.1.7".into())]);
         assert!(r.contains("-A LITEK8S-HOSTPORTS -p tcp -m tcp --dport 8080 -j DNAT --to-destination 10.42.0.5:80\n"));
         assert!(r.contains("-A LITEK8S-HOSTPORTS -d 192.168.1.7/32 -p udp -m udp --dport 53 -j DNAT --to-destination 10.42.0.6:53\n"));

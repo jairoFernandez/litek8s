@@ -430,3 +430,41 @@ spec:
     spec: {containers: [{name: a, image: busybox}]}
 EOF2
 }
+
+case_def pod_security_enforce L1 60 "pod-security.kubernetes.io/enforce refuses pods above the namespace's level"
+t_pod_security_enforce() {
+    local ns="compat-psa-$RANDOM" out
+    k create namespace "$ns" >/dev/null
+    k label namespace "$ns" pod-security.kubernetes.io/enforce=baseline >/dev/null
+    out="$(k -n "$ns" apply -f - 2>&1 <<'EOF2' || true
+apiVersion: v1
+kind: Pod
+metadata: {name: root}
+spec:
+  hostNetwork: true
+  containers: [{name: a, image: busybox, securityContext: {privileged: true}}]
+EOF2
+)"
+    [[ "$out" == *'violates PodSecurity "baseline:latest": host namespaces (hostNetwork=true), privileged (container "a" must not set securityContext.privileged=true)'* ]] || { echo "$out"; return 1; }
+    k label namespace "$ns" pod-security.kubernetes.io/enforce=restricted --overwrite >/dev/null
+    out="$(k -n "$ns" apply -f - 2>&1 <<'EOF2' || true
+apiVersion: v1
+kind: Pod
+metadata: {name: plain}
+spec:
+  containers: [{name: a, image: busybox}]
+EOF2
+)"
+    [[ "$out" == *'violates PodSecurity "restricted:latest": allowPrivilegeEscalation != false (container "a" must set securityContext.allowPrivilegeEscalation=false), unrestricted capabilities (container "a" must set securityContext.capabilities.drop=["ALL"]), runAsNonRoot != true (pod or container "a" must set securityContext.runAsNonRoot=true), seccompProfile (pod or container "a" must set securityContext.seccompProfile.type to "RuntimeDefault" or "Localhost")'* ]] || { echo "$out"; return 1; }
+    k -n "$ns" apply -f - >/dev/null <<'EOF2'
+apiVersion: v1
+kind: Pod
+metadata: {name: fine}
+spec:
+  nodeName: none-such-node
+  securityContext: {runAsNonRoot: true, seccompProfile: {type: RuntimeDefault}}
+  containers:
+  - {name: a, image: busybox, securityContext: {allowPrivilegeEscalation: false, capabilities: {drop: [ALL]}}}
+EOF2
+    k delete namespace "$ns" --wait=false >/dev/null
+}

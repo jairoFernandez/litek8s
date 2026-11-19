@@ -234,7 +234,8 @@ impl AgentHub {
             }))
             .await;
         let policies = features.iter().any(|f| f == netpol::FEATURE);
-        let feed_task = tokio::spawn(feed_pods(api.clone(), node_name.clone(), tx.clone(), policies));
+        let guards = features.iter().any(|f| f == netpol::GUARD_FEATURE);
+        let feed_task = tokio::spawn(feed_pods(api.clone(), node_name.clone(), tx.clone(), policies.then_some(guards)));
 
         let status = node.get("status").cloned().unwrap_or_else(|| json!({}));
         // This connection's metric series ids → the store's.
@@ -486,6 +487,10 @@ struct PolicyFeed {
     sent: HashMap<String, PodRules>,
     /// pod uid → `crate::kube::netpol::fingerprint`, for every pod.
     seen: HashMap<String, Value>,
+    /// node name → [`node_fingerprint`].
+    nodes: HashMap<String, Value>,
+    /// The agent renders guards (`netpol::GUARD_FEATURE`).
+    guards: bool,
     /// Something changed: recompute every pod's rules at this time.
     due: Option<tokio::time::Instant>,
 }
@@ -493,16 +498,24 @@ struct PolicyFeed {
 /// How long changes to policies, namespaces and pods are batched.
 const POLICY_BATCH: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// The cluster as policies see it; `None` when there are no policies.
+/// The cluster as policies see it; `None` when there are no policies and
+/// no untrusted namespace (whose pods have rules without any policy).
 fn policy_snapshot(api: &ApiState) -> Option<(crate::kube::netpol::Snapshot, Vec<Value>)> {
     let (policies, _) = api.store().list(crate::kube::netpol::GROUP, crate::kube::netpol::RESOURCE, None);
-    if policies.is_empty() {
+    let (namespaces, _) = api.store().list("", "namespaces", None);
+    if policies.is_empty() && !namespaces.iter().any(|n| crate::kube::podsecurity::untrusted(Some(n))) {
         return None;
     }
     let (pods, _) = api.store().list("", "pods", None);
-    let (namespaces, _) = api.store().list("", "namespaces", None);
-    let snapshot = crate::kube::netpol::Snapshot::new(policies, namespaces, &pods);
+    let (nodes, _) = api.store().list("", "nodes", None);
+    let snapshot = crate::kube::netpol::Snapshot::new(policies, namespaces, &pods).with_nodes(&nodes);
     Some((snapshot, pods))
+}
+
+/// What of a Node matters to the rules: the addresses untrusted pods never
+/// reach.
+fn node_fingerprint(node: &Value) -> Value {
+    json!([node.pointer("/status/addresses"), node.pointer("/metadata/annotations").and_then(|a| a.get(crate::kube::netpol::NODE_ADDRESSES)), node.pointer("/spec/podCIDR")])
 }
 
 impl PolicyFeed {
@@ -514,7 +527,7 @@ impl PolicyFeed {
         if let Some((snapshot, pods)) = &snapshot {
             for pod in pods.iter().filter(|p| util::s(p, "/spec/nodeName") == node) {
                 if let Some(r) = snapshot.rules_for(pod) {
-                    now.insert(util::uid(pod), r);
+                    now.insert(util::uid(pod), if self.guards { r } else { r.without_guard() });
                 }
             }
         }
@@ -541,7 +554,7 @@ impl PolicyFeed {
     /// (so they are in place before it starts).
     fn before_upsert(&mut self, api: &ApiState, pod: &Value) -> Option<Message> {
         let uid = util::uid(pod);
-        let rules = policy_snapshot(api).and_then(|(s, _)| s.rules_for(pod));
+        let rules = policy_snapshot(api).and_then(|(s, _)| s.rules_for(pod)).map(|r| if self.guards { r } else { r.without_guard() });
         if self.sent.get(&uid) == rules.as_ref() {
             return None;
         }
@@ -565,6 +578,15 @@ impl PolicyFeed {
                 }
             }
             ("", "namespaces") => true,
+            ("", "nodes") => {
+                let name = util::name(object);
+                if event == EventType::Deleted {
+                    self.nodes.remove(&name).is_some()
+                } else {
+                    let fp = node_fingerprint(object);
+                    self.nodes.insert(name, fp.clone()) != Some(fp)
+                }
+            }
             (crate::kube::netpol::GROUP, crate::kube::netpol::RESOURCE) => true,
             _ => false,
         };
@@ -575,8 +597,9 @@ impl PolicyFeed {
 }
 
 /// Push the node's pods: a full sync, then every relevant change.
-/// `policies`: the agent enforces NetworkPolicies, send their rules.
-async fn feed_pods(api: Arc<ApiState>, node: String, tx: mpsc::Sender<Frame>, policies: bool) {
+/// `policies`: the agent enforces NetworkPolicies, send their rules (with
+/// the guards of untrusted pods when `Some(true)`).
+async fn feed_pods(api: Arc<ApiState>, node: String, tx: mpsc::Sender<Frame>, policies: Option<bool>) {
     loop {
         let Ok(sub) = api.store().subscribe(None) else { return };
         let mut live = sub.live;
@@ -587,7 +610,7 @@ async fn feed_pods(api: Arc<ApiState>, node: String, tx: mpsc::Sender<Frame>, po
         if tx.send(Frame::Control(Message::Peers { peers: peers.0.clone(), relay: peers.1 })).await.is_err() {
             return;
         }
-        let mut policy = policies.then(PolicyFeed::default);
+        let mut policy = policies.map(|guards| PolicyFeed { guards, ..Default::default() });
         if let Some(msg) = policy.as_mut().and_then(|p| p.recompute(&api, &node, true)) {
             if tx.send(Frame::Control(msg)).await.is_err() {
                 return;
