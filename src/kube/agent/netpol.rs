@@ -3,23 +3,34 @@
 //! The API server computes, per pod of this node, whether it is isolated
 //! and what is allowed ([`PodRules`], see `crate::kube::netpol`), and pushes
 //! changes over the agent connection (`Message::NetPolicy`), always before
-//! the pod itself. Here they become one filter chain per isolated pod
-//! address, behind a dispatcher chain `LITEK8S-NETPOL`:
+//! the pod itself. Here they become one chain per isolated pod address,
+//! behind a dispatcher chain `LITEK8S-NETPOL` in the **mangle** table:
 //!
-//! - `LITEK8S-FORWARD` (the bridge's forwarding chain) jumps to it first:
-//!   traffic between pods of this node (bridged, seen by iptables through
-//!   `br_netfilter`), from other nodes over the WireGuard overlay, and to
-//!   anything outside. Service traffic is filtered after its DNAT, so the
-//!   real backend is matched, and before the masquerade, so the real
-//!   source is.
+//! - `FORWARD` jumps to it: traffic between pods of this node (bridged,
+//!   seen by iptables through `br_netfilter`), from other nodes over the
+//!   WireGuard overlay, and to anything outside. Service traffic is
+//!   filtered after its DNAT, so the real backend is matched, and before
+//!   the masquerade, so the real source is.
 //! - `INPUT -i litek8s0` jumps to it too: pods talking to the node itself
 //!   (the cluster DNS and the API server when they run here).
+//!
+//! Mangle, not filter: a packet dropped there is gone, whatever another
+//! tool's filter rules accept. In the filter table the policy was only as
+//! good as its place in `FORWARD`, and Tailscale, Docker or a host firewall
+//! put an `ACCEPT` of their own before it (`ts-forward` accepts everything
+//! leaving through `tailscale0`). Chains an older agent left in the filter
+//! table keep working until the first load here, then they are removed.
 //!
 //! The dispatcher sends `-d <pod>` to the pod's ingress chain and `-s
 //! <pod>` to its egress chain; an allowed packet RETURNs (so a pod-to-pod
 //! packet on one node passes both), anything else is dropped. Replies
 //! (conntrack ESTABLISHED/RELATED) always pass. Traffic from the node to
 //! its pods (probes, NodePort relays) goes through OUTPUT and is allowed.
+//!
+//! A pod of an untrusted namespace has a [`Guard`]: its egress chain drops
+//! what no policy may open (the nodes, this one by `--dst-type LOCAL`, so by
+//! any address it has; link-local addresses) before the allow rules, and
+//! the private ranges before the rules that were not meant for one peer.
 //!
 //! With the Docker runtime ([`Target::Docker`]) the same chains go into
 //! Docker's host network namespace (the Linux VM of Docker Desktop or
@@ -28,10 +39,10 @@
 //! share one Docker) is hooked first into `FORWARD` (pods of the Docker
 //! bridge talking to each other through `br_netfilter`, and to anything
 //! outside, after the service DNAT) and `INPUT` (pods talking to the VM
-//! itself). A Docker host that cannot filter bridged traffic is an error:
-//! isolated pods do not start rather than run unprotected. Probes,
-//! port-forwards and NodePort relays run inside the pod's network
-//! namespace there, so they are never filtered.
+//! itself). A host that cannot filter bridged traffic is an error for
+//! Docker and for guarded pods: they do not start rather than run
+//! unprotected. Probes, port-forwards and NodePort relays run inside the
+//! pod's network namespace with Docker, so they are never filtered.
 //!
 //! Ordering: a pod's rules arrive before the pod, and the pod worker
 //! registers the sandbox address with [`NetPol::register`], which loads the
@@ -53,6 +64,9 @@ use tokio::sync::Notify;
 
 /// What the agent announces when it enforces policies.
 pub(crate) const FEATURE: &str = "network-policy";
+/// The agent renders [`Guard`]s; the server sends them to no other.
+pub(crate) const GUARD_FEATURE: &str = "network-policy-guard";
+const TABLE: &str = "mangle";
 pub(crate) const CHAIN: &str = "LITEK8S-NETPOL";
 const INGRESS_PREFIX: &str = "LITEK8S-NPI-";
 const EGRESS_PREFIX: &str = "LITEK8S-NPE-";
@@ -97,6 +111,32 @@ pub struct PodRules {
     pub ingress: Option<Vec<Allow>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub egress: Option<Vec<Allow>>,
+    /// The pod is untrusted: what its egress rules never open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guard: Option<Guard>,
+}
+
+/// Destinations closed to an untrusted pod. This node itself needs no
+/// address here: the agent matches it as `--dst-type LOCAL`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Guard {
+    /// CIDRs no rule opens: the nodes' addresses, link-local.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub never: Vec<String>,
+    /// CIDRs only an [`Allow::exact`] rule opens: private ranges.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub private: Vec<String>,
+}
+
+impl PodRules {
+    /// For an agent that does not know guards: the cluster DNS and nothing
+    /// else, rather than rules it would render without their limits.
+    pub fn without_guard(mut self) -> Self {
+        if self.guard.take().is_some() {
+            self.egress = Some(self.egress.unwrap_or_default().into_iter().filter(|a| a.dns).map(|a| Allow { peers: Some(Vec::new()), exact: false, ..a }).collect());
+        }
+        self
+    }
 }
 
 /// Traffic one rule allows: from (ingress) or to (egress) `peers`, on
@@ -112,6 +152,11 @@ pub struct Allow {
     /// Empty: every port and protocol.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ports: Vec<PortRange>,
+    /// Guarded pods: these peers were named one by one (selected pods, an
+    /// `ipBlock` inside a private range), so the private ranges are open
+    /// to this rule.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exact: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -141,15 +186,18 @@ fn port_match(p: &PortRange) -> String {
     }
 }
 
-fn render_chain(out: &mut String, chain: &str, allows: &[Allow], peer_flag: &str, dns: &[Ipv4Addr]) {
-    let _ = writeln!(out, "-A {chain} -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN");
+/// The RETURN rules of `allows`: to their peers, or (`dns_only`) only to
+/// the cluster DNS addresses of those that include it.
+fn render_allows<'a>(out: &mut String, chain: &str, allows: impl Iterator<Item = &'a Allow>, peer_flag: &str, dns: &[Ipv4Addr], dns_only: bool) {
     for a in allows {
+        let dns_peers = || dns.iter().map(|ip| Some(format!("{ip}/32"))).collect::<Vec<_>>();
         let peers: Vec<Option<String>> = match &a.peers {
+            _ if dns_only => dns_peers(),
             None => vec![None],
             Some(list) => {
                 let mut v: Vec<Option<String>> = list.iter().cloned().map(Some).collect();
                 if a.dns {
-                    v.extend(dns.iter().map(|ip| Some(format!("{ip}/32"))));
+                    v.extend(dns_peers());
                 }
                 v
             }
@@ -162,6 +210,28 @@ fn render_chain(out: &mut String, chain: &str, allows: &[Allow], peer_flag: &str
             }
         }
     }
+}
+
+fn render_chain(out: &mut String, chain: &str, allows: &[Allow], peer_flag: &str, dns: &[Ipv4Addr], guard: Option<&Guard>) {
+    let _ = writeln!(out, "-A {chain} -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN");
+    match guard {
+        None => render_allows(out, chain, allows.iter(), peer_flag, dns, false),
+        Some(guard) => {
+            // The DNS first: it is an address of a node.
+            render_allows(out, chain, allows.iter().filter(|a| a.dns), peer_flag, dns, true);
+            for cidr in &guard.never {
+                let _ = writeln!(out, "-A {chain} {peer_flag} {cidr} -j DROP");
+            }
+            let _ = writeln!(out, "-A {chain} -m addrtype --dst-type LOCAL -j DROP");
+            let no_dns: Vec<Allow> = allows.iter().cloned().map(|a| Allow { dns: false, ..a }).collect();
+            let named = |a: &&Allow| a.exact && a.peers.as_ref().is_some_and(|p| !p.is_empty());
+            render_allows(out, chain, no_dns.iter().filter(named), peer_flag, dns, false);
+            for cidr in &guard.private {
+                let _ = writeln!(out, "-A {chain} {peer_flag} {cidr} -j DROP");
+            }
+            render_allows(out, chain, no_dns.iter().filter(|a| !a.exact), peer_flag, dns, false);
+        }
+    }
     let _ = writeln!(out, "-A {chain} -j DROP");
 }
 
@@ -170,7 +240,7 @@ fn render_chain(out: &mut String, chain: &str, allows: &[Allow], peer_flag: &str
 /// chains currently in the kernel (those no longer wanted are deleted).
 pub(crate) fn render(names: &Names, pods: &BTreeMap<Ipv4Addr, PodRules>, dns: &[Ipv4Addr], existing: &[String]) -> String {
     let dispatcher = &names.dispatcher;
-    let mut decl = format!("*filter\n:{dispatcher} - [0:0]\n");
+    let mut decl = format!("*{TABLE}\n:{dispatcher} - [0:0]\n");
     let mut rules = String::new();
     let mut wanted = Vec::new();
     for (ip, r) in pods {
@@ -179,7 +249,8 @@ pub(crate) fn render(names: &Names, pods: &BTreeMap<Ipv4Addr, PodRules>, dns: &[
             let chain = chain_name(prefix, *ip);
             let _ = writeln!(decl, ":{chain} - [0:0]");
             let _ = writeln!(rules, "-A {dispatcher} {dir} {ip}/32 -j {chain}");
-            render_chain(&mut rules, &chain, allows, flag, dns);
+            // The guard is about where the pod connects to.
+            render_chain(&mut rules, &chain, allows, flag, dns, r.guard.as_ref().filter(|_| dir == "-s"));
             wanted.push(chain);
         }
     }
@@ -198,7 +269,7 @@ fn without_sctp(rules: &str) -> String {
     rules.lines().filter(|l| !l.contains(" -p sctp")).map(|l| format!("{l}\n")).collect()
 }
 
-/// The per-pod chains in `iptables-save -t filter` output.
+/// The per-pod chains in `iptables-save -t mangle` output.
 pub(crate) fn existing_chains(names: &Names, save: &str) -> Vec<String> {
     save.lines()
         .filter_map(|l| l.strip_prefix(':'))
@@ -208,32 +279,54 @@ pub(crate) fn existing_chains(names: &Names, save: &str) -> Vec<String> {
         .collect()
 }
 
-/// Created before the bridge's rules refer to it (declaring it in a
-/// restore would flush it, opening isolated pods while the agent starts).
-pub(crate) const CREATE_CHAIN: &str = "iptables -t filter -N LITEK8S-NETPOL 2>/dev/null; true";
+/// The dispatcher and its jumps from FORWARD and from INPUT (pods talking
+/// to the node itself), made once. An empty dispatcher passes everything.
+pub(crate) const HOOKS: &str = "iptables -t mangle -N LITEK8S-NETPOL 2>/dev/null; \
+iptables -t mangle -C FORWARD -j LITEK8S-NETPOL 2>/dev/null || iptables -t mangle -I FORWARD 1 -j LITEK8S-NETPOL || exit 1; \
+iptables -t mangle -C INPUT -i litek8s0 -j LITEK8S-NETPOL 2>/dev/null || iptables -t mangle -I INPUT 1 -i litek8s0 -j LITEK8S-NETPOL";
 
-/// The INPUT jump (pods talking to the node itself), added once.
-const INPUT_HOOK: &str = "iptables -t filter -C INPUT -i litek8s0 -j LITEK8S-NETPOL 2>/dev/null || iptables -t filter -I INPUT 1 -i litek8s0 -j LITEK8S-NETPOL";
+/// Whether `iptables-save -t filter` shows the chains of an agent from
+/// before the policies moved to the mangle table.
+pub(crate) fn has_legacy(names: &Names, filter_save: &str) -> bool {
+    filter_save.lines().any(|l| l.split_whitespace().next() == Some(&format!(":{}", names.dispatcher)))
+}
+
+/// Removes those chains and every jump to them. Run after the mangle rules
+/// are loaded, so the pods are never without.
+pub(crate) fn legacy_cleanup(names: &Names) -> String {
+    format!(
+        "for c in FORWARD INPUT LITEK8S-FORWARD; do while iptables -t filter -D $c -j {d} 2>/dev/null; do :; done; done; \
+         while iptables -t filter -D INPUT -i litek8s0 -j {d} 2>/dev/null; do :; done; \
+         iptables -t filter -F {d} 2>/dev/null; \
+         iptables-save -t filter | sed -n 's/^:\\({i}[^ ]*\\) .*/\\1/p; s/^:\\({e}[^ ]*\\) .*/\\1/p' | while read c; do iptables -t filter -F $c; iptables -t filter -X $c; done; \
+         iptables -t filter -X {d} 2>/dev/null; true",
+        d = names.dispatcher,
+        i = names.ingress,
+        e = names.egress
+    )
+}
 
 const BRIDGE_SYSCTL: &str = "/proc/sys/net/bridge/bridge-nf-call-iptables";
 
-/// Docker's host: the filter table and whether bridged traffic reaches
-/// iptables (turned on when it can be), first line `bridge-nf=<0|1|>`.
-fn docker_probe() -> String {
+/// Docker's host: the mangle table, whether bridged traffic reaches
+/// iptables (turned on when it can be; first line `bridge-nf=<0|1|>`) and
+/// whether an older agent's chains are in the filter table (`legacy=<0|1>`).
+fn docker_probe(names: &Names) -> String {
     format!(
         "f={BRIDGE_SYSCTL}; [ -e $f ] || modprobe br_netfilter 2>/dev/null; \
          [ \"$(cat $f 2>/dev/null)\" = 1 ] || echo 1 > $f 2>/dev/null; \
-         echo \"bridge-nf=$(cat $f 2>/dev/null)\"; iptables-save -t filter"
+         echo \"bridge-nf=$(cat $f 2>/dev/null)\"; \
+         echo \"legacy=$(iptables-save -t filter | grep -c '^:{d} ')\"; iptables-save -t {TABLE}",
+        d = names.dispatcher
     )
 }
 
 /// Docker's host: the dispatcher, hooked first into FORWARD and INPUT
-/// (checked on every load: Docker restarting rebuilds FORWARD), then the
-/// rules from stdin.
+/// (checked on every load), then the rules from stdin.
 fn docker_load(names: &Names) -> String {
     format!(
-        "iptables -t filter -N {d} 2>/dev/null; for c in FORWARD INPUT; do \
-         iptables -t filter -C $c -j {d} 2>/dev/null || iptables -t filter -I $c 1 -j {d} || exit 1; done; \
+        "iptables -t {TABLE} -N {d} 2>/dev/null; for c in FORWARD INPUT; do \
+         iptables -t {TABLE} -C $c -j {d} 2>/dev/null || iptables -t {TABLE} -I $c 1 -j {d} || exit 1; done; \
          exec iptables-restore --noflush",
         d = names.dispatcher
     )
@@ -256,6 +349,8 @@ struct State {
     /// chains in the kernel (from before a restart) stay as they are.
     synced: bool,
     warned_bridge: bool,
+    /// An older agent's filter-table chains were looked for (and removed).
+    legacy_done: bool,
 }
 
 pub(crate) struct NetPol {
@@ -351,15 +446,19 @@ impl NetPol {
         if let Some(shell) = self.docker.clone() {
             return self.apply_docker(&shell, &pods, &dns).await;
         }
-        if any {
-            self.ensure_bridge_filtering();
+        let guarded = pods.values().any(|r| r.guard.is_some());
+        if any && !self.ensure_bridge_filtering() && guarded {
+            bail!("br_netfilter is not available (modprobe br_netfilter; sysctl net.bridge.bridge-nf-call-iptables=1): untrusted pods would reach the other pods of this node");
         }
-        let save = output("iptables-save", &["-t", "filter"]).await.unwrap_or_default();
+        let save = output("iptables-save", &["-t", TABLE]).await.unwrap_or_default();
         let existing = existing_chains(&self.names, &save);
-        if !any && existing.is_empty() && !save.contains(&format!("-A {CHAIN} ")) {
+        let legacy_done = self.state.lock().unwrap().legacy_done;
+        let legacy = !legacy_done && has_legacy(&self.names, &output("iptables-save", &["-t", "filter"]).await.unwrap_or_default());
+        if !any && !legacy && existing.is_empty() && !save.contains(&format!("-A {CHAIN} ")) {
+            self.state.lock().unwrap().legacy_done = true;
             return Ok(());
         }
-        run("sh", &["-c", CREATE_CHAIN], None).await?;
+        run("sh", &["-c", HOOKS], None).await?;
         let rules = render(&self.names, &pods, &dns, &existing);
         if let Err(e) = run("iptables-restore", &["--noflush"], Some(&rules)).await {
             // A kernel without xt_sctp: those rules allow nothing rather
@@ -370,15 +469,20 @@ impl NetPol {
             eprintln!("node-agent: network policies: SCTP rules left out ({e:#})");
             run("iptables-restore", &["--noflush"], Some(&without_sctp(&rules))).await?;
         }
-        run("sh", &["-c", INPUT_HOOK], None).await
+        if legacy {
+            run("sh", &["-c", &legacy_cleanup(&self.names)], None).await?;
+        }
+        self.state.lock().unwrap().legacy_done = true;
+        Ok(())
     }
 
     /// [`NetPol::apply`] in Docker's host network namespace.
     async fn apply_docker(&self, shell: &Shell, pods: &BTreeMap<Ipv4Addr, PodRules>, dns: &[Ipv4Addr]) -> Result<()> {
-        let save = shell(docker_probe(), None).await.context("Docker's host network namespace")?;
+        let save = shell(docker_probe(&self.names), None).await.context("Docker's host network namespace")?;
         let existing = existing_chains(&self.names, &save);
         let any = !pods.is_empty();
-        if !any && existing.is_empty() && !save.contains(&format!("-A {} ", self.names.dispatcher)) {
+        let legacy = save.lines().nth(1).is_some_and(|l| l.strip_prefix("legacy=").is_some_and(|n| n.trim() != "0" && !n.trim().is_empty()));
+        if !any && !legacy && existing.is_empty() && !save.contains(&format!("-A {} ", self.names.dispatcher)) {
             return Ok(());
         }
         if any && !bridge_filtered(&save) {
@@ -393,13 +497,16 @@ impl NetPol {
             eprintln!("node-agent: network policies: SCTP rules left out ({e:#})");
             shell(docker_load(&self.names), Some(without_sctp(&rules))).await?;
         }
+        if legacy {
+            shell(legacy_cleanup(&self.names), None).await?;
+        }
         Ok(())
     }
 
     /// Traffic between pods on one bridge only reaches iptables with
     /// `br_netfilter` and `bridge-nf-call-iptables` on (as kube-proxy and
-    /// k3s need too).
-    fn ensure_bridge_filtering(&self) {
+    /// k3s need too). `false`: they are not, and cannot be turned on.
+    fn ensure_bridge_filtering(&self) -> bool {
         let sysctl = std::path::Path::new("/proc/sys/net/bridge/bridge-nf-call-iptables");
         if !sysctl.exists() {
             let _ = std::process::Command::new("modprobe").arg("br_netfilter").stderr(std::process::Stdio::null()).status();
@@ -418,6 +525,7 @@ impl NetPol {
             st.warned_bridge = true;
             eprintln!("node-agent: br_netfilter is not available (modprobe br_netfilter; sysctl net.bridge.bridge-nf-call-iptables=1): network policies do not filter traffic between pods of this node");
         }
+        ok
     }
 
     /// Apply changes as they come (batched).
@@ -474,8 +582,9 @@ mod tests {
         pods.insert(
             "10.42.0.5".parse().unwrap(),
             PodRules {
-                ingress: Some(vec![Allow { peers: Some(vec!["10.42.1.7/32".into(), "10.42.0.9/32".into()]), dns: false, ports: vec![tcp(27017)] }]),
+                ingress: Some(vec![Allow { peers: Some(vec!["10.42.1.7/32".into(), "10.42.0.9/32".into()]), dns: false, ports: vec![tcp(27017)], exact: false }]),
                 egress: None,
+                guard: None,
             },
         );
         pods.insert(
@@ -483,14 +592,15 @@ mod tests {
             PodRules {
                 ingress: Some(vec![]),
                 egress: Some(vec![
-                    Allow { peers: Some(vec![]), dns: true, ports: vec![PortRange { protocol: "udp".into(), port: Some((53, 53)) }] },
-                    Allow { peers: None, dns: false, ports: vec![PortRange { protocol: "tcp".into(), port: Some((8000, 8100)) }, PortRange { protocol: "SCTP".into(), port: None }] },
-                    Allow { peers: Some(vec!["0.0.0.0/0".into()]), dns: false, ports: vec![] },
+                    Allow { peers: Some(vec![]), dns: true, ports: vec![PortRange { protocol: "udp".into(), port: Some((53, 53)) }], exact: false },
+                    Allow { peers: None, dns: false, ports: vec![PortRange { protocol: "tcp".into(), port: Some((8000, 8100)) }, PortRange { protocol: "SCTP".into(), port: None }], exact: false },
+                    Allow { peers: Some(vec!["0.0.0.0/0".into()]), dns: false, ports: vec![], exact: false },
                 ]),
+                guard: None,
             },
         );
         let out = render(&Names::node(), &pods, &["192.168.1.10".parse().unwrap()], &["LITEK8S-NPI-0a2a0063".into(), "LITEK8S-NPI-0a2a0005".into()]);
-        let expected = "*filter
+        let expected = "*mangle
 :LITEK8S-NETPOL - [0:0]
 :LITEK8S-NPI-0a2a0005 - [0:0]
 :LITEK8S-NPI-0a2a0006 - [0:0]
@@ -517,7 +627,7 @@ COMMIT
         assert_eq!(out, expected);
         // Nothing isolated: the dispatcher is emptied and old chains go.
         let out = render(&Names::node(), &BTreeMap::new(), &[], &["LITEK8S-NPE-0a2a0006".into()]);
-        assert_eq!(out, "*filter\n:LITEK8S-NETPOL - [0:0]\n:LITEK8S-NPE-0a2a0006 - [0:0]\n-X LITEK8S-NPE-0a2a0006\nCOMMIT\n");
+        assert_eq!(out, "*mangle\n:LITEK8S-NETPOL - [0:0]\n:LITEK8S-NPE-0a2a0006 - [0:0]\n-X LITEK8S-NPE-0a2a0006\nCOMMIT\n");
     }
 
     #[test]
@@ -544,7 +654,7 @@ COMMIT
         let chain = chain_name(&a.ingress, ip);
         assert!(chain.len() <= 28, "{chain}");
         let mut pods = BTreeMap::new();
-        pods.insert(ip, PodRules { ingress: Some(vec![]), egress: None });
+        pods.insert(ip, PodRules { ingress: Some(vec![]), egress: None, guard: None });
         let out = render(&a, &pods, &[], &[]);
         assert!(out.contains(&format!("-A {} -d 10.42.255.254/32 -j {chain}\n", a.dispatcher)), "{out}");
         assert!(!out.contains(":LITEK8S-NETPOL - "), "{out}");
@@ -558,9 +668,10 @@ COMMIT
     fn docker_scripts() {
         let n = Names::docker("n1");
         let load = docker_load(&n);
-        assert!(load.contains(&format!("iptables -t filter -C $c -j {d} 2>/dev/null || iptables -t filter -I $c 1 -j {d}", d = n.dispatcher)));
+        assert!(load.contains(&format!("iptables -t mangle -C $c -j {d} 2>/dev/null || iptables -t mangle -I $c 1 -j {d}", d = n.dispatcher)));
         assert!(load.ends_with("exec iptables-restore --noflush"));
-        assert!(docker_probe().ends_with("iptables-save -t filter"));
+        assert!(docker_probe(&n).ends_with("iptables-save -t mangle"));
+        assert!(docker_probe(&n).contains(&format!("grep -c '^:{} '", n.dispatcher)));
         assert!(bridge_filtered("bridge-nf=1\n*filter\n"));
         assert!(!bridge_filtered("bridge-nf=0\n*filter\n"));
         assert!(!bridge_filtered("bridge-nf=\n*filter\n"));
@@ -576,14 +687,14 @@ COMMIT
         let shell: Shell = Arc::new(move |script, stdin| {
             c.lock().unwrap().push((script, stdin));
             let on = f.load(std::sync::atomic::Ordering::Relaxed);
-            Box::pin(async move { Ok(format!("bridge-nf={}\n*filter\nCOMMIT\n", if on { 1 } else { 0 })) })
+            Box::pin(async move { Ok(format!("bridge-nf={}\nlegacy=0\n*mangle\nCOMMIT\n", if on { 1 } else { 0 })) })
         });
         let np = NetPol::new(Target::Docker { node: "n1".into(), shell });
         // Nothing isolated and nothing loaded before: only the probe.
         np.update(BTreeMap::new(), true);
         np.apply().await.unwrap();
         assert_eq!(calls.lock().unwrap().len(), 1);
-        np.update(BTreeMap::from([("u1".to_string(), Some(PodRules { ingress: Some(vec![]), egress: None }))]), false);
+        np.update(BTreeMap::from([("u1".to_string(), Some(PodRules { ingress: Some(vec![]), egress: None, guard: None }))]), false);
         np.register("u1", "10.42.0.5").await.unwrap();
         let (script, rules) = calls.lock().unwrap().last().cloned().unwrap();
         assert_eq!(script, docker_load(&np.names));
@@ -598,7 +709,7 @@ COMMIT
     fn rules_wait_for_the_full_set() {
         let np = NetPol::default();
         let mut one = BTreeMap::new();
-        one.insert("u1".to_string(), Some(PodRules { ingress: Some(vec![]), egress: None }));
+        one.insert("u1".to_string(), Some(PodRules { ingress: Some(vec![]), egress: None, guard: None }));
         np.update(one.clone(), false);
         assert!(!np.state.lock().unwrap().synced);
         np.update(one, true);
@@ -611,8 +722,77 @@ COMMIT
 
     #[test]
     fn wire_format() {
-        let r = PodRules { ingress: Some(vec![Allow { peers: None, dns: false, ports: vec![tcp(80)] }]), egress: None };
+        let r = PodRules { ingress: Some(vec![Allow { peers: None, dns: false, ports: vec![tcp(80)], exact: false }]), egress: None, guard: None };
         assert_eq!(serde_json::to_string(&r).unwrap(), r#"{"ingress":[{"ports":[{"protocol":"tcp","port":[80,80]}]}]}"#);
         assert_eq!(serde_json::from_str::<PodRules>(r#"{"ingress":[{"ports":[{"protocol":"tcp","port":[80,80]}]}]}"#).unwrap(), r);
+    }
+
+    /// An untrusted pod: what the agents-rt operator wrote by hand (and had
+    /// to keep up to date) is what the guard renders.
+    #[test]
+    fn guard_drops_before_the_allow_rules() {
+        let dns53 = vec![PortRange { protocol: "udp".into(), port: Some((53, 53)) }, tcp(53)];
+        let guard = Guard { never: vec!["169.254.0.0/16".into(), "2.31.142.12/32".into()], private: vec!["10.0.0.0/8".into(), "100.64.0.0/10".into()] };
+        let rules = PodRules {
+            ingress: Some(vec![]),
+            egress: Some(vec![
+                Allow { peers: Some(vec![]), dns: true, ports: dns53, exact: true },
+                Allow { peers: Some(vec!["10.42.1.7/32".into()]), dns: false, ports: vec![tcp(8080)], exact: true },
+                Allow { peers: None, dns: false, ports: vec![], exact: false },
+            ]),
+            guard: Some(guard),
+        };
+        let pods = BTreeMap::from([("10.42.1.82".parse().unwrap(), rules)]);
+        let out = render(&Names::node(), &pods, &["10.42.0.1".parse().unwrap()], &[]);
+        let egress: Vec<&str> = out.lines().filter(|l| l.starts_with("-A LITEK8S-NPE-")).collect();
+        assert_eq!(
+            egress,
+            [
+                "-A LITEK8S-NPE-0a2a0152 -m conntrack --ctstate RELATED,ESTABLISHED -j RETURN",
+                "-A LITEK8S-NPE-0a2a0152 -d 10.42.0.1/32 -p udp -m udp --dport 53 -j RETURN",
+                "-A LITEK8S-NPE-0a2a0152 -d 10.42.0.1/32 -p tcp -m tcp --dport 53 -j RETURN",
+                "-A LITEK8S-NPE-0a2a0152 -d 169.254.0.0/16 -j DROP",
+                "-A LITEK8S-NPE-0a2a0152 -d 2.31.142.12/32 -j DROP",
+                "-A LITEK8S-NPE-0a2a0152 -m addrtype --dst-type LOCAL -j DROP",
+                "-A LITEK8S-NPE-0a2a0152 -d 10.42.1.7/32 -p tcp -m tcp --dport 8080 -j RETURN",
+                "-A LITEK8S-NPE-0a2a0152 -d 10.0.0.0/8 -j DROP",
+                "-A LITEK8S-NPE-0a2a0152 -d 100.64.0.0/10 -j DROP",
+                "-A LITEK8S-NPE-0a2a0152 -j RETURN",
+                "-A LITEK8S-NPE-0a2a0152 -j DROP",
+            ]
+        );
+        // The ingress chain has no guard rules.
+        let ingress: Vec<&str> = out.lines().filter(|l| l.starts_with("-A LITEK8S-NPI-")).collect();
+        assert_eq!(ingress.len(), 2, "{ingress:?}");
+    }
+
+    #[test]
+    fn agents_without_guards_get_dns_only() {
+        let rules = PodRules {
+            ingress: Some(vec![]),
+            egress: Some(vec![Allow { peers: Some(vec![]), dns: true, ports: vec![tcp(53)], exact: true }, Allow { peers: None, dns: false, ports: vec![], exact: false }]),
+            guard: Some(Guard::default()),
+        };
+        let plain = rules.without_guard();
+        assert_eq!(plain.egress, Some(vec![Allow { peers: Some(vec![]), dns: true, ports: vec![tcp(53)], exact: false }]));
+        assert!(plain.guard.is_none());
+        // Rules without a guard are sent as they are.
+        let open = PodRules { ingress: None, egress: Some(vec![Allow { peers: None, dns: false, ports: vec![], exact: false }]), guard: None };
+        assert_eq!(open.clone().without_guard(), open);
+    }
+
+    #[test]
+    fn older_filter_chains_are_found_and_removed() {
+        let n = Names::node();
+        let save = "*filter\n:INPUT ACCEPT [0:0]\n:LITEK8S-FORWARD - [0:0]\n:LITEK8S-NETPOL - [0:0]\n-A INPUT -i litek8s0 -j LITEK8S-NETPOL\nCOMMIT\n";
+        assert!(has_legacy(&n, save));
+        assert!(!has_legacy(&n, "*filter\n:INPUT ACCEPT [0:0]\n:LITEK8S-FORWARD - [0:0]\nCOMMIT\n"));
+        assert!(!has_legacy(&Names::docker("n1"), save));
+        let script = legacy_cleanup(&n);
+        assert!(script.contains("iptables -t filter -D $c -j LITEK8S-NETPOL"), "{script}");
+        assert!(script.contains("iptables -t filter -D INPUT -i litek8s0 -j LITEK8S-NETPOL"), "{script}");
+        assert!(script.contains(r"s/^:\(LITEK8S-NPI-[^ ]*\) .*/\1/p"), "{script}");
+        assert!(script.ends_with("iptables -t filter -X LITEK8S-NETPOL 2>/dev/null; true"), "{script}");
+        assert!(HOOKS.contains("-t mangle -I FORWARD 1 -j LITEK8S-NETPOL") && HOOKS.contains("-t mangle -I INPUT 1 -i litek8s0 -j LITEK8S-NETPOL"));
     }
 }

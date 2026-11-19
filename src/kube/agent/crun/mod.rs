@@ -18,6 +18,7 @@
 //! images, address reservations) and `/run/litek8s` (crun's state, the IPC
 //! namespace files, console sockets); network namespaces are in /run/netns.
 
+mod apparmor;
 pub(crate) mod image;
 pub(crate) mod logs;
 pub(crate) mod net;
@@ -112,6 +113,8 @@ struct Inner {
     execs: Mutex<HashMap<String, Exec>>,
     /// Serializes changes to the hostPort chain.
     hostports: tokio::sync::Mutex<()>,
+    /// The default AppArmor profile is loaded on this node.
+    apparmor: bool,
 }
 
 #[derive(Clone)]
@@ -213,9 +216,16 @@ impl CrunPods {
         let cluster = net::Subnet::parse(cluster_cidr)?;
         run_quiet("sh", &["-c", &net::bridge_commands(&subnet)], None).await.context("failed to set up the pod bridge")?;
         let _ = std::fs::write("/proc/sys/net/ipv4/ip_forward", "1");
-        run_quiet("sh", &["-c", crate::kube::agent::netpol::CREATE_CHAIN], None).await?;
-        run_quiet("iptables-restore", &["--noflush"], Some(&net::base_rules(&subnet, &cluster))).await?;
+        // The node does not answer IPv6 on the bridge (every interface has
+        // a link-local address, and the rules below are IPv4): pods would
+        // reach its services there around their NetworkPolicies.
+        let _ = std::fs::write(format!("/proc/sys/net/ipv6/conf/{}/disable_ipv6", net::BRIDGE), "1");
+        let filter = tokio::process::Command::new("iptables-save").args(["-t", "filter"]).output().await.map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
+        let legacy_netpol = filter.lines().any(|l| l.starts_with(&format!(":{} ", crate::kube::agent::netpol::CHAIN)));
+        run_quiet("iptables-restore", &["--noflush"], Some(&net::base_rules(&subnet, &cluster, legacy_netpol))).await?;
+        run_quiet("sh", &["-c", crate::kube::agent::netpol::HOOKS], None).await?;
         run_quiet("sh", &["-c", net::HOOKS], None).await?;
+        let apparmor = apparmor::load(&root).await;
         let (exits_tx, exits_rx) = mpsc::unbounded_channel();
         let pods = Self {
             inner: Arc::new(Inner {
@@ -229,6 +239,7 @@ impl CrunPods {
                 exits_rx: Mutex::new(Some(exits_rx)),
                 execs: Mutex::new(HashMap::new()),
                 hostports: tokio::sync::Mutex::new(()),
+                apparmor,
                 root,
             }),
         };
@@ -565,6 +576,11 @@ impl CrunPods {
         };
         let user_str = spec.user.clone().or_else(|| image.config.user.clone()).unwrap_or_default();
         let user = spec::resolve_user(&user_str, &etc("passwd"), &etc("group"))?;
+        // The image's passwd file names the uid here, so a named user is
+        // checked too (the kubelet can only refuse those).
+        if spec.run_as_non_root && user.uid == 0 {
+            bail!("container has runAsNonRoot and image will run as root");
+        }
         let sandbox_dir = self.sandbox_dir(&sandbox.id);
         let pod_uid = spec.labels.get(LABEL_POD_UID).cloned().unwrap_or_else(|| sandbox.id.clone());
         let cgroup = format!("/litek8s/pod{}/{id}", pod_uid.replace('-', "_"));
@@ -593,6 +609,12 @@ impl CrunPods {
             super::cdi::Registry::load(&super::cdi::spec_dirs())
                 .apply(&mut config, &spec.cdi_devices)
                 .with_context(|| format!("CDI devices {}", spec.cdi_devices.join(", ")))?;
+        }
+        match spec.apparmor_profile.as_deref().filter(|_| !spec.privileged) {
+            Some(crate::kube::agent::runtime::APPARMOR_DEFAULT) if !self.inner.apparmor => {}
+            Some(profile) if !apparmor::enabled() => bail!("AppArmor profile {profile}: AppArmor is not enabled on this node"),
+            Some(profile) => config["process"]["apparmorProfile"] = json!(profile),
+            None => {}
         }
         std::fs::write(dir.join("config.json"), serde_json::to_vec(&config)?)?;
         Ok(ContainerMeta {

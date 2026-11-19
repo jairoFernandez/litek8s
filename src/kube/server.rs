@@ -3015,9 +3015,19 @@ impl ApiState {
             // Only spec.ephemeralContainers changes through this subresource.
             let mut result = old.clone();
             let mut ecs = new.pointer("/spec/ephemeralContainers").cloned().unwrap_or_else(|| json!([]));
+            let ns = meta(old).get("namespace").and_then(Value::as_str).unwrap_or_default();
+            let namespace = self.store.get(&ObjectKey::new("", "namespaces", "", ns));
+            if super::podsecurity::untrusted(namespace.as_ref()) {
+                super::podsecurity::harden_ephemeral(&mut ecs);
+            }
             defaults::containers(&mut ecs);
             if result.pointer("/spec/ephemeralContainers") != Some(&ecs) {
                 result["spec"]["ephemeralContainers"] = ecs;
+                let level = super::podsecurity::enforced(namespace.as_ref());
+                let violations = super::podsecurity::violations(level, &result);
+                if !violations.is_empty() {
+                    return Err(ApiError::new(StatusCode::FORBIDDEN, "Forbidden", format!("pods \"{url_name}\" is forbidden: {}", super::podsecurity::message(level, &violations))));
+                }
                 let generation = meta(old).get("generation").and_then(Value::as_i64).unwrap_or(1);
                 result["metadata"]["generation"] = json!(generation + 1);
             }
@@ -3566,6 +3576,15 @@ impl ApiState {
         if !errs.is_empty() {
             return Err(forbidden(super::validation::join(&errs)));
         }
+        let namespace = self.store.get(&ObjectKey::new("", "namespaces", "", ns));
+        if super::podsecurity::untrusted(namespace.as_ref()) {
+            super::podsecurity::default_resources(pod);
+        }
+        let level = super::podsecurity::enforced(namespace.as_ref());
+        let violations = super::podsecurity::violations(level, pod);
+        if !violations.is_empty() {
+            return Err(forbidden(super::podsecurity::message(level, &violations)));
+        }
         if let Some(spec) = pod.get("spec").and_then(Value::as_object) {
             let qos = defaults::qos_class(spec);
             pod["status"]["qosClass"] = json!(qos);
@@ -3583,6 +3602,9 @@ impl ApiState {
                     obj["metadata"]["labels"] = json!({});
                 }
                 obj["metadata"]["labels"]["kubernetes.io/metadata.name"] = json!(name);
+                if let Some(msg) = super::podsecurity::invalid_namespace_label(obj) {
+                    return Err(ApiError::invalid_fields(rt, &name, &[msg]));
+                }
                 if old.is_none() {
                     obj["spec"]["finalizers"] = json!(["kubernetes"]);
                     obj["status"] = json!({"phase": "Active"});
@@ -3631,8 +3653,16 @@ impl ApiState {
                         .unwrap_or("default")
                         .to_string();
                     let sa = self.store.get(&ObjectKey::new("", "serviceaccounts", &ns, &sa_name));
+                    let namespace = self.store.get(&ObjectKey::new("", "namespaces", "", &ns));
+                    if super::podsecurity::untrusted(namespace.as_ref()) {
+                        super::podsecurity::harden(obj, namespace.as_ref());
+                    } else if let Some(a) = obj.pointer_mut("/metadata/annotations").and_then(Value::as_object_mut) {
+                        a.remove(super::podsecurity::ISOLATION);
+                    }
                     defaults::pod_on_create(obj, sa.as_ref(), &random_suffix(), (self.lifecycle.not_ready_toleration_secs, self.lifecycle.unreachable_toleration_secs));
                     self.admit_pod(rt, &ns, obj)?;
+                } else if let Some(old) = old {
+                    super::podsecurity::keep_annotations(obj, old);
                 }
             }
             ("", "PersistentVolumeClaim") => defaults::pvc(obj, old),

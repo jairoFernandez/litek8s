@@ -13,18 +13,37 @@
 //! policy peer that would select CoreDNS (namespace `kube-system`, labels
 //! `k8s-app: kube-dns`, ports `dns`/`dns-tcp` 53) allows it, which the
 //! agent turns into the DNS address the pods' resolv.conf names.
+//!
+//! Pods of an untrusted namespace (`crate::kube::podsecurity`) also get a
+//! [`Guard`], which no policy opens: nothing reaches the nodes (the pod's
+//! own node by any of its addresses, the others by the addresses they
+//! report) or link-local addresses (cloud metadata), and an `ipBlock` wider
+//! than a private range does not include the private ranges. Without any
+//! policy such a pod accepts nothing and reaches the cluster DNS and the
+//! public internet.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::Ipv4Addr;
 
 use serde_json::{Value, json};
 
-use super::agent::netpol::{Allow, PodRules, PortRange};
+use super::agent::netpol::{Allow, Guard, PodRules, PortRange};
 use super::controllers::util;
 use super::selector::LabelSelector;
 
 pub const GROUP: &str = "networking.k8s.io";
 pub const RESOURCE: &str = "networkpolicies";
+/// A Node's own IPv4 addresses, every interface (comma separated), as its
+/// agent reports them: what an untrusted pod never reaches.
+pub const NODE_ADDRESSES: &str = "litek8s.dev/addresses";
+
+/// Never a destination of an untrusted pod: cloud metadata services and
+/// whatever else answers on the link.
+const LINK_LOCAL: &str = "169.254.0.0/16";
+
+/// Not part of "any address" for an untrusted pod: private networks, the
+/// carrier-grade NAT range (tailnets), loopback, multicast and reserved.
+const PRIVATE: &[&str] = &["0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/3"];
 
 /// A pod as a policy peer.
 struct Peer {
@@ -47,6 +66,8 @@ pub struct Snapshot {
     /// namespace name → the Namespace (with `kubernetes.io/metadata.name`).
     namespaces: HashMap<String, Value>,
     peers: Vec<Peer>,
+    /// The guard of untrusted pods (the same for all of them).
+    guard: Guard,
 }
 
 impl Snapshot {
@@ -75,11 +96,37 @@ impl Snapshot {
             })
             .collect();
         peers.push(Peer { namespace: "kube-system".into(), object: dns_pod(), ip: None });
-        Self { policies: by_ns, namespaces: ns_map, peers }
+        let guard = Guard { never: vec![LINK_LOCAL.to_string()], private: PRIVATE.iter().map(|c| c.to_string()).collect() };
+        Self { policies: by_ns, namespaces: ns_map, peers, guard }
+    }
+
+    /// The cluster's Nodes: their addresses (status and [`NODE_ADDRESSES`])
+    /// are closed to untrusted pods, their pod CIDRs count as private.
+    pub fn with_nodes(mut self, nodes: &[Value]) -> Self {
+        let mut never = BTreeSet::from([LINK_LOCAL.to_string()]);
+        let mut private: BTreeSet<String> = PRIVATE.iter().map(|c| c.to_string()).collect();
+        for node in nodes {
+            let status = node.pointer("/status/addresses").and_then(Value::as_array).into_iter().flatten().filter_map(|a| a.get("address").and_then(Value::as_str));
+            let reported = node.pointer("/metadata/annotations").and_then(|a| a.get(NODE_ADDRESSES)).and_then(Value::as_str).unwrap_or_default().split(',');
+            for ip in status.chain(reported).filter_map(|a| a.trim().parse::<Ipv4Addr>().ok()) {
+                never.insert(format!("{ip}/32"));
+            }
+            if let Some((net, prefix)) = parse_cidr(util::s(node, "/spec/podCIDR")) {
+                if !PRIVATE.iter().filter_map(|p| parse_cidr(p)).any(|p| contains(p, (net, prefix))) {
+                    private.insert(format!("{}/{prefix}", Ipv4Addr::from(net)));
+                }
+            }
+        }
+        self.guard = Guard { never: never.into_iter().collect(), private: private.into_iter().collect() };
+        self
     }
 
     pub fn has_policies(&self) -> bool {
         self.policies.values().any(|v| !v.is_empty())
+    }
+
+    fn untrusted(&self, ns: &str) -> bool {
+        super::podsecurity::untrusted(self.namespaces.get(ns))
     }
 
     /// The rules of `pod`; `None` when no policy selects it (not isolated
@@ -89,6 +136,7 @@ impl Snapshot {
             return None;
         }
         let ns = util::s(pod, "/metadata/namespace");
+        let guarded = self.untrusted(ns);
         let mut out = PodRules::default();
         for policy in self.policies.get(ns).into_iter().flatten() {
             let selects = LabelSelector::from_object(Some(policy.pointer("/spec/podSelector").unwrap_or(&json!({})))).is_some_and(|s| s.matches(pod));
@@ -105,9 +153,17 @@ impl Snapshot {
             if egress {
                 let rules = out.egress.get_or_insert_with(Vec::new);
                 for rule in policy.pointer("/spec/egress").and_then(Value::as_array).into_iter().flatten() {
-                    rules.extend(self.egress_rule(ns, rule));
+                    rules.extend(self.egress_rule(ns, rule, guarded));
                 }
             }
+        }
+        if guarded {
+            out.ingress.get_or_insert_with(Vec::new);
+            out.egress.get_or_insert_with(|| {
+                let dns = ["udp", "tcp"].map(|p| PortRange { protocol: p.into(), port: Some((53, 53)) }).to_vec();
+                vec![Allow { peers: Some(Vec::new()), dns: true, ports: dns, exact: true }, Allow { peers: None, dns: false, ports: Vec::new(), exact: false }]
+            });
+            out.guard = Some(self.guard.clone());
         }
         if out.ingress.is_none() && out.egress.is_none() {
             return None;
@@ -184,32 +240,50 @@ impl Snapshot {
                 Some(cidrs.into_iter().collect())
             }
         };
-        Some(Allow { peers, dns: false, ports })
+        Some(Allow { peers, dns: false, ports, exact: false })
     }
 
-    fn egress_rule(&self, ns: &str, rule: &Value) -> Vec<Allow> {
+    /// `guarded`: for an untrusted pod, whose rules say which peers were
+    /// meant exactly (selected pods, the DNS, an `ipBlock` inside a private
+    /// range) and which only fall inside a wide block.
+    fn egress_rule(&self, ns: &str, rule: &Value, guarded: bool) -> Vec<Allow> {
         let specs: Vec<PortSpec> = rule.get("ports").and_then(Value::as_array).into_iter().flatten().map(port_spec).collect();
         let peers = self.peers(ns, rule.get("to"));
         let mut out = Vec::new();
-        // Peers as addresses (for numbered ports): None = any.
-        let (addrs, dns) = match &peers {
-            None => (None, false),
+        // Peers as addresses (for numbered ports): None = any. `exact`
+        // ones come apart from the rest for a guarded pod.
+        let private: Vec<(u32, u8)> = self.guard.private.iter().filter_map(|c| parse_cidr(c)).collect();
+        let is_exact = |cidr: &str| parse_cidr(cidr).is_some_and(|c| private.iter().any(|p| contains(*p, c)));
+        let dns = peers.as_ref().is_some_and(|(pods, _)| pods.iter().any(|p| p.ip.is_none()));
+        let mut groups: Vec<(Option<Vec<String>>, bool, bool)> = Vec::new();
+        match &peers {
+            None => groups.push((None, false, false)),
+            Some((pods, cidrs)) if guarded => {
+                let mut exact: BTreeSet<String> = pods.iter().filter_map(|p| p.cidr()).collect();
+                exact.extend(cidrs.iter().filter(|c| is_exact(c)).cloned());
+                let wide: Vec<String> = cidrs.iter().filter(|c| !is_exact(c)).cloned().collect();
+                if !exact.is_empty() || dns {
+                    groups.push((Some(exact.into_iter().collect()), dns, true));
+                }
+                if !wide.is_empty() {
+                    groups.push((Some(wide), false, false));
+                }
+            }
             Some((pods, cidrs)) => {
                 let mut all = cidrs.clone();
                 all.extend(pods.iter().filter_map(|p| p.cidr()));
-                (Some(all.into_iter().collect::<Vec<_>>()), pods.iter().any(|p| p.ip.is_none()))
+                if !all.is_empty() || dns {
+                    groups.push((Some(all.into_iter().collect()), dns, false));
+                }
             }
-        };
-        let has_peers = addrs.as_ref().is_none_or(|a| !a.is_empty()) || dns;
+        }
         if specs.is_empty() {
-            if has_peers {
-                out.push(Allow { peers: addrs, dns, ports: Vec::new() });
-            }
+            out.extend(groups.into_iter().map(|(peers, dns, exact)| Allow { peers, dns, ports: Vec::new(), exact }));
             return out;
         }
         let numbered: Vec<PortRange> = specs.iter().filter_map(|s| s.numbered()).collect();
-        if !numbered.is_empty() && has_peers {
-            out.push(Allow { peers: addrs.clone(), dns, ports: numbered });
+        if !numbered.is_empty() {
+            out.extend(groups.into_iter().map(|(peers, dns, exact)| Allow { peers, dns, ports: numbered.clone(), exact }));
         }
         // Named ports: what each destination pod calls that name.
         let named: Vec<&PortSpec> = specs.iter().filter(|s| matches!(s.port, PortRef::Name(_))).collect();
@@ -235,7 +309,7 @@ impl Snapshot {
             }
         }
         for (range, (cidrs, dns)) in grouped {
-            out.push(Allow { peers: Some(cidrs.into_iter().collect()), dns, ports: vec![range] });
+            out.push(Allow { peers: Some(cidrs.into_iter().collect()), dns, ports: vec![range], exact: guarded });
         }
         out
     }
@@ -449,7 +523,7 @@ mod tests {
         let r = s.rules_for(&pods[0]).unwrap();
         assert!(r.egress.is_none());
         // Not the look-alike in namespace `other`.
-        assert_eq!(r.ingress.unwrap(), vec![Allow { peers: Some(vec!["10.42.0.9/32".into(), "10.42.1.7/32".into()]), dns: false, ports: vec![tcp(27017)] }]);
+        assert_eq!(r.ingress.unwrap(), vec![Allow { peers: Some(vec!["10.42.0.9/32".into(), "10.42.1.7/32".into()]), dns: false, ports: vec![tcp(27017)], exact: false }]);
     }
 
     #[test]
@@ -457,12 +531,12 @@ mod tests {
         let (namespaces, pods) = world();
         let deny = policy("shop", json!({"podSelector": {}, "policyTypes": ["Ingress", "Egress"]}));
         let s = Snapshot::new(vec![deny.clone()], namespaces.clone(), &pods);
-        assert_eq!(s.rules_for(&pods[1]).unwrap(), PodRules { ingress: Some(vec![]), egress: Some(vec![]) });
+        assert_eq!(s.rules_for(&pods[1]).unwrap(), PodRules { ingress: Some(vec![]), egress: Some(vec![]), guard: None });
         // A second policy adds to the first: allow-all ingress.
         let allow = policy("shop", json!({"podSelector": {}, "ingress": [{}]}));
         let s = Snapshot::new(vec![deny, allow], namespaces, &pods);
         let r = s.rules_for(&pods[1]).unwrap();
-        assert_eq!(r.ingress.unwrap(), vec![Allow { peers: None, dns: false, ports: vec![] }]);
+        assert_eq!(r.ingress.unwrap(), vec![Allow { peers: None, dns: false, ports: vec![], exact: false }]);
         assert_eq!(r.egress.unwrap(), vec![]);
     }
 
@@ -501,7 +575,7 @@ mod tests {
         let (namespaces, pods) = world();
         let p = policy("shop", json!({"podSelector": {"matchLabels": {"app": "mongo"}}, "ingress": [{"from": [{"podSelector": {"matchLabels": {"app": "ghost"}}}]}]}));
         let s = Snapshot::new(vec![p], namespaces, &pods);
-        assert_eq!(s.rules_for(&pods[0]).unwrap(), PodRules { ingress: Some(vec![]), egress: None });
+        assert_eq!(s.rules_for(&pods[0]).unwrap(), PodRules { ingress: Some(vec![]), egress: None, guard: None });
     }
 
     #[test]
@@ -581,9 +655,9 @@ mod tests {
         assert_eq!(
             e,
             vec![
-                Allow { peers: Some(vec!["10.42.0.9/32".into()]), dns: false, ports: vec![tcp(9090)] },
-                Allow { peers: Some(vec!["10.42.0.9/32".into(), "10.42.1.7/32".into()]), dns: false, ports: vec![tcp(27017)] },
-                Allow { peers: Some(vec!["10.42.1.7/32".into()]), dns: false, ports: vec![tcp(8080)] },
+                Allow { peers: Some(vec!["10.42.0.9/32".into()]), dns: false, ports: vec![tcp(9090)], exact: false },
+                Allow { peers: Some(vec!["10.42.0.9/32".into(), "10.42.1.7/32".into()]), dns: false, ports: vec![tcp(27017)], exact: false },
+                Allow { peers: Some(vec!["10.42.1.7/32".into()]), dns: false, ports: vec![tcp(8080)], exact: false },
             ]
         );
     }
@@ -601,11 +675,11 @@ mod tests {
         );
         let s = Snapshot::new(vec![p], namespaces.clone(), &pods);
         let e = s.rules_for(&pods[0]).unwrap().egress.unwrap();
-        assert_eq!(e, vec![Allow { peers: Some(vec![]), dns: true, ports: vec![PortRange { protocol: "udp".into(), port: Some((53, 53)) }, tcp(53)] }]);
+        assert_eq!(e, vec![Allow { peers: Some(vec![]), dns: true, ports: vec![PortRange { protocol: "udp".into(), port: Some((53, 53)) }, tcp(53)], exact: false }]);
         // Named: dns / dns-tcp are CoreDNS's port names.
         let p = policy("shop", json!({"podSelector": {}, "policyTypes": ["Egress"], "egress": [{"to": [{"namespaceSelector": {}}], "ports": [{"port": "dns-tcp"}]}]}));
         let s = Snapshot::new(vec![p], namespaces.clone(), &pods);
-        assert_eq!(s.rules_for(&pods[0]).unwrap().egress.unwrap(), vec![Allow { peers: Some(vec![]), dns: true, ports: vec![tcp(53)] }]);
+        assert_eq!(s.rules_for(&pods[0]).unwrap().egress.unwrap(), vec![Allow { peers: Some(vec![]), dns: true, ports: vec![tcp(53)], exact: false }]);
         // Egress to the namespace's pods only: no DNS.
         let p = policy("shop", json!({"podSelector": {}, "policyTypes": ["Egress"], "egress": [{"to": [{"podSelector": {}}]}]}));
         let s = Snapshot::new(vec![p], namespaces, &pods);
@@ -634,5 +708,62 @@ mod tests {
         assert_eq!(fingerprint(&pods[0]), fingerprint(&changed));
         changed["metadata"]["labels"]["x"] = json!("y");
         assert_ne!(fingerprint(&pods[0]), fingerprint(&changed));
+    }
+
+    fn untrusted_world() -> (Vec<Value>, Vec<Value>, Vec<Value>) {
+        let namespaces = vec![ns("runs", json!({"litek8s.dev/isolation": "untrusted"})), ns("shop", json!({}))];
+        let pods = vec![pod("runs", "turn", json!({"run": "1"}), "10.42.1.82"), pod("runs", "tool", json!({"app": "tool"}), "10.42.1.90"), pod("shop", "db", json!({"app": "mongo"}), "10.42.0.5")];
+        let nodes = vec![
+            json!({"metadata": {"name": "control-1", "annotations": {NODE_ADDRESSES: "10.71.1.2,2.31.142.12,100.100.103.11,10.42.0.1"}}, "spec": {"podCIDR": "10.42.0.0/24"}, "status": {"addresses": [{"type": "InternalIP", "address": "10.71.1.2"}, {"type": "Hostname", "address": "control-1"}]}}),
+            json!({"metadata": {"name": "run-1", "annotations": {NODE_ADDRESSES: "2.31.136.189"}}, "spec": {"podCIDR": "198.18.1.0/24"}, "status": {"addresses": [{"type": "ExternalIP", "address": "203.0.113.9"}]}}),
+        ];
+        (namespaces, pods, nodes)
+    }
+
+    #[test]
+    fn untrusted_pods_are_guarded_without_any_policy() {
+        let (namespaces, pods, nodes) = untrusted_world();
+        let s = Snapshot::new(vec![], namespaces, &pods).with_nodes(&nodes);
+        let r = s.rules_for(&pods[0]).unwrap();
+        // Nothing in; out, the cluster DNS and whatever the guard leaves.
+        assert_eq!(r.ingress, Some(vec![]));
+        let dns = vec![PortRange { protocol: "udp".into(), port: Some((53, 53)) }, tcp(53)];
+        assert_eq!(r.egress, Some(vec![Allow { peers: None, dns: false, ports: vec![], exact: false }, Allow { peers: Some(vec![]), dns: true, ports: dns, exact: true }]));
+        let guard = r.guard.unwrap();
+        // Every address of every node, however it got it, and link-local.
+        assert_eq!(guard.never, ["10.42.0.1/32", "10.71.1.2/32", "100.100.103.11/32", "169.254.0.0/16", "2.31.136.189/32", "2.31.142.12/32", "203.0.113.9/32"]);
+        // Private ranges, and a pod CIDR that is not inside one.
+        assert!(guard.private.contains(&"10.0.0.0/8".to_string()) && guard.private.contains(&"100.64.0.0/10".to_string()));
+        assert!(guard.private.contains(&"198.18.1.0/24".to_string()) && !guard.private.contains(&"10.42.0.0/24".to_string()));
+        // A pod of an ordinary namespace is as before: not isolated.
+        assert!(s.rules_for(&pods[2]).is_none());
+    }
+
+    #[test]
+    fn policies_of_an_untrusted_namespace_keep_the_guard() {
+        let (namespaces, pods, nodes) = untrusted_world();
+        // The policy agents-rt keeps by hand, without its list of addresses.
+        let p = policy(
+            "runs",
+            json!({"podSelector": {}, "policyTypes": ["Egress"], "egress": [
+                {"to": [{"ipBlock": {"cidr": "0.0.0.0/0"}}, {"ipBlock": {"cidr": "10.71.5.5/32"}}, {"podSelector": {"matchLabels": {"app": "tool"}}}], "ports": [{"port": 443}]},
+                {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}, "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}], "ports": [{"port": 53, "protocol": "UDP"}]},
+            ]}),
+        );
+        let s = Snapshot::new(vec![p], namespaces, &pods).with_nodes(&nodes);
+        let r = s.rules_for(&pods[0]).unwrap();
+        // Ingress stays closed though the policy is about egress only.
+        assert_eq!(r.ingress, Some(vec![]));
+        assert!(r.guard.is_some());
+        assert_eq!(
+            r.egress.unwrap(),
+            vec![
+                Allow { peers: Some(vec![]), dns: true, ports: vec![PortRange { protocol: "udp".into(), port: Some((53, 53)) }], exact: true },
+                // The wide block: the agent drops the private ranges before it.
+                Allow { peers: Some(vec!["0.0.0.0/0".into()]), dns: false, ports: vec![tcp(443)], exact: false },
+                // Named one by one: a selected pod, a block inside a private range.
+                Allow { peers: Some(vec!["10.42.1.90/32".into(), "10.71.5.5/32".into()]), dns: false, ports: vec![tcp(443)], exact: true },
+            ]
+        );
     }
 }

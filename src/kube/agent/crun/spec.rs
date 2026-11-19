@@ -458,11 +458,34 @@ pub fn host_devices(dev: &std::path::Path) -> Vec<Value> {
     out
 }
 
-fn seccomp() -> Value {
-    json!({
-        "defaultAction": "SCMP_ACT_ALLOW",
-        "syscalls": [{"names": SECCOMP_DENY, "action": "SCMP_ACT_ERRNO", "errnoRet": 1}],
-    })
+/// What the strict filter refuses on top: tracing and reading other
+/// processes, and the kernel log.
+const SECCOMP_DENY_STRICT: &[&str] = &["kcmp", "pidfd_getfd", "process_madvise", "process_vm_readv", "process_vm_writev", "ptrace", "syslog"];
+
+/// `clone` flags that make a namespace (mount, cgroup, UTS, IPC, user, PID,
+/// network): `unshare` and `setns` are refused already.
+const CLONE_NAMESPACES: &[u64] = &[0x0002_0000, 0x0200_0000, 0x0400_0000, 0x0800_0000, 0x1000_0000, 0x2000_0000, 0x4000_0000];
+
+/// `strict` (untrusted pods) also closes what Docker's profile ties to
+/// CAP_SYS_ADMIN: namespaces through `clone` (a user namespace gives a
+/// process every capability over a new set of kernel interfaces), and
+/// `clone3`, whose flags a filter cannot read, answers ENOSYS so that libc
+/// falls back to `clone`.
+fn seccomp(strict: bool) -> Value {
+    let mut syscalls = vec![json!({"names": SECCOMP_DENY, "action": "SCMP_ACT_ERRNO", "errnoRet": 1})];
+    if strict {
+        syscalls.push(json!({"names": SECCOMP_DENY_STRICT, "action": "SCMP_ACT_ERRNO", "errnoRet": 1}));
+        for flag in CLONE_NAMESPACES {
+            syscalls.push(json!({
+                "names": ["clone"],
+                "action": "SCMP_ACT_ERRNO",
+                "errnoRet": 1,
+                "args": [{"index": 0, "value": flag, "valueTwo": flag, "op": "SCMP_CMP_MASKED_EQ"}],
+            }));
+        }
+        syscalls.push(json!({"names": ["clone3"], "action": "SCMP_ACT_ERRNO", "errnoRet": 38}));
+    }
+    json!({"defaultAction": "SCMP_ACT_ALLOW", "syscalls": syscalls})
 }
 
 /// cgroup v2 limits: memory (no swap), CPU quota per 100 ms period from the
@@ -483,6 +506,9 @@ fn resources(spec: &ContainerSpec) -> Value {
     }
     if !cpu.is_empty() {
         r["cpu"] = Value::Object(cpu);
+    }
+    if let Some(limit) = spec.pids_limit.filter(|n| *n > 0) {
+        r["pids"] = json!({"limit": limit});
     }
     r
 }
@@ -619,7 +645,7 @@ pub(crate) fn config(p: &BundleParams) -> Result<Value> {
         linux["maskedPaths"] = json!(MASKED_PATHS);
         linux["readonlyPaths"] = json!(READONLY_PATHS);
         if !spec.seccomp_unconfined {
-            linux["seccomp"] = seccomp();
+            linux["seccomp"] = seccomp(spec.seccomp_strict);
         }
     }
     let mut config = json!({
@@ -716,6 +742,9 @@ mod tests {
         assert_eq!(c["linux"]["resources"]["memory"], json!({"limit": 134217728, "swap": 134217728}));
         assert_eq!(c["linux"]["resources"]["cpu"], json!({"period": 100000, "quota": 50000, "shares": 51}));
         assert_eq!(c["linux"]["cgroupsPath"], "/litek8s/podabc/c1");
+        assert!(c["linux"]["resources"].get("pids").is_none());
+        let limited = ContainerSpec { pids_limit: Some(256), ..Default::default() };
+        assert_eq!(config(&params(&limited, &image)).unwrap()["linux"]["resources"]["pids"], json!({"limit": 256}));
         let ns: Vec<Value> = c["linux"]["namespaces"].as_array().unwrap().clone();
         assert!(ns.contains(&json!({"type": "network", "path": "/run/netns/litek8s-abc"})));
         assert!(ns.contains(&json!({"type": "ipc", "path": "/run/litek8s/ipc/abc"})));
@@ -723,6 +752,14 @@ mod tests {
         assert_eq!(c["hostname"], "web-0");
         assert!(c["linux"]["maskedPaths"].as_array().unwrap().contains(&json!("/proc/kcore")));
         assert_eq!(c["linux"]["seccomp"]["defaultAction"], "SCMP_ACT_ALLOW");
+        assert_eq!(c["linux"]["seccomp"]["syscalls"].as_array().unwrap().len(), 1);
+        let strict = seccomp(true);
+        let rules = strict["syscalls"].as_array().unwrap();
+        // The deny list, the strict one, a rule per namespace flag, clone3.
+        assert_eq!(rules.len(), 2 + CLONE_NAMESPACES.len() + 1);
+        let userns = rules.iter().find(|r| r["names"][0] == "clone" && r["args"][0]["value"] == 0x1000_0000).unwrap();
+        assert_eq!((userns["args"][0]["op"].as_str(), userns["args"][0]["valueTwo"].as_u64(), userns["errnoRet"].as_u64()), (Some("SCMP_CMP_MASKED_EQ"), Some(0x1000_0000), Some(1)));
+        assert_eq!(rules.last().unwrap()["errnoRet"], 38);
         let targets: Vec<&str> = c["mounts"].as_array().unwrap().iter().filter_map(|m| m["destination"].as_str()).collect();
         assert_eq!(targets, ["/proc", "/dev", "/dev/pts", "/dev/mqueue", "/sys", "/sys/fs/cgroup", "/dev/shm", "/etc/hosts", "/etc/resolv.conf"]);
         assert_eq!(c["root"], json!({"path": "rootfs", "readonly": false}));

@@ -42,6 +42,8 @@ pub const LABEL_HASH: &str = "litek8s.container.hash";
 pub const LABEL_NODE: &str = "litek8s.node";
 /// A volume backed by memory (`emptyDir.medium: Memory`).
 pub const LABEL_TMPFS: &str = "litek8s.tmpfs";
+/// The AppArmor profile of `appArmorProfile: RuntimeDefault`.
+pub const APPARMOR_DEFAULT: &str = "litek8s-default";
 
 /// The network pods join, so they get an address of their own.
 const POD_NETWORK: &str = "litek8s-pods";
@@ -171,6 +173,17 @@ pub struct ContainerSpec {
     pub no_new_privileges: bool,
     /// `seccompProfile: Unconfined` (otherwise the runtime's default filter).
     pub seccomp_unconfined: bool,
+    /// The filter also refuses new user (and other) namespaces through
+    /// `clone`, and `ptrace` and its relatives: pods of untrusted namespaces.
+    pub seccomp_strict: bool,
+    /// AppArmor profile to run under ([`APPARMOR_DEFAULT`] for the
+    /// runtime's own: `appArmorProfile: RuntimeDefault`).
+    pub apparmor_profile: Option<String>,
+    /// `runAsNonRoot`: the container does not start as uid 0.
+    pub run_as_non_root: bool,
+    /// Processes and threads the container may have (the pod's
+    /// `litek8s.dev/pids-limit` annotation).
+    pub pids_limit: Option<i64>,
     /// The pod's `fsGroup` and `supplementalGroups`.
     pub supplemental_groups: Vec<u32>,
     /// `spec.shareProcessNamespace`: join the sandbox's PID namespace.
@@ -180,6 +193,19 @@ pub struct ContainerSpec {
     /// CDI devices for the container, fully qualified (`nvidia.com/gpu=0`);
     /// crun only.
     pub cdi_devices: Vec<String>,
+}
+
+/// Why a container with `runAsNonRoot` may not start as `user` (the pod's
+/// `runAsUser`, else the image's `USER`), in the kubelet's words. Only a
+/// numeric uid can be checked without the image's passwd file.
+pub fn non_root_violation(user: &str) -> Option<String> {
+    let uid = user.split(':').next().unwrap_or_default();
+    match uid.parse::<u64>() {
+        Ok(0) => Some("container has runAsNonRoot and image will run as root".into()),
+        Ok(_) => None,
+        Err(_) if uid.is_empty() => Some("container has runAsNonRoot and image will run as root".into()),
+        Err(_) => Some(format!("container has runAsNonRoot and image has non-numeric user ({uid}), cannot verify user is non-root")),
+    }
 }
 
 /// Capacity and identity of the machine the containers run on (for a
@@ -795,6 +821,15 @@ impl PodRuntime for DockerPods {
                 ..Default::default()
             });
         }
+        if spec.run_as_non_root {
+            let user = match &spec.user {
+                Some(u) => u.clone(),
+                None => self.docker.inspect_image(&spec.image).await.ok().and_then(|i| i.config).and_then(|c| c.user).unwrap_or_default(),
+            };
+            if let Some(why) = non_root_violation(&user) {
+                anyhow::bail!(why);
+            }
+        }
         let pid_mode = if spec.host_pid {
             Some("host".to_string())
         } else {
@@ -811,6 +846,7 @@ impl PodRuntime for DockerPods {
             readonly_rootfs: Some(spec.read_only_rootfs),
             memory: spec.memory_limit,
             nano_cpus: spec.nano_cpus,
+            pids_limit: spec.pids_limit,
             cpu_shares: spec.cpu_request_milli.filter(|m| *m > 0).map(|m| (m * 1024 / 1000).max(2)),
             sysctls: (!spec.sysctls.is_empty()).then(|| spec.sysctls.clone()),
             group_add: (!spec.supplemental_groups.is_empty()).then(|| spec.supplemental_groups.iter().map(u32::to_string).collect()),
@@ -821,6 +857,10 @@ impl PodRuntime for DockerPods {
                 }
                 if spec.seccomp_unconfined {
                     opts.push("seccomp=unconfined".to_string());
+                }
+                // Docker's default profile is its own `RuntimeDefault`.
+                if let Some(profile) = spec.apparmor_profile.as_deref().filter(|p| *p != APPARMOR_DEFAULT) {
+                    opts.push(format!("apparmor={profile}"));
                 }
                 (!opts.is_empty()).then_some(opts)
             },
@@ -1263,5 +1303,20 @@ impl PodRuntime for NodeRuntime {
     }
     fn volume_path(&self, name: &str) -> Option<std::path::PathBuf> {
         each!(self, rt => rt.volume_path(name))
+    }
+}
+
+#[cfg(test)]
+mod non_root_tests {
+    use super::non_root_violation;
+
+    #[test]
+    fn run_as_non_root_needs_a_numeric_non_zero_uid() {
+        assert!(non_root_violation("65534").is_none());
+        assert!(non_root_violation("1000:0").is_none());
+        for root in ["", "0", "0:0", ":5"] {
+            assert_eq!(non_root_violation(root).unwrap(), "container has runAsNonRoot and image will run as root", "{root:?}");
+        }
+        assert!(non_root_violation("nginx").unwrap().contains("non-numeric user (nginx)"));
     }
 }
