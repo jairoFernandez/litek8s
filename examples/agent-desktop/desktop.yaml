@@ -1,0 +1,52 @@
+# One agent desktop: a StatefulSet so each desktop keeps its own volume (the
+# browser profile: cookies and logins a person did for the agent survive
+# restarts). No Service: the screen and CDP are only reachable through the
+# API server (kubectl port-forward), never on a port of the node.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: agent-desktop
+spec:
+  serviceName: agent-desktop
+  replicas: 1
+  selector:
+    matchLabels: {app: agent-desktop}
+  template:
+    metadata:
+      labels: {app: agent-desktop}
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: desktop
+          image: agent-desktop:lab
+          imagePullPolicy: Never
+          lifecycle:
+            # Chromium writes cookies to the profile lazily, and SIGTERM makes
+            # it exit without finishing the write: a fresh login would be lost.
+            # Browser.close over CDP shuts it down cleanly first.
+            preStop:
+              exec:
+                command: [chromium-close]
+          env:
+            - {name: DESKTOP_SIZE, value: 1280x800}
+          ports:
+            - {name: novnc, containerPort: 6080}
+          readinessProbe:
+            tcpSocket: {port: 6080}
+            periodSeconds: 2
+          resources:
+            requests: {cpu: 250m, memory: 512Mi}
+            limits: {memory: 1536Mi}
+          volumeMounts:
+            - {name: profile, mountPath: /data}
+            - {name: shm, mountPath: /dev/shm}
+      volumes:
+        - name: shm
+          emptyDir: {medium: Memory, sizeLimit: 256Mi}
+  volumeClaimTemplates:
+    - metadata:
+        name: profile
+      spec:
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests: {storage: 1Gi}

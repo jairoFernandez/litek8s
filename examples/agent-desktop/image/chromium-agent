@@ -1,0 +1,13 @@
+#!/bin/sh
+# Chromium as the agent drives it: CDP on the pod's localhost:9222, the
+# profile (cookies, logins a person did) on the volume at /data.
+exec chromium \
+    --ozone-platform=wayland \
+    --no-sandbox --disable-dev-shm-usage --disable-gpu \
+    --no-first-run --no-default-browser-check --password-store=basic \
+    --hide-crash-restore-bubble \
+    --test-type \
+    --user-data-dir=/data/profile \
+    --remote-debugging-port=9222 \
+    --start-maximized \
+    "${@:-about:blank}"
