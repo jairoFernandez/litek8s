@@ -71,9 +71,11 @@ on networks of its own with aliases, and keeps its exit code until it is
 removed. So the engine (`src/docker/`) keeps its own records and drives
 crun through the same per-container shim the pod runtime uses, with the
 writable layer kept between runs and an attach socket for live stdin and
-stdout. What it shares with the cluster: the image store (an image you
-`docker build` can be a pod's `image:` right away, and `kubectl` workloads
-reuse pulled layers), the DNS server, the crun shim and bundle code.
+stdout. What it shares with the cluster: the image store (an image a build
+leaves there is a pod's `image:` right away, and `kubectl` workloads
+reuse pulled layers; with buildx that means `--load`, see
+[Builds](#builds-two-builders)), the DNS server, the crun shim and
+bundle code.
 `kubectl get pods` does not list Docker containers.
 
 ## What works

@@ -47,11 +47,14 @@ own API port, data, Docker socket and kube context.
   Podman and imports; loaded images are never pulled over (`:latest` works
   without `imagePullPolicy: IfNotPresent`).
 - Or build straight into the cluster's store:
-  `DOCKER_HOST=unix://$HOME/.litek8s/docker.sock docker build -t myapp:dev .`
+  `DOCKER_HOST=unix://$HOME/.litek8s/docker.sock DOCKER_BUILDKIT=0 docker build -t myapp:dev .`
   (named cluster: `~/.litek8s/N/docker.sock`), then use `image: myapp:dev`.
-  With the buildx plugin installed (Docker Desktop, OrbStack), add `--load`
-  or the image never reaches the store; `DOCKER_BUILDKIT=0` uses litek8s's
-  own builder instead.
+  `DOCKER_BUILDKIT=0` picks litek8s's own builder with any `docker` CLI.
+  Without it, and with the buildx plugin installed (Docker Desktop,
+  OrbStack and most Linux packages ship it), the build runs in a BuildKit
+  container and the image never reaches the store unless you pass
+  `--load` (references/docker.md, "Builds"). `compose build` loads either
+  way.
 - Image stores are per cluster.
 - A registry on the host's localhost works (`image: localhost:5000/x:1`).
 - Private registries, CAs, mirrors: `~/.litek8s/registries.yaml` (k3s

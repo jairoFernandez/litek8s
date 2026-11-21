@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+- **The docs and the agent skill tell the same story about building
+  images**: the skill said a `docker build` on the cluster's socket makes
+  the image a pod's `image:` right away, and listed `docker push` as
+  unsupported, so an agent reading it missed that buildx keeps the image
+  in its own builder without `--load`, and that pushes work. The skill now
+  has a Builds section with the two builders (litek8s's own with
+  `DOCKER_BUILDKIT=0`; buildx's BuildKit container, which needs `--load`
+  and cannot `FROM` an image that only exists in litek8s), and the 501 of
+  `POST /session` says the BuildKit API is not exposed instead of
+  "BuildKit is not supported by litek8s". The Spanish docs had no
+  "Pushing images" section and called `docker push` unsupported; the
+  Docker API page now carries that rule in its description, so it shows
+  up in `llms.txt`.
 - **A connection to a Service without ready endpoints is refused at
   once**: the node's service proxy wrote no rule for a ClusterIP port
   with no endpoints, so the SYN went nowhere and the client waited for its

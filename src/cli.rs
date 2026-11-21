@@ -66,7 +66,9 @@ Quickstart:
   litek8s query 'sum by (namespace) (container_memory_working_set_bytes)'
   litek8s dev down
 
-Docker clients use the same cluster: export DOCKER_HOST=unix://$HOME/.litek8s/docker.sock";
+Docker clients use the same cluster: export DOCKER_HOST=unix://$HOME/.litek8s/docker.sock
+With buildx installed, `docker build` needs DOCKER_BUILDKIT=0 (compose: also COMPOSE_BAKE=false)
+for the image to land in litek8s, or `--load` to build in a BuildKit container instead.";
 
 const APISERVER_AFTER_HELP: &str = "\
 Examples:

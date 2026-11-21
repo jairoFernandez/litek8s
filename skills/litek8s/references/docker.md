@@ -47,16 +47,17 @@ another host port; do not stop the user's containers without asking.
 
 Docker containers here are runtime-level containers: `kubectl get pods`
 does not show them and `docker ps` does not show pods. They share the
-cluster's **image store**: `docker build -t myapp:dev .` on the cluster's
-socket makes `image: myapp:dev` usable by pods right away (no push, no
-`dev load`).
+cluster's **image store**: an image built on the cluster's socket is
+`image: myapp:dev` for a pod right away (no push, no `dev load`) — as
+long as the build lands in the store and not in a BuildKit container
+([Builds](#builds)).
 
 ## Works
 
 `run` (ports, volumes, env, networks, restart policies, healthchecks,
 `--platform`), `ps/logs/exec/stop/start/rm/inspect/cp/top/stats/wait`,
-images (`pull/images/tag/rmi/save/load`), `build` (classic builder plus
-BuildKit Dockerfile syntax: `RUN --mount=type=cache`, heredocs, ...),
+images (`pull/push/images/tag/rmi/save/load`), `build` (classic builder
+plus BuildKit Dockerfile syntax: `RUN --mount=type=cache`, heredocs, ...),
 networks (bridges with DNS names and aliases), volumes, compose
 (`up/down/ps/logs/exec/build`, healthchecks, `depends_on`), Dev Containers,
 Testcontainers (Ryuk included). On Apple silicon, `--platform linux/amd64`
@@ -64,10 +65,34 @@ runs under Rosetta when installed.
 
 Published ports listen on `127.0.0.1` (and `::1` on macOS) only.
 
+## Builds
+
+`docker build` works, but which builder runs it depends on the `docker`
+CLI, and only one of them leaves the image in the cluster by itself:
+
+- `DOCKER_BUILDKIT=0 docker build -t myapp:dev .` uses **litek8s's own
+  builder**: the image lands in the image store, `FROM` can use an image
+  that only exists in litek8s, and no extra container runs. Works with
+  any `docker` CLI.
+- **With the buildx plugin** (Docker Desktop, OrbStack and most Linux
+  packages ship it), plain `docker build` goes through buildx, whose
+  default builder here is a `moby/buildkit` container it starts on
+  litek8s. Full BuildKit (secrets, SSH mounts, cache export,
+  multi-platform), but the image **stays in that builder unless you pass
+  `--load`**, so pods do not see it; and it cannot `FROM` an image that
+  only exists in litek8s (it pulls from registries).
+- `docker compose up --build` and `compose build` load the result into
+  litek8s either way. `DOCKER_BUILDKIT=0 COMPOSE_BAKE=false` picks
+  litek8s's builder for compose.
+
+So a tag that is nowhere after a successful build went to a BuildKit
+container: rerun with `--load`, or with `DOCKER_BUILDKIT=0`.
+
 ## Not supported (yet)
 
-`docker push`, `commit`, `export/import`, `diff`, swarm/services, plugins,
-other network or volume drivers, IPv6 networks, `--init`, `--device`, GPUs,
-published UDP ports, the BuildKit API (buildx's docker driver: use
-`DOCKER_BUILDKIT=0`, and `COMPOSE_BAKE=false` for compose). Containers stop
+`commit`, `export/import`, `diff`, swarm/services, plugins, other network
+or volume drivers, IPv6 networks, `--init`, `--device`, GPUs, published
+UDP ports, `checkpoint`, `docker stats` beyond CPU, memory and PIDs, the
+BuildKit API itself (`/grpc`, `/session`: buildx's `docker` driver — its
+`docker-container` driver works, see [Builds](#builds)). Containers stop
 with `litek8s dev down`; restart policies bring them back on `dev up`.

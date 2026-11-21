@@ -74,10 +74,11 @@ su código de salida hasta que se elimina. Por eso el motor (`src/docker/`)
 mantiene sus propios registros y maneja crun a través del mismo shim por
 contenedor que usa el runtime de pods, con la capa escribible conservada entre
 ejecuciones y un socket de attach para stdin y stdout en vivo. Lo que comparte
-con el cluster: el almacén de imágenes (una imagen que construyes con
-`docker build` puede ser de inmediato el `image:` de un pod, y los workloads de
-`kubectl` reutilizan las capas descargadas), el servidor DNS, el shim de crun y
-el código de bundles. `kubectl get pods` no lista los contenedores de Docker.
+con el cluster: el almacén de imágenes (una imagen que un build deja ahí es de
+inmediato el `image:` de un pod, y los workloads de `kubectl` reutilizan las
+capas descargadas; con buildx eso implica `--load`, ver
+[Builds](#builds-dos-builders)), el servidor DNS, el shim de crun y el código
+de bundles. `kubectl get pods` no lista los contenedores de Docker.
 
 ## Qué funciona
 
@@ -89,7 +90,7 @@ se omite el caso `compose_budget`, exclusivo de litek8s):
 |---|---|
 | `docker run` | `-d`, `--rm`, `-it` (pty, redimensionado, teclas de detach), stdin con `-i`, `-p`/`-P`, `-v`/`--mount` (bind, volume, tmpfs), `-e`/`--env-file`, `-w`, `-u`, `--name`, `--network`, `--network-alias`, `--entrypoint`, `--restart`, `--health-*`, `--add-host` (incl. `host-gateway`), `--platform`, `--cap-add/--cap-drop`, `--privileged`, `--read-only`, `--shm-size`, `--ulimit`, `--sysctl`, `--memory`, `--cpus`, `--pid`/`--network container:` |
 | contenedores | `ps`, `logs` (`-f`, `--tail`, `--since`, `-t`), `exec` (`-it`, `-u`, `-e`, `-w`), `stop`/`start`/`restart`/`kill`/`pause`, `rm`, `inspect`, `rename`, `wait`, `cp` (en ambos sentidos, también antes de arrancar), `top`, `stats`, `port`, `prune`, `events` |
-| imágenes | `pull` (progreso, `--platform`; se pasan las credenciales de `docker login`; CAs, mirrors y credenciales para cada pull: [registries.md](../registries.md)), `images`, `tag`, `rmi`, `inspect`, `history`, `save`, `load`, `prune` |
+| imágenes | `pull` (progreso, `--platform`; se pasan las credenciales de `docker login`; CAs, mirrors y credenciales para cada pull: [registries.md](../registries.md)), `push` ([más abajo](#subir-imágenes)), `images`, `tag`, `rmi`, `inspect`, `history`, `save`, `load`, `prune` |
 | build | `docker build` con la API clásica: caché del Dockerfile, multi-stage, `--target`, `--build-arg`, `.dockerignore`, `-f` fuera del contexto; además de la sintaxis de Dockerfile de BuildKit (`RUN --mount=type=cache\|bind\|tmpfs`, `COPY --chmod`/`--link`, heredocs, `TARGETARCH`, etc.) |
 | redes | `network create/ls/inspect/rm/connect/disconnect/prune`; un bridge por red; nombres, alias e IDs cortos se resuelven en redes definidas por el usuario; las redes están aisladas entre sí; `host.docker.internal` llega al host |
 | volúmenes | volúmenes con nombre y anónimos (llenados desde la imagen en el primer uso, como Docker), opciones de bind del driver `local` (`o=bind,device=`), `volume ls/inspect/rm/prune` |
@@ -269,9 +270,39 @@ elige puertos libres. Los puertos UDP no se publican (siguen siendo alcanzables
 en la dirección del contenedor dentro del sandbox/VM). Linux rootless no puede
 hacer bind a puertos del host por debajo de 1024.
 
+## Subir imágenes
+
+`docker push` (y `docker push -a`, `docker compose push`) envía una imagen a
+cualquier registry OCI distribution con las credenciales que `docker login` dio
+a la CLI, o con las de la configuración de registries
+([registries.md](../registries.md): ajustes de TLS y `configs.<host>.auth`; un
+endpoint `http://` del propio registry bajo `mirrors` lo deja en HTTP plano).
+Los registries en `localhost` y `127.0.0.1` hablan HTTP plano, como en Docker,
+y en macOS llegan al loopback del Mac (un registry levantado con
+`docker run -p 5000:5000 registry:2` funciona). Se manejan autenticación por
+token (Bearer) y Basic; el token pide `pull,push`.
+
+El almacén de imágenes guarda las capas desempaquetadas, no como los blobs
+comprimidos con los que llegaron, así que cada capa sube como una de estas: un
+blob que el registry ya tiene (un HEAD, `Layer already exists`), el blob con el
+que se descargó, montado desde otro repositorio del mismo registry (`Mounted
+from ...`) o descargado otra vez del registry de origen, o un tar gzip de la
+capa hecho en el momento del push. El digest de un blob hecho así se guarda
+junto a la capa, así que volver a subir la imagen solo comprueba que el
+registry ya la tiene.
+
+Una imagen construida con `docker build` conserva su image ID a través de un
+push y un pull. Una imagen descargada también lo conserva, digest del manifest
+incluido, mientras su registry esté alcanzable. Si no lo está, sus capas se
+vuelven a empaquetar aquí; los escritores de tar difieren, así que esos tars
+rara vez tienen los diff IDs originales y el config subido nombra los nuevos
+(cambia el image ID, no el contenido; `docker save` hace lo mismo). Un tag
+contiene una sola plataforma, así que un push envía el manifest de esa
+plataforma, nunca un índice multi-plataforma.
+
 ## No soportado (todavía)
 
-`docker push`, `commit`, `export`/`import`, `diff`, `docker swarm` y services,
+`commit`, `export`/`import`, `diff`, `docker swarm` y services,
 plugins y otros drivers de volumen o de red (`overlay`, `macvlan`, `ipvlan`),
 IPv6 en redes de contenedores, `--init`, `--device`, GPU, puertos UDP
 publicados, la propia API de BuildKit (`/grpc`, `/session`: el driver `docker`

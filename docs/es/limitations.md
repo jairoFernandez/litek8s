@@ -51,7 +51,7 @@ Lista honesta; hay más en [skills/litek8s/references/differences.md](../../skil
   `KubeletEnsureSecretPulledImages`).
 - `docker push` envía la única plataforma que guarda un tag (sin índices), y
   una imagen descargada cuyos blobs originales ya no se alcanzan se sube con
-  otro ID de imagen ([docker.md](../docker.md#pushing-images)).
+  otro ID de imagen ([docker.md](../docker.md#subir-imágenes)).
 - Las métricas cubren contenedores, nodos y estado del cluster; los endpoints
   `/metrics` de las aplicaciones no se recolectan (apunta un Prometheus a ellos).
 - La VM de macOS nunca le devuelve a macOS la memoria que ya tocó (un límite de

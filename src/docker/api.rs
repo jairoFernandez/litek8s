@@ -376,7 +376,7 @@ async fn dispatch(engine: &Arc<Engine>, method: Method, s: &[&str], req: Request
         (Method::POST, ["build", "prune"]) => Ok(json_resp(200, &super::build::prune(engine))),
         (Method::POST, ["session"]) => Err(ApiError::new(
             501,
-            "BuildKit is not supported by litek8s; build with the classic builder (DOCKER_BUILDKIT=0, and COMPOSE_BAKE=false for compose)",
+            "the BuildKit API (buildx's docker driver) is not exposed by litek8s; build with litek8s's own builder (DOCKER_BUILDKIT=0, and COMPOSE_BAKE=false for compose), or let buildx use its docker-container driver and pass --load so the image lands in litek8s",
         )),
 
         // Networks

@@ -48,7 +48,11 @@ export const groups = [
     label: 'Guides', translations: { es: 'Guías' },
     pages: [
       { slug: 'dev', label: 'Dev clusters', source: 'docs/dev.md', translations: { es: { source: 'docs/es/dev.md', label: "Clusters de desarrollo" } } },
-      { slug: 'docker', label: 'Docker API', source: 'docs/docker.md', translations: { es: { source: 'docs/es/docker.md', label: "API de Docker" } } },
+      {
+        slug: 'docker', label: 'Docker API', seoTitle: 'The Docker Engine API on litek8s', source: 'docs/docker.md',
+        description: 'Run docker, compose, Dev Containers and Testcontainers on litek8s. Builds: DOCKER_BUILDKIT=0 uses litek8s\'s builder; with buildx, docker build needs --load.',
+        translations: { es: { source: 'docs/es/docker.md', label: "API de Docker", seoTitle: "La API de Docker Engine en litek8s", description: "Usa docker, compose, Dev Containers y Testcontainers en litek8s. Builds: DOCKER_BUILDKIT=0 usa el builder de litek8s; con buildx, docker build necesita --load." } },
+      },
       { slug: 'ci', label: 'CI (GitHub Actions)', source: 'docs/ci.md', translations: { es: { source: 'docs/es/ci.md', label: "CI (GitHub Actions)" } } },
       { slug: 'ui', label: 'Terminal UI', source: 'docs/ui.md', translations: { es: { source: 'docs/es/ui.md', label: "Interfaz de terminal" } } },
       { slug: 'observability', label: 'Metrics, logs, alerts', source: 'docs/observability.md', translations: { es: { source: 'docs/es/observability.md', label: "Métricas, logs y alertas" } } },

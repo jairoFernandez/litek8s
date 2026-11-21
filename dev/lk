@@ -36,6 +36,7 @@ profile() {
 lk_env() {
   echo "export DOCKER_HOST=unix://$SOCK"
   echo "export KUBECONFIG=$KCFG"
+  echo "# docker build with buildx installed: DOCKER_BUILDKIT=0 (compose: also COMPOSE_BAKE=false), else the image stays in a BuildKit container"
   echo "# contexts: ${LITEK8S_CONTEXT_PREFIX:-lkdev-}<cluster>; litek8s for this home: LITEK8S_HOME=$HOME_DIR $BIN"
 }
 
