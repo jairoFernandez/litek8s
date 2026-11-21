@@ -1,0 +1,45 @@
+# The job of workflow.yml as it is usually written for kind: the image is
+# built by the runner's dockerd and copied into the cluster's nodes with
+# `kind load` after every build. Kept for the comparison in ci-bench.yml.
+name: build-deploy-kind
+on: [push, pull_request]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: helm/kind-action@v1
+        with:
+          cluster_name: kind
+
+      - name: Build v1
+        run: |
+          docker build -t app:v1 --build-arg VERSION=v1 app
+          kind load docker-image app:v1
+
+      - name: Deploy v1
+        run: |
+          kubectl apply -f app.yaml
+          kubectl rollout status deployment/app --timeout=3m
+
+      - name: Smoke test v1
+        run: ./smoke.sh v1
+
+      - name: Build v2
+        run: |
+          docker build -t app:v2 --build-arg VERSION=v2 app
+          kind load docker-image app:v2
+
+      - name: Roll out v2
+        run: |
+          kubectl set image deployment/app app=app:v2
+          kubectl rollout status deployment/app --timeout=3m
+
+      - name: Smoke test v2
+        run: ./smoke.sh v2
+
+      - name: Diagnostics
+        if: failure()
+        run: kubectl get pods,events -o wide

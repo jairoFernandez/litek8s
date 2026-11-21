@@ -1,0 +1,41 @@
+# Build an image, deploy it, smoke-test it, then ship a second version: the
+# pull-request job of most services. On litek8s, `docker build` goes to the
+# cluster's own image store, so pods run the image as soon as it is built:
+# no registry, no `kind load`. The same job on kind: workflow.kind.yml.
+name: build-deploy
+on: [push, pull_request]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Exports KUBECONFIG and DOCKER_HOST (litek8s's Docker API).
+      - uses: jairoFernandez/litek8s/.github/actions/setup-litek8s@v0.2.1
+
+      - name: Build v1
+        run: docker build -t app:v1 --build-arg VERSION=v1 app
+
+      - name: Deploy v1
+        run: |
+          kubectl apply -f app.yaml
+          kubectl rollout status deployment/app --timeout=3m
+
+      - name: Smoke test v1
+        run: ./smoke.sh v1
+
+      - name: Build v2
+        run: docker build -t app:v2 --build-arg VERSION=v2 app
+
+      - name: Roll out v2
+        run: |
+          kubectl set image deployment/app app=app:v2
+          kubectl rollout status deployment/app --timeout=3m
+
+      - name: Smoke test v2
+        run: ./smoke.sh v2
+
+      - name: Diagnostics
+        if: failure()
+        run: litek8s-diagnose

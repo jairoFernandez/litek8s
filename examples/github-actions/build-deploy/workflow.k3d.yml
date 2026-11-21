@@ -1,0 +1,45 @@
+# The job of workflow.yml on k3d: the runner's dockerd builds, `k3d image
+# import` copies each image into the cluster. Kept for ci-bench.yml.
+name: build-deploy-k3d
+on: [push, pull_request]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: k3d
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/k3d-io/k3d/v5.8.3/install.sh | TAG=v5.8.3 bash
+          k3d cluster create --wait
+
+      - name: Build v1
+        run: |
+          docker build -t app:v1 --build-arg VERSION=v1 app
+          k3d image import app:v1
+
+      - name: Deploy v1
+        run: |
+          kubectl apply -f app.yaml
+          kubectl rollout status deployment/app --timeout=3m
+
+      - name: Smoke test v1
+        run: ./smoke.sh v1
+
+      - name: Build v2
+        run: |
+          docker build -t app:v2 --build-arg VERSION=v2 app
+          k3d image import app:v2
+
+      - name: Roll out v2
+        run: |
+          kubectl set image deployment/app app=app:v2
+          kubectl rollout status deployment/app --timeout=3m
+
+      - name: Smoke test v2
+        run: ./smoke.sh v2
+
+      - name: Diagnostics
+        if: failure()
+        run: kubectl get pods,events -o wide

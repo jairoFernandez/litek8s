@@ -6,13 +6,17 @@
 # runs the local setup-litek8s action, or kind for comparisons).
 #
 #   examples/github-actions/run.sh helm      # needs yq (on GitHub's runners)
+#   examples/github-actions/run.sh build-deploy workflow.kind.yml
+#
+# A step whose name is in RUN_SKIP (one name per line) is skipped too: the
+# setup that ci-bench.yml times on its own.
 #
 # Prints one line per step with its duration, and STEP_SECONDS=<total>.
 set -uo pipefail
 
-ex=${1:?usage: run.sh <example>}
+ex=${1:?usage: run.sh <example> [workflow file]}
 dir="$(cd "$(dirname "$0")/$ex" && pwd)"
-wf="$dir/workflow.yml"
+wf="$dir/${2:-workflow.yml}"
 cd "$dir" || exit 2
 
 job="$(yq '.jobs | keys | .[0]' "$wf")"
@@ -24,6 +28,7 @@ for ((i = 0; i < n; i++)); do
     run="$(yq "$step.run // \"\"" "$wf")"
     [[ -z "$run" ]] && continue
     name="$(yq "$step.name // \"step $i\"" "$wf")"
+    grep -qxF -- "$name" <<<"${RUN_SKIP:-}" && continue
     cond="$(yq "$step.if // \"\"" "$wf")"
     case "$cond" in
         "") ((failed)) && continue ;;
