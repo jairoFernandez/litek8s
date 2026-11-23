@@ -83,11 +83,12 @@ follows the repository.
 
 ### Examples
 
-[examples/github-actions/](../examples/github-actions/README.md) has three
-workflows to copy, each run on every commit of this repository (the
-`examples` job of [test.yml](../.github/workflows/test.yml), through
+[examples/github-actions/](../examples/github-actions/README.md) has four
+workflows to copy. The first three run on every commit of this repository
+(the `examples` job of [test.yml](../.github/workflows/test.yml), through
 [run.sh](../examples/github-actions/run.sh), which executes an example's
-`run:` steps in order):
+`run:` steps in order); build-deploy runs in
+[ci-bench.yml](../.github/workflows/ci-bench.yml):
 
 - **[helm](../examples/github-actions/helm/workflow.yml)**: `helm lint`,
   `helm install --wait`, `helm test`, upgrade and rollback of a small chart
@@ -102,6 +103,15 @@ workflows to copy, each run on every commit of this repository (the
   nodes; a Deployment spread one replica per node by a topology spread
   constraint, a DaemonSet, a Service reached from every node, a drained
   worker's pod leaving it.
+- **[build-deploy](../examples/github-actions/build-deploy/workflow.yml)**:
+  the pull-request job of most services — `docker build` of a small Go
+  app, `kubectl apply`, a smoke test through the Service, then a second
+  version built and rolled out. The build goes into the cluster's own
+  image store, so pods run the image at once: no registry, no `kind load`
+  (the action exports `DOCKER_BUILDKIT=0`, so buildx does not build into a
+  BuildKit container instead, [docker.md](docker.md#builds-two-builders)).
+  The same job for kind and k3d, which do need to load the image, is next
+  to it: `workflow.kind.yml`, `workflow.k3d.yml`.
 
 ## Numbers
 
@@ -137,10 +147,16 @@ Ranges over the 5 runs: litek8s time to ready 2.1 to 4.1 s, kind 40.8 to
   shorter, though dockerd needs no setup at all. Its containers take less
   memory than litek8s's whole sandbox, which also holds a Kubernetes API
   server and node; dockerd and containerd themselves are not counted.
+- The table is that run of ci-bench.yml: helm, compose and multi-node
+  against kind and dockerd. The workflow now also runs the build-deploy
+  example and k3d (`k3d cluster create`, v5.8.3) next to kind, five runs
+  of every job, and reports the minutes GitHub bills for each job (rounded
+  up per job, as GitHub charges) with a `results.json` that
+  [bench/ci-cost.py](../bench/ci-cost.py) turns into cost per run and per
+  month; those medians are not published here yet.
 - Not compared: the runner's preinstalled kind (`kind create cluster`
-  without the action) and k3d; a cluster image cached between runs. The
-  litek8s numbers are for v0.2.0 with the action's defaults
-  (slirp4netns).
+  without the action); a cluster image cached between runs. The litek8s
+  numbers are for v0.2.0 with the action's defaults (slirp4netns).
 
 ### In a container (Docker in Docker)
 

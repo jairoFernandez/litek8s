@@ -83,11 +83,12 @@ Fija la action a un tag de release (`@v0.2.1` o posterior), como arriba;
 
 ### Ejemplos
 
-[examples/github-actions/](../../examples/github-actions/README.md) tiene tres
-workflows para copiar, cada uno ejecutado en cada commit de este repositorio
-(el job `examples` de [test.yml](../../.github/workflows/test.yml), mediante
-[run.sh](../../examples/github-actions/run.sh), que ejecuta en orden los pasos
-`run:` de un ejemplo):
+[examples/github-actions/](../../examples/github-actions/README.md) tiene cuatro
+workflows para copiar. Los tres primeros se ejecutan en cada commit de este
+repositorio (el job `examples` de [test.yml](../../.github/workflows/test.yml),
+mediante [run.sh](../../examples/github-actions/run.sh), que ejecuta en orden
+los pasos `run:` de un ejemplo); build-deploy corre en
+[ci-bench.yml](../../.github/workflows/ci-bench.yml):
 
 - **[helm](../../examples/github-actions/helm/workflow.yml)**: `helm lint`,
   `helm install --wait`, `helm test`, upgrade y rollback de un chart pequeño
@@ -102,6 +103,16 @@ workflows para copiar, cada uno ejecutado en cada commit de este repositorio
   nodos; un Deployment repartido con una réplica por nodo mediante un topology
   spread constraint, un DaemonSet, un Service alcanzado desde cada nodo, el pod
   de un worker drenado que lo abandona.
+- **[build-deploy](../../examples/github-actions/build-deploy/workflow.yml)**:
+  el job de pull request de casi cualquier servicio: `docker build` de una app
+  pequeña en Go, `kubectl apply`, un smoke test a través del Service y después
+  una segunda versión construida y desplegada. El build va al almacén de
+  imágenes del propio cluster, así que los pods corren la imagen de inmediato:
+  sin registry y sin `kind load` (la action exporta `DOCKER_BUILDKIT=0`, para
+  que buildx no construya en un contenedor BuildKit en su lugar,
+  [docker.md](docker.md#builds-dos-builders)). Al lado está el mismo job para
+  kind y k3d, que sí necesitan cargar la imagen: `workflow.kind.yml`,
+  `workflow.k3d.yml`.
 
 ## Cifras
 
@@ -139,8 +150,15 @@ Rangos en las 5 ejecuciones: tiempo hasta listo de litek8s 2.1 a 4.1 s, kind
   ocupan menos memoria que todo el sandbox de litek8s, que además contiene un
   API server y un nodo de Kubernetes; dockerd y containerd mismos no se
   cuentan.
+- La tabla es de esa ejecución de ci-bench.yml: helm, compose y multi-node
+  contra kind y dockerd. El workflow ahora corre también el ejemplo
+  build-deploy y k3d (`k3d cluster create`, v5.8.3) junto a kind, cinco
+  ejecuciones de cada job, e informa los minutos que GitHub factura por job
+  (redondeados hacia arriba por job, como cobra GitHub) con un `results.json`
+  que [bench/ci-cost.py](../../bench/ci-cost.py) convierte en coste por
+  ejecución y por mes; esas medianas todavía no se publican aquí.
 - No comparado: el kind preinstalado en el runner (`kind create cluster` sin la
-  action) y k3d; una imagen del cluster cacheada entre ejecuciones. Las cifras
+  action); una imagen del cluster cacheada entre ejecuciones. Las cifras
   de litek8s son de v0.2.0 con los valores por defecto de la action
   (slirp4netns).
 
